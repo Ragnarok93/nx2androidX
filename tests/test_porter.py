@@ -653,6 +653,7 @@ class Misc(unittest.TestCase):
             (d / 'g.nsp').write_bytes(b'\0' * 2**20)
             work = d / 'build'
             card = d / 'card/ports'
+            (d / 'card').mkdir()  # an existing mount point: disk_usage resolves here
             p = self.space_port(d, {'base': d / 'g.nsp', 'updates': [], 'dlc': []}, work, app=True, pack_dir=card)
             real = shutil.disk_usage
             try:
