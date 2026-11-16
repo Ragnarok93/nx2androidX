@@ -194,12 +194,21 @@ private fun TaskDetail(lib: LibraryState, record: PortState.Record, viewModel: B
             viewModel.setTarget(File(record.game), record.config, savedConfigMissing = record.config == null)
         })
         if (record.phase == PortPhase.DONE && record.out.isNotEmpty()) {
-            val currentPack = lib.portFromPack(File(record.out))
-            if (currentPack != null) QuietButton(stringResource(R.string.builds_run_action), {
-                actions.onRun(currentPack.pack, GameIdentity.labelFor(File(record.game), currentPack))
-            })
-            else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
-                color = NxPalette.Danger)
+            val artifact = File(record.out)
+            if (record.out.endsWith(".apk", ignoreCase = true)) {
+                if (artifact.isFile) {
+                    Hint(stringResource(R.string.builds_artifact_path, artifact.absolutePath), size = 11.sp)
+                    CapsuleButton(stringResource(R.string.builds_export_apk), { actions.onExportApk(artifact) }, modifier = Modifier.fillMaxWidth())
+                } else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
+                    color = NxPalette.Danger)
+            } else {
+                val currentPack = lib.portFromPack(artifact)
+                if (currentPack != null) QuietButton(stringResource(R.string.builds_run_action), {
+                    actions.onRun(currentPack.pack, GameIdentity.labelFor(File(record.game), currentPack))
+                })
+                else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
+                    color = NxPalette.Danger)
+            }
         }
         if (record.phase != PortPhase.DONE && lib.portOf(File(record.game)) != null)
             Hint(stringResource(R.string.builds_old_pack_still_usable))
