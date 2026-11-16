@@ -27,6 +27,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.widget.ArrayAdapter;
 import android.widget.ListView;
+import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,7 +56,14 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     private AlertDialog audioDialog;
     private final ExecutorService audioExecutor = Executors.newSingleThreadExecutor();
 
+    private String extractionError;
+
     @Override protected void onCreate(Bundle state) {
+        try { GameActivity.extractEmbeddedPack(this); }
+        catch (Exception e) {
+            extractionError = e.getMessage() == null ? e.toString() : e.getMessage();
+            android.util.Log.e("nx2a-export", "Could not prepare the bundled game data", e);
+        }
         super.onCreate(state);
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             try { pad = new OriginalPad(); } catch (IOException e) { android.util.Log.w("nx2a-dual", "original overlay unavailable", e); }
@@ -80,6 +88,15 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
         external = new ExternalDisplay(this, this);
         external.start();
     }
+    @Override protected void onResume() {
+        if (extractionError != null) {
+            Toast.makeText(this, "Game data extraction failed: " + extractionError, Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
+        super.onResume();
+    }
+
     @Override protected void onDestroy() {
         if (external != null) external.stop();
         if (phonePad != null) phonePad.dismiss();
