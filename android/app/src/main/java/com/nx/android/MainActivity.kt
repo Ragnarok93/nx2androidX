@@ -173,6 +173,7 @@ class MainActivity : ComponentActivity() {
             }
         },
         onCancelPort = { PortService.cancel(this) },
+        onExportApk = { apk -> shareApk(apk) },
         onRun = { pack, name ->
             // 运行一个完成的移植：这个游戏还活着就把它带回前台（不重启），否则拉起 :play
             // （包是唯一真源，拷贝覆盖旧副本）
@@ -501,6 +502,30 @@ class MainActivity : ComponentActivity() {
     fun versionName(): String = AppVersion.of(this).ifEmpty { "?" }
 
     fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+
+    /** Shares a completed standalone APK from the app cache, so FileProvider never exposes the source folder. */
+    private fun shareApk(apk: File) {
+        if (!apk.isFile) { toast(locale.str(R.string.lib_artifact_missing_state)); return }
+        lifecycleScope.launch {
+            val staged = withContext(Dispatchers.IO) {
+                val dir = File(cacheDir, "shared-apks")
+                if (!dir.exists() && !dir.mkdirs()) throw java.io.IOException("cannot create APK share cache")
+                val copy = File(dir, apk.name)
+                apk.inputStream().use { input -> copy.outputStream().use { output -> input.copyTo(output, 1 shl 20) } }
+                copy
+            }
+            try {
+                val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", staged)
+                val send = Intent(Intent.ACTION_SEND).setType("application/vnd.android.package-archive")
+                    .putExtra(Intent.EXTRA_STREAM, uri).putExtra(Intent.EXTRA_TITLE, apk.name)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                startActivity(Intent.createChooser(send, locale.str(R.string.builds_export_apk)))
+            } catch (e: Exception) {
+                AppLog.line("[RED] the game APK could not be shared: ${e.message}")
+                toast(locale.str(R.string.main_log_bundle_failed))
+            }
+        }
+    }
 
     /**
      * The log bundle's folder in the cache: the FileProvider serves it (res/xml/file_paths.xml), and the
