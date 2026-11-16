@@ -31,6 +31,14 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertIn("archive = game if self.o.self_contained else 0", source)
         self.assertIn("game * (2 if self.o.self_contained else 1)", source)
 
+    def test_phone_payload_bundles_the_compiled_activity_dex(self):
+        assets = (ROOT / "packaging/android-apk/build_assets.py").read_text(encoding="utf-8")
+        pipeline = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("compile_game_activity_dex(tool)", assets)
+        self.assertIn("'game-activity.dex'", assets)
+        self.assertIn("DM.parent.parent / 'tools' / 'game-activity.dex'", pipeline)
+        self.assertIn("if prebuilt.is_file():", pipeline)
+
     def test_phone_build_requests_self_contained_apk(self):
         source = (ROOT / "android/app/src/main/java/com/nx/android/data/PortRunner.kt").read_text(encoding="utf-8")
         self.assertIn('"--self-contained-apk"', source)
