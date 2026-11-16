@@ -1035,20 +1035,45 @@ class Port:
         icon = self.icon()
         code = version_code(self.pkg_ver, self.o.vercode_offset)
         if self.o.vercode_offset: say(f'versionCode {code} ({self.pkg_ver} + 1 + offset {self.o.vercode_offset})')
-        external = self.external_activity() if self.o.external_display or self.o.native_keyboard else []
+        # The standalone Activity extracts the whole data pack into its own files directory before NativeActivity resumes.
+        # Archive creation and APK assembly are streamed: large RomFS/shader trees never become one Python bytes object.
+        data_assets = []
+        if self.o.self_contained:
+            import zipfile
+            pack = self.data_dir()
+            if not (pack / 'nx2a-data.json').is_file(): raise BuildError(f'the data pack is incomplete: {pack}')
+            archive = self.aw / 'nx2a-data.zip'
+            checksum = self.aw / 'nx2a-data.sha256'
+            with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zf:
+                for src in sorted(pack.rglob('*')):
+                    if src.is_file() and not src.is_symlink():
+                        zf.write(src, src.relative_to(pack).as_posix())
+            if archive.stat().st_size >= 0xffffffff:
+                raise BuildError('the embedded data archive exceeds the current APK ZIP limit (4 GiB); ZIP64 APK export is not supported yet')
+            digest = hashlib.sha256()
+            with archive.open('rb') as src:
+                for block in iter(lambda: src.read(1 << 20), b''): digest.update(block)
+            checksum.write_text(digest.hexdigest() + '\\n', encoding='ascii')
+            data_assets = ['--asset', f'nx2a-data.zip={archive}', '--asset', f'nx2a-data.sha256={checksum}']
+        external = self.external_activity() if self.o.self_contained or self.o.external_display or self.o.native_keyboard else []
         driver = self.o.vulkan_driver
         if driver and driver.name != driver_lib_name(driver):   # packed under a lib*.so name (driver_lib_name), copied beside the host library
             driver = self.so.parent / driver_lib_name(driver); shutil.copyfile(self.o.vulkan_driver, driver)
             say(f'--vulkan-driver: {self.o.vulkan_driver.name} is packed as {driver.name} (Android extracts only lib*.so libraries)')
-        nsp.run([PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
-                 '--data-root', str(self.data_dir()),
-                 '--version-code', str(code), '--version-name', self.display]
-                + (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
-                + (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
-                + [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()
-                                                             + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
-                + (['--dex', str(dex)] if (dex := launcher_dex()) else []),
-                self.logs / 'android_apk.log', env=self.env)
+        cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
+               '--version-code', str(code), '--version-name', self.display]
+        if self.o.self_contained: cmd += data_assets
+        else: cmd += ['--data-root', str(self.data_dir())]
+        cmd += (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
+        cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
+        cmd += [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()
+                                                          + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
+        if dex := launcher_dex(): cmd += ['--dex', str(dex)]
+        nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
+        if self.o.self_contained:
+            archive.unlink(missing_ok=True); checksum.unlink(missing_ok=True)
+            shutil.rmtree(self.data_dir(), ignore_errors=True)
+            self.result.pop('data', None)
         self.result['apk'] = str(self.apk_path)
         PROG.end(f'{self.apk_path.name}, {self.apk_path.stat().st_size / 2**20:.1f} MB')
 
@@ -1181,7 +1206,7 @@ class Port:
                              aoc=self.aoc, sysdata=self.sysdata, language=self.lang, package=self.package, env=self.fps_env + font_env + zenv + (['DM_VK_MT_REPLAY=1'] if self.o.mt_replay else [])
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
                              files=files, text=self.lists(), host=host, icon=icon, drivers=drivers, profile_h=getattr(self, 'profile_h', None),
-                             pack_base=str(dst) if self.o.app else None,   # the app's mode: the pack lives in the app's own folder, not in the app's files folder
+                             pack_base=str(dst) if self.o.app else '.' if self.o.self_contained else None,   # the player app uses its own pack folder; a standalone APK resolves relative paths against its extracted pack
                              progress=lambda what: PROG.set(step=f'linking {what}'))
         self.data_path = dst; self.result['data'] = str(dst)
         PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
@@ -1230,7 +1255,7 @@ class Port:
             nsp.rmtree(kf); d.mkdir(parents=True, exist_ok=True)
             nsp.run([PY, DM / 'tools/make_ext_font.py', ttf, letters], self.logs / 'make_ext_font.log', env=self.env)
             kf.write_text(f'{key}\n')
-        return [f'DM_SHARED_FONT_EXT={self.data_dir()}/nintendo_ext.ttf'], {'nintendo_ext.ttf': ttf}
+        return [f'DM_SHARED_FONT_EXT={"nintendo_ext.ttf" if self.o.self_contained else self.data_dir() + "/nintendo_ext.ttf"}'], {'nintendo_ext.ttf': ttf}
 
     # ---- install (optional) ----
     def install(self):
