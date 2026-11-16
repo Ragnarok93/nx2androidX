@@ -61,7 +61,7 @@ class PortState @Inject constructor(
 
     val running: Boolean get() = phase == PortPhase.RUNNING
 
-    /** The port's artifact (the pack in the app's mode, the APK on the PC flow); '' while it runs */
+    /** The exported APK, or a legacy companion data pack; empty while the build runs. */
     val outPath: String get() = apkPath.ifEmpty { dataPath }
 
     /** Loads the history and answers the question "was a port interrupted?": the marker is still set */
