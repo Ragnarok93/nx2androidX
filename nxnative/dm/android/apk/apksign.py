@@ -117,7 +117,7 @@ def build_zip_file(entries, path):
                 raise ValueError('APK exceeds the classic ZIP 4 GiB limit; this exporter does not yet write ZIP64 APKs')
             pad = -(out.tell() + 30 + len(nb)) % align
             if 0 < pad < 4: pad += align
-            extra = struct.pack('<HH', 0xd935, pad - 4) + b'\\0' * (pad - 4) if pad else b''
+            extra = struct.pack('<HH', 0xd935, pad - 4) + b'\0' * (pad - 4) if pad else b''
             off = out.tell()
             out.write(struct.pack('<IHHHHHIIIHH', 0x04034b50, 10, 0, 0, dos_time, dos_date,
                                   crc, size, size, len(nb), len(extra)))
@@ -148,9 +148,9 @@ def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, c
             while left:
                 block = src.read(min(1 << 20, left))
                 if not block: raise OSError('truncated APK staging ZIP while signing')
-                digests.append(hashlib.sha256(b'\\xa5' + struct.pack('<I', len(block)) + block).digest())
+                digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
                 left -= len(block)
-    digest = hashlib.sha256(b'\\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
+    digest = hashlib.sha256(b'\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
     signed = lp(lp(struct.pack('<I', ALG) + lp(digest))) + lp(lp(crt)) + lp(b'')
     signer = lp(signed) + lp(lp(struct.pack('<I', ALG) + lp(rsa_sign(k, signed)))) + lp(spki(k))
     value = lp(lp(signer))
