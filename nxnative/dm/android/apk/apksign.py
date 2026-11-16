@@ -1,6 +1,6 @@
 # apksign.py: the stored ZIP and the APK Signature Scheme v2 signer (RSA-2048, SHA-256, self-signed certificate) of mkapk.py, with the Python standard library only.
 # mkapk.py builds an APK with them; apkdriver.py rebuilds an installed one with another Vulkan driver library
-import hashlib, secrets, struct, zlib
+import hashlib, os, secrets, shutil, struct, zlib
 
 # ---------------- RSA, DER, self-signed certificate ----------------
 def is_prime(n):
@@ -88,3 +88,91 @@ def sign_v2(zip_entries, cd, eocd, k, crt):
     block = struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
     new_eocd = eocd[:16] + struct.pack('<I', len(zip_entries) + len(block)) + eocd[20:]
     return zip_entries + block + cd + new_eocd
+
+
+# ---------------- bounded-memory ZIP/APK path ----------------
+# Large game packs are file-backed. Keep only the central directory and one 1 MiB
+# I/O buffer resident; the pack, host library and APK are never read into RAM whole.
+def build_zip_file(entries, path):
+    cd = bytearray()
+    count = 0
+    with open(path, 'wb') as out:
+        dos_time, dos_date = 0, (2026 - 1980) << 9 | 1 << 5 | 1
+        for name, data, align in entries:
+            nb = name.encode()
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                size = len(data)
+                crc = zlib.crc32(data)
+                source = None
+            else:
+                source = os.fspath(data)
+                size = os.path.getsize(source)
+                crc = 0
+                with open(source, 'rb') as src:
+                    while True:
+                        block = src.read(1 << 20)
+                        if not block: break
+                        crc = zlib.crc32(block, crc)
+            if size >= 0xffffffff or out.tell() >= 0xffffffff:
+                raise ValueError('APK exceeds the classic ZIP 4 GiB limit; this exporter does not yet write ZIP64 APKs')
+            pad = -(out.tell() + 30 + len(nb)) % align
+            if 0 < pad < 4: pad += align
+            extra = struct.pack('<HH', 0xd935, pad - 4) + b'\\0' * (pad - 4) if pad else b''
+            off = out.tell()
+            out.write(struct.pack('<IHHHHHIIIHH', 0x04034b50, 10, 0, 0, dos_time, dos_date,
+                                  crc, size, size, len(nb), len(extra)))
+            out.write(nb); out.write(extra)
+            if source is None:
+                out.write(data)
+            else:
+                with open(source, 'rb') as src:
+                    shutil.copyfileobj(src, out, 1 << 20)
+            cd += struct.pack('<IHHHHHHIIIHHHHHII', 0x02014b50, 10, 10, 0, 0, dos_time, dos_date,
+                              crc, size, size, len(nb), 0, 0, 0, 0, 0, off) + nb
+            count += 1
+        cd_offset = out.tell()
+        out.write(cd)
+        eocd_offset = out.tell()
+        eocd = struct.pack('<IHHHHIIH', 0x06054b50, 0, 0, count, count, len(cd), cd_offset, 0)
+        out.write(eocd)
+    return cd_offset, len(cd), eocd_offset, eocd
+
+
+def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, crt):
+    ALG = 0x0103
+    digests = []
+    with open(zip_path, 'rb') as src:
+        for start, length in ((0, cd_offset), (cd_offset, cd_size), (eocd_offset, len(eocd))):
+            src.seek(start)
+            left = length
+            while left:
+                block = src.read(min(1 << 20, left))
+                if not block: raise OSError('truncated APK staging ZIP while signing')
+                digests.append(hashlib.sha256(b'\\xa5' + struct.pack('<I', len(block)) + block).digest())
+                left -= len(block)
+    digest = hashlib.sha256(b'\\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
+    signed = lp(lp(struct.pack('<I', ALG) + lp(digest))) + lp(lp(crt)) + lp(b'')
+    signer = lp(signed) + lp(lp(struct.pack('<I', ALG) + lp(rsa_sign(k, signed)))) + lp(spki(k))
+    value = lp(lp(signer))
+    pair = struct.pack('<QI', 4 + len(value), 0x7109871a) + value
+    size = len(pair) + 8 + 16
+    block = struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
+    new_eocd = eocd[:16] + struct.pack('<I', cd_offset + len(block)) + eocd[20:]
+    with open(zip_path, 'rb') as src, open(out_path, 'wb') as dst:
+        shutil.copyfileobj(_LimitedReader(src, cd_offset), dst, 1 << 20)
+        dst.write(block)
+        src.seek(cd_offset)
+        shutil.copyfileobj(_LimitedReader(src, cd_size), dst, 1 << 20)
+        dst.write(new_eocd)
+    return os.path.getsize(out_path)
+
+
+class _LimitedReader:
+    def __init__(self, stream, remaining):
+        self.stream, self.remaining = stream, remaining
+    def read(self, size=-1):
+        if self.remaining <= 0: return b''
+        if size < 0 or size > self.remaining: size = self.remaining
+        data = self.stream.read(size)
+        self.remaining -= len(data)
+        return data
