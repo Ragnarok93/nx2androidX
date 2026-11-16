@@ -24,7 +24,7 @@ class StreamingApkTests(unittest.TestCase):
             entries = [
                 ("AndroidManifest.xml", b"manifest", 4),
                 ("lib/arm64-v8a/libdmhost.so", payload, 16384),
-                ("assets/nx2a-data.sha256", b"0" * 64 + b"\\n", 4),
+                ("assets/nx2a-data.sha256", b"0" * 64 + b"\n", 4),
             ]
 
             cd_offset, cd_size, eocd_offset, eocd = apksign.build_zip_file(entries, output)
@@ -37,7 +37,7 @@ class StreamingApkTests(unittest.TestCase):
                 self.assertIsNone(archive.testzip())
                 self.assertEqual(archive.read("AndroidManifest.xml"), b"manifest")
                 self.assertEqual(archive.read("lib/arm64-v8a/libdmhost.so"), expected)
-                self.assertEqual(archive.read("assets/nx2a-data.sha256"), b"0" * 64 + b"\\n")
+                self.assertEqual(archive.read("assets/nx2a-data.sha256"), b"0" * 64 + b"\n")
 
 
 if __name__ == "__main__":
