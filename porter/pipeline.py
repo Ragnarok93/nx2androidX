@@ -7,7 +7,7 @@ import hashlib, importlib.util, json, mmap, os, re, shutil, socket, struct, subp
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from porter import config, datapack, dumps, fpslocker, install, paths, product_cache, profiles, romfs_pack, toolchain
+from porter import config, datapack, dumps, fpslocker, install, paths, product_cache, profiles, resources, romfs_pack, toolchain
 from porter.revision import PLAYER_API_REVISION
 from porter.adb import NO_ADB, Adb, AdbError
 from porter.paths import DM, NXNATIVE
@@ -60,7 +60,7 @@ class Options:
     alias_headroom: int = None         # GB more alias region (alias_headroom); None: ALIAS_HEADROOM for a version the profile was not brought up on, none for one it was
     romfs_at: str = None               # with install: the folder on the device the app reads the RomFS from (porter/install.py), 'app' for its files folder; None: as the device has it
     romfs_push: bool = False           # with romfs_at: push the pack's RomFS into that folder first
-    jobs: int = field(default_factory=lambda: os.cpu_count() or 8)
+    jobs: int = field(default_factory=resources.safe_jobs)
     no_lsfg: bool = False              # build the host without the frame generation (the lsfg/ code, dm/android/build.py --no-lsfg): the host is then smaller and the frame generation reports "not in this build"
 
 
@@ -404,6 +404,16 @@ class Port:
         os.environ['PATH'] = os.pathsep.join([str(self.tools['dotnet'].parent), os.environ.get('PATH', '')])
         os.environ['DOTNET_ROOT'] = str(toolchain.dotnet_root(self.tools['dotnet']))   # where nx_extract.exe's apphost looks for the runtime (else the system's, which may lack .NET 10)
         # PYTHONUTF8: the engine's tools write their tables with open() and no encoding, which is the ANSI code page on Windows (shader_split.py's "→" failed)
+        previous_jobs = o.jobs
+        o.jobs = resources.safe_jobs(o.jobs)
+        total_mb, available_mb = resources.memory_mb() if resources.is_android() else (None, None)
+        if resources.is_android():
+            if total_mb and available_mb is not None:
+                say(f'Android memory budget: {total_mb / 1024:.1f} GiB RAM, {available_mb / 1024:.1f} GiB available; {o.jobs} worker(s)')
+            else:
+                say(f'Android memory budget: RAM unavailable; {o.jobs} worker(s)')
+        elif previous_jobs != o.jobs:
+            say(f'worker count: {o.jobs}')
         self.env = dict(os.environ, J=str(o.jobs), PYTHONIOENCODING='utf-8', PYTHONUTF8='1', DOTNET_CLI_TELEMETRY_OPTOUT='1')
         # The build tools' own libraries (the toolchain's libshaderc for glslc): the tools are run with the environment the
         # guest has, whose library path holds the rootfs's libraries only, and the tools' own RPATH may point elsewhere
@@ -896,6 +906,10 @@ class Port:
             self.dmsv = None
             for st in ('shader split', 'Vulkan shaders'): PROG.stage(st); PROG.end('none: the game renders with OpenGL ES')
             return
+        previous_jobs = self.o.jobs
+        self.o.jobs = resources.safe_jobs(self.o.jobs)
+        self.env['J'] = str(self.o.jobs)
+        if self.o.jobs != previous_jobs: say(f'available memory fell; shader stages reduced to {self.o.jobs} worker(s)')
         sv = self.versions
         pkg = self.work / 'shader' / 'pkg'
         try:
