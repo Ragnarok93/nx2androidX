@@ -1,6 +1,9 @@
 package org.nx2a;
 
 import android.app.NativeActivity;
+import android.app.Activity;
+import android.app.ProgressDialog;
+import android.content.Context;
 import android.os.Bundle;
 import android.os.StatFs;
 import android.util.Log;
@@ -21,7 +24,6 @@ import java.nio.charset.StandardCharsets;
 /** Standalone game Activity: unpack the embedded port before the NativeActivity host starts. */
 public class GameActivity extends NativeActivity {
     private final GameKeyboard keyboard = new GameKeyboard(this);
-    private String extractionError;
 
     private static String text(byte[] value) {
         return value == null ? "" : new String(value, StandardCharsets.UTF_8);
@@ -33,29 +35,64 @@ public class GameActivity extends NativeActivity {
     }
 
     @Override protected void onCreate(Bundle state) {
-        try {
-            extractEmbeddedPack(this);
-        } catch (Exception e) {
-            extractionError = e.getMessage() == null ? e.toString() : e.getMessage();
-            Log.e("nx2a-export", "Could not prepare the bundled game data", e);
-        }
+        // NativeActivity loads libdmhost here. Its native data setup defers game startup for embedded APKs;
+        // extraction then runs off the UI thread so multi-gigabyte packs cannot ANR the launcher.
         super.onCreate(state);
+        prepareEmbeddedPack(this);
     }
 
     @Override protected void onResume() {
-        if (extractionError != null) {
-            Toast.makeText(this, "Game data extraction failed: " + extractionError, Toast.LENGTH_LONG).show();
-            finish();
-            return;
-        }
         super.onResume();
         keyboard.pause(false);
     }
 
+    private static boolean hasEmbeddedPack(Context context) {
+        try (InputStream marker = context.getAssets().open("nx2a-export-mode")) {
+            return marker.read() >= 0;
+        } catch (java.io.FileNotFoundException missing) {
+            return false;
+        } catch (IOException error) {
+            Log.e("nx2a-export", "Could not read the embedded-data marker", error);
+            return false;
+        }
+    }
+
+    static void prepareEmbeddedPack(Activity activity) {
+        if (!hasEmbeddedPack(activity)) return;  // legacy split-folder APKs keep their native folder picker
+        ProgressDialog dialog = new ProgressDialog(activity);
+        dialog.setMessage("Preparing game data…");
+        dialog.setIndeterminate(true);
+        dialog.setCancelable(false);
+        dialog.show();
+        Thread worker = new Thread(() -> {
+            try {
+                extractEmbeddedPack(activity);
+                activity.runOnUiThread(() -> {
+                    if (activity.isFinishing() || activity.isDestroyed()) return;
+                    dialog.dismiss();
+                    embeddedPackReady();
+                });
+            } catch (Exception error) {
+                Log.e("nx2a-export", "Could not prepare the bundled game data", error);
+                activity.runOnUiThread(() -> {
+                    if (activity.isFinishing() || activity.isDestroyed()) return;
+                    dialog.dismiss();
+                    Toast.makeText(activity, "Game data extraction failed: " +
+                            (error.getMessage() == null ? error.toString() : error.getMessage()),
+                            Toast.LENGTH_LONG).show();
+                    activity.finish();
+                });
+            }
+        }, "nx2a-pack-extract");
+        worker.start();
+    }
+
+    private static native void embeddedPackReady();
+
     @Override protected void onPause() { keyboard.pause(true); super.onPause(); }
     @Override protected void onDestroy() { keyboard.pause(true); super.onDestroy(); }
 
-    static void extractEmbeddedPack(NativeActivity activity) throws Exception {
+    static void extractEmbeddedPack(Context activity) throws Exception {
         // Legacy split-folder APKs do not carry this marker; keep their NativeActivity data-folder flow intact.
         try (InputStream marker = activity.getAssets().open("nx2a-export-mode")) {
             if (marker.read() < 0) throw new IOException("empty export marker");
