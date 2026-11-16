@@ -1235,7 +1235,7 @@ static void env_file(const char *path) {   // KEY=VALUE per line (# comments): s
         char *eq = strchr(line, '='); if (!eq) continue; *eq = 0;
         const char *value = eq + 1; char resolved[800];
         // Standalone APK packs use paths relative to the extracted private data root, never the build machine's path.
-        if ((!strcmp(line, "DM_AOC_DIR") || !strcmp(line, "DM_SYSDATA") || !strcmp(line, "DM_SHARED_FONT") || !strcmp(line, "DM_SHARED_FONT_EXT"))
+        if ((!strcmp(line, "DM_AOC_DIR") || !strcmp(line, "DM_SYSDATA") || !strcmp(line, "DM_SHARED_FONT") || !strcmp(line, "DM_SHARED_FONT_EXT") || !strcmp(line, "DM_ROMFS"))
             && value[0] && value[0] != '/') {
             snprintf(resolved, sizeof resolved, "%s/%s", g_root, value); value = resolved;
         }
