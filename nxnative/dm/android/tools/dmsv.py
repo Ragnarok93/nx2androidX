@@ -30,46 +30,106 @@ def zstd_mod():   # compression.zstd from Python 3.14, its backport before (pip 
     return zstd
 
 
+def _spv_bytes(value):
+    """Read a SPIR-V module from bytes or a path, keeping path-backed entries disk-resident."""
+    if isinstance(value, (str, os.PathLike)):
+        with open(value, 'rb') as f:
+            return f.read()
+    return value
+
+
 def write(path, entries, level=LEVEL, jobs=None):
-    """entries [(key, stage, spv, refl)] → a bundle at path: version 2 with each module's SPIR-V zstd-compressed at level, in jobs threads (zstd lets go of the GIL: 7x faster
-    on 12 threads), or version 1 with level 0 or in a Python without zstd. Written as it goes (the old writer joined the whole bundle in memory, twice its size).
-    Verified in a private sibling directory, then atomically replaces path. A write,
-    verification or replace failure leaves the old bundle intact (shader_vk.py
-    calls this directly, without the CLI repacker's former .partial protection).
-    Returns (version, SPIR-V bytes, SPIR-V bytes stored)"""
-    entries = sorted(entries, key=lambda e: e[0]); z = zstd_mod() if level else None
-    if level and not z: print('[RED] this Python has no zstd (compression.zstd from Python 3.14, or pip install backports.zstd): the shader bundle is written uncompressed (version 1)', flush=True)
-    if z:
-        P = z.CompressionParameter; opt = {P.compression_level: level, P.checksum_flag: 1}
-        def pack(spv):
-            c = z.compress(spv, options=opt)
-            return (c, len(spv)) if len(c) < len(spv) else (spv, 0)
-        with cf.ThreadPoolExecutor(jobs or os.cpu_count() or 4) as ex: stored = list(ex.map(pack, [e[2] for e in entries], chunksize=8))
-    else: stored = [(e[2], 0) for e in entries]
-    ver, off, table = 2 if z else 1, HDR.size + ENT.size * len(entries), []
-    for (key, st, spv, refl), (s, n) in zip(entries, stored):
-        table.append(ENT.pack(key, st, off, len(s), off + len(s), len(refl), n)); off += len(s) + len(refl)
-    # Same filesystem for atomic rename; a unique directory also isolates concurrent
-    # exporters. This preserves nxnative's staged-export contract in the DMSV format.
+    """entries [(key, stage, spv, refl)] → a bundle at path.
+
+    Compression is streamed to a disk-backed spool. At most 2 * jobs
+    compression results are retained at once, instead of keeping every
+    compressed SPIR-V module in RAM until the final bundle is written.
+    The input entries (the translator's output) remain owned by the caller.
+    """
+    entries = sorted(entries, key=lambda e: e[0])
+    z = zstd_mod() if level else None
+    if level and not z:
+        print('[RED] this Python has no zstd (compression.zstd from Python 3.14, or pip install backports.zstd): the shader bundle is written uncompressed (version 1)', flush=True)
+
+    ver = 2 if z else 1
     path = os.path.abspath(path)
     with tempfile.TemporaryDirectory(prefix='.dmsv-', dir=os.path.dirname(path)) as scratch:
+        spool_path = os.path.join(scratch, 'payload.bin')
+        table = []
+        off = HDR.size + ENT.size * len(entries)
+        raw_total = stored_total = 0
+
+        def append(entry, packed, spool):
+            nonlocal off, raw_total, stored_total
+            key, stage, spv, refl = entry
+            data, original_size = packed
+            table.append(ENT.pack(key, stage, off, len(data), off + len(data), len(refl), original_size))
+            spool.write(data)
+            spool.write(refl)
+            off += len(data) + len(refl)
+            raw_total += original_size or len(data)
+            stored_total += len(data)
+
+        if z:
+            P = z.CompressionParameter
+            opt = {P.compression_level: level, P.checksum_flag: 1}
+
+            def pack(entry):
+                spv = _spv_bytes(entry[2])
+                compressed = z.compress(spv, options=opt)
+                return (compressed, len(spv)) if len(compressed) < len(spv) else (spv, 0)
+
+            workers = max(1, min(int(jobs or os.cpu_count() or 4), len(entries) or 1))
+            # ThreadPoolExecutor.map eagerly submits the complete iterable on
+            # supported Python versions. Keep a small ordered window instead.
+            with cf.ThreadPoolExecutor(workers) as ex, open(spool_path, 'wb') as spool:
+                pending = deque()
+                source = iter(entries)
+                for _ in range(min(len(entries), workers * 2)):
+                    entry = next(source, None)
+                    if entry is None: break
+                    pending.append((entry, ex.submit(pack, entry)))
+                while pending:
+                    entry, future = pending.popleft()
+                    append(entry, future.result(), spool)
+                    next_entry = next(source, None)
+                    if next_entry is not None:
+                        pending.append((next_entry, ex.submit(pack, next_entry)))
+                spool.flush()
+                os.fsync(spool.fileno())
+        else:
+            with open(spool_path, 'wb') as spool:
+                for entry in entries:
+                    append(entry, (_spv_bytes(entry[2]), 0), spool)
+                spool.flush()
+                os.fsync(spool.fileno())
+
         tmp = os.path.join(scratch, 'bundle.dmsv')
-        with open(tmp, 'wb') as f:
-            f.write(HDR.pack(MAGIC, ver, len(entries)) + b''.join(table))
-            for (_, _, _, refl), (s, _) in zip(entries, stored): f.write(s); f.write(refl)
-            f.flush(); os.fsync(f.fileno())
+        with open(tmp, 'wb') as f, open(spool_path, 'rb') as payload:
+            f.write(HDR.pack(MAGIC, ver, len(entries)))
+            f.write(b''.join(table))
+            while True:
+                chunk = payload.read(1 << 20)
+                if not chunk: break
+                f.write(chunk)
+            f.flush()
+            os.fsync(f.fileno())
+
         with Bundle(tmp) as check:
             if check.version != ver or len(check.entries) != len(entries):
                 raise ValueError('shader bundle header did not read back correctly; previous bundle retained')
             for expected, actual in zip(entries, check.entries):
-                if actual[:2] != expected[:2] or check.spv(actual) != expected[2] or check.refl(actual) != expected[3]:
+                if actual[:2] != expected[:2] or check.spv(actual) != _spv_bytes(expected[2]) or check.refl(actual) != expected[3]:
                     raise ValueError(f'shader {expected[0]:016x} did not read back correctly; previous bundle retained')
-        # Close the verifier's mapping before replace, including on Windows.
-        try: mode = stat.S_IMODE(os.stat(path).st_mode)
-        except FileNotFoundError: pass
-        else: os.chmod(tmp, mode)
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            pass
+        else:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
-    return ver, sum(len(e[2]) for e in entries), sum(len(s) for s, _ in stored)
+
+    return ver, raw_total, stored_total
 
 
 class Bundle:
