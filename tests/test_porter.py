@@ -376,7 +376,7 @@ class DataPack(unittest.TestCase):
             self.assertEqual(env, [f'DM_SHARED_FONT={pipeline.SHARED_CJK}']); self.assertEqual(files, {})
             # the player's own font wins: it goes in the pack, and the host reads it from there
             mine = t / 'mine.ttf'; shutil.copyfile(pipeline.SHARED_CJK, mine)
-            own = SimpleNamespace(o=SimpleNamespace(shared_font=mine, app=True), package='org.nx2a.test', data_dir=lambda: t / 'out-data')
+            own = SimpleNamespace(o=SimpleNamespace(shared_font=mine, app=True, self_contained=False), package='org.nx2a.test', data_dir=lambda: t / 'out-data')
             env, files = pipeline.Port.shared_font(own)
             self.assertEqual(env, [f'DM_SHARED_FONT={t / "out-data"}/standard.ttf']); self.assertEqual(files, {'standard.ttf': mine})
         finally:
@@ -653,7 +653,7 @@ class Misc(unittest.TestCase):
             (d / 'g.nsp').write_bytes(b'\0' * 2**20)
             work = d / 'build'
             card = d / 'card/ports'
-            p = self.space_port(d, {'base': d / 'g.nsp', 'updates': [], 'dlc': []}, work, pack_dir=card)
+            p = self.space_port(d, {'base': d / 'g.nsp', 'updates': [], 'dlc': []}, work, app=True, pack_dir=card)
             real = shutil.disk_usage
             try:
                 # the card is on another volume: the build's volume asks for the game's files, the card for the pack
@@ -790,7 +790,7 @@ class Dumps(unittest.TestCase):   # porter/dumps.py: NSZ / XCZ → NSP; an NCZ m
         from types import SimpleNamespace as NS
         src = self.nsz(self.solid); size = self.dumps.size(src)
         work = self.d / 'build'
-        p = NS(o=NS(folder=self.d, app=False), work=work, fam={'base': src, 'updates': [], 'dlc': []})
+        p = NS(o=NS(folder=self.d, app=False, self_contained=False, out=None), work=work, fam={'base': src, 'updates': [], 'dlc': []})
         real = shutil.disk_usage
         try:
             shutil.disk_usage = lambda _: NS(free=2**30 + 3 * size)

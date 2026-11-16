@@ -1,6 +1,7 @@
 """Run the export orchestration with a controlled external translator."""
 import ast
 import collections
+import gc
 import mmap
 import concurrent.futures as cf
 import contextlib
@@ -95,13 +96,14 @@ class ExportChecks(unittest.TestCase):
         game = SimpleNamespace(table=lambda name: self.root / name)
         try: products = importlib.import_module('shader_products')
         except ModuleNotFoundError: products = None
-        env = dict(collections=collections, cf=cf, os=os, json=json, mmap=mmap, struct=struct,
+        env = dict(collections=collections, cf=cf, gc=gc, os=os, json=json, mmap=mmap, struct=struct,
                    tempfile=tempfile, subprocess=subprocess, dmsv=dmsv, Path=Path, re=re,
                    shader_products=products, GAME=game, MAP=str(table), XLATE_DLL='translator.dll',
                    a=SimpleNamespace(pkg=str(self.root/'pkg'), out=str(self.out), capture=None, keys='',
                                      jobs=self.jobs, dotnet='dotnet', zstd=0, report=str(self.report)),
                    STAGES={'vs': 0, 'cs': 5}, kinds_all=collections.Counter(),
                    captured=lambda _: {}, records=lambda _: [b'fixture'],
+                   record_at=lambda mapped, offsets, idx: offsets[idx],
                    job_for=lambda key, stage, rec, w: ({'key': key, 'attr': {}}, b''),
                    int_inputs=lambda _: {'0': 'uint'},
                    spirv_bindings=lambda _: (self.bindings, [1, 1, 1], {1: [0, 0, 0], 3: [0, 0, 0]}),

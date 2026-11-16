@@ -524,7 +524,9 @@ class Port:
             if free < need: raise BuildError(f'not enough disk space on {where.anchor} for the build and APK staging: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
             output = (dlc if self.o.app else game * (2 if self.o.self_contained else 1)) + margin
             need, free = output, shutil.disk_usage(pack_where).free
-            if free < need: raise BuildError(f'not enough disk space for the pack and exported APK in {pack}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
+            if free < need:
+                item = 'data pack' if self.o.app else 'pack and exported APK'
+                raise BuildError(f'not enough disk space for the {item} in {pack}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
             return
         need, free = max(0, copies * game + temp - built) + margin, shutil.disk_usage(where).free
         if free < need: raise BuildError(f'not enough disk space on {where.anchor}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')

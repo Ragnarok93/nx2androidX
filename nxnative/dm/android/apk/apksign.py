@@ -88,10 +88,11 @@ def _v2_block(digest, k, crt):
 
 
 def sign_v2(zip_entries, cd, eocd, k, crt):
-    # The digest must cover the EOCD with its central-directory offset adjusted to the signing block's start.
+    # APK v2 hashes EOCD with the central-directory offset pointing to the start of the signing block,
+    # not the on-disk EOCD's relocated central-directory offset.
     placeholder = _v2_block(bytes(32), k, crt)
     new_eocd = eocd[:16] + struct.pack('<I', len(zip_entries) + len(placeholder)) + eocd[20:]
-    digest = chunked_sha256([zip_entries, cd, new_eocd])
+    digest = chunked_sha256([zip_entries, cd, eocd])
     block = _v2_block(digest, k, crt)
     if len(block) != len(placeholder): raise ValueError('APK signing block changed size while signing')
     return zip_entries + block + cd + new_eocd
@@ -164,8 +165,8 @@ def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, c
                 if not block: raise OSError('truncated APK staging ZIP while signing')
                 digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
                 left -= len(block)
-    for start in range(0, len(new_eocd), 1 << 20):
-        block = new_eocd[start:start + (1 << 20)]
+    for start in range(0, len(eocd), 1 << 20):
+        block = eocd[start:start + (1 << 20)]
         digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
     digest = hashlib.sha256(b'\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
     block = _v2_block(digest, k, crt)

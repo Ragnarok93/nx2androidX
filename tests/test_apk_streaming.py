@@ -45,7 +45,8 @@ def _assert_v2_digest(test, apk):
     expected_digest, _ = _take_lp(digest_record, 4)
     test.assertEqual(algorithm, 0x0103)
     chunks = []
-    for section in (apk[:block_start], apk[cd_offset:eocd_offset], eocd):
+    normalized_eocd = eocd[:16] + struct.pack('<I', block_start) + eocd[20:]
+    for section in (apk[:block_start], apk[cd_offset:eocd_offset], normalized_eocd):
         for start in range(0, len(section), 1 << 20):
             chunk = section[start:start + (1 << 20)]
             chunks.append(hashlib.sha256(b"\xa5" + struct.pack("<I", len(chunk)) + chunk).digest())
