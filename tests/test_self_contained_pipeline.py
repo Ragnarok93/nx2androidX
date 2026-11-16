@@ -78,12 +78,18 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertIn("[] if ARGS.dex and ARGS.launcher_activity else [", mkapk)
         self.assertIn("if launcher: args += ['--launcher-activity', 'com.nx2a.launcher.LauncherActivity']", pipeline)
 
-    def test_first_launch_extracts_before_native_activity_startup(self):
-        source = (ROOT / "nxnative/dm/android/java/org/nx2a/GameActivity.java").read_text(encoding="utf-8")
-        self.assertLess(source.index("extractEmbeddedPack(this);"), source.index("super.onCreate(state);"))
-        self.assertIn("nx2a-data.sha256", source)
-        self.assertIn("unsafe path in game data archive", source)
-        self.assertIn("cannot activate extracted game data", source)
+    def test_first_launch_extracts_off_ui_thread_then_starts_native_host(self):
+        java = (ROOT / "nxnative/dm/android/java/org/nx2a/GameActivity.java").read_text(encoding="utf-8")
+        native = (ROOT / "nxnative/dm/android/front_android.c").read_text(encoding="utf-8")
+        external = (ROOT / "nxnative/dm/android/java/org/nx2a/ExternalActivity.java").read_text(encoding="utf-8")
+        self.assertLess(java.index("super.onCreate(state);"), java.index("prepareEmbeddedPack(this);"))
+        self.assertIn('new Thread(() ->', java)
+        self.assertIn("nx2a-data.sha256", java)
+        self.assertIn("unsafe path in game data archive", java)
+        self.assertIn("cannot activate extracted game data", java)
+        self.assertIn('AAssetManager_open(a->assetManager, "nx2a-export-mode"', native)
+        self.assertIn("Java_org_nx2a_GameActivity_embeddedPackReady", native)
+        self.assertIn("GameActivity.prepareEmbeddedPack(this);", external)
 
 
 if __name__ == "__main__":
