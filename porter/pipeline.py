@@ -1068,7 +1068,6 @@ class Port:
         cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
         cmd += [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()
                                                           + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
-        if dex := launcher_dex(): cmd += ['--dex', str(dex)]
         nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
         if self.o.self_contained:
             archive.unlink(missing_ok=True); checksum.unlink(missing_ok=True)
@@ -1084,13 +1083,15 @@ class Port:
         d8s = [p for root in roots for p in (root / 'build-tools').glob('*/d8' + ('.bat' if os.name == 'nt' else ''))]
         def version(p): return tuple(int(x) for x in re.findall(r'\d+', p.parent.name))
         if not javac or not platforms or not d8s:
-            raise BuildError('--external-display / --native-keyboard needs javac and an Android SDK with a platform and build-tools (set ANDROID_HOME)')
+            raise BuildError('standalone APK export (and --external-display / --native-keyboard) needs javac and an Android SDK with a platform and build-tools (set ANDROID_HOME)')
         platform, d8 = max(platforms, key=version), max(d8s, key=version)
         out = self.aw / 'external-activity'; classes, dex = out / 'classes', out / 'dex'
         shutil.rmtree(out, ignore_errors=True); classes.mkdir(parents=True); dex.mkdir()
         sources = sorted((DM / 'android/java/org/nx2a').glob('*.java'))
         nsp.run([javac, '-source', '8', '-target', '8', '-classpath', platform, '-d', classes, *sources], self.logs / 'android_external_java.log', env=self.env)
-        nsp.run([d8, '--min-api', '29', '--lib', platform, '--output', dex, *sorted(classes.rglob('*.class'))], self.logs / 'android_external_dex.log', env=self.env)
+        dex_inputs = sorted(classes.rglob('*.class'))
+        if launcher := launcher_dex(): dex_inputs.append(launcher)   # merge the optional language/driver launcher with the standalone Activity classes
+        nsp.run([d8, '--min-api', '29', '--lib', platform, '--output', dex, *dex_inputs], self.logs / 'android_external_dex.log', env=self.env)
         activity = 'KeyboardExternalActivity' if self.o.native_keyboard else 'ExternalActivity'
         return ['--dex', dex / 'classes.dex', '--activity', 'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
 
