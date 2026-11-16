@@ -11,8 +11,8 @@
 # The APK is the run's artifact (nx2android-android-apk), and a published release gets it as an asset named
 # after the version (nx2android-v0.3.0-alpha02.apk).
 #
-# Only a tag builds: a push of the branch builds nothing. The tag is pushed right before the release is made,
-# and the build waits for that release to appear before it attaches the APK to it.
+# Pull requests targeting android run the same tests and APK build as a release, and keep the artifact for review.
+# A release still builds only from a tag; the build waits for that release to appear before attaching its APK.
 #
 # A tag's build also tells the QQ group: the announcement (the version, the release's Chinese changelog, the
 # release's page and the netdisk link) goes out once the APK is attached. It is an extra: it never fails the
@@ -21,8 +21,18 @@ name: Android app
 
 on:
   workflow_dispatch:   # a build of the branch, kept as the run's artifact
+  pull_request:
+    branches: [android]
+    paths:
+      - 'android/**'
+      - 'porter/**'
+      - 'nxnative/dm/android/**'
+      - 'nxnative/dm/gfx/tools/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/android-apk.yml'
   push:
-    tags: ['v*']      # a tag only: a branch push builds nothing
+    tags: ['v*']      # release builds are tag-only
 
 permissions:
   contents: write   # the release's assets (the APK)
