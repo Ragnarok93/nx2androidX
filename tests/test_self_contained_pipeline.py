@@ -12,7 +12,7 @@ class SelfContainedPipelineTests(unittest.TestCase):
         port = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Port")
         run = next(node for node in port.body if isinstance(node, ast.FunctionDef) and node.name == "_run")
         calls = [
-            node.func.attr for node in ast.walk(run)
+            node.func.attr for node in sorted(ast.walk(run), key=lambda item: getattr(item, 'lineno', -1))
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
