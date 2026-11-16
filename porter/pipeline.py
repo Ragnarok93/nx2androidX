@@ -1231,12 +1231,13 @@ class Port:
         copies into the app's files folder on the device.
         Returns (env.txt rows, pack files); none without a font"""
         if self.o.shared_font:   # the player's own font: it goes in the pack, the install puts it where the host reads it
-            dest = self.data_dir() if self.o.app else datapack.files_folder(self.package)
+            dest = self.data_dir() if self.o.app else 'standard.ttf' if self.o.self_contained else datapack.files_folder(self.package)
             return [f'DM_SHARED_FONT={dest}/standard.ttf'], {'standard.ttf': self.o.shared_font}
         if not SHARED_CJK.is_file():
             say('[RED] the shared font is missing (dm/tools/shared_cjk.ttf): the game\'s Chinese text will draw as "?"')
             return [], {}
         if self.o.app: return [f'DM_SHARED_FONT={SHARED_CJK}'], {}
+        if self.o.self_contained: return ['DM_SHARED_FONT=standard.ttf'], {'standard.ttf': SHARED_CJK}
         dest = datapack.files_folder(self.package)
         return [f'DM_SHARED_FONT={dest}/standard.ttf'], {'standard.ttf': SHARED_CJK}
 
