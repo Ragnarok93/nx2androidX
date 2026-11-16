@@ -27,6 +27,8 @@ def _parser():
     mode.add_argument('--game-apk', action='store_false', dest='app',
                       help="the fork's legacy path: a per-game APK as well (a separate app per game, installed over adb); unmaintained here — "
                            "--install, --replace-signer, --package and --vercode-offset belong to it")
+    mode.add_argument('--self-contained-apk', action='store_true', dest='self_contained',
+                      help='export one installable APK per game, with the complete data pack embedded and extracted on first launch')
     po.set_defaults(app=True)
     po.add_argument('--install', action='store_true', help='install the APK on the connected device afterwards (with --game-apk)')
     po.add_argument('--device', default='', help='adb serial of the device to install on (with --game-apk)')
@@ -197,7 +199,7 @@ def cmd_port(a):
         except BuildError as e: print(e, file=sys.stderr); return 2
     opts = pipeline.Options(folder=Path(a.folder), keys=Path(a.keys) if a.keys else None, firmware=Path(a.firmware) if a.firmware else None, out=Path(a.out) if a.out else None, version=a.version, language=a.language,
                                 language_preferred=a.language_preferred,
-                                app_name=a.app_name, app=a.app, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver,
+                                app_name=a.app_name, app=a.app and not a.self_contained, self_contained=a.self_contained, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver,
                                 vulkan_driver_dir=a.vulkan_driver_dir, shared_font=a.shared_font,
                                 vercode_offset=offset, alias_headroom=a.alias_headroom, romfs_at=a.romfs_at, romfs_push=a.romfs_push, external_display=a.external_display, native_keyboard=a.native_keyboard, jobs=a.jobs, no_lsfg=a.no_lsfg)
     return _with_progress(a.progress, lambda: pipeline.emit_result(pipeline.Port(opts).run()))
