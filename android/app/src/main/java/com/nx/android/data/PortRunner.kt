@@ -49,8 +49,8 @@ class PortRunner(
         /**
          * The porter's command line for a port: pure, so the test can check it on the JVM.
          *
-         * There is no output folder on the command line: the data pack goes into the app's own folder
-         * (the porter's app mode puts it there, whatever the caller says).
+         * The standalone APK is written beside the selected game file by default; its data pack is embedded,
+         * so there is no companion folder or separate output directory.
          *
          * The extra address space (the alias region): Auto passes nothing, the porter decides by itself
          * (the version the profile was tested with gets none, another one 8 GB).
