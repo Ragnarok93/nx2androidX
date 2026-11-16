@@ -45,8 +45,8 @@ def _assert_v2_digest(test, apk):
     for section in (apk[:block_start], apk[cd_offset:eocd_offset], eocd):
         for start in range(0, len(section), 1 << 20):
             chunk = section[start:start + (1 << 20)]
-            chunks.append(hashlib.sha256(b"\\xa5" + struct.pack("<I", len(chunk)) + chunk).digest())
-    actual_digest = hashlib.sha256(b"\\x5a" + struct.pack("<I", len(chunks)) + b"".join(chunks)).digest()
+            chunks.append(hashlib.sha256(b"\xa5" + struct.pack("<I", len(chunk)) + chunk).digest())
+    actual_digest = hashlib.sha256(b"\x5a" + struct.pack("<I", len(chunks)) + b"".join(chunks)).digest()
     test.assertEqual(expected_digest, actual_digest)
 
 class StreamingApkTests(unittest.TestCase):
