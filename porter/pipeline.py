@@ -440,7 +440,8 @@ class Port:
         nsp.rmtree(self.work / 'tmp')
         self.result.update(title_id=self.g.id, name=self.app_name, package=self.package, version=self.pkg_ver, display=self.display, language=self.lang,
                            status=self.ap.status, derived=bool(self.derived), installed=bool(o.install))
-        say(f'done: {self.result.get("apk", "no APK (the app runs it)") + ", " if "apk" in self.result else ""}{self.result["data"]}')
+        artifacts = [self.result[k] for k in ('apk', 'data') if self.result.get(k)]
+        say('done: ' + (', '.join(artifacts) if artifacts else 'no exported artifact'))
         if self.derived: say(f'[RED] {self.derived}: the port is built from a derived profile and may not run as the profile\'s tested version does'
                              + (f'; {self.derived_mem}' if self.derived_mem else ''))
         for x in self.lost: say(f'[RED] {x}')
