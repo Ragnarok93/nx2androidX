@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -12,6 +14,40 @@ SPEC = importlib.util.spec_from_file_location(
 apksign = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(apksign)
 
+
+
+def _take_lp(data, offset):
+    size = struct.unpack_from("<I", data, offset)[0]
+    start = offset + 4
+    return data[start:start + size], start + size
+
+
+def _assert_v2_digest(test, apk):
+    eocd_offset = len(apk) - 22
+    eocd = apk[eocd_offset:]
+    cd_offset = struct.unpack_from("<I", eocd, 16)[0]
+    block_size = struct.unpack_from("<Q", apk, cd_offset - 24)[0] + 8
+    block_start = cd_offset - block_size
+    pair_start = block_start + 8
+    pair_size = struct.unpack_from("<Q", apk, pair_start)[0]
+    pair_id = struct.unpack_from("<I", apk, pair_start + 8)[0]
+    test.assertEqual(pair_id, 0x7109871a)
+    value = apk[pair_start + 12:pair_start + 8 + pair_size]
+    outer, _ = _take_lp(value, 0)
+    signer, _ = _take_lp(outer, 0)
+    signed, _ = _take_lp(signer, 0)
+    digest_list, _ = _take_lp(signed, 0)
+    digest_record, _ = _take_lp(digest_list, 0)
+    algorithm = struct.unpack_from("<I", digest_record, 0)[0]
+    expected_digest, _ = _take_lp(digest_record, 4)
+    test.assertEqual(algorithm, 0x0103)
+    chunks = []
+    for section in (apk[:block_start], apk[cd_offset:eocd_offset], eocd):
+        for start in range(0, len(section), 1 << 20):
+            chunk = section[start:start + (1 << 20)]
+            chunks.append(hashlib.sha256(b"\\xa5" + struct.pack("<I", len(chunk)) + chunk).digest())
+    actual_digest = hashlib.sha256(b"\\x5a" + struct.pack("<I", len(chunks)) + b"".join(chunks)).digest()
+    test.assertEqual(expected_digest, actual_digest)
 
 class StreamingApkTests(unittest.TestCase):
     def test_v2_signed_apk_keeps_zip_entries_readable(self):
@@ -32,7 +68,9 @@ class StreamingApkTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 self.assertIsNone(archive.testzip())
                 self.assertEqual(archive.read("assets/nx2a-data.zip"), payload.read_bytes())
-            self.assertIn(b"APK Sig Block 42", output.read_bytes())
+            signed_apk = output.read_bytes()
+            self.assertIn(b"APK Sig Block 42", signed_apk)
+            _assert_v2_digest(self, signed_apk)
 
     def test_legacy_v2_signer_hashes_the_adjusted_eocd(self):
         import io
@@ -44,6 +82,7 @@ class StreamingApkTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(signed)) as archive:
             self.assertEqual(archive.read("AndroidManifest.xml"), b"manifest")
         self.assertIn(b"APK Sig Block 42", signed)
+        _assert_v2_digest(self, signed)
 
     def test_file_backed_zip_entries_round_trip(self):
         with tempfile.TemporaryDirectory() as temp:
