@@ -5,7 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 移植的命令行：没有输出目录（数据包落在 App 自己的目录里），多出来的「额外地址空间」只在玩家选了数值时才有（Auto 不带这个参数） */
+/** 移植命令行：APK 默认输出到游戏源文件旁边，不传额外输出目录；Auto 不传额外地址空间参数。 */
 class PortRunnerTest {
 
     private fun args(aliasHeadroom: Int, touch: Boolean = false, fps60: Boolean = false,
