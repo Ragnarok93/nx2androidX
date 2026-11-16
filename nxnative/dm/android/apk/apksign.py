@@ -139,6 +139,7 @@ def build_zip_file(entries, path):
         eocd_offset = out.tell()
         eocd = struct.pack('<IHHHHIIH', 0x06054b50, 0, 0, count, count, len(cd), cd_offset, 0)
         out.write(eocd)
+        if out.tell() >= 0xffffffff: raise ValueError('APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
     return cd_offset, len(cd), eocd_offset, eocd
 
 
@@ -170,6 +171,8 @@ def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, c
             src.seek(cd_offset)
             shutil.copyfileobj(_LimitedReader(src, cd_size), dst, 1 << 20)
             dst.write(new_eocd)
+        if os.path.getsize(tmp_out) >= 0xffffffff:
+            raise ValueError('signed APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
         os.replace(tmp_out, out_path)
     except Exception:
         try: os.unlink(tmp_out)
