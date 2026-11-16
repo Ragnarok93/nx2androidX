@@ -34,7 +34,7 @@ public class GameActivity extends NativeActivity {
 
     @Override protected void onCreate(Bundle state) {
         try {
-            extractEmbeddedPack();
+            extractEmbeddedPack(this);
         } catch (Exception e) {
             extractionError = e.getMessage() == null ? e.toString() : e.getMessage();
             Log.e("nx2a-export", "Could not prepare the bundled game data", e);
@@ -55,19 +55,19 @@ public class GameActivity extends NativeActivity {
     @Override protected void onPause() { keyboard.pause(true); super.onPause(); }
     @Override protected void onDestroy() { keyboard.pause(true); super.onDestroy(); }
 
-    private void extractEmbeddedPack() throws Exception {
+    static void extractEmbeddedPack(NativeActivity activity) throws Exception {
         // Legacy split-folder APKs do not carry this marker; keep their NativeActivity data-folder flow intact.
-        try (InputStream marker = getAssets().open("nx2a-export-mode")) {
+        try (InputStream marker = activity.getAssets().open("nx2a-export-mode")) {
             if (marker.read() < 0) throw new IOException("empty export marker");
         } catch (java.io.FileNotFoundException missing) { return; }
         String expected;
-        try (InputStream in = getAssets().open("nx2a-data.sha256")) {
+        try (InputStream in = activity.getAssets().open("nx2a-data.sha256")) {
             byte[] b = new byte[256];
             int n = in.read(b);
             expected = new String(b, 0, Math.max(0, n), StandardCharsets.US_ASCII).trim().toLowerCase(Locale.ROOT);
         }
         if (!expected.matches("[0-9a-f]{64}")) throw new IOException("invalid embedded data checksum");
-        File base = getFilesDir();
+        File base = activity.getFilesDir();
         File target = new File(base, "nx2a-data");
         File partial = new File(base, "nx2a-data.partial");
         File backup = new File(base, "nx2a-data.backup");
@@ -79,11 +79,11 @@ public class GameActivity extends NativeActivity {
         deleteTree(partial);
         if (!partial.mkdirs() && !partial.isDirectory()) throw new IOException("cannot create private data directory");
 
-        String actual = digestAsset("nx2a-data.zip");
+        String actual = digestAsset(activity, "nx2a-data.zip");
         if (!expected.equals(actual)) throw new IOException("bundled game data checksum mismatch");
         long available = new StatFs(base.getAbsolutePath()).getAvailableBytes();
         long written = 0;
-        try (ZipInputStream zip = new ZipInputStream(new BufferedInputStream(getAssets().open("nx2a-data.zip")))) {
+        try (ZipInputStream zip = new ZipInputStream(new BufferedInputStream(activity.getAssets().open("nx2a-data.zip")))) {
             byte[] buffer = new byte[64 * 1024];
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
@@ -137,7 +137,7 @@ public class GameActivity extends NativeActivity {
         deleteTree(backup);
     }
 
-    private boolean safeEntry(String name) {
+    private static boolean safeEntry(String name) {
         if (name == null || name.isEmpty() || name.startsWith("/") || name.indexOf('\\') >= 0 || name.indexOf(':') >= 0)
             return false;
         String[] parts = name.split("/");
@@ -145,9 +145,9 @@ public class GameActivity extends NativeActivity {
         return true;
     }
 
-    private String digestAsset(String name) throws Exception {
+    private static String digestAsset(NativeActivity activity, String name) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        try (InputStream in = new BufferedInputStream(getAssets().open(name))) {
+        try (InputStream in = new BufferedInputStream(activity.getAssets().open(name))) {
             byte[] b = new byte[64 * 1024];
             int n;
             while ((n = in.read(b)) != -1) if (n > 0) digest.update(b, 0, n);
