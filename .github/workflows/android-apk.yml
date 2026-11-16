@@ -26,6 +26,7 @@ on:
     paths:
       - 'android/**'
       - 'porter/**'
+      - 'packaging/android-apk/**'
       - 'nxnative/dm/android/**'
       - 'nxnative/dm/gfx/tools/**'
       - 'tests/**'
