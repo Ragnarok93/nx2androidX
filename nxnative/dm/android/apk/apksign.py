@@ -99,7 +99,9 @@ def build_zip_file(entries, path):
     with open(path, 'wb') as out:
         dos_time, dos_date = 0, (2026 - 1980) << 9 | 1 << 5 | 1
         for name, data, align in entries:
+            if count >= 65535: raise ValueError('APK has too many ZIP entries for the current non-ZIP64 exporter')
             nb = name.encode()
+            if len(nb) > 65535: raise ValueError(f'APK entry name is too long: {name}')
             if isinstance(data, (bytes, bytearray, memoryview)):
                 size = len(data)
                 crc = zlib.crc32(data)
@@ -130,7 +132,9 @@ def build_zip_file(entries, path):
             cd += struct.pack('<IHHHHHHIIIHHHHHII', 0x02014b50, 10, 10, 0, 0, dos_time, dos_date,
                               crc, size, size, len(nb), 0, 0, 0, 0, 0, off) + nb
             count += 1
+            if out.tell() >= 0xffffffff: raise ValueError('APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
         cd_offset = out.tell()
+        if len(cd) >= 0xffffffff: raise ValueError('APK central directory exceeds the classic ZIP limit')
         out.write(cd)
         eocd_offset = out.tell()
         eocd = struct.pack('<IHHHHIIH', 0x06054b50, 0, 0, count, count, len(cd), cd_offset, 0)
@@ -158,12 +162,19 @@ def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, c
     size = len(pair) + 8 + 16
     block = struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
     new_eocd = eocd[:16] + struct.pack('<I', cd_offset + len(block)) + eocd[20:]
-    with open(zip_path, 'rb') as src, open(out_path, 'wb') as dst:
-        shutil.copyfileobj(_LimitedReader(src, cd_offset), dst, 1 << 20)
-        dst.write(block)
-        src.seek(cd_offset)
-        shutil.copyfileobj(_LimitedReader(src, cd_size), dst, 1 << 20)
-        dst.write(new_eocd)
+    tmp_out = os.fspath(out_path) + '.tmp'
+    try:
+        with open(zip_path, 'rb') as src, open(tmp_out, 'wb') as dst:
+            shutil.copyfileobj(_LimitedReader(src, cd_offset), dst, 1 << 20)
+            dst.write(block)
+            src.seek(cd_offset)
+            shutil.copyfileobj(_LimitedReader(src, cd_size), dst, 1 << 20)
+            dst.write(new_eocd)
+        os.replace(tmp_out, out_path)
+    except Exception:
+        try: os.unlink(tmp_out)
+        except FileNotFoundError: pass
+        raise
     return os.path.getsize(out_path)
 
 
