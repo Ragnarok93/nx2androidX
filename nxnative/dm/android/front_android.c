@@ -337,6 +337,10 @@ static int data_setup(ANativeActivity *a) {
     // Prefer it over the legacy external-folder picker: no shared-storage permission or companion -data folder is needed.
     char embedded[700]; snprintf(embedded, sizeof embedded, "%s/nx2a-data", a->internalDataPath);
     if (data_dir_valid(embedded)) { snprintf(g_data_dir, sizeof g_data_dir, "%s", embedded); return 1; }
+    // The Java Activity extracts this APK asset on a worker thread. Do not fall through to the
+    // legacy shared-storage picker while extraction is in progress; Java calls embeddedPackReady().
+    AAsset *export_mode = AAssetManager_open(a->assetManager, "nx2a-export-mode", AASSET_MODE_BUFFER);
+    if (export_mode) { AAsset_close(export_mode); return 0; }
     if (g_data_dir[0] && data_dir_valid(g_data_dir)) return 1;
     char saved[700]; saved[0] = 0;
     if (data_dir_load(a, saved, sizeof saved) && data_dir_valid(saved)) {   // the folder of last time
@@ -1350,6 +1354,16 @@ static void host_start(ANativeActivity *act) {
 #endif
     snprintf(g_root, sizeof g_root, "%s", g_data_dir[0] ? g_data_dir : (act->externalDataPath ? act->externalDataPath : act->internalDataPath));
     host_start_common(act->env, act->vm, act->clazz, act->internalDataPath);
+}
+
+// The Java bootstrap calls this after its worker has verified and extracted the embedded pack.
+// NativeActivity's onCreate/onResume may have arrived earlier and deliberately deferred startup.
+__attribute__((visibility("default"))) JNIEXPORT void JNICALL
+Java_org_nx2a_GameActivity_embeddedPackReady(JNIEnv *E, jclass cls) {
+    (void)E; (void)cls;
+    ANativeActivity *act = g_act;
+    if (!act || g_host_up) return;
+    if (data_setup(act)) host_start(act);
 }
 
 // the player's start (jni_android.h): what the NativeActivity's onCreate and onResume would have done, with the
