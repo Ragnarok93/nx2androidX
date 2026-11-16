@@ -505,18 +505,23 @@ class Port:
         where = self.work
         while not where.exists() and where.parent != where: where = where.parent
         margin = 2**30
-        copies = 1 if self.o.app else 2   # the app's pack holds no RomFS (it points at the build folder's own): one copy of the game's files, not two
+        copies = 1 if self.o.app else 3 if self.o.self_contained else 2   # standalone export also stages the embedded archive beside the build and pack
         pack = None
-        getter = getattr(self, 'pack_dir_root', None)   # the space check runs before the profile is known
-        if getter is not None:
-            try: pack = getter()
-            except Exception: pack = None
+        if self.o.app:
+            getter = getattr(self, 'pack_dir_root', None)   # the space check runs before the profile is known
+            if getter is not None:
+                try: pack = getter()
+                except Exception: pack = None
+        else:
+            pack = self.o.out   # both standalone APK modes write their artifact and data pack here
         if pack is not None and volume_of(pack) not in (None, volume_of(where)):
             # the pack goes to another volume (the removable card): the build's files stay here, the pack's copy goes there
-            need, free = max(0, game + temp - built) + margin, shutil.disk_usage(where).free
-            if free < need: raise BuildError(f'not enough disk space on {where.anchor} for the build folder: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
-            need, free = (dlc if self.o.app else game) + margin, shutil.disk_usage(pack).free
-            if free < need: raise BuildError(f'not enough disk space for the data pack in {pack}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
+            archive = game if self.o.self_contained else 0  # the embedded archive is staged in the build workspace
+            need, free = max(0, game + temp + archive - built) + margin, shutil.disk_usage(where).free
+            if free < need: raise BuildError(f'not enough disk space on {where.anchor} for the build and APK staging: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
+            output = (dlc if self.o.app else game * (2 if self.o.self_contained else 1)) + margin
+            need, free = output, shutil.disk_usage(pack).free
+            if free < need: raise BuildError(f'not enough disk space for the pack and exported APK in {pack}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
             return
         need, free = max(0, copies * game + temp - built) + margin, shutil.disk_usage(where).free
         if free < need: raise BuildError(f'not enough disk space on {where.anchor}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
