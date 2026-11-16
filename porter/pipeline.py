@@ -1053,7 +1053,7 @@ class Port:
             digest = hashlib.sha256()
             with archive.open('rb') as src:
                 for block in iter(lambda: src.read(1 << 20), b''): digest.update(block)
-            checksum.write_text(digest.hexdigest() + '\\n', encoding='ascii')
+            checksum.write_text(digest.hexdigest() + '\n', encoding='ascii')
             data_assets = ['--asset', f'nx2a-data.zip={archive}', '--asset', f'nx2a-data.sha256={checksum}']
         external = self.external_activity() if self.o.self_contained or self.o.external_display or self.o.native_keyboard else []
         driver = self.o.vulkan_driver
