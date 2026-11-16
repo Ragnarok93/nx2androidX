@@ -185,7 +185,7 @@ public class GameActivity extends NativeActivity {
         return true;
     }
 
-    private static String digestAsset(NativeActivity activity, String name) throws Exception {
+    private static String digestAsset(Context activity, String name) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (InputStream in = new BufferedInputStream(activity.getAssets().open(name))) {
             byte[] b = new byte[64 * 1024];
