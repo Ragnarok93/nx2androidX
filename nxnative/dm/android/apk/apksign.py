@@ -162,12 +162,12 @@ def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, c
             while left:
                 block = src.read(min(1 << 20, left))
                 if not block: raise OSError('truncated APK staging ZIP while signing')
-                digests.append(hashlib.sha256(b'\\xa5' + struct.pack('<I', len(block)) + block).digest())
+                digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
                 left -= len(block)
     for start in range(0, len(new_eocd), 1 << 20):
         block = new_eocd[start:start + (1 << 20)]
-        digests.append(hashlib.sha256(b'\\xa5' + struct.pack('<I', len(block)) + block).digest())
-    digest = hashlib.sha256(b'\\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
+        digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
+    digest = hashlib.sha256(b'\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
     block = _v2_block(digest, k, crt)
     if len(block) != len(placeholder): raise ValueError('APK signing block changed size while signing')
     # The ZIP staging file is already in the output directory. Insert the signing block in place,
