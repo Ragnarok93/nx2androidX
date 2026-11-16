@@ -167,7 +167,7 @@ def walk_attrs(n):
     for a in n[1]: yield a
     for k in n[2]: yield from walk_attrs(k)
 
-from apksign import build_zip, cert, gen_key, sign_v2   # the stored ZIP and the v2 signer (apksign.py)
+from apksign import build_zip_file, cert, gen_key, sign_v2_file   # file-backed stored ZIP and bounded-memory v2 signer
 
 def main():
     so, out = ARGS.so, ARGS.out
@@ -177,27 +177,32 @@ def main():
         t = time.time(); k = gen_key(); crt = cert(k)
         json.dump({**{a: str(v) for a, v in k.items()}, 'cert': crt.hex()}, open(keyf, 'w'))
         print(f'new signing key {keyf} ({time.time() - t:.1f} s)')
-    entries = [('AndroidManifest.xml', axml(MANIFEST), 4), (f'lib/arm64-v8a/lib{LIB}.so', open(so, 'rb').read(), 16384)]
-    if ARGS.dex: entries.append(('classes.dex', open(ARGS.dex, 'rb').read(), 4))
-    entries += [(f'lib/arm64-v8a/{os.path.basename(x)}', open(x, 'rb').read(), 16384) for x in ARGS.extra_so]
+    entries = [('AndroidManifest.xml', axml(MANIFEST), 4), (f'lib/arm64-v8a/lib{LIB}.so', so, 16384)]
+    if ARGS.dex: entries.append(('classes.dex', ARGS.dex, 4))
+    entries += [(f'lib/arm64-v8a/{os.path.basename(x)}', x, 16384) for x in ARGS.extra_so]
     if ARGS.data_root:   # the folder with the game's files: the game asks for it when it is not there
         import tempfile
         fd, tmp = tempfile.mkstemp(prefix='nx2a-data.'); os.write(fd, (ARGS.data_root + '\n').encode()); os.close(fd)
         ARGS.asset.append(f'nx2a-data.txt={tmp}')
-    entries += [(f'assets/{n}', open(f, 'rb').read(), 4) for n, _, f in (x.partition('=') for x in ARGS.asset)]   # stored, as every entry: AAsset reads them in place
+    entries += [(f'assets/{n}', f, 4) for n, _, f in (x.partition('=') for x in ARGS.asset)]   # file-backed assets; AAsset reads stored entries in place
     drawables = []
     if ARGS.icon:
         icon = [(NODPI, 'res/drawable-nodpi-v4/icon.png')] + ([(ANYDPI_V26, 'res/drawable-anydpi-v26/icon.xml')] if ARGS.icon_fg else [])
         drawables = [('icon', icon)] + ([('icon_fg', [(NODPI, 'res/drawable-nodpi-v4/icon_fg.png')]), ('icon_bg', [(NODPI, 'res/drawable-nodpi-v4/icon_bg.png')])] if ARGS.icon_fg else [])
-        entries += [('res/drawable-nodpi-v4/icon.png', open(ARGS.icon, 'rb').read(), 4)]
-        if ARGS.icon_fg: entries += [('res/drawable-anydpi-v26/icon.xml', axml(ADAPTIVE_ICON), 4), ('res/drawable-nodpi-v4/icon_fg.png', open(ARGS.icon_fg, 'rb').read(), 4),
-                                     ('res/drawable-nodpi-v4/icon_bg.png', open(ARGS.icon_bg, 'rb').read(), 4)]
-    if ARGS.dex: entries += [('classes.dex', open(ARGS.dex, 'rb').read(), 4)]   # the launcher
+        entries += [('res/drawable-nodpi-v4/icon.png', ARGS.icon, 4)]
+        if ARGS.icon_fg: entries += [('res/drawable-anydpi-v26/icon.xml', axml(ADAPTIVE_ICON), 4), ('res/drawable-nodpi-v4/icon_fg.png', ARGS.icon_fg, 4),
+                                     ('res/drawable-nodpi-v4/icon_bg.png', ARGS.icon_bg, 4)]
     if drawables or ARGS.game_mode_performance: entries.append(('resources.arsc', res_table(drawables, ARGS.game_mode_performance), 4))
     if ARGS.game_mode_performance: entries.append(('res/xml/game_mode_config.xml', axml(GAME_MODE_CONFIG), 4))
-    z, cd, eocd = build_zip(entries)
-    apk = sign_v2(z, cd, eocd, k, crt)
-    open(out, 'wb').write(apk)
-    print(f'{out}: {len(apk)} bytes, signer SHA-256 {hashlib.sha256(crt).hexdigest()[:16]}...')
+    import tempfile
+    fd, zip_tmp = tempfile.mkstemp(prefix='nx2a-apk-', suffix='.zip', dir=os.path.dirname(os.path.abspath(out)))
+    os.close(fd)
+    try:
+        cd_offset, cd_size, eocd_offset, eocd = build_zip_file(entries, zip_tmp)
+        size = sign_v2_file(zip_tmp, out, cd_offset, cd_size, eocd_offset, eocd, k, crt)
+    finally:
+        try: os.unlink(zip_tmp)
+        except FileNotFoundError: pass
+    print(f'{out}: {size} bytes, signer SHA-256 {hashlib.sha256(crt).hexdigest()[:16]}...')
 
 if __name__ == '__main__': main()
