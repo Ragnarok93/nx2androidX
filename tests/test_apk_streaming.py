@@ -80,7 +80,7 @@ class StreamingApkTests(unittest.TestCase):
                 candidates.extend(Path(sdk).glob("build-tools/*/apksigner"))
             apksigner = next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
             if apksigner:
-                verified = subprocess.run([str(apksigner), "verify", "--verbose", str(output)],
+                verified = subprocess.run([str(apksigner), "verify", "--verbose", "--min-sdk-version", "29", str(output)],
                                           capture_output=True, text=True)
                 self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 

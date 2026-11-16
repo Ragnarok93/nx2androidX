@@ -95,7 +95,7 @@ class ExportChecks(unittest.TestCase):
         game = SimpleNamespace(table=lambda name: self.root / name)
         try: products = importlib.import_module('shader_products')
         except ModuleNotFoundError: products = None
-        env = dict(collections=collections, cf=cf, os=os, json=json, struct=struct,
+        env = dict(collections=collections, cf=cf, os=os, json=json, mmap=mmap, struct=struct,
                    tempfile=tempfile, subprocess=subprocess, dmsv=dmsv, Path=Path, re=re,
                    shader_products=products, GAME=game, MAP=str(table), XLATE_DLL='translator.dll',
                    a=SimpleNamespace(pkg=str(self.root/'pkg'), out=str(self.out), capture=None, keys='',

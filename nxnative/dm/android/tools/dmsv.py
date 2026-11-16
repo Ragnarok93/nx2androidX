@@ -9,6 +9,7 @@
 #   dmsv.py info <bundle>                              its version, shaders, SPIR-V stored and decompressed
 #   dmsv.py pack <bundle> <out> [--level N] [--jobs N]  the same shaders in the other form (--level 0: version 1, uncompressed), every module read back and compared
 import argparse, concurrent.futures as cf, mmap, os, stat, struct, sys, tempfile
+from collections import deque
 
 MAGIC, HDR, ENT = b'DMSV', struct.Struct('<4sII'), struct.Struct('<QIIIIII')
 # zstd level 3, zstd's own default (1 does as well on this SPIR-V, within 1%). Each module on its own, the whole SPIR-V of three bundles (Mac M4 Pro; MB/s: one thread's CPU time):
