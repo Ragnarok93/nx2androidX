@@ -1094,8 +1094,15 @@ class Port:
         platforms = [p for root in roots for p in (root / 'platforms').glob('android-*/android.jar')]
         d8s = [p for root in roots for p in (root / 'build-tools').glob('*/d8' + ('.bat' if os.name == 'nt' else ''))]
         def version(p): return tuple(int(x) for x in re.findall(r'\d+', p.parent.name))
+        prebuilt = DM.parent.parent / 'tools' / 'game-activity.dex'
         if not javac or not platforms or not d8s:
-            raise BuildError('standalone APK export (and --external-display / --native-keyboard) needs javac and an Android SDK with a platform and build-tools (set ANDROID_HOME)')
+            if prebuilt.is_file():
+                # The phone payload ships this DEX, compiled on the desktop when the app APK was packaged.
+                # Do not require a JDK or Android SDK on the phone; use the direct game Activity (no optional launcher).
+                activity = 'KeyboardExternalActivity' if self.o.native_keyboard else 'ExternalActivity'
+                return ['--dex', prebuilt, '--activity',
+                        'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
+            raise BuildError('standalone APK export needs the bundled game-activity.dex or javac plus an Android SDK platform/build-tools (set ANDROID_HOME)')
         platform, d8 = max(platforms, key=version), max(d8s, key=version)
         out = self.aw / 'external-activity'; classes, dex = out / 'classes', out / 'dex'
         shutil.rmtree(out, ignore_errors=True); classes.mkdir(parents=True); dex.mkdir()
