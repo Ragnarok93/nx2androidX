@@ -41,6 +41,7 @@ class Options:
     language_preferred: str = ''       # the language the device is set to: the pack follows it when the game has it (a wish, not a demand)
     app_name: str = ''                 # the launcher label (default: the game's name in its control data)
     app: bool = False                  # the nx2android app's mode: no APK and no install — the pack carries the host (libdmplay.so), the drivers and the icon; the app runs the game itself
+    self_contained: bool = False       # build a per-game APK with its data pack embedded; first launch extracts it privately
     install: bool = False              # install on the device after packing
     device: str = ''                   # adb serial
     replace_signer: bool = False       # uninstall an app of the same package signed with another key
