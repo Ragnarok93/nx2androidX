@@ -134,7 +134,7 @@ public class GameActivity extends NativeActivity {
     }
 
     private boolean safeEntry(String name) {
-        if (name == null || name.isEmpty() || name.startsWith("/") || name.indexOf('\\\\') >= 0 || name.indexOf(':') >= 0)
+        if (name == null || name.isEmpty() || name.startsWith("/") || name.indexOf('\\') >= 0 || name.indexOf(':') >= 0)
             return false;
         String[] parts = name.split("/");
         for (String part : parts) if (part.equals("..") || part.equals(".")) return false;
