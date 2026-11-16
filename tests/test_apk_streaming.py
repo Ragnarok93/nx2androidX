@@ -1,6 +1,9 @@
 import hashlib
 import importlib.util
+import os
+import shutil
 import struct
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -71,6 +74,15 @@ class StreamingApkTests(unittest.TestCase):
             signed_apk = output.read_bytes()
             self.assertIn(b"APK Sig Block 42", signed_apk)
             _assert_v2_digest(self, signed_apk)
+            sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+            candidates = [Path(shutil.which("apksigner"))] if shutil.which("apksigner") else []
+            if sdk:
+                candidates.extend(Path(sdk).glob("build-tools/*/apksigner"))
+            apksigner = next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
+            if apksigner:
+                verified = subprocess.run([str(apksigner), "verify", "--verbose", str(output)],
+                                          capture_output=True, text=True)
+                self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 
     def test_legacy_v2_signer_hashes_the_adjusted_eocd(self):
         import io
