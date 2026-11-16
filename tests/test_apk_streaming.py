@@ -14,6 +14,37 @@ SPEC.loader.exec_module(apksign)
 
 
 class StreamingApkTests(unittest.TestCase):
+    def test_v2_signed_apk_keeps_zip_entries_readable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload = root / "asset.bin"
+            payload.write_bytes(b"embedded game data" * 4096)
+            entries = [
+                ("AndroidManifest.xml", b"manifest", 4),
+                ("assets/nx2a-data.zip", payload, 4),
+            ]
+            key = apksign.gen_key()
+            certificate = apksign.cert(key)
+            staged = root / "staged.zip"
+            output = root / "signed.apk"
+            cd_offset, cd_size, eocd_offset, eocd = apksign.build_zip_file(entries, staged)
+            apksign.sign_v2_file(staged, output, cd_offset, cd_size, eocd_offset, eocd, key, certificate)
+            with zipfile.ZipFile(output) as archive:
+                self.assertIsNone(archive.testzip())
+                self.assertEqual(archive.read("assets/nx2a-data.zip"), payload.read_bytes())
+            self.assertIn(b"APK Sig Block 42", output.read_bytes()[-64:])
+
+    def test_legacy_v2_signer_hashes_the_adjusted_eocd(self):
+        import io
+        entries = [("AndroidManifest.xml", b"manifest", 4)]
+        zip_entries, central, eocd = apksign.build_zip(entries)
+        key = apksign.gen_key()
+        certificate = apksign.cert(key)
+        signed = apksign.sign_v2(zip_entries, central, eocd, key, certificate)
+        with zipfile.ZipFile(io.BytesIO(signed)) as archive:
+            self.assertEqual(archive.read("AndroidManifest.xml"), b"manifest")
+        self.assertIn(b"APK Sig Block 42", signed[-64:])
+
     def test_file_backed_zip_entries_round_trip(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
