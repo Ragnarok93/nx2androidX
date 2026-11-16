@@ -52,7 +52,7 @@
              that game page whenever the launcher icon brought the task forward. -->
         <activity
             android:name=".MainActivity"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="fullSensor"
             android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|colorMode|fontWeightAdjustment|fontScale"
             android:exported="true"
             android:label="@string/app_name">
