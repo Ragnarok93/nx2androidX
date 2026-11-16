@@ -514,13 +514,16 @@ class Port:
                 except Exception: pack = None
         else:
             pack = self.o.out   # both standalone APK modes write their artifact and data pack here
+        pack_where = pack
+        while pack_where is not None and not pack_where.exists() and pack_where.parent != pack_where:
+            pack_where = pack_where.parent
         if pack is not None and volume_of(pack) not in (None, volume_of(where)):
             # the pack goes to another volume (the removable card): the build's files stay here, the pack's copy goes there
             archive = game if self.o.self_contained else 0  # the embedded archive is staged in the build workspace
             need, free = max(0, game + temp + archive - built) + margin, shutil.disk_usage(where).free
             if free < need: raise BuildError(f'not enough disk space on {where.anchor} for the build and APK staging: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
             output = (dlc if self.o.app else game * (2 if self.o.self_contained else 1)) + margin
-            need, free = output, shutil.disk_usage(pack).free
+            need, free = output, shutil.disk_usage(pack_where).free
             if free < need: raise BuildError(f'not enough disk space for the pack and exported APK in {pack}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
             return
         need, free = max(0, copies * game + temp - built) + margin, shutil.disk_usage(where).free
