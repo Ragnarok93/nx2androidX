@@ -1259,7 +1259,7 @@ class Port:
             nsp.rmtree(kf); d.mkdir(parents=True, exist_ok=True)
             nsp.run([PY, DM / 'tools/make_ext_font.py', ttf, letters], self.logs / 'make_ext_font.log', env=self.env)
             kf.write_text(f'{key}\n')
-        return [f'DM_SHARED_FONT_EXT={"nintendo_ext.ttf" if self.o.self_contained else self.data_dir() + "/nintendo_ext.ttf"}'], {'nintendo_ext.ttf': ttf}
+        return [f'DM_SHARED_FONT_EXT={"nintendo_ext.ttf" if self.o.self_contained else self.data_dir() / "nintendo_ext.ttf"}'], {'nintendo_ext.ttf': ttf}
 
     # ---- install (optional) ----
     def install(self):
