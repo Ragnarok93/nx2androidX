@@ -9,6 +9,7 @@ import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import com.nx.android.domain.porting.PortPhase
@@ -94,7 +95,7 @@ class MainActivity : ComponentActivity() {
 
     /** 界面语言：toast 与分享面板的标题从这里取词 */
     /** Which tab the screen opens on (the notification's tap says the builds page) */
-    var launchTab = 0
+    var launchTab = 1
     private var launchBuildId by mutableStateOf("")
 
     /** 手柄中心（首页顶栏的入口）：档案跟游戏共用同一个文件 */
@@ -119,7 +120,7 @@ class MainActivity : ComponentActivity() {
         onboarding.storageOk = storageGranted()
         onboarding.batteryOk = batteryUnrestricted()
         GamepadScan.start(this)   // 顶栏的手柄入口要知道有几只手柄接着
-        launchTab = intent?.getIntExtra(EXTRA_TAB, 0) ?: 0
+        launchTab = intent?.getIntExtra(EXTRA_TAB, 1) ?: 1
         launchBuildId = intent?.getStringExtra(EXTRA_BUILD_ID).orEmpty()
         if (!prefs.bool(PrefsStore.OB_COMPLETED)) onboarding.open()
         AppLog.init(this)
@@ -173,7 +174,7 @@ class MainActivity : ComponentActivity() {
             }
         },
         onCancelPort = { PortService.cancel(this) },
-        onExportApk = { apk -> shareApk(apk) },
+        onExportApk = { apk -> exportApk(apk) },
         onRun = { pack, name ->
             // 运行一个完成的移植：这个游戏还活着就把它带回前台（不重启），否则拉起 :play
             // （包是唯一真源，拷贝覆盖旧副本）
@@ -503,28 +504,34 @@ class MainActivity : ComponentActivity() {
 
     fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
-    /** Shares a completed standalone APK from the app cache, so FileProvider never exposes the source folder. */
-    private fun shareApk(apk: File) {
-        if (!apk.isFile) { toast(locale.str(R.string.lib_artifact_missing_state)); return }
+    /** Saves a completed standalone APK through Android's document picker without copying it into another cache. */
+    private var pendingApkExport: File? = null
+    private val apkExportLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { uri ->
+        val source = pendingApkExport
+        pendingApkExport = null
+        if (uri == null || source == null) return@registerForActivityResult
         lifecycleScope.launch {
-            val staged = withContext(Dispatchers.IO) {
-                val dir = File(cacheDir, "shared-apks")
-                if (!dir.exists() && !dir.mkdirs()) throw java.io.IOException("cannot create APK share cache")
-                val copy = File(dir, apk.name)
-                apk.inputStream().use { input -> copy.outputStream().use { output -> input.copyTo(output, 1 shl 20) } }
-                copy
+            val error = withContext(Dispatchers.IO) {
+                runCatching {
+                    val output = contentResolver.openOutputStream(uri, "w")
+                        ?: throw java.io.IOException("the selected destination could not be opened")
+                    output.use { out -> source.inputStream().use { input -> input.copyTo(out, 1 shl 20) } }
+                }.exceptionOrNull()
             }
-            try {
-                val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", staged)
-                val send = Intent(Intent.ACTION_SEND).setType("application/vnd.android.package-archive")
-                    .putExtra(Intent.EXTRA_STREAM, uri).putExtra(Intent.EXTRA_TITLE, apk.name)
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                startActivity(Intent.createChooser(send, locale.str(R.string.builds_export_apk)))
-            } catch (e: Exception) {
-                AppLog.line("[RED] the game APK could not be shared: ${e.message}")
-                toast(locale.str(R.string.main_log_bundle_failed))
+            if (error == null) toast(locale.str(R.string.builds_apk_saved, source.name))
+            else {
+                AppLog.line("[RED] the game APK could not be saved: ${error.message}")
+                toast(locale.str(R.string.builds_apk_save_failed, error.message ?: source.name))
             }
         }
+    }
+
+    private fun exportApk(apk: File) {
+        if (!apk.isFile) { toast(locale.str(R.string.lib_artifact_missing_state)); return }
+        pendingApkExport = apk
+        apkExportLauncher.launch(apk.name)
     }
 
     /**
