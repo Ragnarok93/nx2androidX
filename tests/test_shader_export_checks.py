@@ -1,6 +1,8 @@
 """Run the export orchestration with a controlled external translator."""
 import ast
+import ast
 import collections
+import mmap
 import concurrent.futures as cf
 import contextlib
 import hashlib
@@ -38,6 +40,24 @@ def module(stage):
          5 << 16 | 54, 1, 4, 0, 2, 2 << 16 | 248, 5,
          1 << 16 | 253, 1 << 16 | 56]
     return struct.pack(f'<{len(w)}I', *w)
+
+
+class PackageRecordIndex(unittest.TestCase):
+    def test_mmap_index_keeps_package_payloads_file_backed(self):
+        source = TOOLS / 'shader_vk.py'
+        tree = ast.parse(source.read_text())
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('records', 'record_at')]
+        env = {'mmap': mmap}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), env)
+        with tempfile.TemporaryDirectory(prefix='nx2a_shader_mmap_') as tmp:
+            path = Path(tmp) / 'shader.bin'
+            first, second = b'BTCDBTCD' + b'A' * 128, b'BTCDBTCD' + b'B' * 256
+            path.write_bytes(first + second)
+            with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                offsets = env['records'](mapped)
+                self.assertEqual(offsets, [0, len(first)])
+                self.assertEqual(env['record_at'](mapped, offsets, 0), first)
+                self.assertEqual(env['record_at'](mapped, offsets, 1), second)
 
 
 class ExportChecks(unittest.TestCase):
