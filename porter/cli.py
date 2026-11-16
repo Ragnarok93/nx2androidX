@@ -25,8 +25,7 @@ def _parser():
                       help="the nx2android app's mode (the default): no APK and no install step — the data pack carries the host "
                            "(libdmplay.so), the Vulkan drivers and the icon, and the app runs the game itself")
     mode.add_argument('--game-apk', action='store_false', dest='app',
-                      help="legacy split-folder APK: the game data stays in a companion -data directory; use --self-contained-apk for one complete APK — "
-                           "--install, --replace-signer, --package and --vercode-offset belong to it")
+                      help="legacy split-folder APK: the game data stays in a companion -data directory; use --self-contained-apk for one complete APK; APK install options work with either mode")
     mode.add_argument('--self-contained-apk', action='store_true', dest='self_contained',
                       help='export one installable APK per game, with the complete data pack embedded and extracted on first launch')
     po.set_defaults(app=True)
