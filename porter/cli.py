@@ -30,9 +30,9 @@ def _parser():
     mode.add_argument('--self-contained-apk', action='store_true', dest='self_contained',
                       help='export one installable APK per game, with the complete data pack embedded and extracted on first launch')
     po.set_defaults(app=True)
-    po.add_argument('--install', action='store_true', help='install the APK on the connected device afterwards (with --game-apk)')
-    po.add_argument('--device', default='', help='adb serial of the device to install on (with --game-apk)')
-    po.add_argument('--replace-signer', action='store_true', help='uninstall an app of the same package signed with another key first (deletes its saves) (with --game-apk)')
+    po.add_argument('--install', action='store_true', help='install the exported APK on the connected device afterwards')
+    po.add_argument('--device', default='', help='adb serial of the device to install on')
+    po.add_argument('--replace-signer', action='store_true', help='uninstall an app of the same package signed with another key first (deletes its saves)')
     po.add_argument('--debug', action='store_true', help='a development build: debug information, debuggable, DM_CTL key presses')
     po.add_argument('--experimental', action='store_true', help='try a game not ported to Android yet (a profile guessed from a survey of its files; it may not start)')
     po.add_argument('--package', default='', help="the app's package instead of the profile's (a test install beside another build of the game) (with --game-apk)")
