@@ -415,6 +415,8 @@
     <string name="builds_history_seconds">%1$s min %2$s s</string>
     <string name="builds_build_again">Build again</string>
     <string name="builds_export_apk">Export APK</string>
+    <string name="builds_apk_saved">Saved %1$s</string>
+    <string name="builds_apk_save_failed">Could not save APK: %1$s</string>
     <string name="builds_needs_storage">The app needs the all-files permission to read the game file</string>
     <string name="lib_run_config">Run configuration</string>
     <string name="lib_port_config">Port configuration</string>
