@@ -168,21 +168,22 @@ def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, c
     digest = hashlib.sha256(b'\\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
     block = _v2_block(digest, k, crt)
     if len(block) != len(placeholder): raise ValueError('APK signing block changed size while signing')
-    tmp_out = os.fspath(out_path) + '.tmp'
-    try:
-        with open(zip_path, 'rb') as src, open(tmp_out, 'wb') as dst:
-            shutil.copyfileobj(_LimitedReader(src, cd_offset), dst, 1 << 20)
-            dst.write(block)
-            src.seek(cd_offset)
-            shutil.copyfileobj(_LimitedReader(src, cd_size), dst, 1 << 20)
-            dst.write(new_eocd)
-        if os.path.getsize(tmp_out) >= 0xffffffff:
-            raise ValueError('signed APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
-        os.replace(tmp_out, out_path)
-    except Exception:
-        try: os.unlink(tmp_out)
-        except FileNotFoundError: pass
-        raise
+    # The ZIP staging file is already in the output directory. Insert the signing block in place,
+    # keeping only the central directory (small) in memory; avoid a second full-APK temporary copy.
+    with open(zip_path, 'r+b') as apk:
+        apk.seek(cd_offset)
+        central_directory = apk.read(cd_size)
+        if len(central_directory) != cd_size: raise OSError('truncated APK central directory while signing')
+        apk.seek(cd_offset)
+        apk.truncate(cd_offset)
+        apk.write(block)
+        apk.write(central_directory)
+        apk.write(new_eocd)
+        apk.flush()
+        os.fsync(apk.fileno())
+    if os.path.getsize(zip_path) >= 0xffffffff:
+        raise ValueError('signed APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
+    os.replace(zip_path, out_path)
     return os.path.getsize(out_path)
 
 class _LimitedReader:
