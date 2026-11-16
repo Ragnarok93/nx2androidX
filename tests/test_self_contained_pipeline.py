@@ -25,6 +25,12 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertLess(calls.index("data"), calls.index("apk"))
         self.assertLess(calls.index("apk"), calls.index("install"))
 
+    def test_storage_budget_includes_embedded_archive_and_apk(self):
+        source = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("copies = 1 if self.o.app else 3 if self.o.self_contained else 2", source)
+        self.assertIn("archive = game if self.o.self_contained else 0", source)
+        self.assertIn("game * (2 if self.o.self_contained else 1)", source)
+
     def test_phone_build_requests_self_contained_apk(self):
         source = (ROOT / "android/app/src/main/java/com/nx/android/data/PortRunner.kt").read_text(encoding="utf-8")
         self.assertIn('"--self-contained-apk"', source)
