@@ -495,7 +495,7 @@ class Port:
         Only the picked game's files count (its base, its updates, its DLC): the folder may hold other games, which this port never reads.
         The pack is a copy of the game's files (Android's SELinux never lets an app link), so the port needs room for the build's files and for the pack.
         The app's mode copies no RomFS into the pack (the pack points at the build folder's own), so there the build's files are the only copy and the room is half.
-        When the pack goes to another volume (the app may put it on the removable card), each volume is asked for its own share"""
+        A self-contained export also stages a compressed data archive and the APK; their space is budgeted on the build and output volumes separately."""
         fam = self.fam
         files = [fam['base'], *[p for _, p in fam['updates']], *[p for _, _, p in fam['dlc']]]
         game, temp = sum(dumps.size(f) for f in files), sum(dumps.size(f) for f in files if dumps.compressed(f))
