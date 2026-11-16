@@ -57,8 +57,9 @@ public class GameActivity extends NativeActivity {
 
     private void extractEmbeddedPack() throws Exception {
         // Legacy split-folder APKs do not carry this marker; keep their NativeActivity data-folder flow intact.
-        try (InputStream marker = getAssets().open("nx2a-export-mode")) { if (marker.read() < 0) throw new IOException("empty export marker"); }
-        catch (IOException missing) { if (!assetExists("nx2a-export-mode")) return; throw missing; }
+        try (InputStream marker = getAssets().open("nx2a-export-mode")) {
+            if (marker.read() < 0) throw new IOException("empty export marker");
+        } catch (java.io.FileNotFoundException missing) { return; }
         String expected;
         try (InputStream in = getAssets().open("nx2a-data.sha256")) {
             byte[] b = new byte[256];
