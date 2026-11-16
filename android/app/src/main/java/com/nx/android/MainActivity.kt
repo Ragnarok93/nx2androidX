@@ -164,11 +164,10 @@ class MainActivity : ComponentActivity() {
             if (port.running || runtime.running || player.running || Player.playProcessAlive(this)) {
                 toast(locale.str(R.string.runtime_busy))
             } else if (file.canRead()) {
-                // 落位跟着这个游戏的数据包走：它在可移动卡上，新包就建在那儿（内部存储的那份不动）
-                val packDir = library.packDirOf(file)?.absolutePath
+                // Export a standalone APK beside the source game; no library pack directory is created.
                 PortService.start(this, file.absolutePath, prefs.keys,
                                   cfg.touch, cfg.fps60, cfg.experimental, cfg.aliasHeadroom,
-                                  cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay, packDir)
+                                  cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay)
             } else {
                 toast(locale.str(R.string.builds_needs_storage)); askStorage()
             }
