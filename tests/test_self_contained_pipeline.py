@@ -34,6 +34,13 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertIn('"%s/nx2a-data", a->internalDataPath', source)
         self.assertIn("data_dir_valid(embedded)", source)
 
+    def test_game_activity_is_launcher_when_optional_launcher_is_absent(self):
+        mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")
+        pipeline = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("if ARGS.dex and ARGS.launcher_activity else []", mkapk)
+        self.assertIn("[] if ARGS.dex and ARGS.launcher_activity else [", mkapk)
+        self.assertIn("if launcher: args += ['--launcher-activity', 'com.nx2a.launcher.LauncherActivity']", pipeline)
+
     def test_first_launch_extracts_before_native_activity_startup(self):
         source = (ROOT / "nxnative/dm/android/java/org/nx2a/GameActivity.java").read_text(encoding="utf-8")
         self.assertLess(source.index("extractEmbeddedPack(this);"), source.index("super.onCreate(state);"))
