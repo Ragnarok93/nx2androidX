@@ -1094,10 +1094,13 @@ class Port:
         sources = sorted((DM / 'android/java/org/nx2a').glob('*.java'))
         nsp.run([javac, '-source', '8', '-target', '8', '-classpath', platform, '-d', classes, *sources], self.logs / 'android_external_java.log', env=self.env)
         dex_inputs = sorted(classes.rglob('*.class'))
-        if launcher := launcher_dex(): dex_inputs.append(launcher)   # merge the optional language/driver launcher with the standalone Activity classes
+        launcher = launcher_dex()
+        if launcher: dex_inputs.append(launcher)   # merge the optional language/driver launcher with the standalone Activity classes
         nsp.run([d8, '--min-api', '29', '--lib', platform, '--output', dex, *dex_inputs], self.logs / 'android_external_dex.log', env=self.env)
         activity = 'KeyboardExternalActivity' if self.o.native_keyboard else 'ExternalActivity'
-        return ['--dex', dex / 'classes.dex', '--activity', 'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
+        args = ['--dex', dex / 'classes.dex', '--activity', 'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
+        if launcher: args += ['--launcher-activity', 'com.nx2a.launcher.LauncherActivity']
+        return args
 
     def theme(self):
         """The on-screen gamepad's theme: only the game's own pack goes in the APK (dm/android/themes/themes.tsv maps title IDs to packs; a game with no row
