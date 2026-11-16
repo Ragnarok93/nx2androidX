@@ -84,7 +84,7 @@ for sh in sorted((DM / 'android/shaders').glob('*.*')):
 def srcs(*globs): return [p for g in globs for p in sorted(DM.glob(g))]
 HOST = [p for p in srcs('host/*.c') if p.name not in ('hle_movie_avc.c',)]   # VideoToolbox: dm/android/movie_avc.c instead
 GFX = srcs('gfx/*.c', 'gfx/nvn/*.c', 'gfx/tex/*.c')
-PORT = [p for p in srcs('android/compat/*.c', 'android/*.c') if not (p.name == 'gfx_null.c' and a.gfx != 'null') and not (p.name.startswith('gfx_vk') and a.gfx != 'vk') and not p.name in ('jni_android.c', 'dm_framegen.c', 'vka_shim.c', 'front_android.c')]   # one graphics backend; jni_android.c goes into --play's link, dm_framegen.c + vka_shim.c into every target's (their list below); front_android.c is upstream's APK front, the player front (front_player.c) replaces it
+PORT = [p for p in srcs('android/compat/*.c', 'android/*.c') if not (p.name == 'gfx_null.c' and a.gfx != 'null') and not (p.name.startswith('gfx_vk') and a.gfx != 'vk') and p.name not in ('jni_android.c', 'dm_framegen.c', 'vka_shim.c', 'front_android.c', 'front_player.c')]   # common Android code; the standalone APK and in-app player have different front ends
 ASM = srcs('host/entry.S', 'gfx/nvn/nvn_entry.S', 'gfx/nvn/nvn_thunks.S')
 VPX = srcs('third_party/libvpx/**/*.c')
 ZSTD = srcs('third_party/zstd/zstddeclib.c')   # zstd's decompressor: the shader bundle's SPIR-V (gfx_vk_shader.c bundle_spv)
@@ -133,21 +133,29 @@ def build(files):
             elif err.strip() and '--verbose' in sys.argv: print(err, file=sys.stderr)
     return objs, failed
 
-# the frame generation travels with every target (the present calls it); its GPL chain only when built in
-all_files = HOST + GFX + PORT + ASM + srcs('android/dm_framegen.c') + (srcs('android/lsfg/*.c', 'android/vka_shim.c') if not a.no_lsfg else [])
-PLAYS = srcs('android/jni_android.c')   # the player's JNI entry: compiled always (the errors surface here too), linked only for --play
-objs, failed = build(all_files)
-pobjs, pfailed = build(PLAYS)
+# The host core is shared; its front end is not. A standalone APK needs NativeActivity callbacks and
+# its own data-folder setup, while the phone app uses the JNI player front and has no NativeActivity entry.
+# The headless executable also uses the player front (its guards disable the window/input surface).
+common_files = HOST + GFX + PORT + ASM + srcs('android/dm_framegen.c') + (srcs('android/lsfg/*.c', 'android/vka_shim.c') if not a.no_lsfg else [])
+common_objs, failed = build(common_files)
 vobjs, vfailed = build(VPX + ZSTD)
-failed += pfailed + vfailed
-print(f'compiled {len(all_files) + len(PLAYS) + len(VPX) + len(ZSTD)} sources, {len(failed)} failed' + (': ' + ', '.join(str(f.relative_to(DM)) for f in failed) if failed else ''))
+failed += vfailed
+exe_front, lib_front, play_front, play_jni = [], [], [], []
+if a.exe: exe_front, efailed = build(srcs('android/front_player.c')); failed += efailed
+if a.lib: lib_front, lfailed = build(srcs('android/front_android.c')); failed += lfailed
+if a.play:
+    play_front, pfailed = build(srcs('android/front_player.c'))
+    play_jni, jfailed = build(srcs('android/jni_android.c'))
+    failed += pfailed + jfailed
+compiled = len(common_files) + len(VPX) + len(ZSTD) + len(exe_front) + len(lib_front) + len(play_front) + len(play_jni)
+print(f'compiled {compiled} source units, {len(failed)} failed' + (': ' + ', '.join(str(f.relative_to(DM)) for f in failed) if failed else ''))
 if failed and not a.keep_going: sys.exit(1)
 if a.only_compile: sys.exit(1 if failed else 0)
 
 LIBS = ['-landroid', '-llog', '-lvulkan', '-laaudio', '-lnativewindow', '-lmediandk', '-lz', '-lm', '-ldl']   # -lz: the gamepad theme's PNGs (overlay_theme.c)
 LDFLAGS = [TARGET, '-fuse-ld=lld', '-Wl,--error-limit=0', '-Wl,-z,max-page-size=16384', '-Wl,--build-id', '-Wl,-z,nostart-stop-gc']
 if a.play:   # libdmplay.so: the whole host + the JNI entry, statically linked (jni_android.c's header comment)
-    r = subprocess.run([CC] + CC_EXTRA + LDFLAGS + ['-shared', '-Wl,-soname,libdmplay.so', '-o', str(out / 'libdmplay.so')] + [str(o) for o in objs + pobjs + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
+    r = subprocess.run([CC] + CC_EXTRA + LDFLAGS + ['-shared', '-Wl,-soname,libdmplay.so', '-o', str(out / 'libdmplay.so')] + [str(o) for o in common_objs + play_front + play_jni + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
     print(r.stderr.strip() if r.returncode else f'linked {out / "libdmplay.so"}', file=sys.stderr if r.returncode else sys.stdout)
     if r.returncode: sys.exit(1)
     if a.release:   # the static symbol table goes too (the dynamic one stays: the JNI surface)
@@ -157,11 +165,11 @@ if a.play:   # libdmplay.so: the whole host + the JNI entry, statically linked (
         subprocess.run([str(_strip), '--strip-unneeded', str(out / 'libdmplay.so')], check=True)
         print(f'stripped {out / "libdmplay.so"}: {(out / "libdmplay.so").stat().st_size // 1024} KB')
 if a.exe:
-    r = subprocess.run([CC] + CC_EXTRA + LDFLAGS + ['-pie', '-o', str(out / 'dmhost')] + [str(o) for o in objs + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
+    r = subprocess.run([CC] + CC_EXTRA + LDFLAGS + ['-pie', '-o', str(out / 'dmhost')] + [str(o) for o in common_objs + exe_front + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
     print(r.stderr.strip() if r.returncode else f'linked {out / "dmhost"}', file=sys.stderr if r.returncode else sys.stdout)
     if r.returncode: sys.exit(1)
 if a.lib:
-    r = subprocess.run([CC] + CC_EXTRA + LDFLAGS + ['-shared', '-Wl,-soname,libdmhost.so', '-o', str(out / 'libdmhost.so')] + [str(o) for o in objs + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
+    r = subprocess.run([CC] + CC_EXTRA + LDFLAGS + ['-shared', '-Wl,-soname,libdmhost.so', '-o', str(out / 'libdmhost.so')] + [str(o) for o in common_objs + lib_front + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
     print(r.stderr.strip() if r.returncode else f'linked {out / "libdmhost.so"}', file=sys.stderr if r.returncode else sys.stdout)
     if r.returncode: sys.exit(1)
     if a.release:   # the static symbol table goes too (the dynamic one stays: ANativeActivity_onCreate)
