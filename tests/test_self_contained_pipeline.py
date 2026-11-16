@@ -1,4 +1,6 @@
 import ast
+import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -33,6 +35,41 @@ class SelfContainedPipelineTests(unittest.TestCase):
         source = (ROOT / "nxnative/dm/android/front_android.c").read_text(encoding="utf-8")
         self.assertIn('"%s/nx2a-data", a->internalDataPath', source)
         self.assertIn("data_dir_valid(embedded)", source)
+
+    def test_mkapk_manifest_selects_a_real_launcher_activity(self):
+        script = ROOT / "nxnative/dm/android/apk/mkapk.py"
+        sys.path.insert(0, str(script.parent))
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = [str(script), "libdmhost.so", "game.apk", "key.json",
+                        "--dex", "classes.dex", "--activity", "org.nx2a.GameActivity"]
+            spec = importlib.util.spec_from_file_location("nx2a_mkapk_manifest_test", script)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            manifest = module.MANIFEST
+            app = next(node for node in manifest[2] if node[0] == "application")
+            activities = [node for node in app[2] if node[0] == "activity"]
+            names = [next(value for _, key, value in node[1] if key == "name") for node in activities]
+            self.assertEqual(names, ["org.nx2a.GameActivity"])
+            self.assertTrue(any(child[0] == "intent-filter" for child in activities[0][2]))
+
+            sys.argv = [str(script), "libdmhost.so", "game.apk", "key.json",
+                        "--dex", "classes.dex", "--activity", "org.nx2a.GameActivity",
+                        "--launcher-activity", "com.nx2a.launcher.LauncherActivity"]
+            spec = importlib.util.spec_from_file_location("nx2a_mkapk_launcher_manifest_test", script)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            manifest = module.MANIFEST
+            app = next(node for node in manifest[2] if node[0] == "application")
+            activities = [node for node in app[2] if node[0] == "activity"]
+            names = [next(value for _, key, value in node[1] if key == "name") for node in activities]
+            self.assertEqual(names, ["com.nx2a.launcher.LauncherActivity", "org.nx2a.GameActivity"])
+            self.assertTrue(any(child[0] == "intent-filter" for child in activities[0][2]))
+            self.assertFalse(any(child[0] == "intent-filter" for child in activities[1][2]))
+        finally:
+            sys.argv = original_argv
+            try: sys.path.remove(str(script.parent))
+            except ValueError: pass
 
     def test_game_activity_is_launcher_when_optional_launcher_is_absent(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")
