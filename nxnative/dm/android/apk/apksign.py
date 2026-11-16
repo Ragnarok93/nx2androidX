@@ -77,18 +77,24 @@ def chunked_sha256(sections):
             c = sec[i:i + (1 << 20)]
             digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(c)) + c).digest())
     return hashlib.sha256(b'\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
-def sign_v2(zip_entries, cd, eocd, k, crt):
+def _v2_block(digest, k, crt):
     ALG = 0x0103   # RSASSA-PKCS1-v1_5 with SHA2-256
-    digest = chunked_sha256([zip_entries, cd, eocd])   # EOCD's CD offset still points at the CD start = where the signing block will begin
     signed = lp(lp(struct.pack('<I', ALG) + lp(digest))) + lp(lp(crt)) + lp(b'')
     signer = lp(signed) + lp(lp(struct.pack('<I', ALG) + lp(rsa_sign(k, signed)))) + lp(spki(k))
     value = lp(lp(signer))
     pair = struct.pack('<QI', 4 + len(value), 0x7109871a) + value
     size = len(pair) + 8 + 16
-    block = struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
-    new_eocd = eocd[:16] + struct.pack('<I', len(zip_entries) + len(block)) + eocd[20:]
-    return zip_entries + block + cd + new_eocd
+    return struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
 
+
+def sign_v2(zip_entries, cd, eocd, k, crt):
+    # The digest must cover the EOCD with its central-directory offset adjusted to the signing block's start.
+    placeholder = _v2_block(bytes(32), k, crt)
+    new_eocd = eocd[:16] + struct.pack('<I', len(zip_entries) + len(placeholder)) + eocd[20:]
+    digest = chunked_sha256([zip_entries, cd, new_eocd])
+    block = _v2_block(digest, k, crt)
+    if len(block) != len(placeholder): raise ValueError('APK signing block changed size while signing')
+    return zip_entries + block + cd + new_eocd
 
 # ---------------- bounded-memory ZIP/APK path ----------------
 # Large game packs are file-backed. Keep only the central directory and one 1 MiB
@@ -144,25 +150,21 @@ def build_zip_file(entries, path):
 
 
 def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, crt):
-    ALG = 0x0103
+    placeholder = _v2_block(bytes(32), k, crt)
+    new_eocd = eocd[:16] + struct.pack('<I', cd_offset + len(placeholder)) + eocd[20:]
     digests = []
     with open(zip_path, 'rb') as src:
-        for start, length in ((0, cd_offset), (cd_offset, cd_size), (eocd_offset, len(eocd))):
+        for start, length in ((0, cd_offset), (cd_offset, cd_size), (eocd_offset, len(new_eocd))):
             src.seek(start)
             left = length
             while left:
                 block = src.read(min(1 << 20, left))
                 if not block: raise OSError('truncated APK staging ZIP while signing')
-                digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
+                digests.append(hashlib.sha256(b'\\xa5' + struct.pack('<I', len(block)) + block).digest())
                 left -= len(block)
-    digest = hashlib.sha256(b'\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
-    signed = lp(lp(struct.pack('<I', ALG) + lp(digest))) + lp(lp(crt)) + lp(b'')
-    signer = lp(signed) + lp(lp(struct.pack('<I', ALG) + lp(rsa_sign(k, signed)))) + lp(spki(k))
-    value = lp(lp(signer))
-    pair = struct.pack('<QI', 4 + len(value), 0x7109871a) + value
-    size = len(pair) + 8 + 16
-    block = struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
-    new_eocd = eocd[:16] + struct.pack('<I', cd_offset + len(block)) + eocd[20:]
+    digest = hashlib.sha256(b'\\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
+    block = _v2_block(digest, k, crt)
+    if len(block) != len(placeholder): raise ValueError('APK signing block changed size while signing')
     tmp_out = os.fspath(out_path) + '.tmp'
     try:
         with open(zip_path, 'rb') as src, open(tmp_out, 'wb') as dst:
@@ -179,7 +181,6 @@ def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, c
         except FileNotFoundError: pass
         raise
     return os.path.getsize(out_path)
-
 
 class _LimitedReader:
     def __init__(self, stream, remaining):
