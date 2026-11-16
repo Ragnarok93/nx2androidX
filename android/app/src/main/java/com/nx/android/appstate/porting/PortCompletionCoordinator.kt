@@ -29,7 +29,7 @@ class PortCompletionCoordinator @Inject constructor(
         processor.complete(PortCompletion(record.game, record.phase, record.out, record.startedAt,
             record.id.takeUnless { record.legacy }.orEmpty())) {
             when (record.phase) {
-                PortPhase.DONE -> library.noteDone(record.game, record.out)
+                PortPhase.DONE -> if (!record.out.endsWith(".apk", ignoreCase = true)) library.noteDone(record.game, record.out)
                 PortPhase.FAILED,
                 PortPhase.CANCELLED,
                 PortPhase.INTERRUPTED -> library.noteFailed(record.game)
