@@ -150,6 +150,8 @@ def build_zip_file(entries, path):
 
 
 def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, crt):
+    if os.path.getsize(zip_path) != eocd_offset + len(eocd):
+        raise OSError('unexpected APK staging ZIP length while signing')
     placeholder = _v2_block(bytes(32), k, crt)
     new_eocd = eocd[:16] + struct.pack('<I', cd_offset + len(placeholder)) + eocd[20:]
     digests = []
