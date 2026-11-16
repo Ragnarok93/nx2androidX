@@ -109,7 +109,10 @@ public class GameActivity extends NativeActivity {
         File partial = new File(base, "nx2a-data.partial");
         File backup = new File(base, "nx2a-data.backup");
         File marker = new File(target, "nx2a-export.sha256");
-        if (target.isDirectory() && marker.isFile() && expected.equals(readText(marker).trim())) return;
+        if (target.isDirectory() && marker.isFile() && expected.equals(readText(marker).trim())) {
+            deleteTree(backup);  // a prior process may have died after activating the new directory
+            return;
+        }
 
         // Recover a previous directory if the process died between the two rename operations.
         if (!target.exists() && backup.isDirectory()) backup.renameTo(target);
