@@ -25,7 +25,7 @@ class Pool(unittest.TestCase):
     def test_the_split_runs_over_a_romfs_with_files(self):
         out = self.tmp / 'out'
         out.mkdir()
-        env = dict(os.environ, DM_GAME='0100000000010000')
+        env = dict(os.environ, DM_GAME='0100000000010000', J='1')
         r = subprocess.run([sys.executable, str(TOOLS / 'shader_split.py'), str(self.tmp / 'romfs'), str(self.tmp / 'main.nso'),
                             str(out / 'pkg'), str(out / 'map.tsv'), str(out / 'facts.tsv'), str(out / 'pairs.tsv')],
                            env=env, capture_output=True, text=True)
