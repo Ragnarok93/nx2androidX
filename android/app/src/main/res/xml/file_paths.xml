@@ -4,6 +4,7 @@
      The log bundles (the zips) are shared out of the cache. -->
 <paths>
     <cache-path name="build-logs" path="shared-build-logs/" />
+    <cache-path name="shared-apks" path="shared-apks/" />
     <cache-path name="log-bundles" path="shared-logs/" />
     <external-path name="downloads" path="Download/nx2android/" />
     <external-files-path name="external-files" path="nx2android/" />
