@@ -4,16 +4,16 @@ from pathlib import Path
 
 
 def _parser():
-    ap = argparse.ArgumentParser(prog='porter', description='Port your own Switch game files to an Android app (docs/ARCHITECTURE.md).')
+    ap = argparse.ArgumentParser(prog='porter', description='Port your own Switch game files into a self-contained Android APK or a legacy data pack (docs/ARCHITECTURE.md).')
     sub = ap.add_subparsers(dest='cmd', required=True)
     d = sub.add_parser('doctor', help='check the tools a port needs'); d.add_argument('--json', action='store_true'); d.add_argument('-k', '--keys')
     p = sub.add_parser('profiles', help='list the games the tool can port'); p.add_argument('--all', action='store_true', help='also the iOS profiles not ported to Android'); p.add_argument('--json', action='store_true')
     i = sub.add_parser('inspect', help='what a game holds and whether it can be ported'); i.add_argument('folder', help='the game file (NSP / XCI / NSZ / XCZ) or the folder with it'); i.add_argument('--json', action='store_true')
     i.add_argument('-k', '--keys', help='prod.keys (default: the configured one): reads the title ID of a dump with no [title ID] in its name')
-    po = sub.add_parser('port', help='make the data pack (the phone app runs the game)')
+    po = sub.add_parser('port', help='port a game to a standalone APK or a legacy data pack')
     po.add_argument('folder', help='the game file (NSP / XCI / NSZ / XCZ) or its folder: the updates and the DLC next to it are taken')
     po.add_argument('-k', '--keys', help='prod.keys (default: the configured one)')
-    po.add_argument('-o', '--out', help='folder for the data pack (default: the game folder)')
+    po.add_argument('-o', '--out', help='output folder for the APK or legacy data pack (default: the game folder)')
     po.add_argument('-p', '--version', default='', help='version to pack, v<N> (default: the newest in the folder)')
     po.add_argument('-l', '--language', default='', help='game language, a code or a name (default: English)')
     po.add_argument('--language-preferred', default='',
@@ -25,7 +25,7 @@ def _parser():
                       help="the nx2android app's mode (the default): no APK and no install step — the data pack carries the host "
                            "(libdmplay.so), the Vulkan drivers and the icon, and the app runs the game itself")
     mode.add_argument('--game-apk', action='store_false', dest='app',
-                      help="the fork's legacy path: a per-game APK as well (a separate app per game, installed over adb); unmaintained here — "
+                      help="legacy split-folder APK: the game data stays in a companion -data directory; use --self-contained-apk for one complete APK — "
                            "--install, --replace-signer, --package and --vercode-offset belong to it")
     mode.add_argument('--self-contained-apk', action='store_true', dest='self_contained',
                       help='export one installable APK per game, with the complete data pack embedded and extracted on first launch')
@@ -60,7 +60,7 @@ def _parser():
                          "(android.tsv sysdata: Mario Kart 8 Deluxe's Mii heads come from MiiModel); never shipped with the tool (default: the configured one)")
     po.add_argument('--vercode-offset', type=int, default=None, metavar='N',
                     help='add N (0-65535) to the APK\'s versionCode, so a rebuild of the same game version installs over a build with a higher one and keeps its saves '
-                         '(default: $NX2A_VERCODE_OFFSET, else 0) (with --game-apk)')
+                         '(default: $NX2A_VERCODE_OFFSET, else 0) (with --game-apk or --self-contained-apk)')
     po.add_argument('--alias-headroom', type=int, default=None, metavar='GB',
                     help='GB (0-48) of extra guest address space (the alias region) for a game with virtual address memory, for a game whose log shows '
                          '"AllocateAddressRegion refused (0x1803)" before it crashes; it uses no memory (default: 8 for a game version the profile was not '
