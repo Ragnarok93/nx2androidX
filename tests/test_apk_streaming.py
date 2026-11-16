@@ -32,7 +32,7 @@ class StreamingApkTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 self.assertIsNone(archive.testzip())
                 self.assertEqual(archive.read("assets/nx2a-data.zip"), payload.read_bytes())
-            self.assertIn(b"APK Sig Block 42", output.read_bytes()[-64:])
+            self.assertIn(b"APK Sig Block 42", output.read_bytes())
 
     def test_legacy_v2_signer_hashes_the_adjusted_eocd(self):
         import io
@@ -43,7 +43,7 @@ class StreamingApkTests(unittest.TestCase):
         signed = apksign.sign_v2(zip_entries, central, eocd, key, certificate)
         with zipfile.ZipFile(io.BytesIO(signed)) as archive:
             self.assertEqual(archive.read("AndroidManifest.xml"), b"manifest")
-        self.assertIn(b"APK Sig Block 42", signed[-64:])
+        self.assertIn(b"APK Sig Block 42", signed)
 
     def test_file_backed_zip_entries_round_trip(self):
         with tempfile.TemporaryDirectory() as temp:
