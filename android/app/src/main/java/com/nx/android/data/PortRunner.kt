@@ -28,14 +28,13 @@ class PortRunner(
         touch: Boolean, fps60: Boolean, experimental: Boolean,
         aliasHeadroom: Int,
         sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
-        packDir: String? = null,
         onEnd: () -> Unit,
     ): Thread {
         val args = portArgs(gameFile, keys, touch, fps60, experimental, aliasHeadroom, !BuildConfig.NX_LSFG,
             sharedFont, firmware, mtReplay, deviceLanguage())
         // A file in a netdisk's folder is not there yet in its middle: the port would read it as a broken dump
         GameSource.cloudFolder(gameFile)?.let { onLine(locale.str(R.string.runner_cloud_folder, it)) }
-        return start(args, onEnd, if (packDir.isNullOrBlank()) emptyMap() else mapOf("NX2A_PACK_DIR" to packDir))
+        return start(args, onEnd)
     }
 
     /**
