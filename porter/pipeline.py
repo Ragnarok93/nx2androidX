@@ -1072,7 +1072,7 @@ class Port:
                                                           + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
         nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
         if self.o.self_contained:
-            archive.unlink(missing_ok=True); checksum.unlink(missing_ok=True)
+            archive.unlink(missing_ok=True); checksum.unlink(missing_ok=True); export_mode.unlink(missing_ok=True)
             shutil.rmtree(self.data_dir(), ignore_errors=True)
             self.result.pop('data', None)
         self.result['apk'] = str(self.apk_path)
