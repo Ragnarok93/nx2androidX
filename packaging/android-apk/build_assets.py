@@ -252,7 +252,7 @@ def compile_game_activity_dex(tool: Path):
     javac = shutil.which('javac') or (str(Path(java_home) / 'bin' / ('javac.exe' if os.name == 'nt' else 'javac')) if java_home else '')
     if not javac or not platforms or not d8s:
         raise SystemExit('building the phone payload needs javac and an Android SDK platform/build-tools (set JAVA_HOME and ANDROID_HOME)')
-    version = lambda p: tuple(int(x) for x in re.findall(r'\\d+', p.parent.name))
+    version = lambda p: tuple(int(x) for x in re.findall(r'\d+', p.parent.name))
     platform = max(platforms, key=version)
     d8 = max(d8s, key=version)
     source = tool / 'nxnative' / 'dm' / 'android' / 'java' / 'org' / 'nx2a'
