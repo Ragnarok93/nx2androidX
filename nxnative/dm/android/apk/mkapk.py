@@ -14,7 +14,7 @@ _p.add_argument('--icon-bg', help='the adaptive icon\'s background layer (a PNG,
 _p.add_argument('--asset', action='append', default=[], metavar='NAME=FILE', help='a file the app reads with AAssetManager as NAME (assets/NAME in the APK): the gamepad theme')
 _p.add_argument('--data-root', default='', help='where the data pack is: the game reads its files from there (assets/nx2a-data.txt)')
 _p.add_argument('--dex', default='', help='a classes.dex for the launcher: the icon opens it, and it starts the game')
-_p.add_argument('--launcher-activity', default='com.nx2a.launcher.LauncherActivity', help='the launcher activity in the dex')
+_p.add_argument('--launcher-activity', default='', help='the optional launcher activity in the dex; omitted means launch the game Activity directly')
 _p.add_argument('--activity', default='android.app.NativeActivity', help='NativeActivity class name')
 _p.add_argument('--release', action='store_true', help='not debuggable')
 _p.add_argument('--game-mode-performance', action='store_true', help='declare Performance Game Mode (requires the native NVN pacing policy)')
@@ -83,10 +83,10 @@ MANIFEST = ('manifest', [(False, 'package', PKG), (True, 'versionCode', ARGS.ver
         *([('activity', [(True, 'name', ARGS.launcher_activity), (True, 'exported', True), (True, 'theme', ('ref', THEME_NO_TITLE)), (True, 'configChanges', ('hex', CONFIG_CHANGES))] + ([(True, 'screenOrientation', 6)] if ARGS.landscape else []), [
             ('intent-filter', [], [
                 ('action', [(True, 'name', 'android.intent.action.MAIN')], []),
-                ('category', [(True, 'name', 'android.intent.category.LAUNCHER')], [])])])] if ARGS.dex else []),
-        # the game itself: the launcher starts it; without a launcher the icon opens it directly
+                ('category', [(True, 'name', 'android.intent.category.LAUNCHER')], [])])])] if ARGS.dex and ARGS.launcher_activity else []),
+        # Without the optional launcher DEX, the game Activity itself is the app's launcher.
         ('activity', [(True, 'name', ARGS.activity), (True, 'exported', True), (True, 'configChanges', ('hex', CONFIG_CHANGES))] + ([(True, 'screenOrientation', 6)] if ARGS.landscape else []), [
-            ('meta-data', [(True, 'name', 'android.app.lib_name'), (True, 'value', LIB)], [])] + ([] if ARGS.dex else [
+            ('meta-data', [(True, 'name', 'android.app.lib_name'), (True, 'value', LIB)], [])] + ([] if ARGS.dex and ARGS.launcher_activity else [
             ('intent-filter', [], [
                 ('action', [(True, 'name', 'android.intent.action.MAIN')], []),
                 ('category', [(True, 'name', 'android.intent.category.LAUNCHER')], [])])]))])])
