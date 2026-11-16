@@ -906,6 +906,12 @@ class Port:
     # ---- rewrite: patch_nso.py for the Android host's thread slots ----
     def rewrite(self):
         self.patched = self.aw / f'patched_{self.pkg_ver}'   # beside, not over, an iOS build's patched_<version>: the rewrite's reuse key does not include the target
+        if resources.is_android():
+            # patch_nso.py is launched by the shared NSP rewriter, not by the shader worker pool.
+            # Re-check after extraction: the phone may have less free RAM than at build start.
+            self.o.jobs = resources.safe_jobs(self.o.jobs)
+            self.env['DM_REWRITE_JOBS'] = str(self.o.jobs)
+            say(f'Android rewrite: at most {self.o.jobs} concurrent module(s)')
         nsp.rewrite(PY, NXNATIVE, self.game / 'ExeFS', self.patched, dict(self.env, DM_TARGET='android'), self.logs, self.g)
         if self.derived or self.provisional:   # the keys that need the rewritten modules (upstream's provisional steps)
             nsp.provisional_prep(PY, NXNATIVE, self.env, self.logs, self.g)

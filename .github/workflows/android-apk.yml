@@ -29,6 +29,8 @@ on:
       - 'packaging/android-apk/**'
       - 'nxnative/dm/android/**'
       - 'nxnative/dm/gfx/tools/**'
+      - 'nxnative/dm/tools/**'
+      - 'nxnative/scripts/**'
       - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/android-apk.yml'
