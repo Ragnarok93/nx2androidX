@@ -1262,6 +1262,10 @@ class Port:
     # ---- install (optional) ----
     def install(self):
         if self.o.app: return   # the app's mode: no APK, the app runs the game itself
+        if self.o.self_contained:
+            from porter.adb import Adb
+            Adb(self.tools['adb'], self.o.device or self.cfg.get('device'), log=say).install(self.apk_path, self.package, replace_signer=self.o.replace_signer)
+            return
         install.install(self.apk_path, self.data_path, self.tools['adb'], self.o.device or self.cfg.get('device'), replace_signer=self.o.replace_signer,
                         romfs_at=self.o.romfs_at, romfs_push=self.o.romfs_push)
 
