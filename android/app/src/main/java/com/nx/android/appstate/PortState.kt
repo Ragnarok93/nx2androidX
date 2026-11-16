@@ -35,7 +35,7 @@ class PortState @Inject constructor(
     data class Record(
         val game: String,      // the source file's name
         val phase: PortPhase,  // DONE / FAILED / CANCELLED / INTERRUPTED
-        val out: String,       // the artifact the port made (the data pack; '' when none)
+        val out: String,       // the exported APK or legacy data pack; '' when none
         val startedAt: Long,   // wall clock of the start
         val seconds: Long,     // how long it took
         val id: String = "",
@@ -52,8 +52,8 @@ class PortState @Inject constructor(
     var stageStep by mutableStateOf(""); private set
     var stageNote by mutableStateOf(""); private set
     var progress by mutableStateOf(0f); private set
-    var apkPath by mutableStateOf(""); private set   // the PC flow's APK ('' in the app's mode: the pack is the only artifact)
-    var dataPath by mutableStateOf(""); private set  // the data pack, both modes' artifact
+    var apkPath by mutableStateOf(""); private set   // the self-contained APK export
+    var dataPath by mutableStateOf(""); private set  // the legacy companion data pack (empty for self-contained exports)
     var startedAt by mutableStateOf(0L); private set
     var log by mutableStateOf(listOf<String>()); private set
     var history by mutableStateOf(listOf<Record>()); private set
