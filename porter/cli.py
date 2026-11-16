@@ -64,7 +64,7 @@ def _parser():
                          '"AllocateAddressRegion refused (0x1803)" before it crashes; it uses no memory (default: 8 for a game version the profile was not '
                          'brought up on, none for one it was)')
     _romfs_at(po, 'with --install: ')
-    po.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
+    po.add_argument('--jobs', type=int, default=None)
     po.add_argument('--no-lsfg', action='store_true',
                     help='build the host without the frame generation (the lsfg/ code): the host is then smaller and the frame generation '
                          'reports "not in this build" (dm/android/build.py --no-lsfg)')
