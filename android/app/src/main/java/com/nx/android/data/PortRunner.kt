@@ -62,7 +62,7 @@ class PortRunner(
                      experimental: Boolean, aliasHeadroom: Int, noLsfg: Boolean,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
                      deviceLanguage: String = ""): List<String> {
-            val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--app")
+            val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--self-contained-apk")
             if (touch) args += "--touch"
             if (fps60) args += "--fps60"
             if (experimental) args += "--experimental"
