@@ -34,7 +34,7 @@ class RewriteWorkerBudgetTests(unittest.TestCase):
 
     def test_android_uses_smaller_disassembly_pieces(self):
         rewriter = (ROOT / 'nxnative/dm/tools/patch_nso.py').read_text(encoding='utf-8')
-        self.assertIn("0x10000, 0x10000, 0x2000) if TARGET == 'android'", rewriter)
+        self.assertIn("0x10000, 0x10000, 0x10000) if TARGET == 'android'", rewriter)
         self.assertIn('del insl, ws, inwin, heads, rmid', rewriter)
 
 

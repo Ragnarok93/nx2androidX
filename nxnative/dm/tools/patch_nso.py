@@ -750,8 +750,8 @@ def disasm_fn(fa, fb):
 # 21,385 cut points in that 82 MB and pieces of up to 6.5 MB (about 4 GB while disassembled); with 64 KB, 185,228 points and none over PIECE
 # Capstone's per-instruction detail objects can use gigabytes for a multi-megabyte
 # piece. Prefer smaller safe cut windows on RAM-limited Android devices; Darwin
-# retains its existing, tested boundaries. Far b/bl targets are still validated.
-BIG_FN, PIECE, PIECE_B = ((0x10000, 0x10000, 0x2000) if TARGET == 'android'
+# retains its existing, tested boundaries. Keep the existing branch-crossing safety distance.
+BIG_FN, PIECE, PIECE_B = ((0x10000, 0x10000, 0x10000) if TARGET == 'android'
                          else (0x40000, 0x40000, 0x10000))
 def pieces(fa, fb):
     """[(start, end)] covering [fa, fb), and the far b / bl in it as [(site, target)]"""
