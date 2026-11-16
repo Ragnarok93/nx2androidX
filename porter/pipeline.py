@@ -433,8 +433,9 @@ class Port:
         if o.install: self.pull_captures()
         self.shaders()
         self.host()
-        self.apk()
+        # A self-contained APK embeds the finished data pack, so build the pack before assembling the APK.
         self.data()
+        self.apk()
         if o.install: self.install()
         nsp.rmtree(self.work / 'tmp')
         self.result.update(title_id=self.g.id, name=self.app_name, package=self.package, version=self.pkg_ver, display=self.display, language=self.lang,
