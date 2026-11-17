@@ -282,15 +282,18 @@ def volume_of(path):
 
 def shares_disk_budget(a, b):
     """Android's /data and emulated /sdcard use the same bytes even though FUSE gives them different st_dev values."""
-    left, right = volume_of(a), volume_of(b)
-    if left is not None and left == right: return True
-    if not resources.is_android(): return False
-
     def on_userdata(path):
         p = str(Path(path).resolve())
         return (p == '/data' or p.startswith('/data/') or p.startswith('/storage/emulated/')
                 or p.startswith('/mnt/user/') or p.startswith('/mnt/runtime/default/emulated/'))
-    return on_userdata(a) and on_userdata(b)
+
+    if resources.is_android():
+        # On a real phone these exist; on mocked / not-yet-created paths, a nearest-parent
+        # st_dev comparison can falsely group a removable card with /data.
+        if on_userdata(a) and on_userdata(b): return True
+        if on_userdata(a) != on_userdata(b): return False
+    left, right = volume_of(a), volume_of(b)
+    return left is not None and left == right
 
 
 def oodle_where(tools):
