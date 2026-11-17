@@ -27,9 +27,10 @@ class SelfContainedPipelineTests(unittest.TestCase):
 
     def test_storage_budget_includes_embedded_archive_and_apk(self):
         source = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
-        self.assertIn("copies = 1 if self.o.app else 3 if self.o.self_contained else 2", source)
-        self.assertIn("archive = game if self.o.self_contained else 0", source)
-        self.assertIn("game * (2 if self.o.self_contained else 1)", source)
+        self.assertIn("if self.o.self_contained:", source)
+        self.assertIn("export = 2 * min(game + (64 << 20), 0xffffffff)", source)
+        self.assertIn("shares_disk_budget(where, pack)", source)
+        self.assertIn("require_links=self.o.self_contained", source)
 
     def test_phone_payload_bundles_the_compiled_activity_dex(self):
         assets = (ROOT / "packaging/android-apk/build_assets.py").read_text(encoding="utf-8")
