@@ -3,7 +3,7 @@
 # the rewrite for DM_TARGET=android, the Vulkan shader bundle, the host built with the player's NDK, the APK, the data pack and the install.
 # Work files go where upstream's NSP script puts them, <game folder>/<title ID>_build/ (extract/, aoc/, shader/, logs/ are shared with an iOS build of the same folder),
 # with the Android ones in its android/ folder.
-import hashlib, importlib.util, json, mmap, os, re, shutil, socket, struct, subprocess, sys, traceback
+import errno, hashlib, importlib.util, json, mmap, os, re, shutil, socket, struct, subprocess, sys, traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -272,13 +272,25 @@ def on_android():
 
 
 def volume_of(path):
-    """The filesystem a path is on, as the device number of its nearest existing folder (None when it cannot be told: Windows).
-    Two paths on the same volume can be written in place (a rename), two on different ones cannot"""
+    """The filesystem of a path, by its nearest existing parent (not necessarily the physical storage pool)."""
     p = Path(path)
     while not p.exists() and p.parent != p: p = p.parent
     try: dev = os.stat(p).st_dev
     except OSError: return None
     return dev or None
+
+
+def shares_disk_budget(a, b):
+    """Android's /data and emulated /sdcard use the same bytes even though FUSE gives them different st_dev values."""
+    left, right = volume_of(a), volume_of(b)
+    if left is not None and left == right: return True
+    if not resources.is_android(): return False
+
+    def on_userdata(path):
+        p = str(Path(path).resolve())
+        return (p == '/data' or p.startswith('/data/') or p.startswith('/storage/emulated/')
+                or p.startswith('/mnt/user/') or p.startswith('/mnt/runtime/default/emulated/'))
+    return on_userdata(a) and on_userdata(b)
 
 
 def oodle_where(tools):
@@ -461,6 +473,16 @@ class Port:
         self.work = root / f'{tid}_build'
         g, ap = profiles.by_title(self.app)
         self.provisional = False
+        if o.self_contained:
+            # Earlier APK attempts staged multi-gigabyte temporary files in the private work folder.
+            # In particular an ENOSPC killed zipfile.write without deleting nx2a-data.zip.
+            old = self.work / 'android'
+            for name in ('nx2a-data.zip', 'nx2a-data.sha256', 'nx2a-export-mode'):
+                (old / name).unlink(missing_ok=True)
+            if g and ap:
+                stem = app_stem(g, o.app_name or g.get('name', ''))
+                self.cleanup_legacy_self_contained_pack(stem, g.id, o.package or ap.package)
+                (o.out / f'.{stem}.nx2a-data.zip.partial').unlink(missing_ok=True)
         self.check_space()      # before the survey, which unpacks the game
         if not (g and ap):
             what = f'no game profile for {tid}' if not g else f'{g.get("name", g.id)} ({g.id}) has a game profile but is not ported to Android yet (no android.tsv in {g.dir})'
@@ -489,6 +511,16 @@ class Port:
         # DM_GAME picks the profile for every tool; WORK keeps their temporary folders inside the build folder (the shader translator writes thousands of files)
         self.env.update(DM_GAME=g.id, DM_ROOT=str(self.work), WORK=str(self.work / 'tmp'))
 
+    def cleanup_legacy_self_contained_pack(self, stem, title_id, package):
+        """Reclaim an old export-only copy in Downloads, but never touch foreign packs or saved games."""
+        old = self.o.out / f'{stem}-data'
+        if not old.is_dir() or old.is_symlink() or (old / 'saves').exists(): return
+        try: manifest = json.loads((old / 'nx2a-data.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError): return
+        if manifest.get('title_id') != title_id or manifest.get('package') != package: return
+        shutil.rmtree(old)
+        say(f'reclaimed old standalone export staging pack: {old}')
+
     def check_space(self):
         """Stop before extracting when the game folder's drive cannot hold the port: a build folder takes about 1 to 2 times the game files (NEO 7.0 GB of 6.8,
         Viractal 2.7 of 1.4), less what an earlier port left there, plus a margin; an NSZ / XCZ counts as decompressed, and once more for its NSP while it is extracted.
@@ -505,7 +537,7 @@ class Port:
         where = self.work
         while not where.exists() and where.parent != where: where = where.parent
         margin = 2**30
-        copies = 1 if self.o.app else 3 if self.o.self_contained else 2   # standalone export also stages the embedded archive beside the build and pack
+        copies = 1 if self.o.app else 2   # non-standalone exports retain their separate data pack
         pack = None
         if self.o.app:
             getter = getattr(self, 'pack_dir_root', None)   # the space check runs before the profile is known
@@ -517,12 +549,31 @@ class Port:
         pack_where = pack
         while pack_where is not None and not pack_where.exists() and pack_where.parent != pack_where:
             pack_where = pack_where.parent
-        if pack is not None and volume_of(pack) not in (None, volume_of(where)):
+        if self.o.self_contained:
+            # The pack is now hardlinked inside the private workspace. The compressed archive and
+            # signed APK are the only additional full-size files, both in the output directory.
+            # APKs use classic ZIP offsets, so each of these is at most 4 GiB.
+            export = 2 * min(game + (64 << 20), 0xffffffff)
+            work_need = max(0, game + temp - built)
+            if shares_disk_budget(where, pack):
+                need, free = work_need + export + margin, shutil.disk_usage(where).free
+                if free < need:
+                    raise BuildError(f'not enough storage for the self-contained APK: need about {need / 2**30:.1f} GiB, '
+                                     f'only {free / 2**30:.1f} GiB free; work and emulated Downloads share the same storage')
+            else:
+                need, free = work_need + margin, shutil.disk_usage(where).free
+                if free < need:
+                    raise BuildError(f'not enough private work storage: need about {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free')
+                need, free = export + margin, shutil.disk_usage(pack_where).free
+                if free < need:
+                    raise BuildError(f'not enough APK output storage at {pack}: need about {need / 2**30:.1f} GiB, '
+                                     f'{free / 2**30:.1f} GiB free')
+            return
+        if pack is not None and not shares_disk_budget(pack, where):
             # the pack goes to another volume (the removable card): the build's files stay here, the pack's copy goes there
-            archive = game if self.o.self_contained else 0  # the embedded archive is staged in the build workspace
-            need, free = max(0, game + temp + archive - built) + margin, shutil.disk_usage(where).free
+            need, free = max(0, game + temp - built) + margin, shutil.disk_usage(where).free
             if free < need: raise BuildError(f'not enough disk space on {where.anchor} for the build and APK staging: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
-            output = (dlc if self.o.app else game * (2 if self.o.self_contained else 1)) + margin
+            output = (dlc if self.o.app else game) + margin
             need, free = output, shutil.disk_usage(pack_where).free
             if free < need:
                 item = 'data pack' if self.o.app else 'pack and exported APK'
@@ -1060,18 +1111,45 @@ class Port:
             import zipfile
             pack = self.data_dir()
             if not (pack / 'nx2a-data.json').is_file(): raise BuildError(f'the data pack is incomplete: {pack}')
-            archive = self.aw / 'nx2a-data.zip'
+            # Use the APK output volume for the intermediate archive, not scarce /data/app workspace.
+            archive = self.o.out / f'.{stem}.nx2a-data.zip.partial'
             checksum = self.aw / 'nx2a-data.sha256'
-            with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zf:
-                for src in sorted(pack.rglob('*')):
-                    if src.is_file() and not src.is_symlink():
-                        zf.write(src, src.relative_to(pack).as_posix())
-            if archive.stat().st_size >= 0xffffffff:
-                raise BuildError('the embedded data archive exceeds the current APK ZIP limit (4 GiB); ZIP64 APK export is not supported yet')
-            digest = hashlib.sha256()
-            with archive.open('rb') as src:
-                for block in iter(lambda: src.read(1 << 20), b''): digest.update(block)
-            checksum.write_text(digest.hexdigest() + '\n', encoding='ascii')
+            archive.unlink(missing_ok=True)   # an interrupted attempt must not occupy disk on retry
+            pack_bytes = sum(p.stat().st_size for p in pack.rglob('*') if p.is_file() and not p.is_symlink())
+            # Leave enough room for both the archive and the signed APK. An overly large game may
+            # compress to fit a classic APK, but budgeting for the 4 GiB worst case prevents an
+            # hours-long successful translation followed by ENOSPC at the last step.
+            remaining = shutil.disk_usage(self.o.out).free
+            required = 2 * min(pack_bytes + (64 << 20), 0xffffffff) + (256 << 20)
+            if remaining < required:
+                raise BuildError(f'not enough free storage to export the standalone APK: '
+                                 f'about {required / 2**30:.1f} GiB needed for the compressed archive and APK, '
+                                 f'{remaining / 2**30:.1f} GiB free in {self.o.out}; '
+                                 f'game compilation is cached and will resume after freeing space')
+            try:
+                with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zf:
+                    for src in sorted(pack.rglob('*')):
+                        if src.is_file() and not src.is_symlink():
+                            zf.write(src, src.relative_to(pack).as_posix())
+                if archive.stat().st_size >= 0xffffffff:
+                    raise BuildError('this game\'s compressed data archive exceeds the 4 GiB Android APK ZIP limit; '
+                                     'a single self-contained APK cannot be exported by the current packaging format')
+                # mkapk writes one temporary APK on the output filesystem and signs it in place.
+                free = shutil.disk_usage(self.o.out).free
+                if free < archive.stat().st_size + (256 << 20):
+                    raise BuildError(f'not enough storage for final APK assembly: '
+                                     f'{free / 2**30:.1f} GiB free, '
+                                     f'at least {(archive.stat().st_size + (256 << 20)) / 2**30:.1f} GiB needed')
+                digest = hashlib.sha256()
+                with archive.open('rb') as src:
+                    for block in iter(lambda: src.read(1 << 20), b''): digest.update(block)
+                checksum.write_text(digest.hexdigest() + '\n', encoding='ascii')
+            except BaseException as e:
+                archive.unlink(missing_ok=True)
+                if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+                    raise BuildError(f'not enough storage while compressing the data pack for the APK '
+                                     f'(output: {self.o.out}); cached compilation is preserved') from e
+                raise
             export_mode = self.aw / 'nx2a-export-mode'
             export_mode.write_text('1\n', encoding='ascii')
             data_assets = ['--asset', f'nx2a-data.zip={archive}', '--asset', f'nx2a-data.sha256={checksum}', '--asset', f'nx2a-export-mode={export_mode}']
@@ -1088,9 +1166,14 @@ class Port:
         cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
         cmd += [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()
                                                           + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
-        nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
+        try:
+            nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
+        finally:
+            if self.o.self_contained:
+                archive.unlink(missing_ok=True)
+                checksum.unlink(missing_ok=True)
+                export_mode.unlink(missing_ok=True)
         if self.o.self_contained:
-            archive.unlink(missing_ok=True); checksum.unlink(missing_ok=True); export_mode.unlink(missing_ok=True)
             shutil.rmtree(self.data_dir(), ignore_errors=True)
             self.result.pop('data', None)
         self.result['apk'] = str(self.apk_path)
@@ -1204,6 +1287,7 @@ class Port:
         and the build's own folder stays on the phone's storage, where the programs that run during the build can live"""
         stem = f'{app_stem(self.g, self.app_name)}-data'
         if self.o.app: return self.pack_dir_root() / stem
+        if self.o.self_contained: return self.aw / 'embed-pack'   # same private filesystem as extracted RomFS: hardlinks, no multi-GB copy
         return self.o.out / stem
 
     def data(self):
@@ -1238,7 +1322,7 @@ class Port:
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
                              files=files, text=self.lists(), host=host, icon=icon, drivers=drivers, profile_h=getattr(self, 'profile_h', None),
                              pack_base=str(dst) if self.o.app else '.' if self.o.self_contained else None,   # the player app uses its own pack folder; a standalone APK resolves relative paths against its extracted pack
-                             progress=lambda what: PROG.set(step=f'linking {what}'))
+                             progress=lambda what: PROG.set(step=f'linking {what}'), require_links=self.o.self_contained)
         self.data_path = dst; self.result['data'] = str(dst)
         PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
 
