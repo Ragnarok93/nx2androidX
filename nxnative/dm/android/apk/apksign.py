@@ -1,6 +1,6 @@
 # apksign.py: the stored ZIP and the APK Signature Scheme v2 signer (RSA-2048, SHA-256, self-signed certificate) of mkapk.py, with the Python standard library only.
 # mkapk.py builds an APK with them; apkdriver.py rebuilds an installed one with another Vulkan driver library
-import hashlib, secrets, struct, zlib
+import hashlib, os, secrets, shutil, struct, zlib
 
 # ---------------- RSA, DER, self-signed certificate ----------------
 def is_prime(n):
@@ -77,14 +77,124 @@ def chunked_sha256(sections):
             c = sec[i:i + (1 << 20)]
             digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(c)) + c).digest())
     return hashlib.sha256(b'\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
-def sign_v2(zip_entries, cd, eocd, k, crt):
+def _v2_block(digest, k, crt):
     ALG = 0x0103   # RSASSA-PKCS1-v1_5 with SHA2-256
-    digest = chunked_sha256([zip_entries, cd, eocd])   # EOCD's CD offset still points at the CD start = where the signing block will begin
     signed = lp(lp(struct.pack('<I', ALG) + lp(digest))) + lp(lp(crt)) + lp(b'')
     signer = lp(signed) + lp(lp(struct.pack('<I', ALG) + lp(rsa_sign(k, signed)))) + lp(spki(k))
     value = lp(lp(signer))
     pair = struct.pack('<QI', 4 + len(value), 0x7109871a) + value
     size = len(pair) + 8 + 16
-    block = struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
-    new_eocd = eocd[:16] + struct.pack('<I', len(zip_entries) + len(block)) + eocd[20:]
+    return struct.pack('<Q', size) + pair + struct.pack('<Q', size) + b'APK Sig Block 42'
+
+
+def sign_v2(zip_entries, cd, eocd, k, crt):
+    # APK v2 hashes EOCD with the central-directory offset pointing to the start of the signing block,
+    # not the on-disk EOCD's relocated central-directory offset.
+    placeholder = _v2_block(bytes(32), k, crt)
+    new_eocd = eocd[:16] + struct.pack('<I', len(zip_entries) + len(placeholder)) + eocd[20:]
+    digest = chunked_sha256([zip_entries, cd, eocd])
+    block = _v2_block(digest, k, crt)
+    if len(block) != len(placeholder): raise ValueError('APK signing block changed size while signing')
     return zip_entries + block + cd + new_eocd
+
+# ---------------- bounded-memory ZIP/APK path ----------------
+# Large game packs are file-backed. Keep only the central directory and one 1 MiB
+# I/O buffer resident; the pack, host library and APK are never read into RAM whole.
+def build_zip_file(entries, path):
+    cd = bytearray()
+    count = 0
+    with open(path, 'wb') as out:
+        dos_time, dos_date = 0, (2026 - 1980) << 9 | 1 << 5 | 1
+        for name, data, align in entries:
+            if count >= 65535: raise ValueError('APK has too many ZIP entries for the current non-ZIP64 exporter')
+            nb = name.encode()
+            if len(nb) > 65535: raise ValueError(f'APK entry name is too long: {name}')
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                size = len(data)
+                crc = zlib.crc32(data)
+                source = None
+            else:
+                source = os.fspath(data)
+                size = os.path.getsize(source)
+                crc = 0
+                with open(source, 'rb') as src:
+                    while True:
+                        block = src.read(1 << 20)
+                        if not block: break
+                        crc = zlib.crc32(block, crc)
+            if size >= 0xffffffff or out.tell() >= 0xffffffff:
+                raise ValueError('APK exceeds the classic ZIP 4 GiB limit; this exporter does not yet write ZIP64 APKs')
+            pad = -(out.tell() + 30 + len(nb)) % align
+            if 0 < pad < 4: pad += align
+            extra = struct.pack('<HH', 0xd935, pad - 4) + b'\0' * (pad - 4) if pad else b''
+            off = out.tell()
+            out.write(struct.pack('<IHHHHHIIIHH', 0x04034b50, 10, 0, 0, dos_time, dos_date,
+                                  crc, size, size, len(nb), len(extra)))
+            out.write(nb); out.write(extra)
+            if source is None:
+                out.write(data)
+            else:
+                with open(source, 'rb') as src:
+                    shutil.copyfileobj(src, out, 1 << 20)
+            cd += struct.pack('<IHHHHHHIIIHHHHHII', 0x02014b50, 10, 10, 0, 0, dos_time, dos_date,
+                              crc, size, size, len(nb), 0, 0, 0, 0, 0, off) + nb
+            count += 1
+            if out.tell() >= 0xffffffff: raise ValueError('APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
+        cd_offset = out.tell()
+        if len(cd) >= 0xffffffff: raise ValueError('APK central directory exceeds the classic ZIP limit')
+        out.write(cd)
+        eocd_offset = out.tell()
+        eocd = struct.pack('<IHHHHIIH', 0x06054b50, 0, 0, count, count, len(cd), cd_offset, 0)
+        out.write(eocd)
+        if out.tell() >= 0xffffffff: raise ValueError('APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
+    return cd_offset, len(cd), eocd_offset, eocd
+
+
+def sign_v2_file(zip_path, out_path, cd_offset, cd_size, eocd_offset, eocd, k, crt):
+    if os.path.getsize(zip_path) != eocd_offset + len(eocd):
+        raise OSError('unexpected APK staging ZIP length while signing')
+    placeholder = _v2_block(bytes(32), k, crt)
+    new_eocd = eocd[:16] + struct.pack('<I', cd_offset + len(placeholder)) + eocd[20:]
+    digests = []
+    with open(zip_path, 'rb') as src:
+        for start, length in ((0, cd_offset), (cd_offset, cd_size)):
+            src.seek(start)
+            left = length
+            while left:
+                block = src.read(min(1 << 20, left))
+                if not block: raise OSError('truncated APK staging ZIP while signing')
+                digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
+                left -= len(block)
+    for start in range(0, len(eocd), 1 << 20):
+        block = eocd[start:start + (1 << 20)]
+        digests.append(hashlib.sha256(b'\xa5' + struct.pack('<I', len(block)) + block).digest())
+    digest = hashlib.sha256(b'\x5a' + struct.pack('<I', len(digests)) + b''.join(digests)).digest()
+    block = _v2_block(digest, k, crt)
+    if len(block) != len(placeholder): raise ValueError('APK signing block changed size while signing')
+    # The ZIP staging file is already in the output directory. Insert the signing block in place,
+    # keeping only the central directory (small) in memory; avoid a second full-APK temporary copy.
+    with open(zip_path, 'r+b') as apk:
+        apk.seek(cd_offset)
+        central_directory = apk.read(cd_size)
+        if len(central_directory) != cd_size: raise OSError('truncated APK central directory while signing')
+        apk.seek(cd_offset)
+        apk.truncate(cd_offset)
+        apk.write(block)
+        apk.write(central_directory)
+        apk.write(new_eocd)
+        apk.flush()
+        os.fsync(apk.fileno())
+    if os.path.getsize(zip_path) >= 0xffffffff:
+        raise ValueError('signed APK exceeds the classic ZIP 4 GiB limit; ZIP64 APKs are not supported yet')
+    os.replace(zip_path, out_path)
+    return os.path.getsize(out_path)
+
+class _LimitedReader:
+    def __init__(self, stream, remaining):
+        self.stream, self.remaining = stream, remaining
+    def read(self, size=-1):
+        if self.remaining <= 0: return b''
+        if size < 0 or size > self.remaining: size = self.remaining
+        data = self.stream.read(size)
+        self.remaining -= len(data)
+        return data

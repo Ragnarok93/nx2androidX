@@ -3,11 +3,11 @@
 # the rewrite for DM_TARGET=android, the Vulkan shader bundle, the host built with the player's NDK, the APK, the data pack and the install.
 # Work files go where upstream's NSP script puts them, <game folder>/<title ID>_build/ (extract/, aoc/, shader/, logs/ are shared with an iOS build of the same folder),
 # with the Android ones in its android/ folder.
-import hashlib, importlib.util, json, mmap, os, re, shutil, socket, struct, subprocess, sys, traceback
+import errno, hashlib, importlib.util, json, mmap, os, re, shutil, socket, struct, subprocess, sys, traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from porter import config, datapack, dumps, fpslocker, install, paths, product_cache, profiles, romfs_pack, toolchain
+from porter import config, datapack, dumps, fpslocker, install, paths, product_cache, profiles, resources, romfs_pack, toolchain
 from porter.revision import PLAYER_API_REVISION
 from porter.adb import NO_ADB, Adb, AdbError
 from porter.paths import DM, NXNATIVE
@@ -41,6 +41,7 @@ class Options:
     language_preferred: str = ''       # the language the device is set to: the pack follows it when the game has it (a wish, not a demand)
     app_name: str = ''                 # the launcher label (default: the game's name in its control data)
     app: bool = False                  # the nx2android app's mode: no APK and no install — the pack carries the host (libdmplay.so), the drivers and the icon; the app runs the game itself
+    self_contained: bool = False       # build a per-game APK with its data pack embedded; first launch extracts it privately
     install: bool = False              # install on the device after packing
     device: str = ''                   # adb serial
     replace_signer: bool = False       # uninstall an app of the same package signed with another key
@@ -60,7 +61,7 @@ class Options:
     alias_headroom: int = None         # GB more alias region (alias_headroom); None: ALIAS_HEADROOM for a version the profile was not brought up on, none for one it was
     romfs_at: str = None               # with install: the folder on the device the app reads the RomFS from (porter/install.py), 'app' for its files folder; None: as the device has it
     romfs_push: bool = False           # with romfs_at: push the pack's RomFS into that folder first
-    jobs: int = field(default_factory=lambda: os.cpu_count() or 8)
+    jobs: int = field(default_factory=resources.safe_jobs)
     no_lsfg: bool = False              # build the host without the frame generation (the lsfg/ code, dm/android/build.py --no-lsfg): the host is then smaller and the frame generation reports "not in this build"
 
 
@@ -271,13 +272,28 @@ def on_android():
 
 
 def volume_of(path):
-    """The filesystem a path is on, as the device number of its nearest existing folder (None when it cannot be told: Windows).
-    Two paths on the same volume can be written in place (a rename), two on different ones cannot"""
+    """The filesystem of a path, by its nearest existing parent (not necessarily the physical storage pool)."""
     p = Path(path)
     while not p.exists() and p.parent != p: p = p.parent
     try: dev = os.stat(p).st_dev
     except OSError: return None
     return dev or None
+
+
+def shares_disk_budget(a, b):
+    """Android's /data and emulated /sdcard use the same bytes even though FUSE gives them different st_dev values."""
+    def on_userdata(path):
+        p = str(Path(path).resolve())
+        return (p == '/data' or p.startswith('/data/') or p.startswith('/storage/emulated/')
+                or p.startswith('/mnt/user/') or p.startswith('/mnt/runtime/default/emulated/'))
+
+    if resources.is_android():
+        # On a real phone these exist; on mocked / not-yet-created paths, a nearest-parent
+        # st_dev comparison can falsely group a removable card with /data.
+        if on_userdata(a) and on_userdata(b): return True
+        if on_userdata(a) != on_userdata(b): return False
+    left, right = volume_of(a), volume_of(b)
+    return left is not None and left == right
 
 
 def oodle_where(tools):
@@ -404,6 +420,16 @@ class Port:
         os.environ['PATH'] = os.pathsep.join([str(self.tools['dotnet'].parent), os.environ.get('PATH', '')])
         os.environ['DOTNET_ROOT'] = str(toolchain.dotnet_root(self.tools['dotnet']))   # where nx_extract.exe's apphost looks for the runtime (else the system's, which may lack .NET 10)
         # PYTHONUTF8: the engine's tools write their tables with open() and no encoding, which is the ANSI code page on Windows (shader_split.py's "→" failed)
+        previous_jobs = o.jobs
+        o.jobs = resources.safe_jobs(o.jobs)
+        total_mb, available_mb = resources.memory_mb() if resources.is_android() else (None, None)
+        if resources.is_android():
+            if total_mb and available_mb is not None:
+                say(f'Android memory budget: {total_mb / 1024:.1f} GiB RAM, {available_mb / 1024:.1f} GiB available; {o.jobs} worker(s)')
+            else:
+                say(f'Android memory budget: RAM unavailable; {o.jobs} worker(s)')
+        elif previous_jobs != o.jobs:
+            say(f'worker count: {o.jobs}')
         self.env = dict(os.environ, J=str(o.jobs), PYTHONIOENCODING='utf-8', PYTHONUTF8='1', DOTNET_CLI_TELEMETRY_OPTOUT='1')
         # The build tools' own libraries (the toolchain's libshaderc for glslc): the tools are run with the environment the
         # guest has, whose library path holds the rootfs's libraries only, and the tools' own RPATH may point elsewhere
@@ -422,13 +448,15 @@ class Port:
         if o.install: self.pull_captures()
         self.shaders()
         self.host()
-        self.apk()
+        # A self-contained APK embeds the finished data pack, so build the pack before assembling the APK.
         self.data()
+        self.apk()
         if o.install: self.install()
         nsp.rmtree(self.work / 'tmp')
         self.result.update(title_id=self.g.id, name=self.app_name, package=self.package, version=self.pkg_ver, display=self.display, language=self.lang,
                            status=self.ap.status, derived=bool(self.derived), installed=bool(o.install))
-        say(f'done: {self.result.get("apk", "no APK (the app runs it)") + ", " if "apk" in self.result else ""}{self.result["data"]}')
+        artifacts = [self.result[k] for k in ('apk', 'data') if self.result.get(k)]
+        say('done: ' + (', '.join(artifacts) if artifacts else 'no exported artifact'))
         if self.derived: say(f'[RED] {self.derived}: the port is built from a derived profile and may not run as the profile\'s tested version does'
                              + (f'; {self.derived_mem}' if self.derived_mem else ''))
         for x in self.lost: say(f'[RED] {x}')
@@ -448,6 +476,16 @@ class Port:
         self.work = root / f'{tid}_build'
         g, ap = profiles.by_title(self.app)
         self.provisional = False
+        if o.self_contained:
+            # Earlier APK attempts staged multi-gigabyte temporary files in the private work folder.
+            # In particular an ENOSPC killed zipfile.write without deleting nx2a-data.zip.
+            old = self.work / 'android'
+            for name in ('nx2a-data.zip', 'nx2a-data.sha256', 'nx2a-export-mode'):
+                (old / name).unlink(missing_ok=True)
+            if g and ap:
+                stem = app_stem(g, o.app_name or g.get('name', ''))
+                self.cleanup_legacy_self_contained_pack(stem, g.id, o.package or ap.package)
+                (o.out / f'.{stem}.nx2a-data.zip.partial').unlink(missing_ok=True)
         self.check_space()      # before the survey, which unpacks the game
         if not (g and ap):
             what = f'no game profile for {tid}' if not g else f'{g.get("name", g.id)} ({g.id}) has a game profile but is not ported to Android yet (no android.tsv in {g.dir})'
@@ -476,13 +514,23 @@ class Port:
         # DM_GAME picks the profile for every tool; WORK keeps their temporary folders inside the build folder (the shader translator writes thousands of files)
         self.env.update(DM_GAME=g.id, DM_ROOT=str(self.work), WORK=str(self.work / 'tmp'))
 
+    def cleanup_legacy_self_contained_pack(self, stem, title_id, package):
+        """Reclaim an old export-only copy in Downloads, but never touch foreign packs or saved games."""
+        old = self.o.out / f'{stem}-data'
+        if not old.is_dir() or old.is_symlink() or (old / 'saves').exists(): return
+        try: manifest = json.loads((old / 'nx2a-data.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError): return
+        if manifest.get('title_id') != title_id or manifest.get('package') != package: return
+        shutil.rmtree(old)
+        say(f'reclaimed old standalone export staging pack: {old}')
+
     def check_space(self):
         """Stop before extracting when the game folder's drive cannot hold the port: a build folder takes about 1 to 2 times the game files (NEO 7.0 GB of 6.8,
         Viractal 2.7 of 1.4), less what an earlier port left there, plus a margin; an NSZ / XCZ counts as decompressed, and once more for its NSP while it is extracted.
         Only the picked game's files count (its base, its updates, its DLC): the folder may hold other games, which this port never reads.
         The pack is a copy of the game's files (Android's SELinux never lets an app link), so the port needs room for the build's files and for the pack.
         The app's mode copies no RomFS into the pack (the pack points at the build folder's own), so there the build's files are the only copy and the room is half.
-        When the pack goes to another volume (the app may put it on the removable card), each volume is asked for its own share"""
+        A self-contained export also stages a compressed data archive and the APK; their space is budgeted on the build and output volumes separately."""
         fam = self.fam
         files = [fam['base'], *[p for _, p in fam['updates']], *[p for _, _, p in fam['dlc']]]
         game, temp = sum(dumps.size(f) for f in files), sum(dumps.size(f) for f in files if dumps.compressed(f))
@@ -492,18 +540,47 @@ class Port:
         where = self.work
         while not where.exists() and where.parent != where: where = where.parent
         margin = 2**30
-        copies = 1 if self.o.app else 2   # the app's pack holds no RomFS (it points at the build folder's own): one copy of the game's files, not two
+        copies = 1 if self.o.app else 2   # non-standalone exports retain their separate data pack
         pack = None
-        getter = getattr(self, 'pack_dir_root', None)   # the space check runs before the profile is known
-        if getter is not None:
-            try: pack = getter()
-            except Exception: pack = None
-        if pack is not None and volume_of(pack) not in (None, volume_of(where)):
+        if self.o.app:
+            getter = getattr(self, 'pack_dir_root', None)   # the space check runs before the profile is known
+            if getter is not None:
+                try: pack = getter()
+                except Exception: pack = None
+        else:
+            pack = self.o.out   # both standalone APK modes write their artifact and data pack here
+        pack_where = pack
+        while pack_where is not None and not pack_where.exists() and pack_where.parent != pack_where:
+            pack_where = pack_where.parent
+        if self.o.self_contained:
+            # The pack uses hard links or symlinks inside private workspace. The compressed archive and
+            # signed APK are the only additional full-size files, both in the output directory.
+            # APKs use classic ZIP offsets, so each of these is at most 4 GiB.
+            export = 2 * min(game + (64 << 20), 0xffffffff)
+            work_need = max(0, game + temp - built)
+            if shares_disk_budget(where, pack):
+                need, free = work_need + export + margin, shutil.disk_usage(where).free
+                if free < need:
+                    raise BuildError(f'not enough storage for the self-contained APK: need about {need / 2**30:.1f} GiB, '
+                                     f'only {free / 2**30:.1f} GiB free; work and emulated Downloads share the same storage')
+            else:
+                need, free = work_need + margin, shutil.disk_usage(where).free
+                if free < need:
+                    raise BuildError(f'not enough private work storage: need about {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free')
+                need, free = export + margin, shutil.disk_usage(pack_where).free
+                if free < need:
+                    raise BuildError(f'not enough APK output storage at {pack}: need about {need / 2**30:.1f} GiB, '
+                                     f'{free / 2**30:.1f} GiB free')
+            return
+        if pack is not None and not shares_disk_budget(pack, where):
             # the pack goes to another volume (the removable card): the build's files stay here, the pack's copy goes there
             need, free = max(0, game + temp - built) + margin, shutil.disk_usage(where).free
-            if free < need: raise BuildError(f'not enough disk space on {where.anchor} for the build folder: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
-            need, free = (dlc if self.o.app else game) + margin, shutil.disk_usage(pack).free
-            if free < need: raise BuildError(f'not enough disk space for the data pack in {pack}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
+            if free < need: raise BuildError(f'not enough disk space on {where.anchor} for the build and APK staging: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
+            output = (dlc if self.o.app else game) + margin
+            need, free = output, shutil.disk_usage(pack_where).free
+            if free < need:
+                item = 'data pack' if self.o.app else 'pack and exported APK'
+                raise BuildError(f'not enough disk space for the {item} in {pack}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
             return
         need, free = max(0, copies * game + temp - built) + margin, shutil.disk_usage(where).free
         if free < need: raise BuildError(f'not enough disk space on {where.anchor}: the port needs about {need / 2**30:.1f} GB more, {free / 2**30:.1f} GB is free')
@@ -883,6 +960,12 @@ class Port:
     # ---- rewrite: patch_nso.py for the Android host's thread slots ----
     def rewrite(self):
         self.patched = self.aw / f'patched_{self.pkg_ver}'   # beside, not over, an iOS build's patched_<version>: the rewrite's reuse key does not include the target
+        if resources.is_android():
+            # patch_nso.py is launched by the shared NSP rewriter, not by the shader worker pool.
+            # Re-check after extraction: the phone may have less free RAM than at build start.
+            self.o.jobs = resources.safe_jobs(self.o.jobs)
+            self.env['DM_REWRITE_JOBS'] = str(self.o.jobs)
+            say(f'Android rewrite: at most {self.o.jobs} concurrent module(s)')
         nsp.rewrite(PY, NXNATIVE, self.game / 'ExeFS', self.patched, dict(self.env, DM_TARGET='android'), self.logs, self.g)
         if self.derived or self.provisional:   # the keys that need the rewritten modules (upstream's provisional steps)
             nsp.provisional_prep(PY, NXNATIVE, self.env, self.logs, self.g)
@@ -896,6 +979,10 @@ class Port:
             self.dmsv = None
             for st in ('shader split', 'Vulkan shaders'): PROG.stage(st); PROG.end('none: the game renders with OpenGL ES')
             return
+        previous_jobs = self.o.jobs
+        self.o.jobs = resources.safe_jobs(self.o.jobs)
+        self.env['J'] = str(self.o.jobs)
+        if self.o.jobs != previous_jobs: say(f'available memory fell; shader stages reduced to {self.o.jobs} worker(s)')
         sv = self.versions
         pkg = self.work / 'shader' / 'pkg'
         try:
@@ -1020,20 +1107,77 @@ class Port:
         icon = self.icon()
         code = version_code(self.pkg_ver, self.o.vercode_offset)
         if self.o.vercode_offset: say(f'versionCode {code} ({self.pkg_ver} + 1 + offset {self.o.vercode_offset})')
-        external = self.external_activity() if self.o.external_display or self.o.native_keyboard else []
+        # The standalone Activity extracts the whole data pack into its own files directory before NativeActivity resumes.
+        # Archive creation and APK assembly are streamed: large RomFS/shader trees never become one Python bytes object.
+        data_assets = []
+        if self.o.self_contained:
+            import zipfile
+            pack = self.data_dir()
+            if not (pack / 'nx2a-data.json').is_file(): raise BuildError(f'the data pack is incomplete: {pack}')
+            # Use the APK output volume for the intermediate archive, not scarce /data/app workspace.
+            archive = self.o.out / f'.{stem}.nx2a-data.zip.partial'
+            checksum = self.aw / 'nx2a-data.sha256'
+            archive.unlink(missing_ok=True)   # an interrupted attempt must not occupy disk on retry
+            pack_bytes = sum(p.stat().st_size for p in datapack.embedded_files(pack))
+            # Leave enough room for both the archive and the signed APK. An overly large game may
+            # compress to fit a classic APK, but budgeting for the 4 GiB worst case prevents an
+            # hours-long successful translation followed by ENOSPC at the last step.
+            remaining = shutil.disk_usage(self.o.out).free
+            required = 2 * min(pack_bytes + (64 << 20), 0xffffffff) + (256 << 20)
+            if remaining < required:
+                raise BuildError(f'not enough free storage to export the standalone APK: '
+                                 f'about {required / 2**30:.1f} GiB needed for the compressed archive and APK, '
+                                 f'{remaining / 2**30:.1f} GiB free in {self.o.out}; '
+                                 f'game compilation is cached and will resume after freeing space')
+            try:
+                with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zf:
+                    for src in datapack.embedded_files(pack):
+                        zf.write(src, src.relative_to(pack).as_posix())
+                if archive.stat().st_size >= 0xffffffff:
+                    raise BuildError('this game\'s compressed data archive exceeds the 4 GiB Android APK ZIP limit; '
+                                     'a single self-contained APK cannot be exported by the current packaging format')
+                # mkapk writes one temporary APK on the output filesystem and signs it in place.
+                free = shutil.disk_usage(self.o.out).free
+                if free < archive.stat().st_size + (256 << 20):
+                    raise BuildError(f'not enough storage for final APK assembly: '
+                                     f'{free / 2**30:.1f} GiB free, '
+                                     f'at least {(archive.stat().st_size + (256 << 20)) / 2**30:.1f} GiB needed')
+                digest = hashlib.sha256()
+                with archive.open('rb') as src:
+                    for block in iter(lambda: src.read(1 << 20), b''): digest.update(block)
+                checksum.write_text(digest.hexdigest() + '\n', encoding='ascii')
+            except BaseException as e:
+                archive.unlink(missing_ok=True)
+                if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+                    raise BuildError(f'not enough storage while compressing the data pack for the APK '
+                                     f'(output: {self.o.out}); cached compilation is preserved') from e
+                raise
+            export_mode = self.aw / 'nx2a-export-mode'
+            export_mode.write_text('1\n', encoding='ascii')
+            data_assets = ['--asset', f'nx2a-data.zip={archive}', '--asset', f'nx2a-data.sha256={checksum}', '--asset', f'nx2a-export-mode={export_mode}']
+        external = self.external_activity() if self.o.self_contained or self.o.external_display or self.o.native_keyboard else []
         driver = self.o.vulkan_driver
         if driver and driver.name != driver_lib_name(driver):   # packed under a lib*.so name (driver_lib_name), copied beside the host library
             driver = self.so.parent / driver_lib_name(driver); shutil.copyfile(self.o.vulkan_driver, driver)
             say(f'--vulkan-driver: {self.o.vulkan_driver.name} is packed as {driver.name} (Android extracts only lib*.so libraries)')
-        nsp.run([PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
-                 '--data-root', str(self.data_dir()),
-                 '--version-code', str(code), '--version-name', self.display]
-                + (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
-                + (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
-                + [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()
-                                                             + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
-                + (['--dex', str(dex)] if (dex := launcher_dex()) else []),
-                self.logs / 'android_apk.log', env=self.env)
+        cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
+               '--version-code', str(code), '--version-name', self.display]
+        if self.o.self_contained: cmd += data_assets
+        else: cmd += ['--data-root', str(self.data_dir())]
+        cmd += (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
+        cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
+        cmd += [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()
+                                                          + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
+        try:
+            nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
+        finally:
+            if self.o.self_contained:
+                archive.unlink(missing_ok=True)
+                checksum.unlink(missing_ok=True)
+                export_mode.unlink(missing_ok=True)
+        if self.o.self_contained:
+            shutil.rmtree(self.data_dir(), ignore_errors=True)
+            self.result.pop('data', None)
         self.result['apk'] = str(self.apk_path)
         PROG.end(f'{self.apk_path.name}, {self.apk_path.stat().st_size / 2**20:.1f} MB')
 
@@ -1043,16 +1187,28 @@ class Port:
         platforms = [p for root in roots for p in (root / 'platforms').glob('android-*/android.jar')]
         d8s = [p for root in roots for p in (root / 'build-tools').glob('*/d8' + ('.bat' if os.name == 'nt' else ''))]
         def version(p): return tuple(int(x) for x in re.findall(r'\d+', p.parent.name))
+        prebuilt = DM.parent.parent / 'tools' / 'game-activity.dex'
         if not javac or not platforms or not d8s:
-            raise BuildError('--external-display / --native-keyboard needs javac and an Android SDK with a platform and build-tools (set ANDROID_HOME)')
+            if prebuilt.is_file():
+                # The phone payload ships this DEX, compiled on the desktop when the app APK was packaged.
+                # Do not require a JDK or Android SDK on the phone; use the direct game Activity (no optional launcher).
+                activity = 'KeyboardExternalActivity' if self.o.native_keyboard else 'ExternalActivity'
+                return ['--dex', prebuilt, '--activity',
+                        'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
+            raise BuildError('standalone APK export needs the bundled game-activity.dex or javac plus an Android SDK platform/build-tools (set ANDROID_HOME)')
         platform, d8 = max(platforms, key=version), max(d8s, key=version)
         out = self.aw / 'external-activity'; classes, dex = out / 'classes', out / 'dex'
         shutil.rmtree(out, ignore_errors=True); classes.mkdir(parents=True); dex.mkdir()
         sources = sorted((DM / 'android/java/org/nx2a').glob('*.java'))
         nsp.run([javac, '-source', '8', '-target', '8', '-classpath', platform, '-d', classes, *sources], self.logs / 'android_external_java.log', env=self.env)
-        nsp.run([d8, '--min-api', '29', '--lib', platform, '--output', dex, *sorted(classes.rglob('*.class'))], self.logs / 'android_external_dex.log', env=self.env)
+        dex_inputs = sorted(classes.rglob('*.class'))
+        launcher = launcher_dex()
+        if launcher: dex_inputs.append(launcher)   # merge the optional language/driver launcher with the standalone Activity classes
+        nsp.run([d8, '--min-api', '29', '--lib', platform, '--output', dex, *dex_inputs], self.logs / 'android_external_dex.log', env=self.env)
         activity = 'KeyboardExternalActivity' if self.o.native_keyboard else 'ExternalActivity'
-        return ['--dex', dex / 'classes.dex', '--activity', 'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
+        args = ['--dex', dex / 'classes.dex', '--activity', 'org.nx2a.' + activity if self.o.external_display else 'org.nx2a.GameActivity']
+        if launcher: args += ['--launcher-activity', 'com.nx2a.launcher.LauncherActivity']
+        return args
 
     def theme(self):
         """The on-screen gamepad's theme: only the game's own pack goes in the APK (dm/android/themes/themes.tsv maps title IDs to packs; a game with no row
@@ -1133,6 +1289,7 @@ class Port:
         and the build's own folder stays on the phone's storage, where the programs that run during the build can live"""
         stem = f'{app_stem(self.g, self.app_name)}-data'
         if self.o.app: return self.pack_dir_root() / stem
+        if self.o.self_contained: return self.aw / 'embed-pack'   # private staging: hardlinks or symlinks, no multi-GB copy
         return self.o.out / stem
 
     def data(self):
@@ -1166,8 +1323,8 @@ class Port:
                              aoc=self.aoc, sysdata=self.sysdata, language=self.lang, package=self.package, env=self.fps_env + font_env + zenv + (['DM_VK_MT_REPLAY=1'] if self.o.mt_replay else [])
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
                              files=files, text=self.lists(), host=host, icon=icon, drivers=drivers, profile_h=getattr(self, 'profile_h', None),
-                             pack_base=str(dst) if self.o.app else None,   # the app's mode: the pack lives in the app's own folder, not in the app's files folder
-                             progress=lambda what: PROG.set(step=f'linking {what}'))
+                             pack_base=str(dst) if self.o.app else '.' if self.o.self_contained else None,   # the player app uses its own pack folder; a standalone APK resolves relative paths against its extracted pack
+                             progress=lambda what: PROG.set(step=f'linking {what}'), require_links=self.o.self_contained)
         self.data_path = dst; self.result['data'] = str(dst)
         PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
 
@@ -1190,13 +1347,15 @@ class Port:
         the path does not change when the pack moves; the desktop's mode puts it in the pack, which the install
         copies into the app's files folder on the device.
         Returns (env.txt rows, pack files); none without a font"""
-        if self.o.shared_font:   # the player's own font: it goes in the pack, the install puts it where the host reads it
+        if self.o.shared_font:   # the player's own font: it goes in the pack, the host reads it from the pack root in standalone APKs
+            if self.o.self_contained: return ['DM_SHARED_FONT=standard.ttf'], {'standard.ttf': self.o.shared_font}
             dest = self.data_dir() if self.o.app else datapack.files_folder(self.package)
             return [f'DM_SHARED_FONT={dest}/standard.ttf'], {'standard.ttf': self.o.shared_font}
         if not SHARED_CJK.is_file():
             say('[RED] the shared font is missing (dm/tools/shared_cjk.ttf): the game\'s Chinese text will draw as "?"')
             return [], {}
         if self.o.app: return [f'DM_SHARED_FONT={SHARED_CJK}'], {}
+        if self.o.self_contained: return ['DM_SHARED_FONT=standard.ttf'], {'standard.ttf': SHARED_CJK}
         dest = datapack.files_folder(self.package)
         return [f'DM_SHARED_FONT={dest}/standard.ttf'], {'standard.ttf': SHARED_CJK}
 
@@ -1215,11 +1374,15 @@ class Port:
             nsp.rmtree(kf); d.mkdir(parents=True, exist_ok=True)
             nsp.run([PY, DM / 'tools/make_ext_font.py', ttf, letters], self.logs / 'make_ext_font.log', env=self.env)
             kf.write_text(f'{key}\n')
-        return [f'DM_SHARED_FONT_EXT={self.data_dir()}/nintendo_ext.ttf'], {'nintendo_ext.ttf': ttf}
+        return [f'DM_SHARED_FONT_EXT={"nintendo_ext.ttf" if self.o.self_contained else self.data_dir() / "nintendo_ext.ttf"}'], {'nintendo_ext.ttf': ttf}
 
     # ---- install (optional) ----
     def install(self):
         if self.o.app: return   # the app's mode: no APK, the app runs the game itself
+        if self.o.self_contained:
+            from porter.adb import Adb
+            Adb(self.tools['adb'], self.o.device or self.cfg.get('device'), log=say).install(self.apk_path, self.package, replace_signer=self.o.replace_signer)
+            return
         install.install(self.apk_path, self.data_path, self.tools['adb'], self.o.device or self.cfg.get('device'), replace_signer=self.o.replace_signer,
                         romfs_at=self.o.romfs_at, romfs_push=self.o.romfs_push)
 

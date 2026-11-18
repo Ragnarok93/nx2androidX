@@ -2,8 +2,8 @@
 # the app's assets and the APK itself (packaging/android-apk/build_apk.sh). The desktop bundles are the other
 # workflows' (release-windows.yml, release-macos.yml).
 #
-# The payload is a private release (NixPort/nixport-rootfs): the build needs a token with read access to it in the
-# repository's secret NIXPORT_TOKEN (a fine-grained token with that one repository). Everything else is public.
+# The payload release (NixPort/nixport-rootfs) is public; GitHub's built-in token can download it.
+# No custom NIXPORT_TOKEN secret is required for test or release builds.
 #
 # The build is the release variant: the APK a player installs, signed with the project's own key (the secret
 # NX2A_KEYSTORE_B64), so it installs over an earlier one instead of beside it.
@@ -11,8 +11,8 @@
 # The APK is the run's artifact (nx2android-android-apk), and a published release gets it as an asset named
 # after the version (nx2android-v0.3.0-alpha02.apk).
 #
-# Only a tag builds: a push of the branch builds nothing. The tag is pushed right before the release is made,
-# and the build waits for that release to appear before it attaches the APK to it.
+# Pull requests targeting android run the same tests and APK build as a release, and keep the artifact for review.
+# A release still builds only from a tag; the build waits for that release to appear before attaching its APK.
 #
 # A tag's build also tells the QQ group: the announcement (the version, the release's Chinese changelog, the
 # release's page and the netdisk link) goes out once the APK is attached. It is an extra: it never fails the
@@ -21,8 +21,21 @@ name: Android app
 
 on:
   workflow_dispatch:   # a build of the branch, kept as the run's artifact
+  pull_request:
+    branches: [android]
+    paths:
+      - 'android/**'
+      - 'porter/**'
+      - 'packaging/android-apk/**'
+      - 'nxnative/dm/android/**'
+      - 'nxnative/dm/gfx/tools/**'
+      - 'nxnative/dm/tools/**'
+      - 'nxnative/scripts/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/android-apk.yml'
   push:
-    tags: ['v*']      # a tag only: a branch push builds nothing
+    tags: ['v*']      # release builds are tag-only
 
 permissions:
   contents: write   # the release's assets (the APK)
@@ -57,14 +70,6 @@ jobs:
             packaging/android-apk/.cache/debs
             packaging/android-apk/.cache/nuget
           key: nx2a-android-payload-v1
-      - name: the token for the private payload release
-        run: |
-          if [ -z "$NIXPORT_TOKEN" ]; then
-            echo "::error::the secret NIXPORT_TOKEN is missing (a token with read access to NixPort/nixport-rootfs)"
-            exit 1
-          fi
-        env:
-          NIXPORT_TOKEN: ${{ secrets.NIXPORT_TOKEN }}
       - name: the app's signing key
         run: |
           # A release is signed with the project's own key: it must be the key every earlier build was signed
@@ -87,7 +92,7 @@ jobs:
           export DOTNET="$(which dotnet)"
           bash packaging/android-apk/build_apk.sh release
         env:
-          GH_TOKEN: ${{ secrets.NIXPORT_TOKEN }}   # the private payload release
+          GH_TOKEN: ${{ github.token }}   # built-in token can download the public payload release
       - name: the APK's name
         id: apk
         run: |

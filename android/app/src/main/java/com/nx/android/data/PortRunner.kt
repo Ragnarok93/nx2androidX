@@ -28,14 +28,13 @@ class PortRunner(
         touch: Boolean, fps60: Boolean, experimental: Boolean,
         aliasHeadroom: Int,
         sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
-        packDir: String? = null,
         onEnd: () -> Unit,
     ): Thread {
         val args = portArgs(gameFile, keys, touch, fps60, experimental, aliasHeadroom, !BuildConfig.NX_LSFG,
             sharedFont, firmware, mtReplay, deviceLanguage())
         // A file in a netdisk's folder is not there yet in its middle: the port would read it as a broken dump
         GameSource.cloudFolder(gameFile)?.let { onLine(locale.str(R.string.runner_cloud_folder, it)) }
-        return start(args, onEnd, if (packDir.isNullOrBlank()) emptyMap() else mapOf("NX2A_PACK_DIR" to packDir))
+        return start(args, onEnd)
     }
 
     /**
@@ -49,8 +48,8 @@ class PortRunner(
         /**
          * The porter's command line for a port: pure, so the test can check it on the JVM.
          *
-         * There is no output folder on the command line: the data pack goes into the app's own folder
-         * (the porter's app mode puts it there, whatever the caller says).
+         * The standalone APK is written beside the selected game file by default; its data pack is embedded,
+         * so there is no companion folder or separate output directory.
          *
          * The extra address space (the alias region): Auto passes nothing, the porter decides by itself
          * (the version the profile was tested with gets none, another one 8 GB).
@@ -62,7 +61,7 @@ class PortRunner(
                      experimental: Boolean, aliasHeadroom: Int, noLsfg: Boolean,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
                      deviceLanguage: String = ""): List<String> {
-            val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--app")
+            val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--self-contained-apk")
             if (touch) args += "--touch"
             if (fps60) args += "--fps60"
             if (experimental) args += "--experimental"

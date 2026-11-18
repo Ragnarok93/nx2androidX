@@ -339,7 +339,7 @@ class DataPack(unittest.TestCase):
         from types import SimpleNamespace
         t = Path(tempfile.mkdtemp(prefix='nx2a_test_font_'))
         try:
-            port = SimpleNamespace(aw=t / 'android', logs=t / 'logs', env=dict(os.environ, PYTHONUTF8='1'), package='org.nx2a.test',
+            port = SimpleNamespace(o=SimpleNamespace(self_contained=False), aw=t / 'android', logs=t / 'logs', env=dict(os.environ, PYTHONUTF8='1'), package='org.nx2a.test',
                                    data_dir=lambda: t / 'out-data')
             env, files = pipeline.Port.button_font(port)
             self.assertEqual(env, [f'DM_SHARED_FONT_EXT={t / "out-data"}/nintendo_ext.ttf']); self.assertEqual(list(files), ['nintendo_ext.ttf'])
@@ -356,7 +356,7 @@ class DataPack(unittest.TestCase):
         from types import SimpleNamespace
         t = Path(tempfile.mkdtemp(prefix='nx2a_test_cjk_'))
         try:
-            port = SimpleNamespace(o=SimpleNamespace(shared_font=None, app=False), package='org.nx2a.test',
+            port = SimpleNamespace(o=SimpleNamespace(shared_font=None, app=False, self_contained=False), package='org.nx2a.test',
                                    data_dir=lambda: t / 'out-data')
             env, files = pipeline.Port.shared_font(port)
             self.assertEqual(env, [f'DM_SHARED_FONT={datapack.files_folder("org.nx2a.test")}/standard.ttf'])   # the desktop: the install puts the pack in the app's files folder
@@ -371,12 +371,12 @@ class DataPack(unittest.TestCase):
             self.assertEqual(f['post'].formatType, 2.0)             # the glyph names, which the game builds its glyph table from
             self.assertEqual(f['head'].unitsPerEm, 2048)
             # the app's mode: the shipped font stays where it lies (the payload), so the pack does not carry it
-            app = SimpleNamespace(o=SimpleNamespace(shared_font=None, app=True), package='org.nx2a.test', data_dir=lambda: t / 'out-data')
+            app = SimpleNamespace(o=SimpleNamespace(shared_font=None, app=True, self_contained=False), package='org.nx2a.test', data_dir=lambda: t / 'out-data')
             env, files = pipeline.Port.shared_font(app)
             self.assertEqual(env, [f'DM_SHARED_FONT={pipeline.SHARED_CJK}']); self.assertEqual(files, {})
             # the player's own font wins: it goes in the pack, and the host reads it from there
             mine = t / 'mine.ttf'; shutil.copyfile(pipeline.SHARED_CJK, mine)
-            own = SimpleNamespace(o=SimpleNamespace(shared_font=mine, app=True), package='org.nx2a.test', data_dir=lambda: t / 'out-data')
+            own = SimpleNamespace(o=SimpleNamespace(shared_font=mine, app=True, self_contained=False), package='org.nx2a.test', data_dir=lambda: t / 'out-data')
             env, files = pipeline.Port.shared_font(own)
             self.assertEqual(env, [f'DM_SHARED_FONT={t / "out-data"}/standard.ttf']); self.assertEqual(files, {'standard.ttf': mine})
         finally:
@@ -624,7 +624,7 @@ class Misc(unittest.TestCase):
     def test_disk_space(self):   # twice the game files, less what the build folder holds, plus 1 GB
         from types import SimpleNamespace as NS
         d = Path(tempfile.mkdtemp(prefix='nx2a_test_game_')); (d / 'g.nsp').write_bytes(b'\0' * 2**20); work = d / 'build'
-        p = NS(o=NS(folder=d, app=False), work=work, fam={'base': d / 'g.nsp', 'updates': [], 'dlc': []}); real = shutil.disk_usage
+        p = NS(o=NS(folder=d, app=False, self_contained=False, out=None), work=work, fam={'base': d / 'g.nsp', 'updates': [], 'dlc': []}); real = shutil.disk_usage
         try:
             shutil.disk_usage = lambda _: NS(free=2**30 + 2**20)
             with self.assertRaises(pipeline.BuildError): pipeline.Port.check_space(p)
@@ -633,7 +633,7 @@ class Misc(unittest.TestCase):
 
     def space_port(self, folder, fam, work, app=False, pack_dir=None):   # a port-like object for the space check alone (the check reads the picked game's files and the build folder)
         from types import SimpleNamespace as NS
-        return NS(o=NS(folder=folder, app=app), work=work, fam=fam,
+        return NS(o=NS(folder=folder, app=app, self_contained=False, out=None), work=work, fam=fam,
                   **({'pack_dir_root': (lambda: pack_dir)} if pack_dir is not None else {}))
 
     def space_fits(self, port, free):   # does the check pass with this much free space on the disk?
@@ -653,7 +653,8 @@ class Misc(unittest.TestCase):
             (d / 'g.nsp').write_bytes(b'\0' * 2**20)
             work = d / 'build'
             card = d / 'card/ports'
-            p = self.space_port(d, {'base': d / 'g.nsp', 'updates': [], 'dlc': []}, work, pack_dir=card)
+            (d / 'card').mkdir()  # an existing mount point: disk_usage resolves here
+            p = self.space_port(d, {'base': d / 'g.nsp', 'updates': [], 'dlc': []}, work, app=True, pack_dir=card)
             real = shutil.disk_usage
             try:
                 # the card is on another volume: the build's volume asks for the game's files, the card for the pack
@@ -790,7 +791,7 @@ class Dumps(unittest.TestCase):   # porter/dumps.py: NSZ / XCZ → NSP; an NCZ m
         from types import SimpleNamespace as NS
         src = self.nsz(self.solid); size = self.dumps.size(src)
         work = self.d / 'build'
-        p = NS(o=NS(folder=self.d, app=False), work=work, fam={'base': src, 'updates': [], 'dlc': []})
+        p = NS(o=NS(folder=self.d, app=False, self_contained=False, out=None), work=work, fam={'base': src, 'updates': [], 'dlc': []})
         real = shutil.disk_usage
         try:
             shutil.disk_usage = lambda _: NS(free=2**30 + 3 * size)

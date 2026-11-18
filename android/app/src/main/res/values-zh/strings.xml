@@ -413,6 +413,9 @@
     <string name="builds_source_missing">请重新选择游戏源文件再构建。</string>
     <string name="builds_history_seconds">%1$s 分 %2$s 秒</string>
     <string name="builds_build_again">再次构建</string>
+    <string name="builds_export_apk">导出 APK</string>
+    <string name="builds_apk_saved">已保存 %1$s</string>
+    <string name="builds_apk_save_failed">无法保存 APK：%1$s</string>
     <string name="builds_needs_storage">移植需要「所有文件访问」权限才能读取游戏文件</string>
     <string name="lib_run_config">运行配置</string>
     <string name="lib_port_config">移植配置</string>

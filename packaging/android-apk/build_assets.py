@@ -15,7 +15,7 @@ The result is what the Gradle build takes as the app's assets:
     <out>/drivers/         the Vulkan driver the app ships (Mesa's Turnip), unpacked by the app itself
     <out>/manifest.json    what is in there and what it is for
 """
-import argparse, hashlib, json, os, shutil, subprocess, sys, tarfile, urllib.request
+import argparse, hashlib, json, os, re, shutil, subprocess, sys, tarfile, urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -235,6 +235,45 @@ def finalize_metadata(out):
     (out / 'build-id').write_text(stamp.hexdigest() + '\n')
 
 
+
+def compile_game_activity_dex(tool: Path):
+    """Compile the standalone NativeActivity Java front ends on the build machine.
+
+    The phone payload intentionally ships a native ARM64 toolchain, not a JDK or Android SDK.
+    The resulting DEX travels with the tool so APK export works offline on the phone.
+    """
+    roots = [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT')]
+    roots += [str(Path.home() / 'Android' / 'Sdk'), str(Path.home() / 'Library' / 'Android' / 'sdk')]
+    roots = [Path(p) for p in roots if p]
+    platforms = [p for root in roots for p in (root / 'platforms').glob('android-*/android.jar')]
+    suffix = '.bat' if os.name == 'nt' else ''
+    d8s = [p for root in roots for p in (root / 'build-tools').glob('*/d8' + suffix)]
+    java_home = os.environ.get('JAVA_HOME')
+    javac = shutil.which('javac') or (str(Path(java_home) / 'bin' / ('javac.exe' if os.name == 'nt' else 'javac')) if java_home else '')
+    if not javac or not platforms or not d8s:
+        raise SystemExit('building the phone payload needs javac and an Android SDK platform/build-tools (set JAVA_HOME and ANDROID_HOME)')
+    version = lambda p: tuple(int(x) for x in re.findall(r'\d+', p.parent.name))
+    platform = max(platforms, key=version)
+    d8 = max(d8s, key=version)
+    source = tool / 'nxnative' / 'dm' / 'android' / 'java' / 'org' / 'nx2a'
+    sources = sorted(source.glob('*.java'))
+    if not sources: raise SystemExit(f'no standalone Activity Java sources found in {source}')
+    work = tool / 'tools' / '.game-activity-build'
+    classes, dex = work / 'classes', work / 'dex'
+    shutil.rmtree(work, ignore_errors=True)
+    classes.mkdir(parents=True); dex.mkdir()
+    try:
+        subprocess.run([javac, '-source', '8', '-target', '8', '-classpath', str(platform), '-d', str(classes),
+                        *map(str, sources)], check=True)
+        subprocess.run([str(d8), '--min-api', '29', '--lib', str(platform), '--output', str(dex),
+                        *map(str, sorted(classes.rglob('*.class')))], check=True)
+        target = tool / 'tools' / 'game-activity.dex'
+        shutil.copy2(dex / 'classes.dex', target)
+        print(f'   standalone Activity DEX: {target} ({target.stat().st_size / 1024:.0f} KiB)')
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', required=True)
@@ -261,6 +300,7 @@ def main():
         src = REPO / name
         if not src.exists(): continue
         copy_tree(src, tool / name, skip=TOOL_SKIP)
+    compile_game_activity_dex(tool)
     # the tool's own patch script (the interpreter paths of the programs the porter starts) and the SDK's
     # globalization fix (the phone's .NET has no ICU): both are run by the app, so they travel with it
     shutil.copy2(REPO / 'packaging/android-apk/patch_interp.py', tool / 'tools/patch_interp.py')

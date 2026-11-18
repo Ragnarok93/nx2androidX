@@ -58,6 +58,21 @@ class Bundle(unittest.TestCase):
         e = by[ENTRIES[2][0]]; self.assertEqual((e[6], e[3]), (0, len(ENTRIES[2][2])))   # one zstd does not shrink: stored as it is
         self.assertEqual([e[0] for e in ents], sorted(e[0] for e in ENTRIES))
 
+    @unittest.skipUnless(ZSTD, 'no zstd in this Python')
+    def test_path_backed_entries_round_trip_without_retaining_spirv_bytes(self):
+        p = self.d / 'path-backed.dmsv'
+        entries = []
+        for key, stage, spv, reflection_data in ENTRIES:
+            source = self.d / f'{key:016x}.spv'
+            source.write_bytes(spv)
+            entries.append((key, stage, source, reflection_data))
+        ver, raw, stored = dmsv.write(p, entries, jobs=1)
+        self.assertEqual((ver, raw), (2, sum(len(e[2].read_bytes()) for e in entries)))
+        self.assertLess(stored, raw)
+        ver, got, _ = self.read(p)
+        expected = sorted((key, stage, source.read_bytes(), refl_data) for key, stage, source, refl_data in entries)
+        self.assertEqual((ver, got), (2, expected))
+
     def test_without_zstd_version1(self):   # a Python without compression.zstd or backports.zstd: version 1, and a [RED] line says why
         p, out = self.d / 'nz.dmsv', io.StringIO()
         with mock.patch.object(dmsv, 'zstd_mod', return_value=None), contextlib.redirect_stdout(out): ver = dmsv.write(str(p), ENTRIES)[0]

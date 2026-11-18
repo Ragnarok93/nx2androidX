@@ -978,8 +978,23 @@ def collect_nros(py, repo, romfs, dst, env, logs):
     return {l.split('\t')[0]: dst / (l.split('\t')[0] + '.nro') for l in (dst / 'nro.tsv').read_text().splitlines() if l and not l.startswith('#') and not l.startswith('refused\t')}
 
 
+def rewrite_workers(env, cpu_count=None):
+    """Maximum live patch_nso.py processes; Android's memory budget is a hard limit."""
+    cores = max(2, cpu_count if cpu_count is not None else (os.cpu_count() or 4))
+    limit = env.get('DM_REWRITE_JOBS')
+    if limit is None:  # keep the desktop rewriter's existing parallelism
+        return cores
+    try:
+        requested = int(limit)
+    except (ValueError, TypeError) as e:
+        raise BuildError('DM_REWRITE_JOBS must be a positive integer') from e
+    if requested < 1:
+        raise BuildError('DM_REWRITE_JOBS must be a positive integer')
+    return min(cores, requested)
+
+
 def rewrite(py, repo, exe_dir, out, env, logs, g):
-    """patch_nso.py on every code module (each writes its own <module>.* files, all the same build_src.sha256 line), each with its log, as many at once as the Mac has cores.
+    """patch_nso.py on every code module (each writes its own <module>.* files, all the same build_src.sha256 line), each with its log, with concurrency bounded by DM_REWRITE_JOBS on Android.
     The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those). Reused when the modules, patch_nso.py (with nso_code.py, nso_asm.py
     and the patch files of their builds), its switch and capstone are as at the last successful rewrite (Monster Hunter Rise's main alone takes 5.5 min)"""
     import capstone
@@ -999,7 +1014,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True); logs.mkdir(parents=True, exist_ok=True)
     if manifest.is_file(): shutil.copyfile(manifest, tmp / 'nro.tsv')   # refused-only manifests preserve the game's offline registration path too
     PROG.set(step=', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''), done=0, total=len(names), unit='modules')
-    procs, logf, todo, cores = {}, {}, list(names), max(2, os.cpu_count() or 4)
+    procs, logf, todo, cores = {}, {}, list(names), rewrite_workers(env)
     notes = {}   # the last progress line of each module: the tools print them (patch_nso.py), and the stage's note follows them
     try:
         while todo or procs:

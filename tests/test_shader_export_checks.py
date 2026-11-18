@@ -1,6 +1,8 @@
 """Run the export orchestration with a controlled external translator."""
 import ast
 import collections
+import gc
+import mmap
 import concurrent.futures as cf
 import contextlib
 import hashlib
@@ -40,6 +42,24 @@ def module(stage):
     return struct.pack(f'<{len(w)}I', *w)
 
 
+class PackageRecordIndex(unittest.TestCase):
+    def test_mmap_index_keeps_package_payloads_file_backed(self):
+        source = TOOLS / 'shader_vk.py'
+        tree = ast.parse(source.read_text())
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('records', 'record_at')]
+        env = {'mmap': mmap}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), env)
+        with tempfile.TemporaryDirectory(prefix='nx2a_shader_mmap_') as tmp:
+            path = Path(tmp) / 'shader.bin'
+            first, second = b'BTCDBTCD' + b'A' * 128, b'BTCDBTCD' + b'B' * 256
+            path.write_bytes(first + second)
+            with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                offsets = env['records'](mapped)
+                self.assertEqual(offsets, [0, len(first)])
+                self.assertEqual(env['record_at'](mapped, offsets, 0), first)
+                self.assertEqual(env['record_at'](mapped, offsets, 1), second)
+
+
 class ExportChecks(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='nx2a_export_check_'); self.addCleanup(self.tmp.cleanup)
@@ -76,13 +96,14 @@ class ExportChecks(unittest.TestCase):
         game = SimpleNamespace(table=lambda name: self.root / name)
         try: products = importlib.import_module('shader_products')
         except ModuleNotFoundError: products = None
-        env = dict(collections=collections, cf=cf, os=os, json=json, struct=struct,
+        env = dict(collections=collections, cf=cf, gc=gc, os=os, json=json, mmap=mmap, struct=struct,
                    tempfile=tempfile, subprocess=subprocess, dmsv=dmsv, Path=Path, re=re,
                    shader_products=products, GAME=game, MAP=str(table), XLATE_DLL='translator.dll',
                    a=SimpleNamespace(pkg=str(self.root/'pkg'), out=str(self.out), capture=None, keys='',
                                      jobs=self.jobs, dotnet='dotnet', zstd=0, report=str(self.report)),
                    STAGES={'vs': 0, 'cs': 5}, kinds_all=collections.Counter(),
                    captured=lambda _: {}, records=lambda _: [b'fixture'],
+                   record_at=lambda mapped, offsets, idx: offsets[idx],
                    job_for=lambda key, stage, rec, w: ({'key': key, 'attr': {}}, b''),
                    int_inputs=lambda _: {'0': 'uint'},
                    spirv_bindings=lambda _: (self.bindings, [1, 1, 1], {1: [0, 0, 0], 3: [0, 0, 0]}),

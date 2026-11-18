@@ -146,6 +146,7 @@ data class AppActions(
     val onStartPort: (file: File, cfg: GameConfig) -> Unit,
     val onCancelPort: () -> Unit,
     val onRun: (pack: File, name: String) -> Unit,
+    val onExportApk: (apk: File) -> Unit,
     val onStopGame: () -> Unit,
     val onToast: (String) -> Unit,
     val version: () -> String,

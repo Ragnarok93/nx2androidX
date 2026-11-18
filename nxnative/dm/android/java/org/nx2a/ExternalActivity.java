@@ -55,8 +55,10 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     private AlertDialog audioDialog;
     private final ExecutorService audioExecutor = Executors.newSingleThreadExecutor();
 
+
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        GameActivity.prepareEmbeddedPack(this);
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             try { pad = new OriginalPad(); } catch (IOException e) { android.util.Log.w("nx2a-dual", "original overlay unavailable", e); }
         }
@@ -80,6 +82,8 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
         external = new ExternalDisplay(this, this);
         external.start();
     }
+    @Override protected void onResume() { super.onResume(); }
+
     @Override protected void onDestroy() {
         if (external != null) external.stop();
         if (phonePad != null) phonePad.dismiss();

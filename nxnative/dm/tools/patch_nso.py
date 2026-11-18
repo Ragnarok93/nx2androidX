@@ -748,7 +748,11 @@ def disasm_fn(fa, fb):
 # and the table base before it) and a retry block reach each other by fall-through or by such branches, so each lies within one piece. Farther b / bl that cross a cut (calls and
 # tail calls) are checked once every piece is done: none may land inside a window or a retry block (far_into). With b up to 1 MB counted, tail calls between neighbouring functions left
 # 21,385 cut points in that 82 MB and pieces of up to 6.5 MB (about 4 GB while disassembled); with 64 KB, 185,228 points and none over PIECE
-BIG_FN, PIECE, PIECE_B = 0x40000, 0x40000, 0x10000
+# Capstone's per-instruction detail objects can use gigabytes for a multi-megabyte
+# piece. Prefer smaller safe cut windows on RAM-limited Android devices; Darwin
+# retains its existing, tested boundaries. Keep the existing branch-crossing safety distance.
+BIG_FN, PIECE, PIECE_B = ((0x10000, 0x10000, 0x10000) if TARGET == 'android'
+                         else (0x40000, 0x40000, 0x10000))
 def pieces(fa, fb):
     """[(start, end)] covering [fa, fb), and the far b / bl in it as [(site, target)]"""
     from array import array
@@ -842,6 +846,9 @@ for pi, (fa, fb) in enumerate(funcs):
         if fa <= a_ < fb: assert not any(t in inwin and t not in heads for t in tgt), f'jump table target into window {a_:x}'
     rmid_all |= rmid
     pieces_done += fb - fa
+    # Do not retain the final piece's potentially enormous Capstone detail graph
+    # during the patch emission and file-writing phases.
+    del insl, ws, inwin, heads, rmid
 if far_into:   # functions analysed in pieces (pieces above): their far b / bl, and every jump table's targets (a cut may follow a br x18), may not land inside a window or a retry block
     win_mid = {x.address for wseg in windows for x in wseg[1:]}
     for at, to in far_into: assert to not in win_mid and to not in rmid_all, f'far branch into a window or retry block {at:x}'

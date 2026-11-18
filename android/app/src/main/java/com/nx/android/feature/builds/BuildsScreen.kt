@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -115,11 +116,15 @@ private fun BuildsScreen(lib: LibraryState, viewModel: BuildsViewModel, uiState:
     val selected = uiState.history.firstOrNull { it.id == viewModel.selectedBuildId }
     val current = uiState.history.firstOrNull { it.id == viewModel.port.buildId }
 
-    Column(
-        Modifier.fillMaxWidth().verticalScroll(rememberPageScroll()).padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        when {
+    // Keep the page comfortable in portrait while preventing very wide landscape layouts from stretching
+    // every card across the entire display. Compose still uses density-independent sizing on compact screens.
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+        Column(
+            Modifier.fillMaxWidth().widthIn(max = 760.dp)
+                .verticalScroll(rememberPageScroll()).padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            when {
             selected != null -> {
                 TaskDetail(lib, selected, viewModel, actions, onLog, active = selected.id == viewModel.port.buildId && running)
                 QuietButton(stringResource(R.string.common_back), { viewModel.closeBuild() })
@@ -139,7 +144,8 @@ private fun BuildsScreen(lib: LibraryState, viewModel: BuildsViewModel, uiState:
                 if (uiState.history.isNotEmpty()) History(uiState, viewModel)
             }
         }
-        Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(12.dp))
+        }
     }
 }
 
@@ -188,12 +194,21 @@ private fun TaskDetail(lib: LibraryState, record: PortState.Record, viewModel: B
             viewModel.setTarget(File(record.game), record.config, savedConfigMissing = record.config == null)
         })
         if (record.phase == PortPhase.DONE && record.out.isNotEmpty()) {
-            val currentPack = lib.portFromPack(File(record.out))
-            if (currentPack != null) QuietButton(stringResource(R.string.builds_run_action), {
-                actions.onRun(currentPack.pack, GameIdentity.labelFor(File(record.game), currentPack))
-            })
-            else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
-                color = NxPalette.Danger)
+            val artifact = File(record.out)
+            if (record.out.endsWith(".apk", ignoreCase = true)) {
+                if (artifact.isFile) {
+                    Hint(stringResource(R.string.builds_artifact_path, artifact.absolutePath), size = 11.sp)
+                    CapsuleButton(stringResource(R.string.builds_export_apk), { actions.onExportApk(artifact) }, modifier = Modifier.fillMaxWidth())
+                } else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
+                    color = NxPalette.Danger)
+            } else {
+                val currentPack = lib.portFromPack(artifact)
+                if (currentPack != null) QuietButton(stringResource(R.string.builds_run_action), {
+                    actions.onRun(currentPack.pack, GameIdentity.labelFor(File(record.game), currentPack))
+                })
+                else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
+                    color = NxPalette.Danger)
+            }
         }
         if (record.phase != PortPhase.DONE && lib.portOf(File(record.game)) != null)
             Hint(stringResource(R.string.builds_old_pack_still_usable))

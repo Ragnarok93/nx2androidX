@@ -9,6 +9,7 @@ import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import com.nx.android.domain.porting.PortPhase
@@ -94,7 +95,7 @@ class MainActivity : ComponentActivity() {
 
     /** 界面语言：toast 与分享面板的标题从这里取词 */
     /** Which tab the screen opens on (the notification's tap says the builds page) */
-    var launchTab = 0
+    var launchTab = 1
     private var launchBuildId by mutableStateOf("")
 
     /** 手柄中心（首页顶栏的入口）：档案跟游戏共用同一个文件 */
@@ -119,7 +120,7 @@ class MainActivity : ComponentActivity() {
         onboarding.storageOk = storageGranted()
         onboarding.batteryOk = batteryUnrestricted()
         GamepadScan.start(this)   // 顶栏的手柄入口要知道有几只手柄接着
-        launchTab = intent?.getIntExtra(EXTRA_TAB, 0) ?: 0
+        launchTab = intent?.getIntExtra(EXTRA_TAB, 1) ?: 1
         launchBuildId = intent?.getStringExtra(EXTRA_BUILD_ID).orEmpty()
         if (!prefs.bool(PrefsStore.OB_COMPLETED)) onboarding.open()
         AppLog.init(this)
@@ -163,16 +164,16 @@ class MainActivity : ComponentActivity() {
             if (port.running || runtime.running || player.running || Player.playProcessAlive(this)) {
                 toast(locale.str(R.string.runtime_busy))
             } else if (file.canRead()) {
-                // 落位跟着这个游戏的数据包走：它在可移动卡上，新包就建在那儿（内部存储的那份不动）
-                val packDir = library.packDirOf(file)?.absolutePath
+                // Export a standalone APK beside the source game; no library pack directory is created.
                 PortService.start(this, file.absolutePath, prefs.keys,
                                   cfg.touch, cfg.fps60, cfg.experimental, cfg.aliasHeadroom,
-                                  cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay, packDir)
+                                  cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay)
             } else {
                 toast(locale.str(R.string.builds_needs_storage)); askStorage()
             }
         },
         onCancelPort = { PortService.cancel(this) },
+        onExportApk = { apk -> exportApk(apk) },
         onRun = { pack, name ->
             // 运行一个完成的移植：这个游戏还活着就把它带回前台（不重启），否则拉起 :play
             // （包是唯一真源，拷贝覆盖旧副本）
@@ -501,6 +502,36 @@ class MainActivity : ComponentActivity() {
     fun versionName(): String = AppVersion.of(this).ifEmpty { "?" }
 
     fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+
+    /** Saves a completed standalone APK through Android's document picker without copying it into another cache. */
+    private var pendingApkExport: File? = null
+    private val apkExportLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { uri ->
+        val source = pendingApkExport
+        pendingApkExport = null
+        if (uri == null || source == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            val error = withContext(Dispatchers.IO) {
+                runCatching {
+                    val output = contentResolver.openOutputStream(uri, "w")
+                        ?: throw java.io.IOException("the selected destination could not be opened")
+                    output.use { out -> source.inputStream().use { input -> input.copyTo(out, 1 shl 20) } }
+                }.exceptionOrNull()
+            }
+            if (error == null) toast(locale.str(R.string.builds_apk_saved, source.name))
+            else {
+                AppLog.line("[RED] the game APK could not be saved: ${error.message}")
+                toast(locale.str(R.string.builds_apk_save_failed, error.message ?: source.name))
+            }
+        }
+    }
+
+    private fun exportApk(apk: File) {
+        if (!apk.isFile) { toast(locale.str(R.string.lib_artifact_missing_state)); return }
+        pendingApkExport = apk
+        apkExportLauncher.launch(apk.name)
+    }
 
     /**
      * The log bundle's folder in the cache: the FileProvider serves it (res/xml/file_paths.xml), and the

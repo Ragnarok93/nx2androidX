@@ -10,7 +10,7 @@
 #                  DM_ROMFS row after them when the app reads its RomFS from another folder (porter/install.py, --romfs-at): that is a fact of one device, not of the pack
 #   settings.txt   the pause menu's first-launch defaults (the profile's setting rows, then the port's: --touch); the installer never replaces the player's own
 #   nx2a-data.json what the pack is: the game, the package, the version, the device features the profile requires (android.tsv requires), which the installer checks
-# Big trees are hard links into the extraction when the volume allows, so the pack takes no extra space; the pack is rebuilt whole when anything in it changes.
+# Big trees use hard links when possible (relative symbolic links for denied private hard links), avoiding extra copies; the pack is rebuilt when changed.
 import json, os, shutil, time
 from pathlib import Path
 from porter.revision import PLAYER_API_REVISION
@@ -21,19 +21,37 @@ OWNED = ('mods', 'RomFS', 'aoc', 'sysdata')            # folders the pack owns o
 ROMFS = 'RomFS'
 
 
-def link_or_copy(src, dst):
+def link_or_copy(src, dst, require_links=False):
     dst.parent.mkdir(parents=True, exist_ok=True)
     try: os.link(src, dst)
-    except OSError: shutil.copy2(src, dst)
+    except OSError as e:
+        if require_links:
+            try:
+                # Android can deny hard links even inside private storage. A relative
+                # symlink stays valid when embed-pack.partial becomes embed-pack, and
+                # ZIP creation later archives the target bytes, not the symlink.
+                os.symlink(os.path.relpath(src, dst.parent), dst)
+            except OSError as symlink_error:
+                raise OSError(f'cannot hard-link or create a symbolic link for {src} in private APK staging: '
+                              f'hard-link: {e}; symbolic link: {symlink_error}') from symlink_error
+            return
+        shutil.copy2(src, dst)
 
 
-def link_tree(src, dst):   # (files, bytes)
+def link_tree(src, dst, require_links=False):   # (files, bytes)
     n = b = 0
     for root, _, files in os.walk(src):
         for f in files:
             s = Path(root) / f
-            link_or_copy(s, dst / s.relative_to(src)); n += 1; b += s.stat().st_size
+            link_or_copy(s, dst / s.relative_to(src), require_links=require_links); n += 1; b += s.stat().st_size
     return n, b
+
+
+def embedded_files(pack):
+    """Stream actual file bytes to the standalone APK, including hard-link fallback targets."""
+    for path in sorted(pack.rglob('*')):
+        if path.is_file():
+            yield path
 
 
 def files_folder(package): return f'/sdcard/Android/data/{package}/files'
@@ -45,7 +63,7 @@ def romfs_sizes(d):   # {path in the RomFS: size} of the pack in d, '/'-separate
 
 
 def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, text=None,
-          host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None):
+          host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None, require_links=False):
     """Write the pack to dst (replacing it). profile: the AndroidProfile; package: the app's, when not the profile's; env: more env.txt rows, after the profile's; settings: settings.txt values over the profile's;
     files: {name in the pack: source} (the 60 fps memory writes, fpslock.tsv; the button-icon font; subfolders for the app's mode: host/, drivers/, overlay/, icon.png);
     text: {name in the pack: its text} (the launcher's lists: languages.txt, drivers.txt); host/icon/drivers: the app's artifacts, named in the manifest;
@@ -62,8 +80,8 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     for what, src, sub in (('the rewritten modules', patched, 'mods'), ('the RomFS', romfs, 'RomFS'), ('the DLC', aoc, 'aoc'), ('the system data', sysdata, 'sysdata')):
         if not src: continue
         if progress: progress(what)
-        dn, db = link_tree(src, tmp / sub); n += dn; b += db
-    if shaders: link_or_copy(shaders, tmp / 'shaders.dmsv'); n += 1; b += shaders.stat().st_size   # none for an OpenGL ES game
+        dn, db = link_tree(src, tmp / sub, require_links=require_links); n += dn; b += db
+    if shaders: link_or_copy(shaders, tmp / 'shaders.dmsv', require_links=require_links); n += 1; b += shaders.stat().st_size   # none for an OpenGL ES game
     for name, src in (files or {}).items():
         f = tmp / name
         f.parent.mkdir(parents=True, exist_ok=True)   # the app's files live in subfolders (host/, drivers/, overlay/)

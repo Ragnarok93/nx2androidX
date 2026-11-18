@@ -1332,9 +1332,13 @@ def _pool_run(item):
 
 def pool_map(fn, items, J, initargs, chunksize=1):
     """The work in a pool of processes. A host without /dev/shm (Android has none) cannot make the POSIX semaphores the
-    pool needs, so the children are forked instead (forkpool.py): the same work, in parallel, without semaphores"""
-    spill_flush()   # what this process wrote goes to disk before the children are forked (they inherit its handle)
+    pool needs, so the children are forked instead (forkpool.py): the same work, in parallel, without semaphores.
+    At J=1 run in this process: forking a second copy of the scan state only adds memory pressure."""
+    spill_flush()
     args = tuple(initargs) + (fn,)
+    if J <= 1:
+        _pool_init(*args)
+        return [_pool_run(item) for item in items]
     try:
         with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=args) as ex:
             return list(ex.map(_pool_run, items, chunksize=chunksize))

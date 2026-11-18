@@ -4,16 +4,16 @@ from pathlib import Path
 
 
 def _parser():
-    ap = argparse.ArgumentParser(prog='porter', description='Port your own Switch game files to an Android app (docs/ARCHITECTURE.md).')
+    ap = argparse.ArgumentParser(prog='porter', description='Port your own Switch game files into a self-contained Android APK or a legacy data pack (docs/ARCHITECTURE.md).')
     sub = ap.add_subparsers(dest='cmd', required=True)
     d = sub.add_parser('doctor', help='check the tools a port needs'); d.add_argument('--json', action='store_true'); d.add_argument('-k', '--keys')
     p = sub.add_parser('profiles', help='list the games the tool can port'); p.add_argument('--all', action='store_true', help='also the iOS profiles not ported to Android'); p.add_argument('--json', action='store_true')
     i = sub.add_parser('inspect', help='what a game holds and whether it can be ported'); i.add_argument('folder', help='the game file (NSP / XCI / NSZ / XCZ) or the folder with it'); i.add_argument('--json', action='store_true')
     i.add_argument('-k', '--keys', help='prod.keys (default: the configured one): reads the title ID of a dump with no [title ID] in its name')
-    po = sub.add_parser('port', help='make the data pack (the phone app runs the game)')
+    po = sub.add_parser('port', help='port a game to a standalone APK or a legacy data pack')
     po.add_argument('folder', help='the game file (NSP / XCI / NSZ / XCZ) or its folder: the updates and the DLC next to it are taken')
     po.add_argument('-k', '--keys', help='prod.keys (default: the configured one)')
-    po.add_argument('-o', '--out', help='folder for the data pack (default: the game folder)')
+    po.add_argument('-o', '--out', help='output folder for the APK or legacy data pack (default: the game folder)')
     po.add_argument('-p', '--version', default='', help='version to pack, v<N> (default: the newest in the folder)')
     po.add_argument('-l', '--language', default='', help='game language, a code or a name (default: English)')
     po.add_argument('--language-preferred', default='',
@@ -25,15 +25,16 @@ def _parser():
                       help="the nx2android app's mode (the default): no APK and no install step — the data pack carries the host "
                            "(libdmplay.so), the Vulkan drivers and the icon, and the app runs the game itself")
     mode.add_argument('--game-apk', action='store_false', dest='app',
-                      help="the fork's legacy path: a per-game APK as well (a separate app per game, installed over adb); unmaintained here — "
-                           "--install, --replace-signer, --package and --vercode-offset belong to it")
+                      help="legacy split-folder APK: the game data stays in a companion -data directory; use --self-contained-apk for one complete APK; APK install options work with either mode")
+    mode.add_argument('--self-contained-apk', action='store_true', dest='self_contained',
+                      help='export one installable APK per game, with the complete data pack embedded and extracted on first launch')
     po.set_defaults(app=True)
-    po.add_argument('--install', action='store_true', help='install the APK on the connected device afterwards (with --game-apk)')
-    po.add_argument('--device', default='', help='adb serial of the device to install on (with --game-apk)')
-    po.add_argument('--replace-signer', action='store_true', help='uninstall an app of the same package signed with another key first (deletes its saves) (with --game-apk)')
+    po.add_argument('--install', action='store_true', help='install the exported APK on the connected device afterwards')
+    po.add_argument('--device', default='', help='adb serial of the device to install on')
+    po.add_argument('--replace-signer', action='store_true', help='uninstall an app of the same package signed with another key first (deletes its saves)')
     po.add_argument('--debug', action='store_true', help='a development build: debug information, debuggable, DM_CTL key presses')
     po.add_argument('--experimental', action='store_true', help='try a game not ported to Android yet (a profile guessed from a survey of its files; it may not start)')
-    po.add_argument('--package', default='', help="the app's package instead of the profile's (a test install beside another build of the game) (with --game-apk)")
+    po.add_argument('--package', default='', help="the app's package instead of the profile's (a test install beside another build of the game) (with --game-apk or --self-contained-apk)")
     po.add_argument('--native-keyboard', action='store_true', help='use the Android Unicode keyboard (requires JDK and Android SDK platform/build-tools)')
     po.add_argument('--external-display', action='store_true', help='build the external-screen gamepad activity (requires Android SDK platform and build-tools)')
     po.add_argument('--fps60', action='store_true', help='60 fps: the profile\'s own frame-rate cap, else the community\'s FPSLocker-Warehouse config of the game\'s build, fetched from GitHub')
@@ -58,13 +59,13 @@ def _parser():
                          "(android.tsv sysdata: Mario Kart 8 Deluxe's Mii heads come from MiiModel); never shipped with the tool (default: the configured one)")
     po.add_argument('--vercode-offset', type=int, default=None, metavar='N',
                     help='add N (0-65535) to the APK\'s versionCode, so a rebuild of the same game version installs over a build with a higher one and keeps its saves '
-                         '(default: $NX2A_VERCODE_OFFSET, else 0) (with --game-apk)')
+                         '(default: $NX2A_VERCODE_OFFSET, else 0) (with --game-apk or --self-contained-apk)')
     po.add_argument('--alias-headroom', type=int, default=None, metavar='GB',
                     help='GB (0-48) of extra guest address space (the alias region) for a game with virtual address memory, for a game whose log shows '
                          '"AllocateAddressRegion refused (0x1803)" before it crashes; it uses no memory (default: 8 for a game version the profile was not '
                          'brought up on, none for one it was)')
     _romfs_at(po, 'with --install: ')
-    po.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
+    po.add_argument('--jobs', type=int, default=None)
     po.add_argument('--no-lsfg', action='store_true',
                     help='build the host without the frame generation (the lsfg/ code): the host is then smaller and the frame generation '
                          'reports "not in this build" (dm/android/build.py --no-lsfg)')
@@ -188,6 +189,8 @@ def cmd_port(a):
         env = os.environ.get('NX2A_VERCODE_OFFSET', '').strip() or '0'
         try: offset = int(env)
         except ValueError: print(f'NX2A_VERCODE_OFFSET is not a number: {env}', file=sys.stderr); return 2
+    if a.self_contained and (a.romfs_at is not None or a.romfs_push):
+        print('--romfs-at and --romfs-push are not supported by self-contained APK export; include the RomFS in the APK', file=sys.stderr); return 2
     if (a.romfs_at is not None or a.romfs_push) and not a.install:
         print('--romfs-at and --romfs-push are install options: add --install, or run porter install after the port', file=sys.stderr); return 2
     if a.romfs_at is not None or a.romfs_push:
@@ -197,7 +200,7 @@ def cmd_port(a):
         except BuildError as e: print(e, file=sys.stderr); return 2
     opts = pipeline.Options(folder=Path(a.folder), keys=Path(a.keys) if a.keys else None, firmware=Path(a.firmware) if a.firmware else None, out=Path(a.out) if a.out else None, version=a.version, language=a.language,
                                 language_preferred=a.language_preferred,
-                                app_name=a.app_name, app=a.app, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver,
+                                app_name=a.app_name, app=a.app and not a.self_contained, self_contained=a.self_contained, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver,
                                 vulkan_driver_dir=a.vulkan_driver_dir, shared_font=a.shared_font,
                                 vercode_offset=offset, alias_headroom=a.alias_headroom, romfs_at=a.romfs_at, romfs_push=a.romfs_push, external_display=a.external_display, native_keyboard=a.native_keyboard, jobs=a.jobs, no_lsfg=a.no_lsfg)
     return _with_progress(a.progress, lambda: pipeline.emit_result(pipeline.Port(opts).run()))
