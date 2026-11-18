@@ -326,7 +326,7 @@
     <string name="builds_start_hint">Pick a game file to start a port; the updates and the DLC next to it are taken along. It appears in the library when the build is done.</string>
     <string name="builds_output_location">APK destination</string>
     <string name="builds_output_auto">Automatic</string>
-    <string name="builds_output_location_hint">Internal sources export beside the game. SD-card sources export into this app’s writable SD-card exports folder. Build tools and compilation caches stay on internal storage. Removing the card makes its exports unavailable.</string>
+    <string name="builds_output_location_hint">Internal sources export beside the game. SD-card sources export into this app’s writable SD-card exports folder. Build tools and compilation caches stay on internal storage. Removing the drive makes its exports unavailable. Use Export APK after the build to copy the APK into a permanent folder (app-specific external files are deleted on uninstall).</string>
     <string name="builds_external_storage_unavailable">Selected SD card is unavailable or not writable. Reinsert it or choose Automatic.</string>
     <string name="builds_choose_game_file">Choose a game file</string>
     <string name="builds_target">Target</string>
@@ -513,6 +513,7 @@
     <string name="picker_switch_volume">Switch the storage volume</string>
     <string name="storage_internal">Internal storage</string>
     <string name="storage_sd_card">SD card (%1$s)</string>
+    <string name="storage_removable_volume">External storage (%1$s)</string>
     <string name="storage_role_workspace">Build cache</string>
     <string name="storage_role_pack">Data pack</string>
     <string name="storage_total">Total</string>

@@ -299,7 +299,7 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
                     label = stringResource(R.string.builds_output_location),
                     options = listOf("" to stringResource(R.string.builds_output_auto)) +
                         cardExports.map { (volume, path) ->
-                            path to stringResource(R.string.storage_sd_card, volume)
+                            path to stringResource(R.string.storage_removable_volume, volume)
                         },
                     current = cfg.outputDir,
                     onSelect = { path -> cfg = cfg.copy(outputDir = path); lib.setConfig(f, cfg) },

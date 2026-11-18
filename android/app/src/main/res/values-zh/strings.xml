@@ -325,7 +325,7 @@
     <string name="builds_start_hint">选择一个游戏文件开始移植；同目录的更新与 DLC 会自动带上。构建完成后它会在游戏库里出现。</string>
     <string name="builds_output_location">APK 导出位置</string>
     <string name="builds_output_auto">自动</string>
-    <string name="builds_output_location_hint">内部存储中的游戏导出到源文件旁；SD 卡中的游戏导出到此应用在卡上可写的 exports 文件夹。编译工具和缓存仍保留在内部存储。拔卡后产物将无法访问。</string>
+    <string name="builds_output_location_hint">内部存储中的游戏导出到源文件旁；SD 卡中的游戏导出到此应用在卡上可写的 exports 文件夹。编译工具和缓存仍保留在内部存储。拔掉外部存储后产物将无法访问。构建结束后可用「导出 APK」复制到永久存储位置（卸载应用会删除其专属外部文件夹）。</string>
     <string name="builds_external_storage_unavailable">所选 SD 卡不可用或不可写。请重新插入，或选择「自动」。</string>
     <string name="builds_choose_game_file">选择游戏文件</string>
     <string name="builds_target">目标</string>
@@ -512,6 +512,7 @@
     <string name="picker_switch_volume">切换存储卷</string>
     <string name="storage_internal">内部存储</string>
     <string name="storage_sd_card">SD 卡（%1$s）</string>
+    <string name="storage_removable_volume">外部存储（%1$s）</string>
     <string name="storage_role_workspace">构建缓存</string>
     <string name="storage_role_pack">数据包</string>
     <string name="storage_total">合计</string>

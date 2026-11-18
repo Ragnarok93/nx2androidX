@@ -95,7 +95,7 @@ object StorageVolumes {
             if (!path.startsWith("/storage/")) continue
             val root = path.substringBefore("/Android/data")
             if (root == internal.path || out.any { it.second.path == root }) continue
-            if (File(root).isDirectory) out += locale.str(R.string.storage_sd_card, root.substringAfterLast('/')) to File(root)
+            if (File(root).isDirectory) out += locale.str(R.string.storage_removable_volume, root.substringAfterLast('/')) to File(root)
         }
         return out
     }
