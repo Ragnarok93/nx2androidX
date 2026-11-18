@@ -182,6 +182,14 @@ val legacyFeatureDataImports = setOf(
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.StorageVolumes",
     "feature/settings/SettingsScreen.kt|com.nx.android.data.AppLocale",
     "feature/settings/SettingsScreen.kt|com.nx.android.data.LosslessDll",
+    "feature/builds/BuildsViewModel.kt|com.nx.android.data.PrefsStore",
+    "feature/builds/BuildsViewModel.kt|com.nx.android.data.porting.BuildSessionRepository",
+    "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.LogBundle",
+    "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.saves.SaveIo",
+    "feature/gamedetail/GameDetailViewModel.kt|com.nx.android.data.saves.SaveIo",
+    "feature/library/LibraryHeroDetails.kt|com.nx.android.data.library.GameProfile",
+    "feature/library/LibraryScreen.kt|com.nx.android.data.library.GameProfile",
+    "feature/library/LibraryStatus.kt|com.nx.android.data.library.GameProfile",
 )
 
 val checkArchitectureBoundaries by tasks.registering {
