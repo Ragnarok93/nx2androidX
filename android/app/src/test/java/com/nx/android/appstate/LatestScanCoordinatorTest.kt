@@ -56,7 +56,9 @@ class LatestScanCoordinatorTest {
             executor = executor,
             scan = { scans.incrementAndGet(); throw IllegalStateException("offline volume") },
             publish = {},
-            setScanning = { if (!it) finished.countDown(); synchronized(loading) { loading += it } },
+            // Record the completed state before releasing the awaiting test
+            // thread. Otherwise the latch can signal before loading.last() updates.
+            setScanning = { synchronized(loading) { loading += it }; if (!it) finished.countDown() },
             onFailure = {},
         )
         try {
