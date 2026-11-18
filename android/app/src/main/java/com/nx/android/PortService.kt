@@ -53,7 +53,8 @@ class PortService : Service() {
         const val ALIAS = "alias";
         const val FONT = "font";
         const val FIRMWARE = "firmware";
-        const val MT = "mt";
+        const val MT = "mt"
+        const val OUTPUT_DIR = "outputDir"
         // The Intent's extras: the port's parameters, handed over from the UI to the service
         // Intent 的 extra：移植的参数，从界面交到服务手里
 
@@ -64,7 +65,8 @@ class PortService : Service() {
         fun start(
             ctx: Context, game: String, keys: String,
             touch: Boolean, fps60: Boolean, exp: Boolean, aliasHeadroom: Int,
-            sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false
+            sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
+            outputDir: String = ""
         ) {
             val i = Intent(ctx, PortService::class.java)
                 .setAction(ACTION_START)
@@ -74,6 +76,7 @@ class PortService : Service() {
             if (sharedFont.isNotBlank()) i.putExtra(FONT, sharedFont)
             if (firmware.isNotBlank()) i.putExtra(FIRMWARE, firmware)
             if (mtReplay) i.putExtra(MT, true)
+            if (outputDir.isNotBlank()) i.putExtra(OUTPUT_DIR, outputDir)
             ContextCompat.startForegroundService(ctx, i)
         }
 
@@ -142,6 +145,18 @@ class PortService : Service() {
             return stop()
         }
         val keys = intent.getStringExtra(KEYS) ?: return stop()
+        val outputDir = intent.getStringExtra(OUTPUT_DIR).orEmpty()
+        if (outputDir.isNotEmpty()) {
+            // Validate once more in the service: an SD card can be ejected after
+            // the Build screen was drawn, before the background port starts.
+            val dir = File(outputDir)
+            val cards = com.nx.android.data.StorageVolumes.removableExportDirs(this)
+            if (cards.none { it.second.absolutePath == dir.absolutePath } ||
+                !dir.isDirectory || !dir.canWrite()) {
+                Toast.makeText(this, locale.str(R.string.builds_external_storage_unavailable), Toast.LENGTH_LONG).show()
+                return stop()
+            }
+        }
         // The state goes up before the foreground notification: the UI turns at once
         // 状态先起来，再挂前台通知：界面立刻转向
         val cfg = GameConfig(
@@ -181,7 +196,7 @@ class PortService : Service() {
                 intent.getBooleanExtra(FPS60, false), intent.getBooleanExtra(EXP, false),
                 intent.getIntExtra(ALIAS, ALIAS_AUTO),
                 intent.getStringExtra(FONT) ?: "", intent.getStringExtra(FIRMWARE) ?: "",
-                intent.getBooleanExtra(MT, false),
+                intent.getBooleanExtra(MT, false), outputDir,
             ) {
                 handler.post {
                     if (runner === taskRunner) {

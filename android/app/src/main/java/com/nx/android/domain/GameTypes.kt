@@ -60,6 +60,8 @@ data class GameConfig(
     val sharedFont: String = "",
     /** 多线程回放：游戏的 Vulkan 命令录到自己的线程上（热闹场景里更快；要关掉得重新移植） */
     val mtReplay: Boolean = false,
+    /** Selected mounted SD-card export directory; empty = automatic (source drive). */
+    val outputDir: String = "",
 )
 
 /**
@@ -74,10 +76,11 @@ object GameConfigJson {
         .put("touch", c.touch).put("fps60", c.fps60).put("exp", c.experimental)
         .put("alias", c.aliasHeadroom)
         .put("font", c.sharedFont).put("mt", c.mtReplay)
+        .put("output_dir", c.outputDir)
 
     fun decode(o: JSONObject): GameConfig = GameConfig(
         o.optBoolean("touch"), o.optBoolean("fps60"), o.optBoolean("exp"), o.optInt("alias", ALIAS_AUTO),
-        o.optString("font", ""), o.optBoolean("mt", false))
+        o.optString("font", ""), o.optBoolean("mt", false), o.optString("output_dir", ""))
 }
 
 /** Moves filename-keyed legacy options to title IDs once the library can identify their games. */

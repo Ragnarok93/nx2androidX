@@ -323,6 +323,10 @@
     <string name="lib_report_again">重新移植</string>
     <string name="builds_start_title">开始一次移植</string>
     <string name="builds_start_hint">选择一个游戏文件开始移植；同目录的更新与 DLC 会自动带上。构建完成后它会在游戏库里出现。</string>
+    <string name="builds_output_location">APK 导出位置</string>
+    <string name="builds_output_auto">自动</string>
+    <string name="builds_output_location_hint">内部存储中的游戏导出到源文件旁；SD 卡中的游戏导出到此应用在卡上可写的 exports 文件夹。编译工具和缓存仍保留在内部存储。拔卡后产物将无法访问。</string>
+    <string name="builds_external_storage_unavailable">所选 SD 卡不可用或不可写。请重新插入，或选择「自动」。</string>
     <string name="builds_choose_game_file">选择游戏文件</string>
     <string name="builds_target">目标</string>
     <string name="builds_source">来源：%1$s</string>

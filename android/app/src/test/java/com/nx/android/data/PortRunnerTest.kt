@@ -11,9 +11,9 @@ class PortRunnerTest {
     private fun args(aliasHeadroom: Int, touch: Boolean = false, fps60: Boolean = false,
                      experimental: Boolean = false, noLsfg: Boolean = false,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
-                     deviceLanguage: String = ""): List<String> =
+                     deviceLanguage: String = "", outputDir: String = ""): List<String> =
         PortRunner.portArgs("/sdcard/game.nsp", "/keys/prod.keys", touch, fps60,
-            experimental, aliasHeadroom, noLsfg, sharedFont, firmware, mtReplay, deviceLanguage)
+            experimental, aliasHeadroom, noLsfg, sharedFont, firmware, mtReplay, deviceLanguage, outputDir)
 
     @Test
     fun `Auto passes no address space at all`() {
@@ -28,6 +28,14 @@ class PortRunnerTest {
         val a = args(-1)
         assertFalse("no -o on the command line", a.contains("-o"))
         assertFalse("no --out on the command line", a.contains("--out"))
+    }
+
+    @Test
+    fun `a mounted SD card export directory is forwarded`() {
+        val a = args(-1, outputDir = "/storage/1234-5678/Android/data/com.nx.android/files/exports")
+        val i = a.indexOf("--out")
+        assertTrue(i >= 0)
+        assertEquals("/storage/1234-5678/Android/data/com.nx.android/files/exports", a[i + 1])
     }
 
     @Test

@@ -18,6 +18,14 @@ class GameConfigJsonTest {
     }
 
     @Test
+    fun `external APK export choice is persisted and legacy defaults stay automatic`() {
+        val dir = "/storage/ABCD-1234/Android/data/com.nx.android/files/exports"
+        val selected = GameConfig(outputDir = dir)
+        assertEquals(selected, GameConfigJson.decode(GameConfigJson.encode(selected)))
+        assertEquals("", GameConfigJson.decode(JSONObject().put("touch", true)).outputDir)
+    }
+
+    @Test
     fun `an old config without the alias reads as Auto`() {
         val old = JSONObject().put("touch", true).put("fps60", true).put("exp", false)
         val c = GameConfigJson.decode(old)
