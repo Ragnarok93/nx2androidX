@@ -240,6 +240,9 @@ class MainActivity : ComponentActivity() {
         // 文件管理器能不能看见 App 的私有目录（运行时、存档、日志）。文档提供器自己读这份设置。
         fileProvider = { prefs.bool(PrefsStore.FILE_PROVIDER, true) },
         onSetFileProvider = { on -> prefs.put(PrefsStore.FILE_PROVIDER, on) },
+        removableApkOutputs = {
+            StorageVolumes.removableExportDirs(this).map { (name, dir) -> name to dir.absolutePath }
+        },
         onShareLog = {
             lifecycleScope.launch {
                 val zip = withContext(Dispatchers.IO) {

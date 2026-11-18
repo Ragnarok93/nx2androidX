@@ -51,7 +51,6 @@ import com.nx.android.R
 import com.nx.android.appstate.LibraryState
 import com.nx.android.appstate.PortState
 import com.nx.android.data.AppLog
-import com.nx.android.data.StorageVolumes
 import com.nx.android.domain.ALIAS_AUTO
 import com.nx.android.domain.GameFile
 import com.nx.android.domain.GameIdentity
@@ -229,9 +228,8 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
     // 配置默认展开：选中游戏后玩家一眼看到当前选项
     var configOpen by remember(f.absolutePath) { mutableStateOf(true) }
     val storageOk = actions.storageOk()
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val cardExports = StorageVolumes.removableExportDirs(context)
-    val outputReady = cfg.outputDir.isBlank() || cardExports.any { it.second.absolutePath == cfg.outputDir }
+    val cardExports = actions.removableApkOutputs()
+    val outputReady = cfg.outputDir.isBlank() || cardExports.any { it.second == cfg.outputDir }
     val canStart = f.isFile && f.canRead() && envReady && storageOk && outputReady && !port.running && keys.isNotBlank() && status != GameStatus.PORTING
     val info = viewModel.gameInfo.info
 
@@ -300,8 +298,8 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
                 PickRow(
                     label = stringResource(R.string.builds_output_location),
                     options = listOf("" to stringResource(R.string.builds_output_auto)) +
-                        cardExports.map { (volume, dir) ->
-                            dir.absolutePath to stringResource(R.string.storage_sd_card, volume)
+                        cardExports.map { (volume, path) ->
+                            path to stringResource(R.string.storage_sd_card, volume)
                         },
                     current = cfg.outputDir,
                     onSelect = { path -> cfg = cfg.copy(outputDir = path); lib.setConfig(f, cfg) },
