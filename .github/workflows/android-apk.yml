@@ -42,6 +42,10 @@ permissions:
 
 jobs:
   apk:
+    # Signing passwords never go in logs, artifacts, or source. The runner only
+    # receives them through GitHub Actions secrets on trusted events.
+    env:
+      NX2A_KEYSTORE_PASSWORD: ${{ secrets.NX2A_KEYSTORE_PASSWORD }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -71,18 +75,28 @@ jobs:
             packaging/android-apk/.cache/nuget
           key: nx2a-android-payload-v1
       - name: the app's signing key
-        run: |
-          # A release is signed with the project's own key: it must be the key every earlier build was signed
-          # with, or a phone that installed one can never install this one over it. Without the secret the
-          # build falls back to the runner's throwaway debug key - fine for a look, useless for a player.
-          if [ -n "$NX2A_KEYSTORE_B64" ]; then
-            echo "$NX2A_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/nx2android.keystore"
-            echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android.keystore" >> "$GITHUB_ENV"
-          else
-            echo "::warning::the secret NX2A_KEYSTORE_B64 is missing: the APK carries the runner's debug key and cannot be installed over an earlier one"
-          fi
+        id: signer
         env:
           NX2A_KEYSTORE_B64: ${{ secrets.NX2A_KEYSTORE_B64 }}
+        run: |
+          # A throwaway debug key cannot update an installed APK. Only PRs may
+          # use one for verification; dispatches and tagged releases MUST have
+          # the same permanent key as previous production builds.
+          if [ -z "$NX2A_KEYSTORE_B64" ] || [ -z "$NX2A_KEYSTORE_PASSWORD" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "persistent=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::PR verification APK uses an ephemeral signing key and CANNOT update an installed app"
+            else
+              echo "::error::Missing NX2A_KEYSTORE_B64 or NX2A_KEYSTORE_PASSWORD: refusing to publish an APK with a throwaway signature"
+              exit 1
+            fi
+          else
+            printf '%s' "$NX2A_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/nx2android.keystore"
+            echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android.keystore" >> "$GITHUB_ENV"
+            keytool -list -keystore "$RUNNER_TEMP/nx2android.keystore" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" >/dev/null
+            echo "persistent=true" >> "$GITHUB_OUTPUT"
+            echo "Permanent signing key loaded and validated"
+          fi
       - name: the tests
         run: |
           python -m pip install -r requirements.txt
@@ -107,9 +121,22 @@ jobs:
           echo "name: nx2android-${ver}.apk"
       - name: the APK
         run: ls -la android/app/build/outputs/apk/release/*.apk
+      - name: verify the APK and signing identity
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          apksigner verify --min-sdk-version 26 --verbose "$apk"
+          if [ "${{ steps.signer.outputs.persistent }}" = "true" ]; then
+            expected=$(keytool -exportcert -keystore "$NX2A_KEYSTORE" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" | sha256sum | cut -d' ' -f1)
+            actual=$(apksigner verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+            [ -n "$actual" ] && [ "$actual" = "$expected" ] || {
+              echo "::error::APK signing certificate does not match the permanent keystore"
+              exit 1
+            }
+            echo "Verified permanent signing certificate fingerprint: $actual"
+          fi
       - uses: actions/upload-artifact@v7
         with:
-          name: nx2android-android-apk
+          name: ${{ steps.signer.outputs.persistent == 'true' && 'nx2android-android-apk' || 'nx2android-PR-EPHEMERAL-NOT-UPDATABLE' }}
           path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 14
       - if: startsWith(github.ref, 'refs/tags/')
