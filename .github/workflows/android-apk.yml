@@ -45,7 +45,7 @@ jobs:
     # Signing passwords never go in logs, artifacts, or source. The runner only
     # receives them through GitHub Actions secrets on trusted events.
     env:
-      NX2A_KEYSTORE_PASSWORD: ${{ secrets.NX2A_KEYSTORE_PASSWORD }}
+      NX2A_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.NX2A_KEYSTORE_PASSWORD || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -77,19 +77,17 @@ jobs:
       - name: the app's signing key
         id: signer
         env:
-          NX2A_KEYSTORE_B64: ${{ secrets.NX2A_KEYSTORE_B64 }}
+          NX2A_KEYSTORE_B64: ${{ github.event_name != 'pull_request' && secrets.NX2A_KEYSTORE_B64 || '' }}
         run: |
           # A throwaway debug key cannot update an installed APK. Only PRs may
           # use one for verification; dispatches and tagged releases MUST have
           # the same permanent key as previous production builds.
-          if [ -z "$NX2A_KEYSTORE_B64" ] || [ -z "$NX2A_KEYSTORE_PASSWORD" ]; then
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              echo "persistent=false" >> "$GITHUB_OUTPUT"
-              echo "::warning::PR verification APK uses an ephemeral signing key and CANNOT update an installed app"
-            else
-              echo "::error::Missing NX2A_KEYSTORE_B64 or NX2A_KEYSTORE_PASSWORD: refusing to publish an APK with a throwaway signature"
-              exit 1
-            fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "persistent=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::PR verification APK uses an ephemeral signing key and CANNOT update an installed app"
+          elif [ -z "$NX2A_KEYSTORE_B64" ] || [ -z "$NX2A_KEYSTORE_PASSWORD" ]; then
+            echo "::error::Missing NX2A_KEYSTORE_B64 or NX2A_KEYSTORE_PASSWORD: refusing to publish an APK with a throwaway signature"
+            exit 1
           else
             printf '%s' "$NX2A_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/nx2android.keystore"
             echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android.keystore" >> "$GITHUB_ENV"
