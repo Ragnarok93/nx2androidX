@@ -553,7 +553,7 @@ class Port:
         while pack_where is not None and not pack_where.exists() and pack_where.parent != pack_where:
             pack_where = pack_where.parent
         if self.o.self_contained:
-            # The pack is now hardlinked inside the private workspace. The compressed archive and
+            # The pack uses hard links or symlinks inside private workspace. The compressed archive and
             # signed APK are the only additional full-size files, both in the output directory.
             # APKs use classic ZIP offsets, so each of these is at most 4 GiB.
             export = 2 * min(game + (64 << 20), 0xffffffff)
@@ -1118,7 +1118,7 @@ class Port:
             archive = self.o.out / f'.{stem}.nx2a-data.zip.partial'
             checksum = self.aw / 'nx2a-data.sha256'
             archive.unlink(missing_ok=True)   # an interrupted attempt must not occupy disk on retry
-            pack_bytes = sum(p.stat().st_size for p in pack.rglob('*') if p.is_file() and not p.is_symlink())
+            pack_bytes = sum(p.stat().st_size for p in datapack.embedded_files(pack))
             # Leave enough room for both the archive and the signed APK. An overly large game may
             # compress to fit a classic APK, but budgeting for the 4 GiB worst case prevents an
             # hours-long successful translation followed by ENOSPC at the last step.
@@ -1131,9 +1131,8 @@ class Port:
                                  f'game compilation is cached and will resume after freeing space')
             try:
                 with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zf:
-                    for src in sorted(pack.rglob('*')):
-                        if src.is_file() and not src.is_symlink():
-                            zf.write(src, src.relative_to(pack).as_posix())
+                    for src in datapack.embedded_files(pack):
+                        zf.write(src, src.relative_to(pack).as_posix())
                 if archive.stat().st_size >= 0xffffffff:
                     raise BuildError('this game\'s compressed data archive exceeds the 4 GiB Android APK ZIP limit; '
                                      'a single self-contained APK cannot be exported by the current packaging format')
@@ -1290,7 +1289,7 @@ class Port:
         and the build's own folder stays on the phone's storage, where the programs that run during the build can live"""
         stem = f'{app_stem(self.g, self.app_name)}-data'
         if self.o.app: return self.pack_dir_root() / stem
-        if self.o.self_contained: return self.aw / 'embed-pack'   # same private filesystem as extracted RomFS: hardlinks, no multi-GB copy
+        if self.o.self_contained: return self.aw / 'embed-pack'   # private staging: hardlinks or symlinks, no multi-GB copy
         return self.o.out / stem
 
     def data(self):

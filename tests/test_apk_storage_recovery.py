@@ -31,15 +31,15 @@ class ApkStorageRecoveryTests(unittest.TestCase):
             datapack.link_tree(source, destination, require_links=True)
             self.assertEqual(original.stat().st_ino, (destination / "romfs.bin").stat().st_ino)
 
-    def test_hardlink_only_does_not_silently_copy_gigabytes(self):
+    def test_denied_hardlink_does_not_silently_copy_gigabytes(self):
         with tempfile.TemporaryDirectory() as root:
             src = Path(root) / "src"
             dst = Path(root) / "dst"
             src.write_bytes(b"data")
-            with mock.patch.object(datapack.os, "link", side_effect=OSError(errno.EXDEV, "cross device")):
-                with self.assertRaises(OSError):
-                    datapack.link_or_copy(src, dst, require_links=True)
-            self.assertFalse(dst.exists())
+            with mock.patch.object(datapack.os, "link", side_effect=OSError(errno.EACCES, "permission denied")):
+                datapack.link_or_copy(src, dst, require_links=True)
+            self.assertTrue(dst.is_symlink())
+            self.assertEqual(dst.read_bytes(), src.read_bytes())
 
     def test_android_private_and_emulated_storage_share_a_free_space_budget(self):
         with mock.patch.object(pipeline.resources, "is_android", return_value=True):

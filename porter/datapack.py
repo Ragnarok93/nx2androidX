@@ -10,7 +10,7 @@
 #                  DM_ROMFS row after them when the app reads its RomFS from another folder (porter/install.py, --romfs-at): that is a fact of one device, not of the pack
 #   settings.txt   the pause menu's first-launch defaults (the profile's setting rows, then the port's: --touch); the installer never replaces the player's own
 #   nx2a-data.json what the pack is: the game, the package, the version, the device features the profile requires (android.tsv requires), which the installer checks
-# Big trees are hard links into the extraction when the volume allows, so the pack takes no extra space; the pack is rebuilt whole when anything in it changes.
+# Big trees use hard links when possible (relative symbolic links for denied private hard links), avoiding extra copies; the pack is rebuilt when changed.
 import json, os, shutil, time
 from pathlib import Path
 from porter.revision import PLAYER_API_REVISION
@@ -26,7 +26,15 @@ def link_or_copy(src, dst, require_links=False):
     try: os.link(src, dst)
     except OSError as e:
         if require_links:
-            raise OSError(f'cannot hard-link {src} into the private APK staging folder: {e}') from e
+            try:
+                # Android can deny hard links even inside private storage. A relative
+                # symlink stays valid when embed-pack.partial becomes embed-pack, and
+                # ZIP creation later archives the target bytes, not the symlink.
+                os.symlink(os.path.relpath(src, dst.parent), dst)
+            except OSError as symlink_error:
+                raise OSError(f'cannot hard-link or create a symbolic link for {src} in private APK staging: '
+                              f'hard-link: {e}; symbolic link: {symlink_error}') from symlink_error
+            return
         shutil.copy2(src, dst)
 
 
@@ -37,6 +45,13 @@ def link_tree(src, dst, require_links=False):   # (files, bytes)
             s = Path(root) / f
             link_or_copy(s, dst / s.relative_to(src), require_links=require_links); n += 1; b += s.stat().st_size
     return n, b
+
+
+def embedded_files(pack):
+    """Stream actual file bytes to the standalone APK, including hard-link fallback targets."""
+    for path in sorted(pack.rglob('*')):
+        if path.is_file():
+            yield path
 
 
 def files_folder(package): return f'/sdcard/Android/data/{package}/files'
