@@ -105,6 +105,10 @@ jobs:
           bash packaging/android-apk/build_apk.sh release
         env:
           GH_TOKEN: ${{ github.token }}   # built-in token can download the public payload release
+      - name: Android JVM tests and dependency boundaries
+        run: |
+          cd android
+          ./gradlew :app:testDebugUnitTest :app:checkArchitectureBoundaries --console=plain
       - name: the APK's name
         id: apk
         run: |
