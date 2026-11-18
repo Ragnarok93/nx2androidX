@@ -235,7 +235,9 @@ fun AppRoot(
                     onDiagnosticLog = { logOpen = true },
                     onEnvCheck = { envCheckOpen = true })
             }
-            val volumes = remember(ctx, locale.mode) { StorageVolumes.list(ctx, locale) }
+            // Re-enumerate on each picker open: a removable card may have been
+            // inserted or ejected since the app was launched.
+            val volumes = remember(ctx, locale.mode, pickerReq) { StorageVolumes.list(ctx, locale) }
             pickerReq?.let { req ->
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f))) {
                     if (!actions.storageOk()) {
