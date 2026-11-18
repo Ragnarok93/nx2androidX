@@ -177,7 +177,6 @@ val legacyFeatureDataImports = setOf(
     "feature/environment/PhantomFixDialog.kt|com.nx.android.data.PhantomFix",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.GameIcon",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.GameLog",
-    "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.Player",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.SaveShare",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.StorageVolumes",
     "feature/settings/SettingsScreen.kt|com.nx.android.data.AppLocale",
