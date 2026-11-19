@@ -106,7 +106,9 @@ static void settings_save(void) {
     }
     fclose(f); rename(tmp, p);
 }
-void dm_haptics_android_start(JNIEnv *E, JavaVM *vm, jobject actctx, int on); void dm_haptics_android_tap(void); void dm_haptics_android_device(int id); void dm_haptics_android_set(int on);
+// The standalone NativeActivity exposes one controller player (index zero).
+// Keep the call sites in sync with haptics_android.c's per-player ABI.
+void dm_haptics_android_start(JNIEnv *E, JavaVM *vm, jobject actctx, int on); void dm_haptics_android_tap(void); void dm_haptics_android_device_player(int player, int id); void dm_haptics_android_set(int on);
 void dm_haptics_suspend(unsigned reason, int suspended);
 __attribute__((weak)) void dm_overlay_redraw(void) {}   // the backend presents the last frame again (the pause menu changed while the game is held)
 
@@ -553,7 +555,7 @@ static void *pad_watch(void *a) {
         }
         for (int k = 0; k < np; k++) { int still = 0; for (int i = 0; i < n; i++) still |= ids[i] == prev[k]; if (!still) LOG("[input] controller detached (device %d)", prev[k]); }
         if (atomic_exchange(&g_pads, nu) && !nu) {   // the last one went: the gamepad again, and the device's motor for rumble
-            atomic_store(&g_overlay, 1); dm_haptics_android_device(-1);
+            atomic_store(&g_overlay, 1); dm_haptics_android_device_player(0, -1);
             LOG("[input] no controller in use: the gamepad is shown");
         }
         memcpy(prev, ids, sizeof ids); memcpy(used, on, sizeof on); np = n;
@@ -1069,7 +1071,7 @@ static void touch_event(const dm_java_event *e) {
         int c = i < pc ? ctl_at(e->ptr[i].x, e->ptr[i].y, W, H) : -1;
         g_ptr_ctl[id] = c + 1;
         if (c >= 0 && OV_CTLS[c].kind == OV_MENU) { atomic_store(&g_menu_t, mono_ns()); dm_haptics_android_tap(); menu_grab(id, &OV_CTLS[c], e->ptr[i].x, e->ptr[i].y, W, H); }
-        if (!atomic_load(&g_overlay) && !atomic_load(&g_pads)) { atomic_store(&g_overlay, 1); dm_haptics_android_device(-1); }   // a touch brings the gamepad back (not over an attached controller)
+        if (!atomic_load(&g_overlay) && !atomic_load(&g_pads)) { atomic_store(&g_overlay, 1); dm_haptics_android_device_player(0, -1); }   // a touch brings the gamepad back (not over an attached controller)
     }
     uint64_t btn = 0; int32_t lx = 0, ly = 0, rx = 0, ry = 0; float kn[2][2] = {{0, 0}, {0, 0}}; int open = 0, held[2] = {0, 0};
     dm_touch t[16]; int n = 0;
@@ -1133,14 +1135,14 @@ static int handle_event(const dm_java_event *e) {
                 seen[k >> 3] |= (uint8_t)(1 << (k & 7)); LOG("[input] controller key %d (device %d): not mapped", k, e->device); }
             return 0;
         }
-        atomic_store(&g_overlay, 0); g_pad_used = 1; atomic_store(&g_pad_in, e->device); dm_haptics_android_device(e->device);   // a controller is in use: the gamepad steps aside (until a touch)
+        atomic_store(&g_overlay, 0); g_pad_used = 1; atomic_store(&g_pad_in, e->device); dm_haptics_android_device_player(0, e->device);   // a controller is in use: the gamepad steps aside (until a touch)
         if (atomic_load(&g_menu)) { if (down && e->key_repeat == 0) menu_key(bit); return 1; }
         if (down) g_btn |= bit; else if (e->key_action == AKEY_EVENT_ACTION_UP) g_btn &= ~bit;
         dm_pad_players(1); pad_publish(); return 1;
     }
     if (atomic_load(&g_tx_on) && ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK || (src & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD)) return 1;   // sticks: not for the text entry
     if ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK || (src & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD) {
-        g_pad_used = 1; atomic_store(&g_pad_in, e->device); dm_haptics_android_device(e->device);
+        g_pad_used = 1; atomic_store(&g_pad_in, e->device); dm_haptics_android_device_player(0, e->device);
         if (atomic_load(&g_menu)) {   // the hat moves the selection
             static float hx, hy; float x = e->axis[6], y = e->axis[7];
             if (y < -0.5f && hy >= -0.5f) menu_key(DM_BTN_UP); else if (y > 0.5f && hy <= 0.5f) menu_key(DM_BTN_DOWN);

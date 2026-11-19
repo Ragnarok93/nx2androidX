@@ -153,7 +153,10 @@ if failed and not a.keep_going: sys.exit(1)
 if a.only_compile: sys.exit(1 if failed else 0)
 
 LIBS = ['-landroid', '-llog', '-lvulkan', '-laaudio', '-lnativewindow', '-lmediandk', '-lz', '-lm', '-ldl']   # -lz: the gamepad theme's PNGs (overlay_theme.c)
-LDFLAGS = [TARGET, '-fuse-ld=lld', '-Wl,--error-limit=0', '-Wl,-z,max-page-size=16384', '-Wl,--build-id', '-Wl,-z,nostart-stop-gc']
+# A shared library can link successfully despite unresolved references, then
+# Android's dynamic loader crashes before NativeActivity.onCreate. Reject that
+# at APK export time instead (the old haptics ABI was such a case).
+LDFLAGS = [TARGET, '-fuse-ld=lld', '-Wl,--no-undefined', '-Wl,--error-limit=0', '-Wl,-z,max-page-size=16384', '-Wl,--build-id', '-Wl,-z,nostart-stop-gc']
 if a.play:   # libdmplay.so: the whole host + the JNI entry, statically linked (jni_android.c's header comment)
     r = subprocess.run([CC] + CC_EXTRA + LDFLAGS + ['-shared', '-Wl,-soname,libdmplay.so', '-o', str(out / 'libdmplay.so')] + [str(o) for o in common_objs + play_front + play_jni + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
     print(r.stderr.strip() if r.returncode else f'linked {out / "libdmplay.so"}', file=sys.stderr if r.returncode else sys.stdout)
