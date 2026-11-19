@@ -106,7 +106,8 @@ class SplitGameExportTests(unittest.TestCase):
 
     def test_denied_public_manifest_read_falls_back_to_system_picker(self):
         java = (ROOT / "nxnative/dm/android/java/org/nx2a/CompanionImporter.java").read_text(encoding="utf-8")
-        manifest_hash = java.index('info.getString("manifest_sha256").equals(digestFile(manifest))')
+        manifest_hash = java.index('info.getString("manifest_sha256").equals(digestFile(manifest))',
+                                   java.index("String baked = bakedDataPath(activity);"))
         guarded = java.rfind("try {", 0, manifest_hash)
         handled = java.index("catch (IOException | SecurityException inaccessible)", manifest_hash)
         dialog = java.index('new AlertDialog.Builder(activity)', handled)
