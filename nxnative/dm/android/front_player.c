@@ -400,6 +400,24 @@ void dm_menu_mode_set(int docked) { dm_set_opmode(docked ? 1 : 0); settings_save
 int dm_menu_mode_get(void) { return dm_opmode() != 0; }
 void dm_menu_edit_open(void) { LOG("[RED] [overlay] the layout editor is the app's now: the host has no editor to open"); }
 int dm_menu_state(void) { return -1; }   // the host has no panel of its own: the app's drawer is the only one
+// The Vulkan overlay formatter is compiled into all three host variants, even
+// when the player/headless front does not display the native menu. Its FG rows
+// still need these symbols at link time. The player has no menu-local FG state:
+// the Android app supplies the values via DM_LSFG_* environment settings.
+int dm_menu_fg_mult(void) {
+    const char *e = getenv("DM_LSFG_MULT");
+    int mult = e ? atoi(e) : 2;
+    return mult < 2 ? 2 : mult > 4 ? 4 : mult;
+}
+int dm_menu_fg_flow(void) {
+    const char *e = getenv("DM_LSFG_FLOW");
+    int flow = e ? atoi(e) : 75;
+    return flow <= 0 ? 0 : flow < 25 ? 25 : flow > 100 ? 100 : flow;
+}
+int dm_menu_fg_has_dll(void) {
+    const char *dll = getenv("DM_LSFG_DLL");
+    return dll && *dll && access(dll, R_OK) == 0;
+}
 
 // ---- the save manager (saves_android.c): the export runs on a thread of its own; the drawer shows its outcome ----
 static pthread_mutex_t g_sp_mu = PTHREAD_MUTEX_INITIALIZER;   // the export's note

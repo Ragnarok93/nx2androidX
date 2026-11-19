@@ -128,13 +128,17 @@ jobs:
           # The builder APK does not include libdmhost.so: each exported game
           # compiles its own. Build a real standalone host here and require all
           # symbols to resolve BEFORE accepting the porter test artifact.
+          # Also link the headless dmhost (used for Oodle shader decoding)
+          # and libdmplay.so: the two use front_player.c, not front_android.c.
           python nxnative/dm/android/build.py \
             --game 0100000000010000 \
             --ndk "$ANDROID_HOME/ndk/27.3.13750724" \
             --out "$RUNNER_TEMP/nx2a-native-host-smoke" \
-            --lib --release --jobs 4
+            --exe --lib --play --release --jobs 4
           so="$RUNNER_TEMP/nx2a-native-host-smoke/libdmhost.so"
           test -s "$so"
+          test -s "$RUNNER_TEMP/nx2a-native-host-smoke/dmhost"
+          test -s "$RUNNER_TEMP/nx2a-native-host-smoke/libdmplay.so"
           nmtool="$ANDROID_HOME/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           "$nmtool" -D --undefined-only "$so" | tee "$RUNNER_TEMP/nx2a-native-undef.txt"
           ! grep -E '\b(dm_haptics_android_device|dm_haptics_android_device_player)\b' "$RUNNER_TEMP/nx2a-native-undef.txt"
