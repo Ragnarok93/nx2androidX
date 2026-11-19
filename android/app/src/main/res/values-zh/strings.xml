@@ -217,6 +217,7 @@
     <string name="driver_note_7xx_oneui">Adreno 7xx，OneUI 的补丁</string>
     <string name="driver_note_6xx_7xx_8xx">Adreno 6xx / 7xx / 8xx（通用版）</string>
     <string name="driver_note_7xx_8xx_switch">Adreno 7xx / 8xx，为 Switch 模拟器调优</string>
+    <string name="driver_note_xclipse">三星 Xclipse GPU（Exynos 2200 / 2400 及支持的更新型号）；RADV</string>
     <string name="driver_pick_hint">默认用内置的 Turnip。想换成专为 Switch 模拟器调优的版本，到 设置 → Vulkan 驱动 下载 Turnip 710（Switch）；换了驱动下次启动生效。</string>
     <string name="driver_system_default">系统默认</string>
     <string name="driver_refused_no_driver">这个压缩包里没有驱动</string>
