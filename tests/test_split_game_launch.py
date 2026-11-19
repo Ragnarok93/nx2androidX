@@ -74,8 +74,8 @@ class SplitGameExportTests(unittest.TestCase):
             obj.aw = root
             expected = root / "storage" / "ABCD-1234" / "Download" / "nx2android-ports"
             with mock.patch.object(pipeline.datapack, "build",
-                                   return_value={"files": 0, "bytes": 0}) as build, \\
-                 mock.patch.object(pipeline, "PROG"), \\
+                                   return_value={"files": 0, "bytes": 0}) as build, \
+                 mock.patch.object(pipeline, "PROG"), \
                  mock.patch.object(pipeline, "say"):
                 pipeline.Port.data(obj, retry_split=True)
             self.assertEqual(obj.o.out, expected)
