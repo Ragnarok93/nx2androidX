@@ -943,13 +943,23 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
 // the game's own rate. with_meta: the game frame's extras (the sRGB pick on the first
 // present, the picture-rect report for the touch mapping); a generated frame follows what it chose, and never
 // flips (the chain was fed the texture already upright). period < 0: a redraw (ticket 0).
-static VkFormat im_meta_srgb;   // the game frame's sRGB pick: a generated frame follows it (present_window sets it)
+// Pick the scanout encoding from the source image on the actual present thread.
+// Async presents call present_one directly (not present_window), so a shared
+// metadata variable set only by present_window remained VK_FORMAT_UNDEFINED (0)
+// on that path and forced an unnecessary, incorrectly formatted swapchain.
+static VkFormat present_window_format(VkFormat src) {
+    return src == VK_FORMAT_R8G8B8A8_SRGB || src == VK_FORMAT_B8G8R8A8_SRGB || src == VK_FORMAT_A8B8G8R8_SRGB_PACK32
+        ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+}
 static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch, int flip, double period, uint64_t ticket, int with_meta) {
     // Count only after the swapchain accepted a present, not when a frame was
     // queued. The framegen images and paused redraws must not inflate source FPS.
     uint32_t k = g_pi++ % 8;
     vkWaitForFences(V.dev, 1, &g_pfence[k], 1, UINT64_MAX);
-    if (with_meta && im_meta_srgb != g_want) { g_want = im_meta_srgb; swap_destroy(); if (!swap_make()) return; }   // once, at the first present of the other kind
+    if (with_meta && im) {
+        VkFormat want = present_window_format(im->fmt);
+        if (want != g_want) { g_want = want; swap_destroy(); if (!swap_make()) return; }
+    }   // Recreate once if the source changes encoding, on both sync and async paths.
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
     if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return; }
@@ -1031,7 +1041,6 @@ static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch
 }
 static void present_window(vkimg_t *im, const int crop[4], double period, uint64_t ticket) {   // period: the game's frame period (s); < 0 for a redraw (ticket 0)
     int cx = crop ? crop[0] : 0, cy = crop ? crop[1] : 0, cw = crop && crop[2] ? crop[2] : (int)im->w, ch = crop && crop[3] ? crop[3] : (int)im->h;
-    im_meta_srgb = im->fmt == VK_FORMAT_R8G8B8A8_SRGB || im->fmt == VK_FORMAT_B8G8R8A8_SRGB || im->fmt == VK_FORMAT_A8B8G8R8_SRGB_PACK32 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     present_one(im, im->img, cx, cy, cw, ch, 1, period, ticket, 1);
 }
 // headless frame shots
