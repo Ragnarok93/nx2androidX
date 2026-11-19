@@ -52,7 +52,7 @@ public class GameActivity extends NativeActivity {
         keyboard.pause(false);
     }
 
-    private static boolean hasEmbeddedPack(Context context) {
+    static boolean hasEmbeddedPack(Context context) {
         try (InputStream marker = context.getAssets().open("nx2a-export-mode")) {
             return marker.read() >= 0;
         } catch (java.io.FileNotFoundException missing) {

@@ -104,6 +104,12 @@ class SplitGameExportTests(unittest.TestCase):
         self.assertIn('if (!root.exists() && backup.isDirectory() && !backup.renameTo(root))', java)
         self.assertLess(java.index('GameActivity.deleteTree(partial);'), java.index('long free = new StatFs('))
 
+    def test_bootstrap_draws_before_starting_game_native_activity(self):
+        java = (ROOT / "nxnative/dm/android/java/org/nx2a/BootstrapActivity.java").read_text(encoding="utf-8")
+        self.assertLess(java.index("setContentView(status"), java.index("CompanionImporter.prepare(this)"))
+        self.assertIn("intent.setClassName(getPackageName(), activityName)", java)
+        self.assertIn("void launchGame(String verifiedDataPath)", java)
+
     def test_standalone_apk_matches_builder_legacy_runtime_target(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")
         builder = (ROOT / "android/app/build.gradle.kts").read_text(encoding="utf-8")

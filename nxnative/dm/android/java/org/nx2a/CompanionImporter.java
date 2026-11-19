@@ -83,6 +83,7 @@ final class CompanionImporter {
 
     static boolean prepare(Activity activity) {
         if (!exists(activity)) return false;
+        final boolean bootstrap = activity instanceof BootstrapActivity;
         final JSONObject info;
         try {
             info = descriptor(activity);
@@ -94,8 +95,23 @@ final class CompanionImporter {
             if (!root.exists() && backup.isDirectory() && !backup.renameTo(root))
                 throw new IOException("Cannot recover the previous game data");
             if (cached(root, info.getString("manifest_sha256"))) {
-                GameActivity.embeddedPackReady();
+                if (bootstrap) ((BootstrapActivity) activity).launchGame(null);
+                else GameActivity.embeddedPackReady();
                 return true;
+            }
+            // The bootstrap checks zero-copy paths without calling native code.
+            // Only a running NativeActivity may call the libdmhost JNI bridge.
+            if (!bootstrap && activity.getIntent() != null) {
+                String verified = activity.getIntent().getStringExtra(BootstrapActivity.VERIFIED_DATA_PATH);
+                if (verified != null) {
+                    File folder = new File(verified);
+                    File manifest = new File(folder, MANIFEST);
+                    if (!folder.isDirectory() || !folder.canWrite() || !manifest.isFile()
+                            || !info.getString("manifest_sha256").equals(digestFile(manifest))
+                            || !GameActivity.companionPackReady(folder.getCanonicalPath()))
+                        throw new IOException("Cannot start the game from the verified data folder");
+                    return true;
+                }
             }
             // When the exported folder is still at its original location
             // and the OS gives this installed game raw read/write access,
@@ -111,6 +127,10 @@ final class CompanionImporter {
                         File probe = null;
                         try {
                             probe = File.createTempFile(".nx2a-write-", ".tmp", folder);
+                            if (bootstrap) {
+                                ((BootstrapActivity) activity).launchGame(folder.getCanonicalPath());
+                                return true;
+                            }
                             if (!GameActivity.companionPackReady(folder.getCanonicalPath()))
                                 Log.w("nx2a-companion", "Native player could not use the public pack; importing privately");
                             else return true;
@@ -173,7 +193,9 @@ final class CompanionImporter {
                 activity.runOnUiThread(() -> {
                     if (activity.isFinishing() || activity.isDestroyed()) return;
                     progress.dismiss();
-                    GameActivity.embeddedPackReady();
+                    if (activity instanceof BootstrapActivity)
+                        ((BootstrapActivity) activity).launchGame(null);
+                    else GameActivity.embeddedPackReady();
                 });
             } catch (Exception error) {
                 Log.e("nx2a-companion", "Game-data import failed", error);

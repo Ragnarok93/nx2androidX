@@ -93,6 +93,18 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertIn("nx2a-companion.json=", pipeline)
         self.assertIn("manifest_sha256", pipeline)
 
+    def test_phone_export_has_a_real_java_bootstrap_launcher(self):
+        source = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "nxnative/dm/android/java/org/nx2a/BootstrapActivity.java").read_text(encoding="utf-8")
+        importer = (ROOT / "nxnative/dm/android/java/org/nx2a/CompanionImporter.java").read_text(encoding="utf-8")
+        self.assertIn("external += ['--launcher-activity', 'org.nx2a.BootstrapActivity']", source)
+        self.assertIn("nx2a-player-activity=", source)
+        self.assertIn("setContentView(status", bootstrap)
+        self.assertIn("CompanionImporter.prepare(this)", bootstrap)
+        self.assertIn("GameActivity.extractEmbeddedPack(this)", bootstrap)
+        self.assertIn("launchGame(null)", importer)
+        self.assertIn("BootstrapActivity.VERIFIED_DATA_PATH", importer)
+
     def test_game_activity_is_launcher_when_optional_launcher_is_absent(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")
         pipeline = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
@@ -112,6 +124,7 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertIn('AAssetManager_open(a->assetManager, "nx2a-export-mode"', native)
         self.assertIn("Java_org_nx2a_GameActivity_embeddedPackReady", native)
         self.assertIn("GameActivity.prepareEmbeddedPack(this);", external)
+        self.assertIn("BootstrapActivity.java", "nxnative/dm/android/java/org/nx2a/BootstrapActivity.java")
 
 
 if __name__ == "__main__":

@@ -1199,6 +1199,16 @@ class Port:
         # Even a split APK needs the Java Activity: the native host must not start
         # before the companion-data folder is chosen and validated.
         external = self.external_activity()
+        # Android 12+ does not dismiss the OS launch splash until a frame is
+        # drawn. The NativeActivity cannot draw before its data import is
+        # finished; launch a regular Java Activity first so the folder-picker,
+        # extraction progress and any error are actually visible.
+        activity = external[external.index('--activity') + 1]
+        player_activity_file = self.aw / 'nx2a-player-activity'
+        player_activity_file.write_text(activity + '\n', encoding='ascii')
+        if '--launcher-activity' not in external:
+            external += ['--launcher-activity', 'org.nx2a.BootstrapActivity']
+        data_assets += ['--asset', f'nx2a-player-activity={player_activity_file}']
         driver = self.o.vulkan_driver
         if driver and driver.name != driver_lib_name(driver):   # packed under a lib*.so name (driver_lib_name), copied beside the host library
             driver = self.so.parent / driver_lib_name(driver); shutil.copyfile(self.o.vulkan_driver, driver)
@@ -1208,6 +1218,7 @@ class Port:
         if self.o.self_contained:
             cmd += data_assets
         else:
+            cmd += data_assets
             pack = self.data_dir()
             manifest = pack / datapack.MANIFEST
             if not manifest.is_file():
