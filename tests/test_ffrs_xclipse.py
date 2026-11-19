@@ -40,6 +40,12 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('g_npd >= pass_dump_limit()', part)
         self.assertIn('getenv("DM_VK_PASSDUMP_LIMIT")', exec_src)
         self.assertIn('g_npd < pass_dump_limit() - 1', exec_src)
+        # Shader pipelines can be present while GPU culling emits zero
+        # indirect primitives. The bounded probe reports arguments for the
+        # first 48 draws on two presents, without a GPU readback stall.
+        self.assertIn('DM_VK_INDIRECT_LOG_AT', exec_src)
+        self.assertIn('indirect_log(d);', exec_src)
+        self.assertIn('entries++ >= 48', exec_src)
 
     def test_xclipse_tuning_is_device_scoped_and_opt_out(self):
         src = FRONT.read_text(encoding="utf-8")
