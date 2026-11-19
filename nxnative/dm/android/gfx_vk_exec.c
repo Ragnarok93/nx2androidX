@@ -402,9 +402,17 @@ void vk_ubd_land(VkCommandBuffer cb); int vk_ubd_shadow(uint64_t a, uint64_t n, 
 // DM_VK_PASSDUMP_SIZE=WxH[,WxH...] (read when a dump starts): only passes whose first colour target has one of these sizes, over every submission of the frame (no depth),
 // to follow one effect's targets when the pass numbers move from frame to frame (Xenoblade Chronicles 3's 384x216 clouds)
 // DM_VK_PASSDUMP_FRAMES=N (read when a dump starts): keep dumping for N presents (up to 96 dumps in all), to catch an effect that is wrong in single frames
+// DM_VK_PASSDUMP_MIN_COLORS=N (live): only dump passes with at least N attached colour targets. UE's early scene/G-buffer
+// passes write multiple render targets; this avoids the final postprocessing+HUD-only captures of FFRS's missing characters.
+// DM_VK_PASSDUMP_LIMIT=N (live): cap GPU readback allocations to N images (1..96), preserving memory on 8 GB phones.
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; uint32_t w, h; VkFormat f; uint64_t fence; int pass; uint64_t present; } pdump_t;
 enum { PD_MAX = 96 };
-static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];   // state 0 off, 1 dumping this submission's passes, 2 waiting to write
+static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];
+static int pass_dump_limit(void) {
+    const char *e = getenv("DM_VK_PASSDUMP_LIMIT");
+    int n = e && *e ? atoi(e) : PD_MAX;
+    return n > 0 && n < PD_MAX ? n : PD_MAX;
+}   // state 0 off, 1 dumping this submission's passes, 2 waiting to write
 static void pass_dump_depth(void);
 static void texdump_flush(void);
 static void pass_dump(void) {
@@ -416,11 +424,17 @@ static void pass_dump(void) {
         if (!hit) return; } }                                                                                                                                       // over many frames
     { const char *pf = getenv("DM_VK_PASSDUMP_FMT"); int a, b;   // DM_VK_PASSDUMP_FMT=a/b (live): only passes whose first two colour formats are VkFormat a and b (pass numbers move)
       if (g_pd_state == 1 && pf && sscanf(pf, "%d/%d", &a, &b) == 2 && ((int)S.cfmt[0] != a || (int)S.cfmt[1] != b)) return; }
+    // Match the scene's G-buffer rather than the last full-screen composition
+    // when investigating models absent despite a complete HUD.
+    { const char *mc = getenv("DM_VK_PASSDUMP_MIN_COLORS");
+      int need = mc ? atoi(mc) : 0, have = 0;
+      if (need > 0) { for (int i = 0; i < S.ncol && i < 8; i++) if (S.rt_has_col[i]) have++;
+          if (have < need) return; } }
     if (g_pd_state == 1 && g_pd_from[0]) { char wh[32]; snprintf(wh, sizeof wh, "%ux%u", S.pass_w, S.pass_h); if (strcmp(wh, g_pd_from)) return; g_pd_from[0] = 0; }
     if (!g_pd_size[0]) pass_dump_depth();
     int ci = 0; while (ci < S.ncol && ci < 8 && !S.rt_has_col[ci]) ci++;   // the first colour target bound (Pokémon Legends: Arceus's G-buffer leaves colour 0 unbound)
     const char *pt = getenv("DM_VK_PASSDUMP_TARGET"); if (pt && *pt && atoi(pt) >= 0 && atoi(pt) < 8 && S.rt_has_col[atoi(pt)]) ci = atoi(pt);   // =n: colour target n where the pass has one
-    if (g_pd_state != 1 || g_npd >= PD_MAX || !S.ncol || ci >= S.ncol || ci >= 8) return;
+    if (g_pd_state != 1 || g_npd >= pass_dump_limit() || !S.ncol || ci >= S.ncol || ci >= 8) return;
     vkimg_t *im = vk_tex(&S.rt_col[ci]);
     if (im && g_pd_size[0]) { char wh[32]; snprintf(wh, sizeof wh, "%ux%u", im->w, im->h); const char *f = strstr(g_pd_size, wh); size_t l = strlen(wh);
         if (!f || (f != g_pd_size && f[-1] != ',') || (f[l] && f[l] != ',')) return;
@@ -469,7 +483,7 @@ static void texdump_flush(void) {   // DM_VK_TEXDUMP: outside a render pass (pas
     VKLOG("texdump: %ux%u fmt %d layers %u levels %u (level %u dumped) at pool %#llx+%#llx: dumps with pass -100 - layer", im->w, im->h, im->fmt, im->layers, im->levels, lv, (unsigned long long)im->pool, (unsigned long long)im->off);
 }
 static void pass_dump_depth(void) {   // the pass's depth (D24S8 / D32 / D16) as a pdump_t with f = the depth format; written as a grayscale stretched between its min and max
-    if (g_pd_state != 1 || g_npd >= PD_MAX || !S.rt_has_dep) return;
+    if (g_pd_state != 1 || g_npd >= pass_dump_limit() || !S.rt_has_dep) return;
     vkimg_t *im = vk_tex(&S.rt_dep); if (!im || !(im->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) return;
     uint32_t bpp = im->fmt == VK_FORMAT_D16_UNORM ? 2 : 4; VkDeviceSize n = (VkDeviceSize)im->w * im->h * bpp;
     pdump_t *d = &g_pd[g_npd++]; d->w = im->w; d->h = im->h; d->f = im->fmt; d->pass = g_sub_pass - 1; d->present = g_tex_frame;
@@ -493,7 +507,7 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         { const char *td = getenv("DM_VK_TEXDUMP"); const char *pl = td ? strchr(td, '+') : NULL; g_td_pool = pl ? strtoull(td, NULL, 16) : 0; g_td_off = pl ? strtoll(pl + 1, NULL, 16) : -1; g_td_im = NULL; g_td_done = 0; }
         const char *fr = getenv("DM_VK_PASSDUMP_FRAMES"); g_pd_frames = fr && atoi(fr) > 1 ? atoi(fr) : 1;
         g_pd_state = 1; g_npd = 0; setenv("DM_VK_PASSDUMP", "0", 1); VKLOG("pass dump: the next submission's passes from pass %d", g_pd_skip); return; }
-    if (g_pd_state == 1 && g_npd && --g_pd_frames > 0 && g_npd < PD_MAX - 8) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
+    if (g_pd_state == 1 && g_npd && --g_pd_frames > 0 && g_npd < pass_dump_limit() - 1) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
     if (g_pd_state == 1 && g_npd) { g_pd_state = 2; for (int i = 0; i < g_npd; i++) g_pd[i].fence = mtl_last_fence() + 1; return; }
     if (g_pd_state != 2 || !g_npd || done_fence < g_pd[g_npd - 1].fence) return;
     const char *root = getenv("DM_ROOT");
