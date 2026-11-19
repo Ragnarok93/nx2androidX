@@ -1414,6 +1414,12 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("DM_FPS_TARGET", "30", 0);
         LOG("[profile] FFRS S25 FE/RADV: game FPS target 30 (override with DM_FPS_TARGET=60)");
     }
+    // Handheld mode is 1280x720 rather than docked 1920x1080 on this
+    // NVN title. Allow the saved "docked" setting to override this on restart.
+    if (!getenv("DM_OPMODE")) {
+        setenv("DM_OPMODE", "0", 0);
+        LOG("[profile] FFRS S25 FE/RADV: handheld 720p rendering (change Docked in the game menu)");
+    }
     // JimVulkan's DCC_SMALL=0 affects only <=512x512 targets used by UE
     // post-processing; it is a conservative correctness diagnostic and may
     // cost some bandwidth. The larger render targets retain compression.
