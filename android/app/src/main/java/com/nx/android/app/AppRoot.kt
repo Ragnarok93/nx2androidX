@@ -453,7 +453,7 @@ fun MainScreen(prefs: PrefsStore, locale: AppLocale, port: PortState, library: L
                 Tab.LIBRARY -> LibraryRoute(libraryViewModel, port, player, actions,
                     onGoBuilds = { buildsViewModel.setTarget(lib.buildsTarget); tab = Tab.BUILDS.ordinal }, onRequest = onRequest,
                     navActive = navHost == NavHost.LIBRARY)
-                Tab.BUILDS -> BuildsRoute(buildsViewModel, prefs.keys, environmentSetup.ready, actions, onRequest, onLog)
+                Tab.BUILDS -> BuildsRoute(buildsViewModel, prefs.keys, environmentSetup.ready, installedDrivers, actions, onRequest, onLog)
             }
         }
         if (port.running || buildsViewModel.gameInfo.reading) {

@@ -52,6 +52,7 @@ import com.nx.android.appstate.LibraryState
 import com.nx.android.appstate.PortState
 import com.nx.android.data.AppLog
 import com.nx.android.domain.ALIAS_AUTO
+import com.nx.android.domain.drivers.Driver
 import com.nx.android.domain.GameFile
 import com.nx.android.domain.GameIdentity
 import com.nx.android.domain.GameInfo
@@ -88,7 +89,7 @@ private fun sourceMatchesTarget(target: File, candidate: File): Boolean {
  * 游戏库里点「▶ 构建」把游戏带进来（buildsTarget）；开始按钮在这里，前提的检查与说明也在这里。
  */
 @Composable
-fun BuildsRoute(viewModel: BuildsViewModel, keys: String, envReady: Boolean,
+fun BuildsRoute(viewModel: BuildsViewModel, keys: String, envReady: Boolean, installedDrivers: List<Driver>,
                 actions: AppActions, onRequest: (PickerRequest) -> Unit, onLog: (String) -> Unit) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val locale = LocalAppLocale.current
@@ -103,12 +104,12 @@ fun BuildsRoute(viewModel: BuildsViewModel, keys: String, envReady: Boolean,
             null -> Unit
         }
     }
-    BuildsScreen(viewModel.library, viewModel, uiState, keys, envReady, actions, onRequest, onLog)
+    BuildsScreen(viewModel.library, viewModel, uiState, keys, envReady, installedDrivers, actions, onRequest, onLog)
 }
 
 @Composable
 private fun BuildsScreen(lib: LibraryState, viewModel: BuildsViewModel, uiState: BuildsUiState,
-                         keys: String, envReady: Boolean, actions: AppActions,
+                         keys: String, envReady: Boolean, installedDrivers: List<Driver>, actions: AppActions,
                          onRequest: (PickerRequest) -> Unit, onLog: (String) -> Unit) {
     val locale = LocalAppLocale.current
     val running = uiState.running
@@ -130,7 +131,7 @@ private fun BuildsScreen(lib: LibraryState, viewModel: BuildsViewModel, uiState:
                 QuietButton(stringResource(R.string.common_back), { viewModel.closeBuild() })
             }
             target != null && viewModel.preparing && !running ->
-                TargetCard(lib, uiState, viewModel, keys, envReady, target, actions, onRequest)
+                TargetCard(lib, uiState, viewModel, keys, envReady, target, installedDrivers, actions, onRequest)
             current != null -> TaskDetail(lib, current, viewModel, actions, onLog, active = running)
             running -> ProgressCard(uiState, actions)
             else -> {
@@ -219,7 +220,7 @@ private fun TaskDetail(lib: LibraryState, record: PortState.Record, viewModel: B
 
 @Composable
 private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: BuildsViewModel, keys: String, envReady: Boolean,
-                       f: File, actions: AppActions, onRequest: (PickerRequest) -> Unit) {
+                       f: File, installedDrivers: List<Driver>, actions: AppActions, onRequest: (PickerRequest) -> Unit) {
     val locale = LocalAppLocale.current
     val status = lib.statusOf(f)
     var cfg by remember(f.absolutePath, viewModel.preparedConfig) {
@@ -316,6 +317,25 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
                 Hint(stringResource(R.string.fw_hint), size = 11.sp)
                 ConfigRow(stringResource(R.string.builds_mt_replay), cfg.mtReplay) { cfg = cfg.copy(mtReplay = it); lib.setConfig(f, cfg) }
                 Hint(stringResource(R.string.builds_mt_replay_hint), size = 11.sp)
+                // Installed drivers are not automatically included in exported game APKs.
+                // Choose a specific library before recompilation; the game's runtime
+                // status will then confirm a custom load or system fallback.
+                val driverChoices = listOf("" to "System Vulkan driver") +
+                    installedDrivers.filter { it.library.isFile }.map {
+                        it.library.absolutePath to it.label
+                    }
+                PickRow(
+                    "Vulkan driver (exported APK)", driverChoices, cfg.vulkanDriver,
+                    onSelect = { value ->
+                        cfg = cfg.copy(vulkanDriver = value.orEmpty())
+                        lib.setConfig(f, cfg)
+                    },
+                    fallback = "System Vulkan driver",
+                    hint = "Custom driver is packaged in the APK. Check its active status in the in-game Performance tab."
+                )
+                if (cfg.vulkanDriver.isNotBlank() && installedDrivers.none {
+                        it.library.isFile && it.library.absolutePath == cfg.vulkanDriver
+                    }) Hint("Selected driver is no longer installed. Select a driver or System before exporting.", size = 11.sp)
             }
 
             if (!canStart) {

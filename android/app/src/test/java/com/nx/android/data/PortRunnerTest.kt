@@ -11,9 +11,9 @@ class PortRunnerTest {
     private fun args(aliasHeadroom: Int, touch: Boolean = false, fps60: Boolean = false,
                      experimental: Boolean = false, noLsfg: Boolean = false,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
-                     deviceLanguage: String = ""): List<String> =
+                     deviceLanguage: String = "", vulkanDriver: String = ""): List<String> =
         PortRunner.portArgs("/sdcard/game.nsp", "/keys/prod.keys", touch, fps60,
-            experimental, aliasHeadroom, noLsfg, sharedFont, firmware, mtReplay, deviceLanguage)
+            experimental, aliasHeadroom, noLsfg, sharedFont, firmware, mtReplay, deviceLanguage, vulkanDriver)
 
     @Test
     fun `Auto passes no address space at all`() {
@@ -88,6 +88,20 @@ class PortRunnerTest {
         val i = a.indexOf("--language-preferred")
         assertTrue("the option is there", i >= 0)
         assertEquals("zh-CN", a[i + 1])
+    }
+
+    @Test
+    fun `selected RADV library is included in the exported game options`() {
+        val selected = "/data/user/0/com.nx.android/files/drivers/RADV/libvulkan_radeon.so"
+        val args = args(-1, vulkanDriver = selected)
+        val at = args.indexOf("--vulkan-driver")
+        assertTrue(at >= 0)
+        assertEquals(selected, args[at + 1])
+    }
+
+    @Test
+    fun `unselected driver never gets packed implicitly`() {
+        assertFalse(args(-1).contains("--vulkan-driver"))
     }
 
     @Test

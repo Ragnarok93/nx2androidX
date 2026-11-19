@@ -28,6 +28,14 @@ class GameConfigJsonTest {
     }
 
     @Test
+    fun `exported driver choice persists and legacy configs default to system`() {
+        val chosen = "/data/user/0/com.nx.android/files/drivers/RADV/libvulkan_radeon.so"
+        val config = GameConfig(vulkanDriver = chosen)
+        assertEquals(chosen, GameConfigJson.decode(GameConfigJson.encode(config)).vulkanDriver)
+        assertEquals("", GameConfigJson.decode(JSONObject()).vulkanDriver)
+    }
+
+    @Test
     fun `Auto is what a fresh config carries`() {
         assertEquals(ALIAS_AUTO, GameConfig().aliasHeadroom)
         assertEquals(0, GameConfig().copy(aliasHeadroom = 0).aliasHeadroom)
