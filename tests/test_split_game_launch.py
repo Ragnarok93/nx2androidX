@@ -101,6 +101,8 @@ class SplitGameExportTests(unittest.TestCase):
         self.assertIn('GameActivity.companionPackReady(', java)
         self.assertIn('Java_org_nx2a_GameActivity_companionPackReady', front)
         self.assertIn('Not enough free storage', java)
+        self.assertIn('if (!root.exists() && backup.isDirectory() && !backup.renameTo(root))', java)
+        self.assertLess(java.index('GameActivity.deleteTree(partial);'), java.index('long free = new StatFs('))
 
     def test_standalone_apk_matches_builder_legacy_runtime_target(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")

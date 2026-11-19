@@ -87,6 +87,12 @@ final class CompanionImporter {
         try {
             info = descriptor(activity);
             File root = new File(activity.getFilesDir(), "nx2a-data");
+            File backup = new File(activity.getFilesDir(), "nx2a-data.backup");
+            // A killed import may leave the previously working pack in backup
+            // between the two atomic renames. Recover it before deciding that
+            // a new import is required, preserving settings and old game data.
+            if (!root.exists() && backup.isDirectory() && !backup.renameTo(root))
+                throw new IOException("Cannot recover the previous game data");
             if (cached(root, info.getString("manifest_sha256"))) {
                 GameActivity.embeddedPackReady();
                 return true;
@@ -329,13 +335,15 @@ final class CompanionImporter {
         File target = new File(base, "nx2a-data");
         File partial = new File(base, "nx2a-data.partial");
         File backup = new File(base, "nx2a-data.backup");
+        // A previous interrupted import can occupy many gigabytes. Reclaim it
+        // BEFORE checking available storage; otherwise retries deadlock at ENOSPC.
+        GameActivity.deleteTree(partial);
         long bytes = info.getLong("bytes");
         long free = new StatFs(base.getAbsolutePath()).getAvailableBytes();
         if (free < bytes || free - bytes < (64L << 20))
             throw new IOException(String.format(Locale.US,
                 "Not enough free storage for game data: %.2f GiB required, %.2f GiB available",
                 (bytes + (64L << 20)) / 1073741824.0, free / 1073741824.0));
-        GameActivity.deleteTree(partial);
         if (!partial.mkdirs()) throw new IOException("Cannot create temporary game-data folder");
         try {
             CopyState state = new CopyState(activity, progress, bytes);
