@@ -1097,11 +1097,12 @@ class Port:
         PROG.end(f'{self.so.stat().st_size / 2**20:.1f} MB')
 
     # ---- apk: the host as a NativeActivity app, signed with the player's key ----
-    def apk(self):
+    def apk(self, *, retry_split=False):
         if self.o.app:   # the app's mode: the pack is the only artifact, the app runs the game itself
             self.result['mode'] = 'app'
             return
-        PROG.stage('APK')
+        if not retry_split:
+            PROG.stage('APK')
         stem = app_stem(self.g, self.app_name)
         self.apk_path = self.o.out / f'{stem}.apk'; self.o.out.mkdir(parents=True, exist_ok=True)
         icon = self.icon()
@@ -1138,6 +1139,19 @@ class Port:
                 try:
                     archive_size, level = datapack.write_embedded_zip(pack, archive, archive_budget)
                 except ValueError as e:
+                    # Android APKs use classic ZIP offsets. If the game cannot fit
+                    # even at maximum compression, retain the finished recompile
+                    # and produce a per-game APK plus companion data instead.
+                    if 'even maximum compatible ZIP compression cannot fit' in str(e):
+                        archive.unlink(missing_ok=True)
+                        say("Embedded game exceeds Android's APK size limit; "
+                            "exporting a separate game APK plus companion -data folder. "
+                            "Both outputs are required; nx2android is not required to run it.")
+                        self.o.self_contained = False
+                        self.data(retry_split=True)
+                        self.result['mode'] = 'apk+data'
+                        self.result['self_contained'] = False
+                        return self.apk(retry_split=True)
                     raise BuildError(str(e)) from e
                 say(f'embedded data pack: {pack_bytes / 2**30:.2f} GiB raw -> '
                     f'{archive_size / 2**30:.2f} GiB (DEFLATE level {level})')
@@ -1184,6 +1198,8 @@ class Port:
             shutil.rmtree(self.data_dir(), ignore_errors=True)
             self.result.pop('data', None)
         self.result['apk'] = str(self.apk_path)
+        if self.o.self_contained:
+            self.result['self_contained'] = True
         PROG.end(f'{self.apk_path.name}, {self.apk_path.stat().st_size / 2**20:.1f} MB')
 
     def external_activity(self):
@@ -1297,8 +1313,11 @@ class Port:
         if self.o.self_contained: return self.aw / 'embed-pack'   # private staging: hardlinks or symlinks, no multi-GB copy
         return self.o.out / stem
 
-    def data(self):
-        PROG.stage('data pack', step='button-icon font')
+    def data(self, *, retry_split=False):
+        if retry_split:
+            PROG.set(step='exporting companion game data (single APK is too large)')
+        else:
+            PROG.stage('data pack', step='button-icon font')
         font_env, font_files = self.button_font()
         shared_env, shared_files = self.shared_font()
         font_env, font_files = font_env + shared_env, {**font_files, **shared_files}
