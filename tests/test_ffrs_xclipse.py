@@ -43,6 +43,9 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('setenv("DM_OPMODE", "0", 0)', tune)
         self.assertIn('if (!getenv("RADV_XCLIPSE_DCC_SMALL"))', tune)
         self.assertIn('setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0)', tune)
+        self.assertIn('if (!getenv("DM_VK_RP"))', tune)
+        self.assertIn('setenv("DM_VK_RP", "0", 0)', tune)
+        self.assertIn('override with DM_VK_RP=1', tune)
         start = src.index("static void host_start_common(")
         code = src[start:src.index("static void host_start(", start)]
         self.assertLess(code.index("env_file(p);"), code.index("tune_ffrs_s25fe_radv();"))
