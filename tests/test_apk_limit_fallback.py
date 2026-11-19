@@ -44,7 +44,7 @@ class FakePort:
     def loader_so(self): return []
     def theme(self): return []
     def ui_font(self): return []
-    def external_activity(self): return []
+    def external_activity(self): return ['--dex', 'test-game-activity.dex', '--activity', 'org.nx2a.GameActivity']
 
     def data_dir(self):
         return self.aw / 'embed-pack' if self.o.self_contained else self.o.out / 'TestGame-data'
