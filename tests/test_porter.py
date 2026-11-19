@@ -339,10 +339,10 @@ class DataPack(unittest.TestCase):
         from types import SimpleNamespace
         t = Path(tempfile.mkdtemp(prefix='nx2a_test_font_'))
         try:
-            port = SimpleNamespace(o=SimpleNamespace(self_contained=False), aw=t / 'android', logs=t / 'logs', env=dict(os.environ, PYTHONUTF8='1'), package='org.nx2a.test',
+            port = SimpleNamespace(o=SimpleNamespace(app=False, self_contained=False), aw=t / 'android', logs=t / 'logs', env=dict(os.environ, PYTHONUTF8='1'), package='org.nx2a.test',
                                    data_dir=lambda: t / 'out-data')
             env, files = pipeline.Port.button_font(port)
-            self.assertEqual(env, [f'DM_SHARED_FONT_EXT={t / "out-data"}/nintendo_ext.ttf']); self.assertEqual(list(files), ['nintendo_ext.ttf'])
+            self.assertEqual(env, ['DM_SHARED_FONT_EXT=nintendo_ext.ttf']); self.assertEqual(list(files), ['nintendo_ext.ttf'])
             cmap = TTFont(files['nintendo_ext.ttf']).getBestCmap()
             self.assertTrue({0xE0E0, 0xE0E1, 0xE0E4, 0xE0E5, 0xE0EF, 0xE100} <= set(cmap))   # A, B, L, R, +, stick
             made = files['nintendo_ext.ttf'].stat().st_mtime_ns
@@ -359,7 +359,7 @@ class DataPack(unittest.TestCase):
             port = SimpleNamespace(o=SimpleNamespace(shared_font=None, app=False, self_contained=False), package='org.nx2a.test',
                                    data_dir=lambda: t / 'out-data')
             env, files = pipeline.Port.shared_font(port)
-            self.assertEqual(env, [f'DM_SHARED_FONT={datapack.files_folder("org.nx2a.test")}/standard.ttf'])   # the desktop: the install puts the pack in the app's files folder
+            self.assertEqual(env, ['DM_SHARED_FONT=standard.ttf'])   # the desktop: the install puts the pack in the app's files folder
             self.assertEqual(list(files), ['standard.ttf'])
             f = TTFont(files['standard.ttf'])
             cmap = f.getBestCmap()
