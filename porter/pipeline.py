@@ -1097,6 +1097,16 @@ class Port:
         PROG.end(f'{self.so.stat().st_size / 2**20:.1f} MB')
 
     # ---- apk: the host as a NativeActivity app, signed with the player's key ----
+    def fallback_split_apk(self, reason):
+        """Export the game's original-style APK and companion data without recompiling."""
+        say(f'{reason}; exporting a separate game APK plus companion -data folder. '
+            'Both outputs are required; nx2android is not required to run it.')
+        self.o.self_contained = False
+        self.data(retry_split=True)
+        self.result['mode'] = 'apk+data'
+        self.result['self_contained'] = False
+        return self.apk(retry_split=True)
+
     def apk(self, *, retry_split=False):
         if self.o.app:   # the app's mode: the pack is the only artifact, the app runs the game itself
             self.result['mode'] = 'app'
@@ -1131,10 +1141,10 @@ class Port:
             remaining = shutil.disk_usage(self.o.out).free
             required = 2 * min(pack_bytes + (64 << 20), 0xffffffff) + (256 << 20)
             if remaining < required:
-                raise BuildError(f'not enough free storage to export the standalone APK: '
-                                 f'about {required / 2**30:.1f} GiB needed for the compressed archive and APK, '
-                                 f'{remaining / 2**30:.1f} GiB free in {self.o.out}; '
-                                 f'game compilation is cached and will resume after freeing space')
+                return self.fallback_split_apk(
+                    f'Not enough storage for a single-file APK (needs '
+                    f'{required / 2**30:.1f} GiB of temporary space, '
+                    f'only {remaining / 2**30:.1f} GiB free)')
             try:
                 try:
                     archive_size, level = datapack.write_embedded_zip(pack, archive, archive_budget)
@@ -1144,14 +1154,8 @@ class Port:
                     # and produce a per-game APK plus companion data instead.
                     if 'even maximum compatible ZIP compression cannot fit' in str(e):
                         archive.unlink(missing_ok=True)
-                        say("Embedded game exceeds Android's APK size limit; "
-                            "exporting a separate game APK plus companion -data folder. "
-                            "Both outputs are required; nx2android is not required to run it.")
-                        self.o.self_contained = False
-                        self.data(retry_split=True)
-                        self.result['mode'] = 'apk+data'
-                        self.result['self_contained'] = False
-                        return self.apk(retry_split=True)
+                        return self.fallback_split_apk(
+                            "Embedded game exceeds Android's APK size limit")
                     raise BuildError(str(e)) from e
                 say(f'embedded data pack: {pack_bytes / 2**30:.2f} GiB raw -> '
                     f'{archive_size / 2**30:.2f} GiB (DEFLATE level {level})')
@@ -1350,7 +1354,10 @@ class Port:
                              pack_base=str(dst) if self.o.app else '.' if self.o.self_contained else None,   # the player app uses its own pack folder; a standalone APK resolves relative paths against its extracted pack
                              progress=lambda what: PROG.set(step=f'linking {what}'), require_links=self.o.self_contained)
         self.data_path = dst; self.result['data'] = str(dst)
-        PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
+        if retry_split:
+            PROG.set(step='companion game data ready')
+        else:
+            PROG.end(f'{man["files"]:,} files, {man["bytes"] / 2**30:.1f} GB')
 
     def lists(self):
         """The launcher's lists: the languages the game supports (languages.txt) and the drivers the APK carries (drivers.txt).
