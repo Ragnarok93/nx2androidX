@@ -54,6 +54,46 @@ def embedded_files(pack):
             yield path
 
 
+def write_embedded_zip(pack, archive, byte_limit):
+    """Write the standalone game's data ZIP without exceeding the APK's classic ZIP budget.
+
+    Android's installer needs a classic ZIP APK with a v2 signing block, so the embedded
+    asset must leave space for the host, drivers, metadata and signing block. The *inner*
+    ZIP may use ZIP64 (large RomFS files), but must itself fit as one APK asset.
+    First try fast DEFLATE for small packs; use level 9 when space is tight. Both
+    levels are readable by Android's java.util.zip.ZipInputStream.
+    """
+    import zipfile
+
+    if byte_limit <= 0:
+        raise ValueError('there is no space for the embedded game archive in an Android APK')
+    files = tuple(embedded_files(pack))
+    raw_bytes = sum(path.stat().st_size for path in files)
+    levels = (9,) if raw_bytes >= byte_limit else (1, 9)
+    last_size = 0
+    for level in levels:
+        archive.unlink(missing_ok=True)
+        overflow = False
+        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED,
+                             compresslevel=level, allowZip64=True) as zf:
+            for path in files:
+                zf.write(path, path.relative_to(pack).as_posix())
+                # Stop before spending more storage or CPU on an archive that can
+                # no longer fit. The context manager still closes the partial ZIP.
+                if zf.fp.tell() >= byte_limit:
+                    overflow = True
+                    break
+        last_size = archive.stat().st_size
+        if not overflow and last_size < byte_limit:
+            return last_size, level
+    raise ValueError(
+        f'even maximum compatible ZIP compression cannot fit this game in one '
+        f'installable APK (data alone is at least {last_size / 2**30:.2f} GiB; '
+        f'available APK data budget {byte_limit / 2**30:.2f} GiB). '
+        'Android APK ZIP64 is not supported; keep the compiled port cache for another export format'
+    )
+
+
 def files_folder(package): return f'/sdcard/Android/data/{package}/files'
 
 
