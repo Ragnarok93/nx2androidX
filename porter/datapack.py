@@ -77,11 +77,20 @@ def write_embedded_zip(pack, archive, byte_limit):
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED,
                              compresslevel=level, allowZip64=True) as zf:
             for path in files:
-                zf.write(path, path.relative_to(pack).as_posix())
-                # Stop before spending more storage or CPU on an archive that can
-                # no longer fit. The context manager still closes the partial ZIP.
-                if zf.fp.tell() >= byte_limit:
-                    overflow = True
+                # Stream within every file, too: Unreal/IoStore archives may be
+                # several gigabytes each. zf.write would finish the whole archive
+                # before checking the output budget and could exhaust storage.
+                info = zipfile.ZipInfo(path.relative_to(pack).as_posix())
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info._compresslevel = level
+                info.file_size = path.stat().st_size
+                with path.open('rb') as src, zf.open(info, 'w') as dst:
+                    while block := src.read(1 << 20):
+                        dst.write(block)
+                        if zf.fp.tell() >= byte_limit:
+                            overflow = True
+                            break
+                if overflow:
                     break
         last_size = archive.stat().st_size
         if not overflow and last_size < byte_limit:
