@@ -5,6 +5,7 @@
 // Version 1 orders everything with whole-pipeline barriers around passes, copies and dispatches.
 #include "gfx_vk.h"
 #include "gfx_vk_slot.h"
+#include "gfx_vk_passdump_plan.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -405,9 +406,23 @@ void vk_ubd_land(VkCommandBuffer cb); int vk_ubd_shadow(uint64_t a, uint64_t n, 
 // DM_VK_PASSDUMP_MIN_COLORS=N (live): only dump passes with at least N attached colour targets. UE's early scene/G-buffer
 // passes write multiple render targets; this avoids the final postprocessing+HUD-only captures of FFRS's missing characters.
 // DM_VK_PASSDUMP_LIMIT=N (live): cap GPU readback allocations to N images (1..96), preserving memory on 8 GB phones.
-typedef struct { VkBuffer b; VkDeviceMemory m; void *p; uint32_t w, h; VkFormat f; uint64_t fence; int pass; uint64_t present; } pdump_t;
+// DM_VK_PASSDUMP_ALL_COLORS=1: capture every bound MRT slot, rather than only the first.
+// DM_VK_PASSDUMP_STENCIL=1: capture stencil separately from depth when the attachment contains it.
+// DM_VK_PASSDUMP_MAX_MB=N: 128 MB default, 16..512 MB bound for all captured buffers.
+// DM_VK_PASSDUMP_RAW=1: also save exact, unclamped transfer bytes for reference comparisons.
+// Each capture writes pass_dump_manifest.tsv with present/pass, target slot, mip/layer, format, pool and raw byte hash.
+typedef struct { VkBuffer b; VkDeviceMemory m; void *p; uint32_t w, h; VkFormat f, view_fmt; VkDeviceSize bytes;
+    uint64_t fence, present, pool; int pass, target; uint32_t level, layer; int64_t off; } pdump_t;
 enum { PD_MAX = 96 };
 static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];
+static uint64_t g_pd_bytes;
+static uint64_t pass_dump_budget(void) {
+    const char *e = getenv("DM_VK_PASSDUMP_MAX_MB");
+    int mb = e && *e ? atoi(e) : 128;
+    if (mb < 16) mb = 16;
+    if (mb > 512) mb = 512;
+    return (uint64_t)mb * 1024 * 1024;
+}
 static int pass_dump_limit(void) {
     const char *e = getenv("DM_VK_PASSDUMP_LIMIT");
     int n = e && *e ? atoi(e) : PD_MAX;
@@ -415,44 +430,80 @@ static int pass_dump_limit(void) {
 }   // state 0 off, 1 dumping this submission's passes, 2 waiting to write
 static void pass_dump_depth(void);
 static void texdump_flush(void);
+static int pass_dump_color(int ci) {
+    if (ci < 0 || ci >= 8 || g_npd >= pass_dump_limit()) return 0;
+    vkimg_t *im = vk_tex(&S.rt_col[ci]);
+    if (!im || im->samples != 1) return 0;  // VkCmdCopyImageToBuffer requires a single-sampled source.
+    if (im->fmt != VK_FORMAT_R8G8B8A8_UNORM && im->fmt != VK_FORMAT_R8G8B8A8_SRGB &&
+        im->fmt != VK_FORMAT_R16G16B16A16_SFLOAT && im->fmt != VK_FORMAT_B8G8R8A8_UNORM &&
+        im->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 && im->fmt != VK_FORMAT_R16_SFLOAT &&
+        im->fmt != VK_FORMAT_R8_UNORM && im->fmt != VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
+        im->fmt != VK_FORMAT_R16G16_SFLOAT) return 0;
+    const view_t *cv = S.rt_has_cview[ci] ? &S.rt_cview[ci] : NULL;
+    uint32_t lv = cv && cv->set_levels ? cv->base_level : 0;
+    uint32_t ly = cv && cv->set_layers ? cv->min_layer : 0;
+    if (lv >= im->levels || ly >= im->layers) return 0; // Never silently capture a different subresource.
+    uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1;
+    if (g_pd_size[0]) {
+        char wh[32]; snprintf(wh, sizeof wh, "%ux%u", w, h);
+        const char *f = strstr(g_pd_size, wh); size_t len = strlen(wh);
+        if (!f || (f != g_pd_size && f[-1] != ',') || (f[len] && f[len] != ',')) return 0;
+    }
+    uint32_t bpp = im->fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 :
+                   im->fmt == VK_FORMAT_R16_SFLOAT ? 2 : im->fmt == VK_FORMAT_R8_UNORM ? 1 : 4;
+    VkDeviceSize n = (VkDeviceSize)w * h * bpp;
+    if (!vk_pd_budget_allows(g_pd_bytes, n, pass_dump_budget())) {
+        static int warned;
+        if (warned++ < 4) VKLOG("pass dump: skip c%d (%llu bytes); readback budget %llu MB reached",
+            ci, (unsigned long long)n, (unsigned long long)(pass_dump_budget() / 1048576));
+        return 0;
+    }
+    pdump_t *d = &g_pd[g_npd++];
+    *d = (pdump_t){.w = w, .h = h, .f = im->fmt, .view_fmt = S.cfmt[ci], .bytes = n,
+        .pass = g_sub_pass - 1, .present = g_tex_frame, .target = ci, .level = lv, .layer = ly,
+        .pool = im->pool, .off = im->off};
+    g_pd_bytes += n;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, n, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
+    VKCHK(vkCreateBuffer(V.dev, &bi, NULL, &d->b)); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(V.dev, d->b, &rq);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0)};
+    VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &d->m)); VKCHK(vkBindBufferMemory(V.dev, d->b, d->m, 0));
+    VKCHK(vkMapMemory(V.dev, d->m, 0, VK_WHOLE_SIZE, 0, &d->p));
+    VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
+    VkBufferImageCopy c = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1}, {0, 0, 0}, {w, h, 1}};
+    vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, d->b, 1, &c); vk_img_barrier_all(cb);
+    return 1;
+}
 static void pass_dump(void) {
     texdump_flush();
-    if (g_pd_state != 1) return;   // no dump armed: nothing below does anything then, and its three getenv calls at every pass's end were about 1% of the replay thread
-    if (g_pd_state == 1 && g_sub_pass - 1 < g_pd_skip) return;   // (a submission with fewer passes dumps nothing, and the next one is tried)
-    { const char *pp = getenv("DM_VK_PASSDUMP_PASS"); if (g_pd_state == 1 && pp && *pp) {   // DM_VK_PASSDUMP_PASS=n[,n...] (live): only these pass numbers of each submission,
-        int hit = 0; for (const char *q = pp; *q;) { char *e; long v = strtol(q, &e, 10); if (e == q) break; if (v == g_sub_pass - 1) hit = 1; q = *e ? e + 1 : e; }   // to follow a few passes
-        if (!hit) return; } }                                                                                                                                       // over many frames
-    { const char *pf = getenv("DM_VK_PASSDUMP_FMT"); int a, b;   // DM_VK_PASSDUMP_FMT=a/b (live): only passes whose first two colour formats are VkFormat a and b (pass numbers move)
-      if (g_pd_state == 1 && pf && sscanf(pf, "%d/%d", &a, &b) == 2 && ((int)S.cfmt[0] != a || (int)S.cfmt[1] != b)) return; }
-    // Match the scene's G-buffer rather than the last full-screen composition
-    // when investigating models absent despite a complete HUD.
+    if (g_pd_state != 1) return;
+    if (g_sub_pass - 1 < g_pd_skip) return;
+    { const char *pp = getenv("DM_VK_PASSDUMP_PASS");
+      if (pp && *pp) {
+          int hit = 0;
+          for (const char *q = pp; *q;) { char *e; long v = strtol(q, &e, 10);
+              if (e == q) break; if (v == g_sub_pass - 1) hit = 1; q = *e ? e + 1 : e; }
+          if (!hit) return;
+      } }
+    { const char *pf = getenv("DM_VK_PASSDUMP_FMT"); int a, b;
+      if (pf && sscanf(pf, "%d/%d", &a, &b) == 2 && ((int)S.cfmt[0] != a || (int)S.cfmt[1] != b)) return; }
     { const char *mc = getenv("DM_VK_PASSDUMP_MIN_COLORS");
       int need = mc ? atoi(mc) : 0, have = 0;
       if (need > 0) { for (int i = 0; i < S.ncol && i < 8; i++) if (S.rt_has_col[i]) have++;
           if (have < need) return; } }
-    if (g_pd_state == 1 && g_pd_from[0]) { char wh[32]; snprintf(wh, sizeof wh, "%ux%u", S.pass_w, S.pass_h); if (strcmp(wh, g_pd_from)) return; g_pd_from[0] = 0; }
-    if (!g_pd_size[0]) pass_dump_depth();
-    int ci = 0; while (ci < S.ncol && ci < 8 && !S.rt_has_col[ci]) ci++;   // the first colour target bound (Pokémon Legends: Arceus's G-buffer leaves colour 0 unbound)
-    const char *pt = getenv("DM_VK_PASSDUMP_TARGET"); if (pt && *pt && atoi(pt) >= 0 && atoi(pt) < 8 && S.rt_has_col[atoi(pt)]) ci = atoi(pt);   // =n: colour target n where the pass has one
-    if (g_pd_state != 1 || g_npd >= pass_dump_limit() || !S.ncol || ci >= S.ncol || ci >= 8) return;
-    vkimg_t *im = vk_tex(&S.rt_col[ci]);
-    if (im && g_pd_size[0]) { char wh[32]; snprintf(wh, sizeof wh, "%ux%u", im->w, im->h); const char *f = strstr(g_pd_size, wh); size_t l = strlen(wh);
-        if (!f || (f != g_pd_size && f[-1] != ',') || (f[l] && f[l] != ',')) return;
-        const char *dd = getenv("DM_VK_PASSDUMP_DEPTH"); if (dd && atoi(dd)) pass_dump_depth(); }   // DM_VK_PASSDUMP_DEPTH=1: the size-filtered passes' depth too
-    if (!im || (im->fmt != VK_FORMAT_R8G8B8A8_UNORM && im->fmt != VK_FORMAT_R8G8B8A8_SRGB && im->fmt != VK_FORMAT_R16G16B16A16_SFLOAT && im->fmt != VK_FORMAT_B8G8R8A8_UNORM &&
-                                                    im->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 && im->fmt != VK_FORMAT_R16_SFLOAT && im->fmt != VK_FORMAT_R8_UNORM && im->fmt != VK_FORMAT_A2B10G10R10_UNORM_PACK32 && im->fmt != VK_FORMAT_R16G16_SFLOAT)) return;
-    const view_t *cv = S.rt_has_cview[ci] ? &S.rt_cview[ci] : NULL;   // the view's level and layer (a cube face of an array, a mip)
-    uint32_t lv = cv && cv->set_levels ? cv->base_level : 0, ly = cv && cv->set_layers ? cv->min_layer : 0, w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1;
-    if (lv >= im->levels || ly >= im->layers) lv = ly = 0, w = im->w, h = im->h;
-    uint32_t bpp = im->fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : im->fmt == VK_FORMAT_R16_SFLOAT ? 2 : im->fmt == VK_FORMAT_R8_UNORM ? 1 : 4; VkDeviceSize n = (VkDeviceSize)w * h * bpp;
-    pdump_t *d = &g_pd[g_npd++]; d->w = w; d->h = h; d->f = im->fmt; d->pass = g_sub_pass - 1; d->present = g_tex_frame;
-    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, n, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
-    VKCHK(vkCreateBuffer(V.dev, &bi, NULL, &d->b)); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(V.dev, d->b, &rq);
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0)};
-    VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &d->m)); VKCHK(vkBindBufferMemory(V.dev, d->b, d->m, 0)); VKCHK(vkMapMemory(V.dev, d->m, 0, VK_WHOLE_SIZE, 0, &d->p));
-    VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
-    VkBufferImageCopy c = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1}, {0, 0, 0}, {w, h, 1}};
-    vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, d->b, 1, &c); vk_img_barrier_all(cb);
+    if (g_pd_from[0]) { char wh[32]; snprintf(wh, sizeof wh, "%ux%u", S.pass_w, S.pass_h);
+        if (strcmp(wh, g_pd_from)) return; g_pd_from[0] = 0; }
+    if (g_npd >= pass_dump_limit()) return;
+    uint8_t enabled[8] = {0}, slots[8] = {0};
+    for (int i = 0; i < S.ncol && i < 8; i++) enabled[i] = !!S.rt_has_col[i];
+    const char *all = getenv("DM_VK_PASSDUMP_ALL_COLORS");
+    const char *pt = getenv("DM_VK_PASSDUMP_TARGET");
+    int selected = pt && *pt ? atoi(pt) : -1;
+    unsigned n = vk_pd_select_colors(enabled, S.ncol > 0 ? (unsigned)S.ncol : 0,
+        selected, all && atoi(all), (unsigned)(pass_dump_limit() - g_npd), slots);
+    int copied = 0;
+    for (unsigned i = 0; i < n; i++) copied |= pass_dump_color(slots[i]);
+    const char *dd = getenv("DM_VK_PASSDUMP_DEPTH");
+    if (!g_pd_size[0] || (copied && dd && atoi(dd))) pass_dump_depth();
 }
 static void texdump_flush(void) {   // DM_VK_TEXDUMP: outside a render pass (pass_dump runs after its end)
     vkimg_t *im = g_td_im; if (!im || g_pd_state != 1) return; g_td_im = NULL; g_td_done = 1;
@@ -462,6 +513,8 @@ static void texdump_flush(void) {   // DM_VK_TEXDUMP: outside a render pass (pas
     uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1;
     VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
     for (uint32_t ly = 0; ly < im->layers && ly < 6 && g_npd < pass_dump_limit(); ly++) {
+        VkDeviceSize dump_bytes = (VkDeviceSize)w * h * 8;
+        if (!vk_pd_budget_allows(g_pd_bytes, dump_bytes, pass_dump_budget())) break;
         VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {w, h, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT,
             VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
         VkImage ti; VKCHK(vkCreateImage(V.dev, &ic, NULL, &ti)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(V.dev, ti, &rq);
@@ -471,7 +524,10 @@ static void texdump_flush(void) {   // DM_VK_TEXDUMP: outside a render pass (pas
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
         VkImageBlit r = {{VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1}, {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
         vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, ti, VK_IMAGE_LAYOUT_GENERAL, 1, &r, VK_FILTER_NEAREST); vk_img_barrier_all(cb);
-        pdump_t *d = &g_pd[g_npd++]; d->w = w; d->h = h; d->f = VK_FORMAT_R16G16B16A16_SFLOAT; d->pass = -100 - (int)ly; d->present = g_tex_frame;
+        pdump_t *d = &g_pd[g_npd++]; *d = (pdump_t){.w = w, .h = h, .f = VK_FORMAT_R16G16B16A16_SFLOAT,
+            .view_fmt = im->fmt, .bytes = dump_bytes, .pass = -100 - (int)ly,
+            .present = g_tex_frame, .target = -2, .level = lv, .layer = ly, .pool = im->pool, .off = im->off};
+        g_pd_bytes += dump_bytes;
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, (VkDeviceSize)w * h * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
         VKCHK(vkCreateBuffer(V.dev, &bi, NULL, &d->b)); vkGetBufferMemoryRequirements(V.dev, d->b, &rq);
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0)};
@@ -482,18 +538,39 @@ static void texdump_flush(void) {   // DM_VK_TEXDUMP: outside a render pass (pas
     }
     VKLOG("texdump: %ux%u fmt %d layers %u levels %u (level %u dumped) at pool %#llx+%#llx: dumps with pass -100 - layer", im->w, im->h, im->fmt, im->layers, im->levels, lv, (unsigned long long)im->pool, (unsigned long long)im->off);
 }
-static void pass_dump_depth(void) {   // the pass's depth (D24S8 / D32 / D16) as a pdump_t with f = the depth format; written as a grayscale stretched between its min and max
+static void pass_dump_depth_aspect(VkImageAspectFlags aspect) {
     if (g_pd_state != 1 || g_npd >= pass_dump_limit() || !S.rt_has_dep) return;
-    vkimg_t *im = vk_tex(&S.rt_dep); if (!im || !(im->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) return;
-    uint32_t bpp = im->fmt == VK_FORMAT_D16_UNORM ? 2 : 4; VkDeviceSize n = (VkDeviceSize)im->w * im->h * bpp;
-    pdump_t *d = &g_pd[g_npd++]; d->w = im->w; d->h = im->h; d->f = im->fmt; d->pass = g_sub_pass - 1; d->present = g_tex_frame;
+    vkimg_t *im = vk_tex(&S.rt_dep);
+    if (!im || !(im->aspect & aspect) || im->samples != 1) return;
+    const view_t *dv = S.rt_has_dview ? &S.rt_dview : NULL;
+    uint32_t lv = dv && dv->set_levels ? dv->base_level : 0;
+    uint32_t ly = dv && dv->set_layers ? dv->min_layer : 0;
+    if (lv >= im->levels || ly >= im->layers) return;
+    uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1;
+    uint32_t bpp = aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? 1 :
+                   im->fmt == VK_FORMAT_D16_UNORM ? 2 : 4;
+    VkDeviceSize n = (VkDeviceSize)w * h * bpp;
+    if (!vk_pd_budget_allows(g_pd_bytes, n, pass_dump_budget())) return;
+    pdump_t *d = &g_pd[g_npd++];
+    *d = (pdump_t){.w = w, .h = h,
+        .f = aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? VK_FORMAT_S8_UINT : im->fmt,
+        .view_fmt = im->fmt, .bytes = n, .pass = g_sub_pass - 1, .present = g_tex_frame,
+        .target = aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? -3 : -1,
+        .level = lv, .layer = ly, .pool = im->pool, .off = im->off};
+    g_pd_bytes += n;
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, n, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
     VKCHK(vkCreateBuffer(V.dev, &bi, NULL, &d->b)); VkMemoryRequirements rq; vkGetBufferMemoryRequirements(V.dev, d->b, &rq);
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0)};
-    VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &d->m)); VKCHK(vkBindBufferMemory(V.dev, d->b, d->m, 0)); VKCHK(vkMapMemory(V.dev, d->m, 0, VK_WHOLE_SIZE, 0, &d->p));
+    VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &d->m)); VKCHK(vkBindBufferMemory(V.dev, d->b, d->m, 0));
+    VKCHK(vkMapMemory(V.dev, d->m, 0, VK_WHOLE_SIZE, 0, &d->p));
     VkCommandBuffer cb = vk_cmd(); vk_img_barrier_all(cb);
-    VkBufferImageCopy c = {0, 0, 0, {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, {0, 0, 0}, {im->w, im->h, 1}};
+    VkBufferImageCopy c = {0, 0, 0, {aspect, lv, ly, 1}, {0, 0, 0}, {w, h, 1}};
     vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, d->b, 1, &c); vk_img_barrier_all(cb);
+}
+static void pass_dump_depth(void) {
+    pass_dump_depth_aspect(VK_IMAGE_ASPECT_DEPTH_BIT);
+    const char *e = getenv("DM_VK_PASSDUMP_STENCIL");
+    if (e && atoi(e)) pass_dump_depth_aspect(VK_IMAGE_ASPECT_STENCIL_BIT);
 }
 static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31, e = (h >> 10) & 31, m = h & 1023, f;
     if (!e) { if (!m) f = s; else { e = 1; while (!(m & 1024)) { m <<= 1; e--; } m &= 1023; f = s | ((e + 112) << 23) | (m << 13); } } else if (e == 31) f = s | 0x7f800000 | (m << 13); else f = s | ((e + 112) << 23) | (m << 13);
@@ -506,13 +583,36 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         const char *sz = getenv("DM_VK_PASSDUMP_SIZE"); snprintf(g_pd_size, sizeof g_pd_size, "%s", sz && strcmp(sz, "0") ? sz : "");
         { const char *td = getenv("DM_VK_TEXDUMP"); const char *pl = td ? strchr(td, '+') : NULL; g_td_pool = pl ? strtoull(td, NULL, 16) : 0; g_td_off = pl ? strtoll(pl + 1, NULL, 16) : -1; g_td_im = NULL; g_td_done = 0; }
         const char *fr = getenv("DM_VK_PASSDUMP_FRAMES"); g_pd_frames = fr && atoi(fr) > 1 ? atoi(fr) : 1;
-        g_pd_state = 1; g_npd = 0; setenv("DM_VK_PASSDUMP", "0", 1); VKLOG("pass dump: the next submission's passes from pass %d", g_pd_skip); return; }
+        g_pd_state = 1; g_npd = 0; g_pd_bytes = 0; setenv("DM_VK_PASSDUMP", "0", 1);
+        { const char *root = getenv("DM_ROOT"); char path[1024];
+          snprintf(path, sizeof path, "%s/pass_dump_manifest.tsv", root ? root : ".");
+          FILE *mf = fopen(path, "w");
+          if (mf) { fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\n", mf); fclose(mf); } }
+        VKLOG("pass dump: next submission from pass %d, limit %d images, %llu MB raw readback",
+            g_pd_skip, pass_dump_limit(), (unsigned long long)(pass_dump_budget() / 1048576)); return; }
     if (g_pd_state == 1 && g_npd && --g_pd_frames > 0 && g_npd < pass_dump_limit() - 1) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
     if (g_pd_state == 1 && g_npd) { g_pd_state = 2; for (int i = 0; i < g_npd; i++) g_pd[i].fence = mtl_last_fence() + 1; return; }
     if (g_pd_state != 2 || !g_npd || done_fence < g_pd[g_npd - 1].fence) return;
     const char *root = getenv("DM_ROOT");
     for (int i = 0; i < g_npd; i++) {
         pdump_t *d = &g_pd[i]; char path[1024]; snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
+        // done_fence covers this buffer's transfer write; HOST_CACHED does not imply HOST_COHERENT.
+        VkMappedMemoryRange inv = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, NULL, d->m, 0, VK_WHOLE_SIZE};
+        VKCHK(vkInvalidateMappedMemoryRanges(V.dev, 1, &inv));
+        uint64_t raw_hash = vk_pd_hash(d->p, (size_t)d->bytes);
+        VKLOG("pass dump %02d: present %llu pass %d target %d mip %u layer %u %ux%u storage/view formats %d/%d pool %#llx+%lld bytes %llu raw FNV1a64 %016llx",
+            i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
+            d->f, d->view_fmt, (unsigned long long)d->pool, (long long)d->off,
+            (unsigned long long)d->bytes, (unsigned long long)raw_hash);
+        { char mfpath[1024]; snprintf(mfpath, sizeof mfpath, "%s/pass_dump_manifest.tsv", root ? root : ".");
+          FILE *mf = fopen(mfpath, "a");
+          if (mf) { fprintf(mf, "%d\t%llu\t%d\t%d\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llx\t%lld\t%016llx\tpass_%02d.ppm\n",
+              i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
+              d->f, d->view_fmt, (unsigned long long)d->bytes, (unsigned long long)d->pool,
+              (long long)d->off, (unsigned long long)raw_hash, i); fclose(mf); } }
+        { const char *raw = getenv("DM_VK_PASSDUMP_RAW");
+          if (raw && atoi(raw)) { char rp[1100]; snprintf(rp, sizeof rp, "%s/pass_%02d.raw", root ? root : ".", i);
+              FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(d->p, 1, (size_t)d->bytes, rf); fclose(rf); } } }
         VKLOG("pass dump %02d is the submission's pass %d (present %llu)", i, d->pass, (unsigned long long)d->present);
         FILE *f = fopen(path, "wb"); if (!f) continue; fprintf(f, "P6\n%u %u\n255\n", d->w, d->h);
         uint8_t *row = malloc((size_t)d->w * 3); uint64_t bad = 0; float mx = 0, mn = 0; double sum = 0;
@@ -545,7 +645,7 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
                 else { uint32_t w = ((const uint32_t *)d->p)[(size_t)y * d->w + x];   // 11-bit and 10-bit floats: a half's exponent and top mantissa bits
                     v3[0] = half2f((uint16_t)((w & 0x7ff) << 4)); v3[1] = half2f((uint16_t)((w >> 11 & 0x7ff) << 4)); v3[2] = half2f((uint16_t)((w >> 22 & 0x3ff) << 5)); }
                 for (int c = 0; c < 3; c++) { float v = v3[c]; if (v != v || v > 65000.f || v < -65000.f) { bad++; v = 1; } if (v > mx) mx = v; if (v < mn) mn = v; sum += v; row[3 * x + c] = (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : v * 255 + .5f); } }
-            else if (d->f == VK_FORMAT_R8_UNORM) row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = ((const uint8_t *)d->p)[(size_t)y * d->w + x];
+            else if (d->f == VK_FORMAT_R8_UNORM || d->f == VK_FORMAT_S8_UINT) row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = ((const uint8_t *)d->p)[(size_t)y * d->w + x];
             else if (d->f == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { uint32_t w = ((const uint32_t *)d->p)[(size_t)y * d->w + x]; for (int c = 0; c < 3; c++) row[3 * x + c] = (uint8_t)((w >> (10 * c) & 0x3ff) >> 2); }
             else { const uint8_t *p = (const uint8_t *)d->p + ((size_t)y * d->w + x) * 4; int bgr = d->f == VK_FORMAT_B8G8R8A8_UNORM; row[3 * x] = p[bgr ? 2 : 0]; row[3 * x + 1] = p[1]; row[3 * x + 2] = p[bgr ? 0 : 2]; } }
             fwrite(row, 1, (size_t)d->w * 3, f); }
@@ -558,7 +658,7 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
             VKLOG("   texels:%s", t); }
         vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL);
     }
-    g_npd = 0; g_pd_state = 0;
+    g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;
 }
 // DM_VK_CRUMBS=1 (start-up), for a device lost (a GPU hang): every pass end and dispatch writes {submission, pass} into host-visible memory after a full barrier, and the host
 // keeps the shaders each pass drew with; when the device is lost (vk_crumbs_report), the last work the GPU finished and the passes after it are logged
