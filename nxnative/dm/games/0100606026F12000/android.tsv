@@ -29,3 +29,14 @@ tested	v65536 Lenovo Legion Y700 TB322FC (Snapdragon 8 Elite, Adreno 830, Androi
 package	org.nx2a.finalfantasyresonance
 orientation	landscape
 graphics	nvn
+# Keep the Vulkan gameplay FPS overlay on by default for fresh exports.
+# Existing player settings.txt is preserved; it may keep the previous toggle.
+setting	fps=1
+# The 60 FPS default is from an Adreno 830 tablet. On Galaxy S25 FE
+# (SM-S731*, Exynos 2400/Xclipse 940) with JimVulkan RADV Xclipse only,
+# front_android.c selects UE's 30 FPS target (DM_FPS_TARGET=30) and disables
+# small-render-target DCC, a conservative starting point for investigating
+# incorrect UE post-processing. Other devices and drivers keep their defaults.
+# Remove this row or set it to 0 to opt out. Explicit DM_FPS_TARGET and
+# RADV_XCLIPSE_DCC_SMALL values in env.txt take priority over the defaults.
+env	DM_FFRS_S25FE_RADV_TUNE=1
