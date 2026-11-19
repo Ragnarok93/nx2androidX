@@ -97,7 +97,7 @@ class SplitGameExportTests(unittest.TestCase):
         self.assertIn('manifest_sha256', java)
         self.assertIn('GameActivity.embeddedPackReady()', java)
         self.assertIn('new Thread(', java)
-        self.assertIn('not enough free storage', java)
+        self.assertIn('Not enough free storage', java)
 
     def test_standalone_apk_matches_builder_legacy_runtime_target(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")
