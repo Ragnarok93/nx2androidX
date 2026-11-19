@@ -109,6 +109,9 @@ class SplitGameExportTests(unittest.TestCase):
         self.assertLess(java.index("setContentView(status"), java.index("CompanionImporter.prepare(this)"))
         self.assertIn("intent.setClassName(getPackageName(), activityName)", java)
         self.assertIn("void launchGame(String verifiedDataPath)", java)
+        self.assertIn("firstFrameDrawn = true;", java)
+        self.assertIn("if (!firstFrameDrawn)", java)
+        self.assertIn("status.post(() -> launchGame(path))", java)
 
     def test_standalone_apk_matches_builder_legacy_runtime_target(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")

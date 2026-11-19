@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.ViewTreeObserver;
 import android.view.ViewGroup;
 import android.widget.TextView;
 import java.io.BufferedReader;
@@ -28,6 +29,9 @@ import java.nio.charset.StandardCharsets;
 public final class BootstrapActivity extends Activity {
     static final String VERIFIED_DATA_PATH = "org.nx2a.VERIFIED_DATA_PATH";
     private boolean launching;
+    private boolean firstFrameDrawn;
+    private boolean pendingLaunch;
+    private String pendingDataPath;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -40,6 +44,20 @@ public final class BootstrapActivity extends Activity {
         status.setPadding(24, 24, 24, 24);
         setContentView(status, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Even a cached-data launch must display at least one real frame before
+        // handing off. Otherwise finishing here in onCreate can transfer the
+        // system splash straight to a NativeActivity that cannot draw yet.
+        status.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                status.getViewTreeObserver().removeOnPreDrawListener(this);
+                firstFrameDrawn = true;
+                if (pendingLaunch) {
+                    String path = pendingDataPath;
+                    status.post(() -> launchGame(path));
+                }
+                return true;
+            }
+        });
         Log.i("nx2a-bootstrap", "First-launch bootstrap displayed");
 
         // CompanionImporter will either verify a cached pack and launch, or
@@ -86,6 +104,12 @@ public final class BootstrapActivity extends Activity {
 
     void launchGame(String verifiedDataPath) {
         if (launching || isFinishing() || isDestroyed()) return;
+        if (!firstFrameDrawn) {
+            pendingLaunch = true;
+            pendingDataPath = verifiedDataPath;
+            return;
+        }
+        pendingLaunch = false;
         launching = true;
         try {
             String activityName = "org.nx2a.GameActivity";
