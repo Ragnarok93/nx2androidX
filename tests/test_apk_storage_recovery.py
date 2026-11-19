@@ -105,6 +105,18 @@ class ApkStorageRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cannot fit this game"):
                 datapack.write_embedded_zip(pack, Path(root) / "oversized.zip", 16 * 1024)
 
+    def test_large_incompressible_file_stops_at_budget_instead_of_writing_entire_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            pack = Path(root) / "pack"
+            pack.mkdir()
+            (pack / "already-compressed.ucas").write_bytes(os.urandom(12 << 20))
+            archive = Path(root) / "partial.zip"
+            with self.assertRaisesRegex(ValueError, "cannot fit this game"):
+                datapack.write_embedded_zip(pack, archive, 1 << 20)
+            # The 12 MiB IoStore-like file must be stopped mid-stream rather
+            # than using zf.write() to exhaust the APK export volume.
+            self.assertLess(archive.stat().st_size, 3 << 20)
+
     def test_empty_apk_data_budget_is_rejected_before_writing(self):
         with tempfile.TemporaryDirectory() as root:
             pack = Path(root) / "pack"
