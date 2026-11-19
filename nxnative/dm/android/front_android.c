@@ -1408,56 +1408,17 @@ static void tune_ffrs_s25fe_radv(void) {
     if (!__system_property_get("ro.product.model", model) || strncmp(model, "SM-S731", 7)) return;
     const char *driver = getenv("DM_VK_DRIVER");
     if (!driver || !(strstr(driver, "radeon") || strstr(driver, "radv"))) return;
-    // The game is paced by the value written into UE's rhi.SyncInterval and
-    // t.MaxFPS (hle_fpslock.c). Do not force a different rate on other GPUs.
+    // UE on the original Switch targets 30 FPS; retain a correctly scoped
+    // pacing reference, with DM_FPS_TARGET=60 remaining an explicit option.
     if (!getenv("DM_FPS_TARGET")) {
         setenv("DM_FPS_TARGET", "30", 0);
-        LOG("[profile] FFRS S25 FE/RADV: game FPS target 30 (override with DM_FPS_TARGET=60)");
+        LOG("[profile] FFRS S25 FE/RADV: Switch-reference 30 FPS target (override with DM_FPS_TARGET=60)");
     }
-    // Handheld mode is 1280x720 rather than docked 1920x1080 on this
-    // NVN title. Allow the saved "docked" setting to override this on restart.
-    if (!getenv("DM_OPMODE")) {
-        setenv("DM_OPMODE", "0", 0);
-        LOG("[profile] FFRS S25 FE/RADV: handheld 720p rendering (change Docked in the game menu)");
-    }
-    // JimVulkan's DCC_SMALL=0 affects only <=512x512 targets used by UE
-    // post-processing; it is a conservative correctness diagnostic and may
-    // cost some bandwidth. The larger render targets retain compression.
-    if (!getenv("RADV_XCLIPSE_DCC_SMALL")) {
-        setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0);
-        LOG("[profile] FFRS S25 FE/RADV: small-target compression off (override with RADV_XCLIPSE_DCC_SMALL=1)");
-    }
-    // This driver exposes dynamic rendering. Use it for FFRS to avoid the
-    // imageless-framebuffer/render-pass compatibility path while the title's
-    // missing geometry is being isolated. This does not touch other devices;
-    // DM_VK_RP=1 in env.txt restores the older path for an A/B comparison.
-    if (!getenv("DM_VK_RP")) {
-        setenv("DM_VK_RP", "0", 0);
-        LOG("[profile] FFRS S25 FE/RADV: dynamic rendering on (override with DM_VK_RP=1)");
-    }
-    // RADV Xclipse v1.9.0 (cc87fdf) provides a driver-cache coherency
-    // workaround for the Xclipse 940 when a shader reads data that another
-    // shader has written. FFRS makes extensive use of GPU-produced scene
-    // buffers; try the correctness path first while its disappearing meshes
-    // are being investigated. Older RADV builds ignore this new switch.
-    // An explicit RADV_XCLIPSE_DLC=0 restores the driver's default behavior.
-    if (!getenv("RADV_XCLIPSE_DLC")) {
-        setenv("RADV_XCLIPSE_DLC", "1", 0);
-        LOG("[profile] FFRS S25 FE/RADV: driver shader-cache coherence workaround on (override with RADV_XCLIPSE_DLC=0)");
-    }
-    // The failed first-battle capture used DM_VK_MT_REPLAY=1. That mode
-    // records Vulkan commands on a second thread and is experimental; it is
-    // NOT the default replayer. Keep command recording on the replay thread
-    // for this device/game until missing scene geometry is ruled out as a
-    // recorder lifetime or ordering problem. Adreno and other games keep their
-    // selected mode. The owner can opt in again for an A/B trial.
-    const char *allow_mt = getenv("DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY");
-    const char *mt = getenv("DM_VK_MT_REPLAY");
-    if (mt && atoi(mt) > 0 && !(allow_mt && atoi(allow_mt) > 0)) {
-        setenv("DM_VK_MT_REPLAY", "0", 1);
-        LOG("[profile] FFRS S25 FE/RADV: disabled experimental DM_VK_MT_REPLAY=1 for render correctness (opt in again with DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY=1)");
-    }
-    LOG("[profile] S25 FE RADV compatibility settings selected (driver %s)", driver);
+    // Past trials of handheld mode, DCC_SMALL=0, dynamic rendering, DLC=1,
+    // and forced single-thread replay did not repair missing actors. Do not
+    // impose any of them on a new port: respect the normal NVN/Vulkan
+    // behavior and any explicit settings in the game's env.txt.
+    LOG("[profile] FFRS S25 FE/RADV: neutral rendering defaults (driver %s)", driver);
 }
 static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char *internal) {
     if (g_host_up) return;   // the dialog's thread and the resume can both get here

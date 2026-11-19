@@ -47,31 +47,19 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('indirect_log(d);', exec_src)
         self.assertIn('entries++ >= 48', exec_src)
 
-    def test_xclipse_tuning_is_device_scoped_and_opt_out(self):
+    def test_xclipse_tuning_is_device_scoped_without_unproven_driver_defaults(self):
         src = FRONT.read_text(encoding="utf-8")
-        tune = src[src.index("static void tune_ffrs_s25fe_radv(void) {"):src.index("static void host_start_common(")]
+        tune = src[src.index("static void tune_ffrs_s25fe_radv(void) {"):
+                   src.index("static void host_start_common(")]
         self.assertIn('strncmp(model, "SM-S731", 7)', tune)
         self.assertIn('strstr(driver, "radeon")', tune)
         self.assertIn('strstr(driver, "radv")', tune)
         self.assertIn('strcmp(enabled, "1")', tune)
         self.assertIn('if (!getenv("DM_FPS_TARGET"))', tune)
         self.assertIn('setenv("DM_FPS_TARGET", "30", 0)', tune)
-        self.assertIn('if (!getenv("DM_OPMODE"))', tune)
-        self.assertIn('setenv("DM_OPMODE", "0", 0)', tune)
-        self.assertIn('if (!getenv("RADV_XCLIPSE_DCC_SMALL"))', tune)
-        self.assertIn('setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0)', tune)
-        self.assertIn('if (!getenv("DM_VK_RP"))', tune)
-        self.assertIn('setenv("DM_VK_RP", "0", 0)', tune)
-        self.assertIn('override with DM_VK_RP=1', tune)
-        self.assertIn('if (!getenv("RADV_XCLIPSE_DLC"))', tune)
-        self.assertIn('setenv("RADV_XCLIPSE_DLC", "1", 0)', tune)
-        self.assertIn('override with RADV_XCLIPSE_DLC=0', tune)
-        # The prior game capture had experimental two-stage replay enabled.
-        # Default to correctness on this device, but allow a deliberate A/B
-        # opt-in; other devices are rejected by the guards at the top.
-        self.assertIn('getenv("DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY")', tune)
-        self.assertIn('getenv("DM_VK_MT_REPLAY")', tune)
-        self.assertIn('setenv("DM_VK_MT_REPLAY", "0", 1)', tune)
+        for speculative in ("DM_OPMODE", "RADV_XCLIPSE_DCC_SMALL",
+                            "DM_VK_RP", "RADV_XCLIPSE_DLC", "DM_VK_MT_REPLAY"):
+            self.assertNotIn(f'setenv("{speculative}"', tune)
         start = src.index("static void host_start_common(")
         code = src[start:src.index("static void host_start(", start)]
         self.assertLess(code.index("env_file(p);"), code.index("tune_ffrs_s25fe_radv();"))

@@ -33,10 +33,11 @@ graphics	nvn
 # Existing player settings.txt is preserved; it may keep the previous toggle.
 setting	fps=1
 # The 60 FPS default is from an Adreno 830 tablet. On Galaxy S25 FE
-# (SM-S731*, Exynos 2400/Xclipse 940) with JimVulkan RADV Xclipse only,
-# front_android.c selects UE's 30 FPS target (DM_FPS_TARGET=30) and disables
-# small-render-target DCC, a conservative starting point for investigating
-# incorrect UE post-processing. Other devices and drivers keep their defaults.
-# Remove this row or set it to 0 to opt out. Explicit DM_FPS_TARGET and
-# RADV_XCLIPSE_DCC_SMALL values in env.txt take priority over the defaults.
+# (SM-S731*, Exynos 2400/Xclipse 940) with an explicitly selected RADV
+# driver, front_android.c uses the Switch-reference 30 FPS target unless
+# DM_FPS_TARGET is explicitly set. All earlier speculative rendering overrides
+# (DCC, imageless/dynamic pass selection, DLC, forced replay mode, handheld
+# resolution) are removed from this profile; user-provided env.txt controls
+# remain available for controlled A/B experiments.
+# Remove this row or set it to 0 to opt out of the 30 FPS device reference.
 env	DM_FFRS_S25FE_RADV_TUNE=1

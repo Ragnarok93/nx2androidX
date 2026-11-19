@@ -120,3 +120,20 @@ the first divergent pass; without it, do not infer that a shader, indirect
 argument, depth test, alias, or RADV driver is the cause. Do not enable
 \`RADV_XCLIPSE_DLC\` or other driver toggles as a "fix" without comparative
 captures. There is no evidence yet of zero graphical defects.
+
+
+## Profile cleanup: eliminate unproven rendering defaults
+
+The Xclipse-specific profile now retains only the game's Switch-reference
+30 FPS pacing default (explicit \`DM_FPS_TARGET\` wins). It no longer sets
+\`DM_OPMODE=0\`, \`RADV_XCLIPSE_DCC_SMALL=0\`,
+\`DM_VK_RP=0\`, \`RADV_XCLIPSE_DLC=1\`, or forces
+\`DM_VK_MT_REPLAY=0\` when the user explicitly enabled it.
+The port still honors those flags if supplied directly in \`env.txt\`.
+
+Reason: none of the graphics-mode or driver changes resolved the missing
+character/enemy models in the previous phone tests. Automatically changing
+those Vulkan paths without a proven failure mechanism can mask the first
+incorrect stage and cause fidelity/performance regressions. This cleanup
+is covered by a compiled production-function fixture that verifies the
+device and driver guard and preservation of explicit overrides.
