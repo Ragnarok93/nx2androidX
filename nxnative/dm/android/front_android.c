@@ -1435,6 +1435,16 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("DM_VK_RP", "0", 0);
         LOG("[profile] FFRS S25 FE/RADV: dynamic rendering on (override with DM_VK_RP=1)");
     }
+    // RADV Xclipse v1.9.0 (cc87fdf) provides a driver-cache coherency
+    // workaround for the Xclipse 940 when a shader reads data that another
+    // shader has written. FFRS makes extensive use of GPU-produced scene
+    // buffers; try the correctness path first while its disappearing meshes
+    // are being investigated. Older RADV builds ignore this new switch.
+    // An explicit RADV_XCLIPSE_DLC=0 restores the driver's default behavior.
+    if (!getenv("RADV_XCLIPSE_DLC")) {
+        setenv("RADV_XCLIPSE_DLC", "1", 0);
+        LOG("[profile] FFRS S25 FE/RADV: driver shader-cache coherence workaround on (override with RADV_XCLIPSE_DLC=0)");
+    }
     LOG("[profile] S25 FE RADV compatibility settings selected (driver %s)", driver);
 }
 static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char *internal) {
