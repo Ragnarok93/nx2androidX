@@ -66,7 +66,9 @@ void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freez
 // ---- settings (the pause menu's), kept in the files folder as KEY=VALUE lines ----
 static char g_root[512];
 const char *dm_front_root(void) { return g_root; }   // overlay_theme.c: the player's path has no APK assets, the theme comes from the pack's overlay/
-static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // the gamepad shown; rumble and tap vibration; the frame rate counter (top left)
+static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // gamepad, rumble, frame rate
+static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalone FG preferences
+void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid
 // the player's own layout (overlay_layout.h dm_overlay_custom): [0] the saved one (settings.txt ui= rows), [1] the layout editor's while it is open; per layout
@@ -76,6 +78,14 @@ static const char *const LAYOUT_NAMES[2] = {"tablet", "phone"};
 static int ctl_named(const char *n) { for (int i = 0; i < OV_N; i++) if (!strcmp(OV_LAYOUTS[0][i].name, n)) return i; return -1; }
 int dm_opmode(void); void dm_set_opmode(int m);   // hle_oe.c: 0 handheld, 1 docked; a change reaches the game as the Switch's operation mode notification
 static void settings_load(void) {
+    const char *fg_env;
+    if ((fg_env = getenv("DM_LSFG"))) atomic_store(&g_set_fg, atoi(fg_env) != 0);
+    if ((fg_env = getenv("DM_LSFG_MULT"))) {
+        int n = atoi(fg_env); atomic_store(&g_set_fg_mult, n < 2 ? 2 : n > 4 ? 4 : n);
+    }
+    if ((fg_env = getenv("DM_LSFG_FLOW"))) {
+        int n = atoi(fg_env); atomic_store(&g_set_fg_flow, n <= 0 ? 0 : n < 25 ? 25 : n > 100 ? 100 : n);
+    }
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
     if (!f) return;
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
@@ -83,6 +93,9 @@ static void settings_load(void) {
         else if (sscanf(line, "docked=%d", &v) == 1) setenv("DM_OPMODE", v ? "1" : "0", 1);   // over env.txt's: the host reads it once, at its first query
         else if (sscanf(line, "opacity=%d", &v) == 1) atomic_store(&g_set_opacity, v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v);
         else if (sscanf(line, "grid=%d", &v) == 1) atomic_store(&g_set_grid, v != 0);
+        else if (sscanf(line, "fg=%d", &v) == 1) atomic_store(&g_set_fg, v != 0);
+        else if (sscanf(line, "fg_mult=%d", &v) == 1) atomic_store(&g_set_fg_mult, v < 2 ? 2 : v > 4 ? 4 : v);
+        else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow, v <= 0 ? 0 : v < 25 ? 25 : v > 100 ? 100 : v);
         else if (!strncmp(line, "ui=", 3)) {   // ui=<layout>,<control>,<x>,<y>,<size>: x, y in 1/10000 of the window (-1 the layout's place), size in 1/1000
             char lay[16], name[32]; int x, y, z, l, i;
             if (sscanf(line + 3, "%15[^,],%31[^,],%d,%d,%d", lay, name, &x, &y, &z) != 5 || (i = ctl_named(name)) < 0) continue;
@@ -98,8 +111,8 @@ static void settings_load(void) {
 static void settings_save(void) {
     char p[600], tmp[610]; snprintf(p, sizeof p, "%s/settings.txt", g_root); snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
-    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
-            atomic_load(&g_set_opacity), atomic_load(&g_set_grid));
+    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
+            atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow));
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
         _Atomic int *c = g_cust[0][l][i]; int x = atomic_load(&c[0]), y = atomic_load(&c[1]), z = atomic_load(&c[2]);
         if ((x && y) || z) fprintf(f, "ui=%s,%s,%d,%d,%d\n", LAYOUT_NAMES[l], OV_LAYOUTS[0][i].name, x && y ? x - 1 : -1, x && y ? y - 1 : -1, z ? z : 1000);
@@ -578,7 +591,7 @@ int dm_menu_state(void) {
     if (atomic_load(&g_edit)) return OVE_ST | atomic_load(&g_ed_st);
     if (atomic_load(&g_sp_on)) return OVS_ST | (atomic_load(&g_sp_hi) + 1) << 4 | (atomic_load(&g_sp_ver) & 255) << 20;
     return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 | atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
-           atomic_load(&g_menu_tab) << 8 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24;
+           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24;
 }
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
 static void menu_open(int hi) {
@@ -611,11 +624,37 @@ static void menu_opacity(int v) {   // the slider: a new value is drawn at once 
 }
 static void menu_tab(int t) { t = (t % OVM_TABS + OVM_TABS) % OVM_TABS; if (atomic_exchange(&g_menu_tab, t) != t) dm_haptics_android_tap(); dm_overlay_redraw(); }
 static void ed_open(void); static void sp_open(void); static void save_export(void);
+static void fg_apply(void) {
+    dm_fg_set(atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), 0, atomic_load(&g_set_fg_flow));
+    settings_save();
+}
+int dm_menu_fg_mult(void) { return atomic_load(&g_set_fg_mult); }
+int dm_menu_fg_flow(void) { return atomic_load(&g_set_fg_flow); }
+int dm_menu_fg_has_dll(void) {
+    const char *dll = getenv("DM_LSFG_DLL");
+    return dll && *dll && access(dll, R_OK) == 0;
+}
+static void fg_mult_step(int direction) {
+    int n = atomic_load(&g_set_fg_mult);
+    atomic_store(&g_set_fg_mult, 2 + ((n - 2 + (direction < 0 ? 2 : 1)) % 3));
+    fg_apply();
+}
+static void fg_flow_step(int direction) {
+    int n = atomic_load(&g_set_fg_flow);
+    n = direction < 0 ? (n == 0 ? 100 : n <= 25 ? 0 : n - 5)
+                      : (n == 0 ? 25 : n >= 100 ? 0 : n + 5);
+    atomic_store(&g_set_fg_flow, n);
+    fg_apply();
+}
 static void menu_do(int item) {
     if (item == OVM_OVERLAY) { atomic_store(&g_set_overlay, !atomic_load(&g_set_overlay)); atomic_store(&g_overlay, 1); settings_save(); }
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
     else if (item == OVM_MODE) { dm_set_opmode(dm_opmode() ? 0 : 1); settings_save(); }   // the game takes it when it goes on
+    else if (item == OVM_FG) { atomic_store(&g_set_fg, !atomic_load(&g_set_fg)); fg_apply(); }
+    else if (item == OVM_FG_MULT) fg_mult_step(1);
+    else if (item == OVM_FG_FLOW) fg_flow_step(1);
+    else if (item == OVM_DRIVER) return; // read-only actual driver, cannot hot-swap a VkDevice
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }
     else if (item == OVM_OPACITY) return;   // (the slider is dragged, or stepped with left and right)
@@ -660,6 +699,8 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
         for (int k = 0; k < OVM_ROWS; k++) { hi = hi < 0 ? (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1) : (hi + (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1)) % OVM_ROWS; if (ov_menu_item(tab, hi) >= 0) break; }
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
     } else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_OPACITY) { menu_opacity(atomic_load(&g_set_opacity) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_MULT) { fg_mult_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_FLOW) { fg_flow_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(tab + (bit == DM_BTN_LEFT ? -1 : 1));
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {
         menu_tab(tab + (bit == DM_BTN_L || bit == DM_BTN_ZL ? -1 : 1));
@@ -1350,9 +1391,15 @@ static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char 
     snprintf(p, sizeof p, "%s/temp", internal); mkdir(p, 0700); snprintf(q, sizeof q, "%s%s", p, sub); mkdir(q, 0700); setenv("DM_TEMP", q, 0);
     snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
     snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p);
+    // User-supplied Lossless.dll may live alongside imported game data.
+    // Do not bundle copyrighted DLLs without the user's own provided file.
+    if (!getenv("DM_LSFG_DLL") || !*getenv("DM_LSFG_DLL")) {
+        snprintf(p, sizeof p, "%s/Lossless.dll", g_root);
+        if (access(p, R_OK) == 0) setenv("DM_LSFG_DLL", p, 1);
+    }
     // the save manager's requests (saves_android.c), before the host mounts the save: an import chosen in the menu or pushed by porter, an export porter asks for
     if (dm_saves_start(g_root)) { LOG("[saves] the request asked the app to end: the game is not started"); g_quit = 1; return; }
-    settings_load(); dm_haptics_android_start(E, vm, actctx, atomic_load(&g_set_rumble));
+    settings_load(); fg_apply(); dm_haptics_android_start(E, vm, actctx, atomic_load(&g_set_rumble));
     { pthread_t w; if (!pthread_create(&w, NULL, pad_watch, vm)) pthread_detach(w); }
     LOG("NX2A host on Android: files %s, saves %s", g_root, internal);
     pthread_t t; pthread_create(&t, NULL, input_thread, NULL); pthread_detach(t);

@@ -163,17 +163,21 @@ void dm_overlay_theme_done(const ov_theme *t);   // the pixels are on the GPU: t
 
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
-enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
+enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
             // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
             // OVM_PAD: a controller's face buttons by their position or by their label (front_player.c pad_labels)
-#define OVM_TABS 2
+#define OVM_TABS 3
 #define OVM_PER_TAB 5
-static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD}, {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO}};
-static const char *const OVM_TAB_NAMES[OVM_TABS] = {"Gamepad", "Game"};
+static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {
+    {OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD},
+    {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO},
+    {OVM_FPS, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER}
+};
+static const char *const OVM_TAB_NAMES[OVM_TABS] = {"Gamepad", "Game", "Performance"};
 #define OVM_ROWS (OVM_PER_TAB + 2)   // the tabs, a tab's rows (as many for every tab: the panel keeps its size), Resume
 int dm_menu_audio_available(void);
 static inline int ov_menu_item(int tab, int row) {
-    int item = row == 0 ? OVM_TAB : row == OVM_ROWS - 1 ? OVM_RESUME : row > 0 && row < OVM_ROWS - 1 ? OVM_TAB_ITEMS[tab & 1][row - 1] : -1;
+    int item = row == 0 ? OVM_TAB : row == OVM_ROWS - 1 ? OVM_RESUME : row > 0 && row < OVM_ROWS - 1 ? OVM_TAB_ITEMS[tab >= 0 && tab < OVM_TABS ? tab : 0][row - 1] : -1;
     return item == OVM_AUDIO && !dm_menu_audio_available() ? -1 : item;
 }
 #define OV_MENU_ROW 0.115f   // row height, of the window's height
@@ -182,7 +186,7 @@ static inline int ov_menu_item(int tab, int row) {
 #define OV_OPACITY_MIN 20    // the gamepad's opacity, percent (the Opacity slider, settings.txt opacity=)
 #define OV_OPACITY_MAX 80
 // what the menu shows (-1 = closed): bit 0 the gamepad is on, bit 1 rumble is on, bit 2 docked, bit 3 the frame rate shown, bits 4..7 the highlighted row + 1
-// (0 = none), bit 8 the open tab, bits 9..15 the opacity in percent, bits 20..23 the last export's outcome (OVX_*), bits 24..27 a count of exports (its name
+// (0 = none), bits 29..30 the open tab, bit 19 FG enabled, bits 9..15 the opacity in percent, bits 20..23 the last export's outcome (OVX_*), bits 24..27 a count of exports (its name
 // changes with each). Bit 16: the text entry's panel instead (its edit count below); bit 17: the layout editor (OVE_ST_* below); bit 18: the save picker (OVS_ST)
 int dm_menu_state(void);
 enum { OVX_IDLE, OVX_BUSY, OVX_DONE, OVX_NOSAVE, OVX_FAILED };   // Export save: the button; copying; the export's name; the game has not saved yet; failed
