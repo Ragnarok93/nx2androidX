@@ -67,5 +67,53 @@ class ApkStorageRecoveryTests(unittest.TestCase):
             self.assertTrue(owned.exists())
 
 
+    def test_embedded_archive_retries_stronger_deflate_and_remains_readable(self):
+        import random
+        import zipfile
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            pack = folder / "pack"
+            pack.mkdir()
+            rng = random.Random(2)
+            data = bytearray()
+            for _ in range(1200):
+                chunk = rng.randbytes(64)
+                data.extend(chunk + b"A" * 500 + chunk + b"B" * 500)
+            (pack / "game.bin").write_bytes(data)
+            paths = []
+            for level in (1, 9):
+                output = folder / f"trial-{level}.zip"
+                with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
+                                     compresslevel=level) as zf:
+                    zf.write(pack / "game.bin", "game.bin")
+                paths.append(output.stat().st_size)
+            self.assertLess(paths[1], paths[0])
+            budget = sum(paths) // 2
+            output = folder / "embedded.zip"
+            size, level = datapack.write_embedded_zip(pack, output, budget)
+            self.assertEqual(level, 9)
+            self.assertLess(size, budget)
+            with zipfile.ZipFile(output) as zf:
+                self.assertIsNone(zf.testzip())
+                self.assertEqual(zf.read("game.bin"), data)
+
+    def test_uncompressible_pack_reports_limit_instead_of_false_success(self):
+        with tempfile.TemporaryDirectory() as root:
+            pack = Path(root) / "pack"
+            pack.mkdir()
+            (pack / "random.bin").write_bytes(os.urandom(256 * 1024))
+            with self.assertRaisesRegex(ValueError, "cannot fit this game"):
+                datapack.write_embedded_zip(pack, Path(root) / "oversized.zip", 16 * 1024)
+
+    def test_empty_apk_data_budget_is_rejected_before_writing(self):
+        with tempfile.TemporaryDirectory() as root:
+            pack = Path(root) / "pack"
+            pack.mkdir()
+            output = Path(root) / "embedded.zip"
+            with self.assertRaisesRegex(ValueError, "no space"):
+                datapack.write_embedded_zip(pack, output, 0)
+            self.assertFalse(output.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
