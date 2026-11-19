@@ -218,6 +218,7 @@
     <string name="driver_note_7xx_oneui">Adreno 7xx, with the OneUI patch</string>
     <string name="driver_note_6xx_7xx_8xx">Adreno 6xx / 7xx / 8xx (the universal build)</string>
     <string name="driver_note_7xx_8xx_switch">Adreno 7xx / 8xx, tuned for Switch emulators</string>
+    <string name="driver_note_xclipse">Samsung Xclipse GPUs (Exynos 2200 / 2400 and supported newer models); RADV</string>
     <string name="driver_pick_hint">The built-in Turnip is the default. For a build tuned for Switch emulators, download Turnip 710 (Switch) in Settings → Vulkan driver; a new driver takes effect at the next start.</string>
     <string name="driver_system_default">The device\'s own</string>
     <string name="driver_refused_no_driver">This archive holds no driver</string>
