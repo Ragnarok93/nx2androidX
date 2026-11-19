@@ -54,6 +54,7 @@ class PortService : Service() {
         const val FONT = "font";
         const val FIRMWARE = "firmware";
         const val MT = "mt";
+        const val DRIVER = "driver";
         // The Intent's extras: the port's parameters, handed over from the UI to the service
         // Intent 的 extra：移植的参数，从界面交到服务手里
 
@@ -64,7 +65,8 @@ class PortService : Service() {
         fun start(
             ctx: Context, game: String, keys: String,
             touch: Boolean, fps60: Boolean, exp: Boolean, aliasHeadroom: Int,
-            sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false
+            sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
+            vulkanDriver: String = ""
         ) {
             val i = Intent(ctx, PortService::class.java)
                 .setAction(ACTION_START)
@@ -74,6 +76,7 @@ class PortService : Service() {
             if (sharedFont.isNotBlank()) i.putExtra(FONT, sharedFont)
             if (firmware.isNotBlank()) i.putExtra(FIRMWARE, firmware)
             if (mtReplay) i.putExtra(MT, true)
+            if (vulkanDriver.isNotBlank()) i.putExtra(DRIVER, vulkanDriver)
             ContextCompat.startForegroundService(ctx, i)
         }
 
@@ -182,6 +185,7 @@ class PortService : Service() {
                 intent.getIntExtra(ALIAS, ALIAS_AUTO),
                 intent.getStringExtra(FONT) ?: "", intent.getStringExtra(FIRMWARE) ?: "",
                 intent.getBooleanExtra(MT, false),
+                intent.getStringExtra(DRIVER) ?: "",
             ) {
                 handler.post {
                     if (runner === taskRunner) {
