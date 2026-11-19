@@ -529,8 +529,24 @@ class MainActivity : ComponentActivity() {
 
     private fun exportApk(apk: File) {
         if (!apk.isFile) { toast(locale.str(R.string.lib_artifact_missing_state)); return }
-        pendingApkExport = apk
-        apkExportLauncher.launch(apk.name)
+        val dataFolder = File(apk.parentFile, "${apk.nameWithoutExtension}-data")
+        if (dataFolder.isDirectory) {
+            // Android cannot install ZIP64 APKs. A large game uses the original
+            // per-game APK + companion data export instead: never suggest the
+            // copied APK alone contains the full port.
+            android.app.AlertDialog.Builder(this)
+                .setTitle(locale.str(R.string.builds_apk_companion_title))
+                .setMessage(locale.str(R.string.builds_apk_companion_message, dataFolder.absolutePath))
+                .setPositiveButton(locale.str(R.string.common_ok)) { _, _ ->
+                    pendingApkExport = apk
+                    apkExportLauncher.launch(apk.name)
+                }
+                .setNegativeButton(locale.str(R.string.common_cancel), null)
+                .show()
+        } else {
+            pendingApkExport = apk
+            apkExportLauncher.launch(apk.name)
+        }
     }
 
     /**
