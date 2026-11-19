@@ -42,6 +42,9 @@ class FakePort:
     def drivers(self): return []
     def loader_libs(self): return []
     def loader_so(self): return []
+    # These tests stub APK assembly and test only the 4 GiB fallback. The real
+    # Port validates and collects the loader/driver libraries separately.
+    def apk_vulkan_libraries(self): return []
     def theme(self): return []
     def ui_font(self): return []
     def external_activity(self): return ['--dex', 'test-game-activity.dex', '--activity', 'org.nx2a.GameActivity']
