@@ -15,7 +15,7 @@
 #include "lsfg/lsfg.h"
 #endif
 
-static _Atomic int g_on = -1, g_mult = 2, g_target, g_flow = 75, g_state;   // g_state: 0 off, 1 generating, 2 on and not generating, -1 unavailable
+static _Atomic int g_on = -1, g_mult = 2, g_target, g_flow = 75, g_state, g_reprobe;   // g_state: 0 off, 1 generating, 2 on and not generating, -1 unavailable
 static char g_reason[256] = "off";
 static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
 // The host's frame rate limit (the adaptive rate, perf_android.c): the rate's own strong definition wins this weak one; 0 = no limit here
@@ -32,6 +32,10 @@ static void settings_init(void) {
     e = getenv("DM_LSFG");
     atomic_compare_exchange_strong(&g_on, &exp, e && atoi(e) ? 1 : 0);
 }
+
+// A freshly imported user-supplied DLL can retry a previously unavailable
+// frame generation setup. The present thread owns the actual reset.
+void dm_fg_retry(void) { atomic_store(&g_reprobe, 1); }
 
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct) {
     atomic_store(&g_mult, multiplier < 2 ? 2 : multiplier > 4 ? 4 : multiplier);
@@ -158,6 +162,11 @@ int dm_fg_frame(vkimg_t *im, const int *crop, double period, VkImage gen[3], dou
         return 0;
     }
     if (!im || !im->img) return 0;
+    if (atomic_exchange(&g_reprobe, 0) && F.state < 0) {
+        F.state = 0;
+        atomic_store(&g_state, 0);
+        reason("%s", "retrying user-selected Lossless.dll");
+    }
     if (!load()) return 0;
     // The game's frame period is never shorter than the host's own frame limit allows (the adaptive rate, perf_android.c): a game that asks for interval 1
     // (16.7 ms) but is held to 30 fps has two refreshes of a 60 Hz panel a frame, room for one generated frame, and its output rate is 60, not 120

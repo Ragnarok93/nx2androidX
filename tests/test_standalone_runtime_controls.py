@@ -28,6 +28,20 @@ class StandaloneRuntimeControlsTest(unittest.TestCase):
         self.assertIn('"Need DLL"', draw)
         self.assertIn("dm_vk_driver_status()", draw)
 
+    def test_user_can_import_lossless_dll_from_game_menu(self):
+        java = (DM / "java/org/nx2a/GameActivity.java").read_text()
+        front = (DM / "front_android.c").read_text()
+        fg = (DM / "dm_framegen.c").read_text()
+        self.assertIn('Intent.ACTION_OPEN_DOCUMENT', java)
+        self.assertIn('OpenableColumns.DISPLAY_NAME', java)
+        self.assertIn('importLosslessDll(data.getData())', java)
+        self.assertIn('Lossless.dll.partial', java)
+        self.assertIn('losslessDllReady(target.getAbsolutePath())', java)
+        self.assertIn('Java_org_nx2a_GameActivity_losslessDllReady', front)
+        self.assertIn('jni_fg_dll_picker();', front)
+        self.assertIn('dm_fg_retry();', front)
+        self.assertIn('atomic_exchange(&g_reprobe, 0)', fg)
+
     def test_actual_custom_driver_status_or_fallback(self):
         core = (DM / "gfx_vk_core.c").read_text()
         self.assertIn("custom_driver_loaded = 1;", core)

@@ -144,7 +144,8 @@ jobs:
           "$nmtool" -D --defined-only "$so" | tee "$RUNNER_TEMP/nx2a-native-exports.txt"
           for symbol in ANativeActivity_onCreate \
                         Java_org_nx2a_GameActivity_embeddedPackReady \
-                        Java_org_nx2a_GameActivity_companionPackReady; do
+                        Java_org_nx2a_GameActivity_companionPackReady \
+                        Java_org_nx2a_GameActivity_losslessDllReady; do
             if ! awk '{print $NF}' "$RUNNER_TEMP/nx2a-native-exports.txt" | grep -Fxq "$symbol"; then
               echo "::error::Native game host is missing required export: $symbol"
               exit 1

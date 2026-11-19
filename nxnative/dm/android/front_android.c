@@ -634,6 +634,22 @@ int dm_menu_fg_has_dll(void) {
     const char *dll = getenv("DM_LSFG_DLL");
     return dll && *dll && access(dll, R_OK) == 0;
 }
+static void jni_fg_dll_picker(void) {
+    ANativeActivity *a = g_act;
+    if (!a || !a->vm || !a->clazz) return;
+    JNIEnv *E = jni_attach(a);
+    if (!E) return;
+    jclass cls = (*E)->GetObjectClass(E, a->clazz);
+    jmethodID choose = cls ? (*E)->GetMethodID(E, cls, "chooseLosslessDll", "()V") : NULL;
+    if (choose) (*E)->CallVoidMethod(E, a->clazz, choose);
+    if ((*E)->ExceptionCheck(E)) {
+        (*E)->ExceptionDescribe(E);
+        (*E)->ExceptionClear(E);
+        LOG("[RED] [fg] could not open Lossless.dll picker");
+    }
+    if (cls) (*E)->DeleteLocalRef(E, cls);
+    (*a->vm)->DetachCurrentThread(a->vm);
+}
 static void fg_mult_step(int direction) {
     int n = atomic_load(&g_set_fg_mult);
     atomic_store(&g_set_fg_mult, 2 + ((n - 2 + (direction < 0 ? 2 : 1)) % 3));
@@ -651,7 +667,13 @@ static void menu_do(int item) {
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
     else if (item == OVM_MODE) { dm_set_opmode(dm_opmode() ? 0 : 1); settings_save(); }   // the game takes it when it goes on
-    else if (item == OVM_FG) { atomic_store(&g_set_fg, !atomic_load(&g_set_fg)); fg_apply(); }
+    else if (item == OVM_FG) {
+        if (!atomic_load(&g_set_fg) && !dm_menu_fg_has_dll()) {
+            jni_fg_dll_picker(); // the system SAF picker, never broad storage permissions
+            return;
+        }
+        atomic_store(&g_set_fg, !atomic_load(&g_set_fg)); fg_apply();
+    }
     else if (item == OVM_FG_MULT) fg_mult_step(1);
     else if (item == OVM_FG_FLOW) fg_flow_step(1);
     else if (item == OVM_DRIVER) return; // read-only actual driver, cannot hot-swap a VkDevice
@@ -1455,6 +1477,29 @@ Java_org_nx2a_GameActivity_companionPackReady(JNIEnv *E, jclass cls, jstring pat
     atomic_store(&g_java_pack_ready, 0);
     g_data_dir[0] = 0;
     return JNI_FALSE;
+}
+
+void dm_fg_retry(void);
+__attribute__((visibility("default"))) JNIEXPORT void JNICALL
+Java_org_nx2a_GameActivity_losslessDllReady(JNIEnv *E, jclass cls, jstring path) {
+    (void)cls;
+    if (!path) return;
+    const char *f = (*E)->GetStringUTFChars(E, path, NULL);
+    if (!f) return;
+    // Only accept the app-private file created by the chooser.
+    const char *internal = g_act ? g_act->internalDataPath : NULL;
+    size_t prefix = internal ? strlen(internal) : 0;
+    if (prefix && !strncmp(f, internal, prefix) && f[prefix] == '/' &&
+            strstr(f + prefix, "/nx2a-data/Lossless.dll") &&
+            access(f, R_OK) == 0) {
+        setenv("DM_LSFG_DLL", f, 1);
+        dm_fg_retry(); // clear an earlier missing-DLL error on the present thread
+        atomic_store(&g_set_fg, 1);
+        fg_apply();
+        dm_overlay_redraw();
+        LOG("[fg] user supplied Lossless.dll; frame generation enabled");
+    } else LOG("[RED] [fg] invalid Lossless.dll import path");
+    (*E)->ReleaseStringUTFChars(E, path, f);
 }
 
 // the player's start (jni_android.h): what the NativeActivity's onCreate and onResume would have done, with the

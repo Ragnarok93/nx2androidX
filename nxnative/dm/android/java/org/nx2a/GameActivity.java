@@ -5,6 +5,9 @@ import android.app.Activity;
 import android.app.ProgressDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
+import android.provider.OpenableColumns;
+import android.database.Cursor;
 import android.os.Bundle;
 import android.os.StatFs;
 import android.util.Log;
@@ -33,7 +36,70 @@ public class GameActivity extends NativeActivity {
         System.loadLibrary("dmhost");
     }
 
+    private static final int REQUEST_LOSSLESS_DLL = 0x6e33;
     private final GameKeyboard keyboard = new GameKeyboard(this);
+
+    /** Called by the standalone performance menu when shader DLL is missing. */
+    public void chooseLosslessDll() {
+        runOnUiThread(() -> {
+            Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            picker.addCategory(Intent.CATEGORY_OPENABLE);
+            picker.setType("*/*");
+            picker.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try { startActivityForResult(picker, REQUEST_LOSSLESS_DLL); }
+            catch (Exception error) {
+                Log.e("nx2a-fg", "Unable to open Lossless.dll picker", error);
+                Toast.makeText(this, "Cannot open file picker: " + error.getMessage(), Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private void importLosslessDll(Uri selected) {
+        new Thread(() -> {
+            File partial = null;
+            try {
+                try (Cursor cursor = getContentResolver().query(selected,
+                        new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                    if (cursor == null || !cursor.moveToFirst() ||
+                            !"Lossless.dll".equalsIgnoreCase(cursor.getString(0)))
+                        throw new IOException("Please select a file named Lossless.dll");
+                }
+                File directory = new File(getFilesDir(), "nx2a-data");
+                if (!directory.isDirectory() && !directory.mkdirs())
+                    throw new IOException("Cannot create game-data folder");
+                File target = new File(directory, "Lossless.dll");
+                partial = new File(directory, "Lossless.dll.partial");
+                long total = 0;
+                try (InputStream input = new BufferedInputStream(getContentResolver().openInputStream(selected));
+                     FileOutputStream output = new FileOutputStream(partial)) {
+                    if (input == null) throw new IOException("Cannot read selected file");
+                    byte[] bytes = new byte[64 * 1024];
+                    int n;
+                    while ((n = input.read(bytes)) != -1) {
+                        if (n <= 0) continue;
+                        total += n;
+                        if (total > (128L << 20)) throw new IOException("Lossless.dll exceeds 128 MiB");
+                        output.write(bytes, 0, n);
+                    }
+                    output.getFD().sync();
+                }
+                if (total == 0) throw new IOException("Lossless.dll is empty");
+                if (target.exists() && !target.delete())
+                    throw new IOException("Cannot replace previous Lossless.dll");
+                if (!partial.renameTo(target)) throw new IOException("Cannot activate Lossless.dll");
+                runOnUiThread(() -> {
+                    losslessDllReady(target.getAbsolutePath());
+                    Toast.makeText(this, "Lossless FG shaders imported", Toast.LENGTH_SHORT).show();
+                });
+            } catch (Exception error) {
+                Log.e("nx2a-fg", "Lossless.dll import failed", error);
+                runOnUiThread(() -> Toast.makeText(this, "Lossless.dll import failed: " +
+                        error.getMessage(), Toast.LENGTH_LONG).show());
+            } finally {
+                if (partial != null) partial.delete();
+            }
+        }, "nx2a-lossless-import").start();
+    }
 
     private static String text(byte[] value) {
         return value == null ? "" : new String(value, StandardCharsets.UTF_8);
@@ -53,6 +119,11 @@ public class GameActivity extends NativeActivity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_LOSSLESS_DLL) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null)
+                importLosslessDll(data.getData());
+            return;
+        }
         CompanionImporter.onActivityResult(this, requestCode, resultCode, data);
     }
 
@@ -105,6 +176,7 @@ public class GameActivity extends NativeActivity {
 
     static native void embeddedPackReady();
     static native boolean companionPackReady(String absoluteDirectory);
+    static native void losslessDllReady(String path);
 
     @Override protected void onPause() { keyboard.pause(true); super.onPause(); }
     @Override protected void onDestroy() { keyboard.pause(true); super.onDestroy(); }
