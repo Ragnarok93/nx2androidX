@@ -72,6 +72,9 @@ DM_VK_PASSDUMP_MIN_COLORS=2
 DM_VK_PASSDUMP_DEPTH=1
 DM_VK_PASSDUMP_LIMIT=12
 DM_VK_LIST_AT=1500
+DM_VK_INDIRECT_LOG_AT=1500
 ```
 
 Use the same first-battle save. Check log.txt for `pass dump` and the `--- pass ...` lines to identify the first multi-target geometry pass. If the scene outputs and depth show actors but the final composition does not, debug downstream depth, blending and aliasing. If the actors never reach scene/depth, debug vertex data, GPU culling, skinned mesh shaders and buffer visibility. Never equate a successful `vkCmdDraw` call with the mesh actually rasterizing.
+
+- `1f2cdce3`: Added opt-in `DM_VK_INDIRECT_LOG_AT=N`: logs at most 48 indexed indirect draws on each of two frames, including vertex-shader key, draw-argument guest bytes, and cached pool-shadow bytes. These are **not synchronized GPU readbacks**. Zero primitive counts in both suggest a GPU-culling/argument-buffer path to investigate, but nonzero shadow values do not prove a successful draw. This is scoped by opt-in, with negligible cost when disabled.
