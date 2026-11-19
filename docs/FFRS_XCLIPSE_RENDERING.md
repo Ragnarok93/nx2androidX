@@ -50,3 +50,28 @@ Source: https://github.com/JimVulkan/radv-xclipse/releases/tag/v1.9.0 (check rel
 5. If geometry absent from early passes, focus on skinned vertex inputs, GPU culling / indirect buffers, and compute→graphics synchronization. If present in early passes and lost downstream, focus on depth/stencil, postprocessing, aliasing, and pass boundaries. Do not make broad Vulkan memory workarounds without decisive evidence.
 
 **Status:** rendering correctness outstanding until device screenshot shows visible characters and enemies. GitHub Issues is disabled for this repo, so this document is the handoff tracker.
+
+## Follow-up: persistent missing geometry in 86-second gameplay recording
+
+The 2026-11-19 follow-up MP4 `1000025325.mp4` still shows no visible player or enemy models in the first battle despite a working FPS overlay (roughly 38–60 FPS), visible terrain, battle bars, targeting marks and effects. The initial DCC/720p profile and later dynamic-rendering/DLC changes **did not establish a visual repair**. Do not call these settings a fix.
+
+Rechecked the user's earlier `ffr-source-frames.tar.gz` and `ffr-render-passes.tar.gz` and the log: the scene is already missing figures in `pass_00.ppm` before final HUD (`pass_01.ppm`), with 1,772,747 draws and 0 missing programs/targets/pipelines by present 1800. Both dumps were postprocessed 1920×1080 targets; neither identifies whether early scene geometry was rasterized. The active driver was RADV MAGELLAN CARL. `DM_VK_MT_REPLAY=1` was present in the export's env.txt.
+
+### Next isolated change
+
+- `fd0b7a64`: On SM-S731* with the FFRS RADV profile, override experimental `DM_VK_MT_REPLAY=1` to `0` **before** `vk_dq_init`, so Vulkan commands are recorded on their replay thread. An explicit `DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY=1` restores the previous mode for an A/B run. This is a scoped hypothesis test, not a proven repair, and does not affect any other device/game.
+- `c7679fd0`: Added `DM_VK_PASSDUMP_MIN_COLORS=N`, selecting only passes that bind at least N color attachments, so final compositing/HUD doesn't consume the capture budget before early UE G-buffer geometry; and `DM_VK_PASSDUMP_LIMIT=N` (1–96) to cap GPU readback allocations on 8 GB phones. Works with existing `DM_VK_PASSDUMP_SIZE` and `DM_VK_PASSDUMP_DEPTH=1`.
+
+**If models remain absent after disabling experimental two-stage replay**, collect early scene passes in one test with these values in the game port's env.txt (or the existing DM_CTL environment mechanism):
+
+```
+DM_VK_MT_REPLAY=0
+DM_VK_PASSDUMP=1500
+DM_VK_PASSDUMP_SIZE=1280x720,1920x1080,960x540
+DM_VK_PASSDUMP_MIN_COLORS=2
+DM_VK_PASSDUMP_DEPTH=1
+DM_VK_PASSDUMP_LIMIT=12
+DM_VK_LIST_AT=1500
+```
+
+Use the same first-battle save. Check log.txt for `pass dump` and the `--- pass ...` lines to identify the first multi-target geometry pass. If the scene outputs and depth show actors but the final composition does not, debug downstream depth, blending and aliasing. If the actors never reach scene/depth, debug vertex data, GPU culling, skinned mesh shaders and buffer visibility. Never equate a successful `vkCmdDraw` call with the mesh actually rasterizing.
