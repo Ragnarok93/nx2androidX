@@ -48,8 +48,9 @@ class PortRunner(
         /**
          * The porter's command line for a port: pure, so the test can check it on the JVM.
          *
-         * The standalone APK is written beside the selected game file by default; its data pack is embedded,
-         * so there is no companion folder or separate output directory.
+         * A game installs as its own APK, with a companion folder for arbitrarily large
+         * assets. The game's first-run Activity imports the folder using Android's
+         * system document picker. The porting tool is not required at runtime.
          *
          * The extra address space (the alias region): Auto passes nothing, the porter decides by itself
          * (the version the profile was tested with gets none, another one 8 GB).
@@ -61,7 +62,7 @@ class PortRunner(
                      experimental: Boolean, aliasHeadroom: Int, noLsfg: Boolean,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
                      deviceLanguage: String = ""): List<String> {
-            val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--self-contained-apk")
+            val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--game-apk")
             if (touch) args += "--touch"
             if (fps60) args += "--fps60"
             if (experimental) args += "--experimental"

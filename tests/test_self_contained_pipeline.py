@@ -40,9 +40,10 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertIn("DM.parent.parent / 'tools' / 'game-activity.dex'", pipeline)
         self.assertIn("if prebuilt.is_file():", pipeline)
 
-    def test_phone_build_requests_self_contained_apk(self):
+    def test_phone_build_requests_independent_game_apk_with_companion_pack(self):
         source = (ROOT / "android/app/src/main/java/com/nx/android/data/PortRunner.kt").read_text(encoding="utf-8")
-        self.assertIn('"--self-contained-apk"', source)
+        self.assertIn('"--game-apk"', source)
+        self.assertNotIn('"--self-contained-apk"', source)
         self.assertNotIn("NX2A_PACK_DIR", source)
         self.assertNotIn("packDir:", source)
 

@@ -415,7 +415,7 @@
     <string name="builds_build_again">再次构建</string>
     <string name="builds_export_apk">导出 APK</string>
     <string name="builds_apk_companion_title">需要配套的游戏数据</string>
-    <string name="builds_apk_companion_message">此游戏过大，无法装入单个 APK。APK 可独立安装为游戏应用，但仍需要以下数据文件夹：\n%1$s\n将游戏移到其他设备时，请同时复制此文件夹。首次启动时，游戏可能要求选择数据文件夹的位置。</string>
+    <string name="builds_apk_companion_message">此独立游戏 APK 需要配套数据文件夹：\n%1$s\n安装并启动 APK 后，在系统文件夹选择器中选择此文件夹以导入游戏数据。将游戏移至其他设备时请同时复制 APK 和数据文件夹；游玩时无需 nx2android。</string>
     <string name="builds_apk_saved">已保存 %1$s</string>
     <string name="builds_apk_save_failed">无法保存 APK：%1$s</string>
     <string name="builds_needs_storage">移植需要「所有文件访问」权限才能读取游戏文件</string>

@@ -416,7 +416,7 @@
     <string name="builds_build_again">Build again</string>
     <string name="builds_export_apk">Export APK</string>
     <string name="builds_apk_companion_title">Companion game data required</string>
-    <string name="builds_apk_companion_message">This game is too large for one APK. The APK installs the game separately, but the following data folder is also required:\n%1$s\nCopy this folder as well when moving the game to another device. The installed game may ask you to select its location on first launch.</string>
+    <string name="builds_apk_companion_message">This independent game APK has a companion data folder:\n%1$s\nInstall the APK and launch it. On first launch, select this data folder in Android’s folder picker to import the assets. Keep both items when moving the game to another device; nx2android is not required to play.</string>
     <string name="builds_apk_saved">Saved %1$s</string>
     <string name="builds_apk_save_failed">Could not save APK: %1$s</string>
     <string name="builds_needs_storage">The app needs the all-files permission to read the game file</string>

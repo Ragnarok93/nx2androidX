@@ -10,7 +10,7 @@ import android.net.Uri;
 import android.os.StatFs;
 import android.provider.DocumentsContract;
 import android.util.Log;
-import android.widget.Toast;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -40,10 +40,15 @@ final class CompanionImporter {
 
     private static JSONObject descriptor(Activity activity) throws Exception {
         try (InputStream in = activity.getAssets().open(DESCRIPTOR)) {
-            byte[] b = new byte[4096];
-            int n = in.read(b);
-            if (n <= 0) throw new IOException("empty game-data descriptor");
-            JSONObject info = new JSONObject(new String(b, 0, n, StandardCharsets.UTF_8));
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] b = new byte[1024];
+            int n;
+            while ((n = in.read(b)) != -1) {
+                if (out.size() + n > 4096) throw new IOException("oversized game-data descriptor");
+                out.write(b, 0, n);
+            }
+            if (out.size() == 0) throw new IOException("empty game-data descriptor");
+            JSONObject info = new JSONObject(new String(out.toByteArray(), StandardCharsets.UTF_8));
             String folder = info.getString("folder");
             String hash = info.getString("manifest_sha256");
             if (info.getInt("schema") != 1 || !safeName(folder) ||
