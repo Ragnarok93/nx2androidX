@@ -124,18 +124,36 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vk_validation_msg(VkDebugUtilsMessageSever
     return VK_FALSE;
 }
 
-// Whether a driver offers a Vulkan 1.3 GPU (DM_VK_DRIVER: a Turnip built for another Adreno generation loads and then has none)
-static int drv_has_gpu(PFN_vkGetInstanceProcAddr g) {
+// A custom loader can open successfully yet the hook may still load Samsung's system
+// driver. In particular, a RADV Xclipse library must enumerate Mesa RADV, not merely
+// some Vulkan 1.3 GPU (both the stock Xclipse and RADV satisfy that requirement).
+static int drv_has_gpu(PFN_vkGetInstanceProcAddr g, const char *requested_driver) {
     PFN_vkCreateInstance ci = (PFN_vkCreateInstance)g(NULL, "vkCreateInstance"); VkInstance in; int ok = 0;
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "dmhost", 1, "nxnative", 1, VK_API_VERSION_1_3};
     VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app, 0, NULL, 0, NULL};
     if (!ci || ci(&ici, NULL, &in)) return 0;
     PFN_vkEnumeratePhysicalDevices ep = (PFN_vkEnumeratePhysicalDevices)g(in, "vkEnumeratePhysicalDevices");
     PFN_vkGetPhysicalDeviceProperties gp = (PFN_vkGetPhysicalDeviceProperties)g(in, "vkGetPhysicalDeviceProperties");
+    PFN_vkGetPhysicalDeviceProperties2 gp2 = (PFN_vkGetPhysicalDeviceProperties2)g(in, "vkGetPhysicalDeviceProperties2");
     PFN_vkDestroyInstance di = (PFN_vkDestroyInstance)g(in, "vkDestroyInstance");
+    // The RADV Android driver is distributed as vulkan.radeon.so. Require its Vulkan
+    // driver ID so a failed adrenotools hook cannot silently masquerade as RADV.
+    const int expect_radv = requested_driver && (strstr(requested_driver, "radeon") || strstr(requested_driver, "radv"));
     VkPhysicalDevice pd[8]; uint32_t n = 8;
-    if (ep && gp && ep(in, &n, pd) >= 0) for (uint32_t i = 0; i < n && !ok; i++) { VkPhysicalDeviceProperties p; gp(pd[i], &p); ok = p.apiVersion >= VK_API_VERSION_1_3;
-        VKLOG("DM_VK_DRIVER: %s, Vulkan %u.%u, driver version 0x%x", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), p.driverVersion); }
+    if (ep && gp && ep(in, &n, pd) >= 0) for (uint32_t i = 0; i < n && !ok; i++) {
+        VkPhysicalDeviceProperties p; gp(pd[i], &p);
+        VkPhysicalDeviceDriverProperties driver = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+        VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver };
+        if (gp2) gp2(pd[i], &p2);
+        const int is_radv = gp2 && driver.driverID == VK_DRIVER_ID_MESA_RADV;
+        ok = p.apiVersion >= VK_API_VERSION_1_3 && (!expect_radv || is_radv);
+        VKLOG("DM_VK_DRIVER: %s, Vulkan %u.%u, driver version 0x%x, driver ID %d (%s); RADV required %s",
+              p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion),
+              p.driverVersion, gp2 ? (int)driver.driverID : -1, gp2 ? driver.driverName : "unavailable",
+              expect_radv ? "yes" : "no");
+        if (expect_radv && !is_radv)
+            VKLOG("[RED] DM_VK_DRIVER: requested RADV Xclipse but Vulkan enumerated a different driver; custom loader hook did not activate RADV");
+    }
     if (di) di(in, NULL);
     return ok;
 }
@@ -164,7 +182,7 @@ void vk_init(void) {
         if (!open_vk || !*dir) VKLOG("[RED] DM_VK_DRIVER %s: no libadrenotools in the APK (%s); the system's driver instead", drv, at ? "no adrenotools_open_libvulkan" : dlerror());
         else if (!(lib = open_vk(RTLD_NOW | RTLD_LOCAL, 1 /* ADRENOTOOLS_DRIVER_CUSTOM */, NULL, dir, drvdir, drvname, NULL, NULL)))
             VKLOG("[RED] DM_VK_DRIVER %s: adrenotools could not load it from %s; the system's driver instead", drv, drvdir);
-        else if (!(p_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr")) || !drv_has_gpu(p_vkGetInstanceProcAddr)) {
+        else if (!(p_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr")) || !drv_has_gpu(p_vkGetInstanceProcAddr, drvname)) {
             VKLOG("[RED] DM_VK_DRIVER %s: no Vulkan 1.3 GPU through it; the system's driver instead", drv); lib = NULL; }   // (left loaded: a driver does not always unload cleanly)
         else { custom_driver_loaded = 1; VKLOG("Vulkan driver %s through adrenotools, not the system's (%s)", drvname, drvdir); }
     }
