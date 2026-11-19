@@ -23,7 +23,11 @@ _p.add_argument('--version-name', default='1.0', help='versionName: the version 
 PKG, LIB, LABEL = ARGS.package, ARGS.lib, ARGS.label
 if ARGS.activity != 'android.app.NativeActivity' and not ARGS.dex: _p.error('--activity requires --dex')
 if bool(ARGS.icon_fg) != bool(ARGS.icon_bg) or (ARGS.icon_fg and not ARGS.icon): _p.error('--icon-fg and --icon-bg go together, with --icon')
-MIN_SDK, TARGET_SDK = 29, 36
+# The recompiled guest/runtime uses dynamically generated executable pages. Keep
+# the standalone APK's target at 28, matching the parent phone app: targeting
+# 29+ opts into Android's writable-code execution restrictions. The SDK floor
+# remains 29 because this standalone player requires Android 10 APIs.
+MIN_SDK, TARGET_SDK = 29, 28
 ANDROID_NS = 'http://schemas.android.com/apk/res/android'
 # configChanges: what the game takes without its activity made again. Android relaunches the activity for any other change while it runs, and that ends the game
 # (the app's game page ends the :play process: one game per process): switching dark mode (uiMode) ended Link's Awakening in the emulator's Android 13 image. The rest are what
