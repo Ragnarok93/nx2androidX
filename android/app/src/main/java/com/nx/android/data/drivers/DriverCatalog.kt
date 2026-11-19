@@ -24,8 +24,13 @@ object DriverCatalog {
 
     private const val BASE = "https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases/download/v39/"
     private const val TURNIP_710 = "https://github.com/Vauzi-17/710/releases/download/4.6/"
+    private const val RADV_XCLIPSE = "https://github.com/JimVulkan/radv-xclipse/releases/download/v1.9.0/"
 
     val RELEASES = listOf(
+        // Samsung Exynos 2200/2400 Xclipse GPUs: Mesa RADV, not Turnip.
+        // v1.9.0 is newer than the uploaded v1.9.0-RC1 fe9b894 package.
+        DriverRelease("radv-xclipse-27.0.0-devel-cc87fdf.zip", "RADV Xclipse 27.0.0 (v1.9.0)", "RADV Xclipse (Mesa 27.0.0-devel-cc87fdf)",
+            DriverNote.GPU_XCLIPSE, RADV_XCLIPSE + "radv-xclipse-27.0.0-devel-cc87fdf.zip"),
         DriverRelease("Turnip_Gen8_V39.zip", "Turnip Gen8 V39", "Turnip Gen8 V39",
             DriverNote.GPU_8XX, BASE + "Turnip_Gen8_V39.zip"),
         // the Switch build first: it is the one this app's games want (a Switch emulator runs on it)
