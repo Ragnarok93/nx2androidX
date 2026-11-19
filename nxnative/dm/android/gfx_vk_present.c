@@ -586,7 +586,7 @@ static float ov_glow(int64_t t, int64_t now) {   // a held button's glow: bright
     if (!t) return 0;
     float f = (float)(now - t) / OV_FLASH_NS; return f >= 1 ? 0.22f : 0.22f + 0.48f * (1 - f) * (1 - f);
 }
-static _Atomic uint64_t g_fps_frames;   // the game's frames shown (mtl_present), which the counter counts
+static _Atomic uint64_t g_fps_frames;   // successful game-frame presents (not menu redraws or generated frames)
 // The frame rate counter: the game's frames shown per second, measured over half a second, in the window's top left corner on a dark block
 static float ov_fps_cell(void) {   // a character cell's width in texels: the widest advance of OV_FPS_CHARS (8 columns: A, O, T), a clear texel each side
     static int adv;
@@ -945,8 +945,8 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
 // flips (the chain was fed the texture already upright). period < 0: a redraw (ticket 0).
 static VkFormat im_meta_srgb;   // the game frame's sRGB pick: a generated frame follows it (present_window sets it)
 static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch, int flip, double period, uint64_t ticket, int with_meta) {
-    // The performance HUD's counters: the game's frame (a redraw presents the last one again — not a frame) and the generation's frames
-    hud_count(with_meta, period, mono_ns());
+    // Count only after the swapchain accepted a present, not when a frame was
+    // queued. The framegen images and paused redraws must not inflate source FPS.
     uint32_t k = g_pi++ % 8;
     vkWaitForFences(V.dev, 1, &g_pfence[k], 1, UINT64_MAX);
     if (with_meta && im_meta_srgb != g_want) { g_want = im_meta_srgb; swap_destroy(); if (!swap_make()) return; }   // once, at the first present of the other kind
@@ -1018,6 +1018,11 @@ static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch
     r = vkQueuePresentKHR(V.q, &pi);
     if (V.has_dtiming && r >= 0) present_time_map(ptm.presentID, ticket);
     pthread_mutex_unlock(&g_vk_queue_mu);
+    if (r >= 0) {
+        hud_count(with_meta, period, mono_ns());
+        if (with_meta && period >= 0)
+            atomic_fetch_add_explicit(&g_fps_frames, 1, memory_order_relaxed);
+    }
     if (r == VK_ERROR_OUT_OF_DATE_KHR) swap_destroy();
     else if (r == VK_SUBOPTIMAL_KHR && g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {   // the device turned over (ROTATE_90 <-> ROTATE_270): a swapchain for the new turn
         VkSurfaceCapabilitiesKHR c; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &c);
@@ -1224,7 +1229,6 @@ uint64_t vk_present_vkimg(vkimg_t *im, double period) {
     uint64_t n = ++g_presents;
     { int disp = V.has_dtiming && dm_front_window() && (n <= 240 || g_pres_recorded); struct timespec ts; if (!disp) clock_gettime(CLOCK_MONOTONIC, &ts);
       present_time_begin(n, disp ? 0 : (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
-    atomic_fetch_add(&g_fps_frames, 1);
     if (shot_wanted(n) && im->layout == VK_IMAGE_LAYOUT_GENERAL) shot(im, n);
     return present_enqueue(im, NULL, n, period);
 }
