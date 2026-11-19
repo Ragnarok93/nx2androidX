@@ -1351,7 +1351,7 @@ class Port:
                              aoc=self.aoc, sysdata=self.sysdata, language=self.lang, package=self.package, env=self.fps_env + font_env + zenv + (['DM_VK_MT_REPLAY=1'] if self.o.mt_replay else [])
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
                              files=files, text=self.lists(), host=host, icon=icon, drivers=drivers, profile_h=getattr(self, 'profile_h', None),
-                             pack_base=str(dst) if self.o.app else '.' if self.o.self_contained else None,   # the player app uses its own pack folder; a standalone APK resolves relative paths against its extracted pack
+                             pack_base=str(dst) if self.o.app else '.',   # all standalone packs are relocatable: native env_file resolves relative paths against the chosen data root
                              progress=lambda what: PROG.set(step=f'linking {what}'), require_links=self.o.self_contained)
         self.data_path = dst; self.result['data'] = str(dst)
         if retry_split:
@@ -1379,14 +1379,14 @@ class Port:
         copies into the app's files folder on the device.
         Returns (env.txt rows, pack files); none without a font"""
         if self.o.shared_font:   # the player's own font: it goes in the pack, the host reads it from the pack root in standalone APKs
-            if self.o.self_contained: return ['DM_SHARED_FONT=standard.ttf'], {'standard.ttf': self.o.shared_font}
+            if not self.o.app: return ['DM_SHARED_FONT=standard.ttf'], {'standard.ttf': self.o.shared_font}
             dest = self.data_dir() if self.o.app else datapack.files_folder(self.package)
             return [f'DM_SHARED_FONT={dest}/standard.ttf'], {'standard.ttf': self.o.shared_font}
         if not SHARED_CJK.is_file():
             say('[RED] the shared font is missing (dm/tools/shared_cjk.ttf): the game\'s Chinese text will draw as "?"')
             return [], {}
         if self.o.app: return [f'DM_SHARED_FONT={SHARED_CJK}'], {}
-        if self.o.self_contained: return ['DM_SHARED_FONT=standard.ttf'], {'standard.ttf': SHARED_CJK}
+        if not self.o.app: return ['DM_SHARED_FONT=standard.ttf'], {'standard.ttf': SHARED_CJK}
         dest = datapack.files_folder(self.package)
         return [f'DM_SHARED_FONT={dest}/standard.ttf'], {'standard.ttf': SHARED_CJK}
 
@@ -1405,7 +1405,7 @@ class Port:
             nsp.rmtree(kf); d.mkdir(parents=True, exist_ok=True)
             nsp.run([PY, DM / 'tools/make_ext_font.py', ttf, letters], self.logs / 'make_ext_font.log', env=self.env)
             kf.write_text(f'{key}\n')
-        return [f'DM_SHARED_FONT_EXT={"nintendo_ext.ttf" if self.o.self_contained else self.data_dir() / "nintendo_ext.ttf"}'], {'nintendo_ext.ttf': ttf}
+        return [f'DM_SHARED_FONT_EXT={"nintendo_ext.ttf" if not self.o.app else self.data_dir() / "nintendo_ext.ttf"}'], {'nintendo_ext.ttf': ttf}
 
     # ---- install (optional) ----
     def install(self):
