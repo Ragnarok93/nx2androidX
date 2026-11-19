@@ -1445,6 +1445,18 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("RADV_XCLIPSE_DLC", "1", 0);
         LOG("[profile] FFRS S25 FE/RADV: driver shader-cache coherence workaround on (override with RADV_XCLIPSE_DLC=0)");
     }
+    // The failed first-battle capture used DM_VK_MT_REPLAY=1. That mode
+    // records Vulkan commands on a second thread and is experimental; it is
+    // NOT the default replayer. Keep command recording on the replay thread
+    // for this device/game until missing scene geometry is ruled out as a
+    // recorder lifetime or ordering problem. Adreno and other games keep their
+    // selected mode. The owner can opt in again for an A/B trial.
+    const char *allow_mt = getenv("DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY");
+    const char *mt = getenv("DM_VK_MT_REPLAY");
+    if (mt && atoi(mt) > 0 && !(allow_mt && atoi(allow_mt) > 0)) {
+        setenv("DM_VK_MT_REPLAY", "0", 1);
+        LOG("[profile] FFRS S25 FE/RADV: disabled experimental DM_VK_MT_REPLAY=1 for render correctness (opt in again with DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY=1)");
+    }
     LOG("[profile] S25 FE RADV compatibility settings selected (driver %s)", driver);
 }
 static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char *internal) {
