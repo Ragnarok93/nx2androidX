@@ -30,6 +30,17 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn("setting\tfps=1", rows)
         self.assertIn("env\tDM_FFRS_S25FE_RADV_TUNE=1", rows)
 
+    def test_geometry_probe_only_captures_scene_passes_with_a_bounded_budget(self):
+        exec_src = (ROOT / "nxnative/dm/android/gfx_vk_exec.c").read_text(encoding="utf-8")
+        part = exec_src[exec_src.index("static void pass_dump(void) {"):
+                        exec_src.index("static void texdump_flush(void) {")]
+        self.assertIn('getenv("DM_VK_PASSDUMP_MIN_COLORS")', part)
+        self.assertIn('S.rt_has_col[i]', part)
+        self.assertIn('if (have < need) return;', part)
+        self.assertIn('g_npd >= pass_dump_limit()', part)
+        self.assertIn('getenv("DM_VK_PASSDUMP_LIMIT")', exec_src)
+        self.assertIn('g_npd < pass_dump_limit() - 1', exec_src)
+
     def test_xclipse_tuning_is_device_scoped_and_opt_out(self):
         src = FRONT.read_text(encoding="utf-8")
         tune = src[src.index("static void tune_ffrs_s25fe_radv(void) {"):src.index("static void host_start_common(")]
@@ -49,6 +60,12 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('if (!getenv("RADV_XCLIPSE_DLC"))', tune)
         self.assertIn('setenv("RADV_XCLIPSE_DLC", "1", 0)', tune)
         self.assertIn('override with RADV_XCLIPSE_DLC=0', tune)
+        # The prior game capture had experimental two-stage replay enabled.
+        # Default to correctness on this device, but allow a deliberate A/B
+        # opt-in; other devices are rejected by the guards at the top.
+        self.assertIn('getenv("DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY")', tune)
+        self.assertIn('getenv("DM_VK_MT_REPLAY")', tune)
+        self.assertIn('setenv("DM_VK_MT_REPLAY", "0", 1)', tune)
         start = src.index("static void host_start_common(")
         code = src[start:src.index("static void host_start(", start)]
         self.assertLess(code.index("env_file(p);"), code.index("tune_ffrs_s25fe_radv();"))
