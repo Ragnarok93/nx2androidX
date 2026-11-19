@@ -52,7 +52,13 @@ tasks.named("preBuild").configure { dependsOn(generatePlayerApiRevision) }
 
 android {
     namespace = "com.nx.android"
-    compileSdk = 37
+    // Android 17 is published as SDK platform android-37.0, not android-37.
+    // The minor-aware AGP 9 DSL must match the package installed by CI.
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
 
     signingConfigs {
         if (nx2aKeystore.isFile) {
