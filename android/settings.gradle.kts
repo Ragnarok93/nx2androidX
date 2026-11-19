@@ -1,6 +1,12 @@
 pluginManagement {
     repositories {
         google()
+        // CI sometimes receives a missing JAR from repo.maven.apache.org despite
+        // the artifact existing (e.g. protobuf-java-util 3.25.5). Prefer the
+        // Google Cloud-hosted Maven Central mirror, keeping Central as fallback.
+        maven {
+            url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+        }
         mavenCentral()
         gradlePluginPortal()
     }
@@ -15,6 +21,12 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
+        // CI sometimes receives a missing JAR from repo.maven.apache.org despite
+        // the artifact existing (e.g. protobuf-java-util 3.25.5). Prefer the
+        // Google Cloud-hosted Maven Central mirror, keeping Central as fallback.
+        maven {
+            url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+        }
         mavenCentral()
     }
 }
