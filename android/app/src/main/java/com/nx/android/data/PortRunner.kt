@@ -28,10 +28,11 @@ class PortRunner(
         touch: Boolean, fps60: Boolean, experimental: Boolean,
         aliasHeadroom: Int,
         sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
+        outputDir: String = "",
         onEnd: () -> Unit,
     ): Thread {
         val args = portArgs(gameFile, keys, touch, fps60, experimental, aliasHeadroom, !BuildConfig.NX_LSFG,
-            sharedFont, firmware, mtReplay, deviceLanguage())
+            sharedFont, firmware, mtReplay, deviceLanguage(), outputDir)
         // A file in a netdisk's folder is not there yet in its middle: the port would read it as a broken dump
         GameSource.cloudFolder(gameFile)?.let { onLine(locale.str(R.string.runner_cloud_folder, it)) }
         return start(args, onEnd)
@@ -60,7 +61,7 @@ class PortRunner(
         fun portArgs(gameFile: String, keys: String, touch: Boolean, fps60: Boolean,
                      experimental: Boolean, aliasHeadroom: Int, noLsfg: Boolean,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
-                     deviceLanguage: String = ""): List<String> {
+                     deviceLanguage: String = "", outputDir: String = ""): List<String> {
             val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--self-contained-apk")
             if (touch) args += "--touch"
             if (fps60) args += "--fps60"
@@ -70,6 +71,7 @@ class PortRunner(
             if (firmware.isNotBlank()) args += listOf("--firmware", firmware.trim())
             if (mtReplay) args += "--mt-replay"
             if (deviceLanguage.isNotBlank()) args += listOf("--language-preferred", deviceLanguage.trim())
+            if (outputDir.isNotBlank()) args += listOf("--out", outputDir.trim())
             // A build without the frame generation (the Gradle property nxLsfg=false): the host the app builds on the
             // device is then smaller and the frame generation reports that it is not in this build (android/NOTICE.md).
             if (noLsfg) args += "--no-lsfg"

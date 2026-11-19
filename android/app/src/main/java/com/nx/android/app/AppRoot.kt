@@ -168,6 +168,8 @@ data class AppActions(
     // the file provider: the app's own folders are visible to the file managers (on by default)
     val fileProvider: () -> Boolean = { true },
     val onSetFileProvider: (Boolean) -> Unit = {},
+    /** Mounted removable media exports that the app has permission to write. */
+    val removableApkOutputs: () -> List<Pair<String, String>> = { emptyList() },
 )
 
 /** The app's root: the guided setup until it is done, the main shell after */
@@ -233,7 +235,9 @@ fun AppRoot(
                     onDiagnosticLog = { logOpen = true },
                     onEnvCheck = { envCheckOpen = true })
             }
-            val volumes = remember(ctx, locale.mode) { StorageVolumes.list(ctx, locale) }
+            // Re-enumerate on each picker open: a removable card may have been
+            // inserted or ejected since the app was launched.
+            val volumes = remember(ctx, locale.mode, pickerReq) { StorageVolumes.list(ctx, locale) }
             pickerReq?.let { req ->
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f))) {
                     if (!actions.storageOk()) {

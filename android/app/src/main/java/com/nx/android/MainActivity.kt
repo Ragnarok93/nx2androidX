@@ -33,6 +33,7 @@ import com.nx.android.data.AppVersion
 import com.nx.android.data.LogBundle
 import com.nx.android.data.Player
 import com.nx.android.data.PrefsStore
+import com.nx.android.data.StorageVolumes
 import com.nx.android.data.porting.BuildSessionRepository
 import com.nx.android.core.storage.AppPaths
 import androidx.core.content.FileProvider
@@ -164,10 +165,24 @@ class MainActivity : ComponentActivity() {
             if (port.running || runtime.running || player.running || Player.playProcessAlive(this)) {
                 toast(locale.str(R.string.runtime_busy))
             } else if (file.canRead()) {
-                // Export a standalone APK beside the source game; no library pack directory is created.
-                PortService.start(this, file.absolutePath, prefs.keys,
-                                  cfg.touch, cfg.fps60, cfg.experimental, cfg.aliasHeadroom,
-                                  cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay)
+                // Runtime/compilers stay on internal storage. Only the finished
+                // APK and its temporary archive go to the selected removable card.
+                val resolved = runCatching {
+                    StorageVolumes.resolveExportDirectory(this, file, cfg.outputDir)
+                }
+                if (resolved.isFailure) {
+                    toast(locale.str(R.string.builds_external_storage_unavailable))
+                } else {
+                    val export = resolved.getOrNull()
+                    if (export != null && (!(export.isDirectory || export.mkdirs()) || !export.canWrite())) {
+                        toast(locale.str(R.string.builds_external_storage_unavailable))
+                    } else {
+                        PortService.start(this, file.absolutePath, prefs.keys,
+                                          cfg.touch, cfg.fps60, cfg.experimental, cfg.aliasHeadroom,
+                                          cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay,
+                                          export?.absolutePath.orEmpty())
+                    }
+                }
             } else {
                 toast(locale.str(R.string.builds_needs_storage)); askStorage()
             }
@@ -225,6 +240,9 @@ class MainActivity : ComponentActivity() {
         // 文件管理器能不能看见 App 的私有目录（运行时、存档、日志）。文档提供器自己读这份设置。
         fileProvider = { prefs.bool(PrefsStore.FILE_PROVIDER, true) },
         onSetFileProvider = { on -> prefs.put(PrefsStore.FILE_PROVIDER, on) },
+        removableApkOutputs = {
+            StorageVolumes.removableExportDirs(this).map { (name, dir) -> name to dir.absolutePath }
+        },
         onShareLog = {
             lifecycleScope.launch {
                 val zip = withContext(Dispatchers.IO) {

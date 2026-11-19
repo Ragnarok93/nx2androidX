@@ -73,8 +73,8 @@ android {
         targetSdk = 28
         // The version the release's tag carries, without the "v": v0.3.0-alpha02 -> 0.3.0-alpha02. The update
         // check compares the two, so the app can tell which release is newer than the one running.
-        versionCode = 16
-        versionName = "0.3.0-alpha16"
+        versionCode = 17
+        versionName = "0.3.0-alpha17"
         ndk { abiFilters += listOf("arm64-v8a") }
         // -PnxLsfg=false: the host the app builds is built without the frame generation (the lsfg/ folder): the host
         // is then smaller and the frame generation reports that it is not in this build. The default is the current
@@ -177,11 +177,18 @@ val legacyFeatureDataImports = setOf(
     "feature/environment/PhantomFixDialog.kt|com.nx.android.data.PhantomFix",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.GameIcon",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.GameLog",
-    "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.Player",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.SaveShare",
     "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.StorageVolumes",
     "feature/settings/SettingsScreen.kt|com.nx.android.data.AppLocale",
     "feature/settings/SettingsScreen.kt|com.nx.android.data.LosslessDll",
+    "feature/builds/BuildsViewModel.kt|com.nx.android.data.PrefsStore",
+    "feature/builds/BuildsViewModel.kt|com.nx.android.data.porting.BuildSessionRepository",
+    "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.LogBundle",
+    "feature/gamedetail/GameDetailScreen.kt|com.nx.android.data.saves.SaveIo",
+    "feature/gamedetail/GameDetailViewModel.kt|com.nx.android.data.saves.SaveIo",
+    "feature/library/LibraryHeroDetails.kt|com.nx.android.data.library.GameProfile",
+    "feature/library/LibraryScreen.kt|com.nx.android.data.library.GameProfile",
+    "feature/library/LibraryStatus.kt|com.nx.android.data.library.GameProfile",
 )
 
 val checkArchitectureBoundaries by tasks.registering {

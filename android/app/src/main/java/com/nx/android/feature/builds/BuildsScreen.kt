@@ -228,7 +228,9 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
     // 配置默认展开：选中游戏后玩家一眼看到当前选项
     var configOpen by remember(f.absolutePath) { mutableStateOf(true) }
     val storageOk = actions.storageOk()
-    val canStart = f.isFile && f.canRead() && envReady && storageOk && !port.running && keys.isNotBlank() && status != GameStatus.PORTING
+    val cardExports = actions.removableApkOutputs()
+    val outputReady = cfg.outputDir.isBlank() || cardExports.any { it.second == cfg.outputDir }
+    val canStart = f.isFile && f.canRead() && envReady && storageOk && outputReady && !port.running && keys.isNotBlank() && status != GameStatus.PORTING
     val info = viewModel.gameInfo.info
 
     // 三张卡，一件事一张：目标（是哪个游戏、文件在哪）· 识别到的文件 · 构建选项
@@ -290,6 +292,20 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
                 ConfigRow(stringResource(R.string.builds_experimental), cfg.experimental) { cfg = cfg.copy(experimental = it); lib.setConfig(f, cfg) }
                 AliasRow(cfg.aliasHeadroom) { cfg = cfg.copy(aliasHeadroom = it); lib.setConfig(f, cfg) }
                 Hint(stringResource(R.string.builds_alias_hint), size = 11.sp)
+                // An app-specific SD-card directory is writable on modern Android;
+                // arbitrary SD-card roots generally are not. The source may still live
+                // anywhere the file picker can read.
+                PickRow(
+                    label = stringResource(R.string.builds_output_location),
+                    options = listOf("" to stringResource(R.string.builds_output_auto)) +
+                        cardExports.map { (volume, path) ->
+                            path to stringResource(R.string.storage_removable_volume, volume)
+                        },
+                    current = cfg.outputDir,
+                    onSelect = { path -> cfg = cfg.copy(outputDir = path); lib.setConfig(f, cfg) },
+                    fallback = stringResource(R.string.builds_external_storage_unavailable),
+                )
+                Hint(stringResource(R.string.builds_output_location_hint), size = 11.sp)
                 // 玩家自己的覆盖：系统字体、固件 dump、多线程回放
                 PathOptionRow(
                     label = stringResource(R.string.builds_shared_font),
@@ -323,6 +339,7 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
                     when {
                         !envReady -> stringResource(R.string.builds_need_env)
                         !storageOk -> stringResource(R.string.builds_need_storage)
+                        !outputReady -> stringResource(R.string.builds_external_storage_unavailable)
                         keys.isBlank() -> stringResource(R.string.builds_need_keys)
                         !f.isFile -> stringResource(R.string.builds_source_missing)
                         !f.canRead() -> stringResource(R.string.builds_needs_storage)

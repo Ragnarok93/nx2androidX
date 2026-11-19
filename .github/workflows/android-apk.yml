@@ -119,6 +119,10 @@ jobs:
           bash packaging/android-apk/build_apk.sh release
         env:
           GH_TOKEN: ${{ github.token }}   # built-in token can download the public payload release
+      - name: Android JVM tests and dependency boundaries
+        run: |
+          cd android
+          ./gradlew :app:testDebugUnitTest :app:checkArchitectureBoundaries --console=plain
       - name: the APK's name
         id: apk
         run: |
@@ -136,10 +140,12 @@ jobs:
       - name: verify the APK and signing identity
         run: |
           apk=android/app/build/outputs/apk/release/app-release.apk
-          apksigner verify --min-sdk-version 26 --verbose "$apk"
+          signer_bin="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+          [ -x "$signer_bin" ] || { echo "::error::Android SDK apksigner was not installed"; exit 1; }
+          "$signer_bin" verify --min-sdk-version 26 --verbose "$apk"
           if [ "${{ steps.signer.outputs.persistent }}" = "true" ]; then
             expected=$(keytool -exportcert -keystore "$NX2A_KEYSTORE" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" | sha256sum | cut -d' ' -f1)
-            actual=$(apksigner verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+            actual=$("$signer_bin" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
             [ -n "$actual" ] && [ "$actual" = "$expected" ] || {
               echo "::error::APK signing certificate does not match the permanent keystore"
               exit 1
