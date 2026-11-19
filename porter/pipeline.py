@@ -1111,17 +1111,22 @@ class Port:
         # Archive creation and APK assembly are streamed: large RomFS/shader trees never become one Python bytes object.
         data_assets = []
         if self.o.self_contained:
-            import zipfile
             pack = self.data_dir()
             if not (pack / 'nx2a-data.json').is_file(): raise BuildError(f'the data pack is incomplete: {pack}')
-            # Use the APK output volume for the intermediate archive, not scarce /data/app workspace.
+            # Stage the archive on the export volume, not scarce /data/app storage.
             archive = self.o.out / f'.{stem}.nx2a-data.zip.partial'
             checksum = self.aw / 'nx2a-data.sha256'
-            archive.unlink(missing_ok=True)   # an interrupted attempt must not occupy disk on retry
+            archive.unlink(missing_ok=True)   # interrupted exports must not occupy disk on retry
             pack_bytes = sum(p.stat().st_size for p in datapack.embedded_files(pack))
-            # Leave enough room for both the archive and the signed APK. An overly large game may
-            # compress to fit a classic APK, but budgeting for the 4 GiB worst case prevents an
-            # hours-long successful translation followed by ENOSPC at the last step.
+            # Android APKs are classic ZIP files signed with v2. Reserve room for the
+            # runtime, all known Vulkan/loader libraries, other assets and signing data.
+            other_libs = list(dict.fromkeys(str(p) for p in
+                (self.drivers() + self.loader_libs() + self.loader_so())))
+            reserve = self.so.stat().st_size + sum(Path(p).stat().st_size for p in other_libs if Path(p).is_file()) + (32 << 20)
+            archive_budget = 0xffffffff - reserve
+            if archive_budget <= 0:
+                raise BuildError('native runtime and drivers exceed the Android APK ZIP size budget')
+            # Archive and signed APK may both exist on the export volume at once.
             remaining = shutil.disk_usage(self.o.out).free
             required = 2 * min(pack_bytes + (64 << 20), 0xffffffff) + (256 << 20)
             if remaining < required:
@@ -1130,18 +1135,18 @@ class Port:
                                  f'{remaining / 2**30:.1f} GiB free in {self.o.out}; '
                                  f'game compilation is cached and will resume after freeing space')
             try:
-                with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zf:
-                    for src in datapack.embedded_files(pack):
-                        zf.write(src, src.relative_to(pack).as_posix())
-                if archive.stat().st_size >= 0xffffffff:
-                    raise BuildError('this game\'s compressed data archive exceeds the 4 GiB Android APK ZIP limit; '
-                                     'a single self-contained APK cannot be exported by the current packaging format')
+                try:
+                    archive_size, level = datapack.write_embedded_zip(pack, archive, archive_budget)
+                except ValueError as e:
+                    raise BuildError(str(e)) from e
+                say(f'embedded data pack: {pack_bytes / 2**30:.2f} GiB raw -> '
+                    f'{archive_size / 2**30:.2f} GiB (DEFLATE level {level})')
                 # mkapk writes one temporary APK on the output filesystem and signs it in place.
                 free = shutil.disk_usage(self.o.out).free
-                if free < archive.stat().st_size + (256 << 20):
+                if free < archive_size + (256 << 20):
                     raise BuildError(f'not enough storage for final APK assembly: '
-                                     f'{free / 2**30:.1f} GiB free, '
-                                     f'at least {(archive.stat().st_size + (256 << 20)) / 2**30:.1f} GiB needed')
+                                    f'{free / 2**30:.1f} GiB free, '
+                                    f'at least {(archive_size + (256 << 20)) / 2**30:.1f} GiB needed')
                 digest = hashlib.sha256()
                 with archive.open('rb') as src:
                     for block in iter(lambda: src.read(1 << 20), b''): digest.update(block)
