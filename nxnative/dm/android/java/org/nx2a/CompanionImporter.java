@@ -121,24 +121,33 @@ final class CompanionImporter {
             if (baked != null) {
                 File folder = new File(baked);
                 if (folder.isDirectory() && folder.canRead() && folder.canWrite()) {
-                    File manifest = new File(folder, MANIFEST);
-                    if (manifest.isFile() &&
-                            info.getString("manifest_sha256").equals(digestFile(manifest))) {
-                        File probe = null;
-                        try {
+                    File probe = null;
+                    try {
+                        // Android's scoped-storage filesystem may report
+                        // canRead()/isFile() as true, but actually opening the
+                        // manifest then fails with EACCES. Verification is
+                        // optional here; it must never abort the SAF fallback.
+                        File manifest = new File(folder, MANIFEST);
+                        if (manifest.isFile() &&
+                                info.getString("manifest_sha256").equals(digestFile(manifest))) {
                             probe = File.createTempFile(".nx2a-write-", ".tmp", folder);
                             if (bootstrap) {
                                 ((BootstrapActivity) activity).launchGame(folder.getCanonicalPath());
                                 return true;
                             }
-                            if (!GameActivity.companionPackReady(folder.getCanonicalPath()))
-                                Log.w("nx2a-companion", "Native player could not use the public pack; importing privately");
-                            else return true;
-                        } catch (IOException | SecurityException inaccessible) {
-                            Log.i("nx2a-companion", "Direct data-folder access unavailable; using folder picker");
-                        } finally {
-                            if (probe != null) probe.delete();
+                            if (GameActivity.companionPackReady(folder.getCanonicalPath()))
+                                return true;
+                            Log.w("nx2a-companion", "Native player could not use the public pack; importing privately");
                         }
+                    } catch (IOException | SecurityException inaccessible) {
+                        // The APK is valid; only direct shared-storage access is
+                        // denied. Android's document picker can grant access
+                        // to the exact folder without broad storage permissions.
+                        Log.w("nx2a-companion", "Direct access denied for " + baked +
+                                "; offering system document picker instead", inaccessible);
+                    } finally {
+                        if (probe != null && !probe.delete())
+                            Log.w("nx2a-companion", "Could not remove direct-write probe from " + baked);
                     }
                 }
             }
@@ -148,10 +157,11 @@ final class CompanionImporter {
         }
         new AlertDialog.Builder(activity)
             .setTitle("Import game data")
-            .setMessage("This game is larger than one APK can hold. Select its exported " +
-                    info.optString("folder") + " folder. The game will verify and import " +
-                    "its files once, without needing nx2android installed. " +
-                    "You need enough free storage for the imported data.")
+            .setMessage("Android does not allow this game to read the exported shared folder directly. " +
+                    "Select the " + info.optString("folder") + " folder using Android's system " +
+                    "file picker. Its contents will be verified and imported into the game's " +
+                    "private storage. This requires additional free storage for the game data; " +
+                    "nx2android is not needed to play.")
             .setPositiveButton("Choose data folder", (d, which) -> {
                 Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
                 picker.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |

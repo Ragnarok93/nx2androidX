@@ -104,6 +104,20 @@ class SplitGameExportTests(unittest.TestCase):
         self.assertIn('if (!root.exists() && backup.isDirectory() && !backup.renameTo(root))', java)
         self.assertLess(java.index('GameActivity.deleteTree(partial);'), java.index('long free = new StatFs('))
 
+    def test_denied_public_manifest_read_falls_back_to_system_picker(self):
+        java = (ROOT / "nxnative/dm/android/java/org/nx2a/CompanionImporter.java").read_text(encoding="utf-8")
+        manifest_hash = java.index('info.getString("manifest_sha256").equals(digestFile(manifest))')
+        guarded = java.rfind("try {", 0, manifest_hash)
+        handled = java.index("catch (IOException | SecurityException inaccessible)", manifest_hash)
+        dialog = java.index('new AlertDialog.Builder(activity)', handled)
+        self.assertGreater(guarded, java.index("String baked = bakedDataPath(activity);"))
+        self.assertGreater(handled, manifest_hash)
+        self.assertGreater(dialog, handled)
+        self.assertIn('Intent.ACTION_OPEN_DOCUMENT_TREE', java[dialog:])
+        self.assertIn('Direct access denied for ', java)
+        # An unreadable public path must not produce the fatal descriptor error.
+        self.assertLess(java.index("} catch (Exception error) {", handled), dialog)
+
     def test_bootstrap_draws_before_starting_game_native_activity(self):
         java = (ROOT / "nxnative/dm/android/java/org/nx2a/BootstrapActivity.java").read_text(encoding="utf-8")
         self.assertLess(java.index("setContentView(status"), java.index("CompanionImporter.prepare(this)"))
