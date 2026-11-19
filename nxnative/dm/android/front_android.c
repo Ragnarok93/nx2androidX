@@ -1427,6 +1427,14 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0);
         LOG("[profile] FFRS S25 FE/RADV: small-target compression off (override with RADV_XCLIPSE_DCC_SMALL=1)");
     }
+    // This driver exposes dynamic rendering. Use it for FFRS to avoid the
+    // imageless-framebuffer/render-pass compatibility path while the title's
+    // missing geometry is being isolated. This does not touch other devices;
+    // DM_VK_RP=1 in env.txt restores the older path for an A/B comparison.
+    if (!getenv("DM_VK_RP")) {
+        setenv("DM_VK_RP", "0", 0);
+        LOG("[profile] FFRS S25 FE/RADV: dynamic rendering on (override with DM_VK_RP=1)");
+    }
     LOG("[profile] S25 FE RADV compatibility settings selected (driver %s)", driver);
 }
 static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char *internal) {
