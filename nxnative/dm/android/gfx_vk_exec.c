@@ -2329,6 +2329,35 @@ static void draw(const p_draw *d) {
     }
     if (!(dbg_draw() & 1) && g_ok) { int xf = xfb_begin(cb); vkCmdDraw(cb, (uint32_t)d->count, inst, (uint32_t)d->first, (uint32_t)d->base_instance); if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf); }
 }
+// DM_VK_INDIRECT_LOG_AT=<present>: bounded, read-only diagnostics for GPU
+// culling/indirect scene draws. A submitted draw with a valid pipeline may
+// still rasterize nothing when its GPU-produced indirect count is zero. The
+// CPU guest bytes and cached Vulkan-buffer shadow are NOT synchronized GPU
+// readbacks; differences narrow the investigation but do not prove the count
+// that the GPU ultimately consumed. Never stall rendering to inspect them.
+static void indirect_log(const p_draw_idx *d) {
+    static int64_t at = -2;
+    if (at == -2) {
+        const char *e = getenv("DM_VK_INDIRECT_LOG_AT");
+        at = e && *e ? atoll(e) : -1;
+    }
+    if (at < 0 || (int64_t)g_tex_frame < at || (int64_t)g_tex_frame >= at + 2 || !d->ind) return;
+    static uint64_t frame = UINT64_MAX;
+    static unsigned entries;
+    if (frame != g_tex_frame) { frame = g_tex_frame; entries = 0; }
+    if (entries++ >= 48) return;
+    uint32_t guest[5] = {0}, shadow[5] = {0};
+    vkpool_t *p = vk_pool_of(d->ind, sizeof guest);
+    vk_ubd_read(d->ind, sizeof guest, (uint8_t *)guest);
+    int has_shadow = p && p->shadow;
+    if (has_shadow) memcpy(shadow, p->shadow + (d->ind - p->lo), sizeof shadow);
+    VKLOG("[indirect] present %llu pass %d shader %016llx arguments %#llx: guest indices %u instances %u first %u base %d; pool shadow %sindices %u instances %u first %u base %d",
+          (unsigned long long)g_tex_frame, g_sub_pass - 1,
+          (unsigned long long)(S.sh[0] ? S.sh[0]->key : 0),
+          (unsigned long long)d->ind,
+          guest[0], guest[1], guest[2], (int32_t)guest[3],
+          has_shadow ? "" : "unavailable; ", shadow[0], shadow[1], shadow[2], (int32_t)shadow[3]);
+}
 static void draw_idx(const p_draw_idx *d) {
     graphics_updates_ready();
     graphics_cpu_ready();
@@ -2372,7 +2401,7 @@ static void draw_idx(const p_draw_idx *d) {
     uint32_t inst = d->instances ? (uint32_t)d->instances : 1;
     { static int n; if (n < 12 && (d->itype == 0 || d->ind || (uint32_t)d->count > (1u << 20) || inst > (1u << 16))) { n++;
         VKLOG("unusual indexed draw: itype %d count %u instances %u indirect %#llx prim %d base vertex %d", d->itype, (unsigned)d->count, inst, (unsigned long long)d->ind, d->prim, d->base_vertex); } }
-    if (d->ind) { VkBuffer b; VkDeviceSize o; bc_index(cb, ib, io, it); if (!vk_buf_at(d->ind, mcb ? (uint64_t)d->mdi_stride * (uint64_t)d->mdi_max : 20, &b, &o)) VKRED_ONCE(97, "indexed indirect draw arguments outside the memory pools");
+    if (d->ind) { indirect_log(d); VkBuffer b; VkDeviceSize o; bc_index(cb, ib, io, it); if (!vk_buf_at(d->ind, mcb ? (uint64_t)d->mdi_stride * (uint64_t)d->mdi_max : 20, &b, &o)) VKRED_ONCE(97, "indexed indirect draw arguments outside the memory pools");
         else if (!(dbg_draw() & 1) && g_ok) { if (mcb) vkCmdDrawIndexedIndirectCount(cb, b, o, mcb, mco, (uint32_t)d->mdi_max, (uint32_t)d->mdi_stride); else vkCmdDrawIndexedIndirect(cb, b, o, 1, 20); } return; }
     if (prim == 7) { VkBuffer b; VkDeviceSize o; int n = quad_indices((uint32_t)d->count, (const uint8_t *)(uintptr_t)d->ibuf, d->itype, 0, &b, &o); if (!n) return;
         bc_index(cb, b, o, VK_INDEX_TYPE_UINT32); if (!(dbg_draw() & 1) && g_ok) vkCmdDrawIndexed(cb, (uint32_t)n, inst, 0, d->base_vertex, (uint32_t)d->base_instance); return; }
