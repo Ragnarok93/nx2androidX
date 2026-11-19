@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 
 void front_run(void (*guest)(void)) { guest(); }
@@ -1396,6 +1397,32 @@ static void app_notice_keep(JNIEnv *E, JavaVM *vm, jobject act) {   // the start
     }
 }
 
+// A device-specific tuning request comes from the game's android.tsv, rather
+// than a global emulator change. The validated FFRS 60 FPS profile was tested
+// on an Adreno 830; don't assume that is viable on the S25 FE (Exynos 2400).
+// An explicit env.txt override or the player's saved docked setting wins.
+static void tune_ffrs_s25fe_radv(void) {
+    const char *enabled = getenv("DM_FFRS_S25FE_RADV_TUNE");
+    if (!enabled || strcmp(enabled, "1")) return;
+    char model[PROP_VALUE_MAX] = {0};
+    if (!__system_property_get("ro.product.model", model) || strncmp(model, "SM-S731", 7)) return;
+    const char *driver = getenv("DM_VK_DRIVER");
+    if (!driver || !(strstr(driver, "radeon") || strstr(driver, "radv"))) return;
+    // The game is paced by the value written into UE's rhi.SyncInterval and
+    // t.MaxFPS (hle_fpslock.c). Do not force a different rate on other GPUs.
+    if (!getenv("DM_FPS_TARGET")) {
+        setenv("DM_FPS_TARGET", "30", 0);
+        LOG("[profile] FFRS S25 FE/RADV: game FPS target 30 (override with DM_FPS_TARGET=60)");
+    }
+    // JimVulkan's DCC_SMALL=0 affects only <=512x512 targets used by UE
+    // post-processing; it is a conservative correctness diagnostic and may
+    // cost some bandwidth. The larger render targets retain compression.
+    if (!getenv("RADV_XCLIPSE_DCC_SMALL")) {
+        setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0);
+        LOG("[profile] FFRS S25 FE/RADV: small-target compression off (override with RADV_XCLIPSE_DCC_SMALL=1)");
+    }
+    LOG("[profile] S25 FE RADV compatibility settings selected (driver %s)", driver);
+}
 static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char *internal) {
     if (g_host_up) return;   // the dialog's thread and the resume can both get here
     crash_install();   // the signal handlers: the Android host has no main.c to install them, so a crash here used to kill the game silently
@@ -1413,6 +1440,7 @@ static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char 
     snprintf(p, sizeof p, "%s/temp", internal); mkdir(p, 0700); snprintf(q, sizeof q, "%s%s", p, sub); mkdir(q, 0700); setenv("DM_TEMP", q, 0);
     snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
     snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p);
+    tune_ffrs_s25fe_radv();
     // User-supplied Lossless.dll may live alongside imported game data.
     // Do not bundle copyrighted DLLs without the user's own provided file.
     if (!getenv("DM_LSFG_DLL") || !*getenv("DM_LSFG_DLL")) {
