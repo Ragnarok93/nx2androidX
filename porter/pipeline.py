@@ -1209,10 +1209,11 @@ class Port:
         if '--launcher-activity' not in external:
             external += ['--launcher-activity', 'org.nx2a.BootstrapActivity']
         data_assets += ['--asset', f'nx2a-player-activity={player_activity_file}']
-        driver = self.o.vulkan_driver
-        if driver and driver.name != driver_lib_name(driver):   # packed under a lib*.so name (driver_lib_name), copied beside the host library
-            driver = self.so.parent / driver_lib_name(driver); shutil.copyfile(self.o.vulkan_driver, driver)
-            say(f'--vulkan-driver: {self.o.vulkan_driver.name} is packed as {driver.name} (Android extracts only lib*.so libraries)')
+        # Resolve all driver and loader libraries before running the file-backed APK signer.
+        # A prebuilt loader comes from tools/adrenotools, NOT this game's host output.
+        # Adding both paths used to request host/libadrenotools.so even when it did not
+        # exist, aborting an otherwise successful Xclipse port in build_zip_file().
+        vulkan_libs = self.apk_vulkan_libraries()
         cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
                '--version-code', str(code), '--version-name', self.display]
         if self.o.self_contained:
@@ -1235,8 +1236,7 @@ class Port:
             cmd += ['--data-root', str(pack), '--asset', f'nx2a-companion.json={descriptor}']
         cmd += (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
         cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
-        cmd += [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()
-                                                          + ([driver] + [self.so.parent / n for n in ADRENOTOOLS_LIBS] if driver else []))) for a in ('--extra-so', f)]
+        cmd += [a for lib in vulkan_libs for a in ('--extra-so', str(lib))]
         try:
             nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
         finally:
@@ -1344,6 +1344,49 @@ class Port:
         if pre: return pre
         f = self.so.parent / ADRENOTOOLS_LOADER
         return [f] if f.is_file() else []
+
+    def apk_vulkan_libraries(self):
+        """Complete, unique set of libraries for a standalone game's APK.
+
+        The phone's prebuilt libadrenotools and hooks must be used from their
+        actual paths. Neither a custom RADV Xclipse driver nor an Adreno driver
+        requires another copy in the game's host output. Android extracts only
+        lib*.so names, so normalize every bundled driver (not just the default).
+        """
+        loader = {}
+        for path in self.loader_libs() + self.loader_so():
+            if path.is_file() and path.stat().st_size:
+                loader[path.name] = path
+        missing = sorted(set(ADRENOTOOLS_LIBS) - loader.keys())
+        if missing:
+            raise BuildError('Vulkan driver loader is incomplete: ' + ', '.join(missing)
+                             + '; rebuild the nx2androidX app with build_adrenotools.py')
+
+        packaged_drivers = {}
+        for source in self.drivers():
+            name = driver_lib_name(source)
+            if name in loader or name in ('libdmhost.so', 'libdmplay.so'):
+                raise BuildError(f'--vulkan-driver: {name} conflicts with the port runtime')
+            previous = packaged_drivers.get(name)
+            if previous is not None:
+                if previous != source.resolve():
+                    raise BuildError(f'Vulkan driver filename collision: {name} from {previous} and {source}')
+                continue
+            if not source.is_file() or not source.stat().st_size:
+                raise BuildError(f'Vulkan driver is missing or empty: {source}')
+            packaged_drivers[name] = source.resolve()
+
+        result = list(loader.values())
+        for name, source in packaged_drivers.items():
+            if source.name != name:
+                target = self.so.parent / name
+                if source != target.resolve():
+                    shutil.copyfile(source, target)
+                say(f'--vulkan-driver: {source.name} is packed as {name} (Android extracts only lib*.so libraries)')
+                result.append(target)
+            else:
+                result.append(source)
+        return result
 
     def pack_dir_root(self):
         """The folder that will hold the data pack. The app may put it on the removable card (NX2A_PACK_DIR);
