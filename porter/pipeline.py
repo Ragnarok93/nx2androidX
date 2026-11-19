@@ -31,6 +31,24 @@ LETTER_FONTS = [f'{os.environ.get("WINDIR", "C:/Windows")}/Fonts/{f}' for f in (
     '/usr/share/fonts/liberation/LiberationSans-Bold.ttf', '/usr/share/fonts/noto/NotoSans-Bold.ttf']   # after DejaVu: a machine that has both keeps the font (and its cache key) it had
 
 
+def public_split_export_dir(path):
+    """Keep standalone APK/companion files outside another app's protected Android/data tree.
+
+    On Android 11+, MANAGE_EXTERNAL_STORAGE does NOT grant a standalone game
+    access to the builder's Android/data/com.nx.android directory. Export onto
+    the same storage volume's public Download directory instead. A standalone
+    game always requires its companion files, and both artifacts remain together.
+    """
+    path = Path(path)
+    parts = path.parts
+    for i in range(len(parts) - 2):
+        if parts[i].lower() == 'android' and parts[i + 1].lower() in ('data', 'obb'):
+            return Path(*parts[:i]) / 'Download' / 'nx2android-ports'
+    if str(path).startswith(('/data/user/0/com.nx.android/', '/data/data/com.nx.android/')):
+        return Path('/sdcard/Download/nx2android-ports')
+    return path
+
+
 @dataclass
 class Options:
     folder: Path                       # the game's folder: the base game, its updates and DLC
@@ -1318,6 +1336,16 @@ class Port:
         return self.o.out / stem
 
     def data(self, *, retry_split=False):
+        if not self.o.app and not self.o.self_contained:
+            safe_out = public_split_export_dir(self.o.out)
+            if safe_out != self.o.out:
+                say(f'standalone APK + data cannot be read from Android/data of another app; '
+                    f'exporting both together in {safe_out}')
+                self.o.out = safe_out
+                try:
+                    self.o.out.mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    raise BuildError(f'cannot create accessible standalone game export directory {safe_out}: {e}') from e
         if retry_split:
             PROG.set(step='exporting companion game data (single APK is too large)')
         else:
