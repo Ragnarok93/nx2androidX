@@ -78,7 +78,13 @@ jobs:
       - name: the SDK parts the build needs
         run: |
           sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.3.13750724"
-          yes | sdkmanager --licenses > /dev/null
+          # Process substitution avoids 'yes' exiting 141 on SIGPIPE under
+          # GitHub's bash -e -o pipefail when sdkmanager has finished reading.
+          sdkmanager --licenses < <(yes) > /dev/null
+          test -f "$ANDROID_HOME/platforms/android-37.0/android.jar" || {
+            echo "::error::Android SDK 37.0 is missing after sdkmanager install"
+            exit 1
+          }
       # the payload and the build tools do not depend on the repository: they are fetched once and kept
       - uses: actions/cache@v4
         with:
