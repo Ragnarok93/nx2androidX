@@ -39,6 +39,8 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('strcmp(enabled, "1")', tune)
         self.assertIn('if (!getenv("DM_FPS_TARGET"))', tune)
         self.assertIn('setenv("DM_FPS_TARGET", "30", 0)', tune)
+        self.assertIn('if (!getenv("DM_OPMODE"))', tune)
+        self.assertIn('setenv("DM_OPMODE", "0", 0)', tune)
         self.assertIn('if (!getenv("RADV_XCLIPSE_DCC_SMALL"))', tune)
         self.assertIn('setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0)', tune)
         start = src.index("static void host_start_common(")
