@@ -25,6 +25,14 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #define VK_DEF(f) PFN_##f f;
 VK_FNS(VK_DEF) VK_DEV_FNS(VK_DEF)
 static PFN_vkGetInstanceProcAddr p_vkGetInstanceProcAddr;
+// Set before the first frame. Reports the loader result, not merely which
+// driver was imported into the builder. The string is immutable after publish.
+static char g_vk_driver_status[128] = "Initializing";
+static _Atomic int g_vk_driver_status_ready;
+const char *dm_vk_driver_status(void) {
+    return atomic_load_explicit(&g_vk_driver_status_ready, memory_order_acquire)
+        ? g_vk_driver_status : "Initializing";
+}
 vkdev_t V;
 #include "gfx_vk_pipeline_cache.inc"
 pthread_mutex_t g_vk_queue_mu = PTHREAD_MUTEX_INITIALIZER;   // VkQueue access is externally synchronized: submissions and presents
@@ -139,7 +147,7 @@ void vk_init(void) {
     // making the surface and the swapchain, which Turnip on Android has none of (the platform loader makes them over VK_ANDROID_native_buffer). TOTKDroid, a port of Tears
     // of the Kingdom 1.4.3 that also replays NVN on Vulkan, measured its Great Sky Island forest at GPU 16-17 ms a frame on Turnip on an Adreno 830 (docs/FPS-2026-10-31.md),
     // against 22-27 ms here on Qualcomm's driver. A driver that does not load, or offers no Vulkan 1.3 GPU, leaves the system's
-    const char *drv = getenv("DM_VK_DRIVER"); void *lib = NULL;
+    const char *drv = getenv("DM_VK_DRIVER"); void *lib = NULL; int custom_driver_loaded = 0;
     if (drv && *drv) {
         Dl_info di; char dir[512] = "", dirs[520] = "";   // the APK's extracted libraries (mkapk.py: extractNativeLibs), where adrenotools finds its hooks
         if (dladdr((void *)vk_init, &di) && di.dli_fname && strrchr(di.dli_fname, '/')) {
@@ -158,12 +166,20 @@ void vk_init(void) {
             VKLOG("[RED] DM_VK_DRIVER %s: adrenotools could not load it from %s; the system's driver instead", drv, drvdir);
         else if (!(p_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr")) || !drv_has_gpu(p_vkGetInstanceProcAddr)) {
             VKLOG("[RED] DM_VK_DRIVER %s: no Vulkan 1.3 GPU through it; the system's driver instead", drv); lib = NULL; }   // (left loaded: a driver does not always unload cleanly)
-        else VKLOG("Vulkan driver %s through adrenotools, not the system's (%s)", drvname, drvdir);
+        else { custom_driver_loaded = 1; VKLOG("Vulkan driver %s through adrenotools, not the system's (%s)", drvname, drvdir); }
     }
     if (!lib) {
         if (!(lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL))) die("[vk] libvulkan.so: %s", dlerror());
         p_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
     }
+    if (custom_driver_loaded) {
+        const char *name = strrchr(drv, '/');
+        name = name ? name + 1 : drv;
+        snprintf(g_vk_driver_status, sizeof g_vk_driver_status, "Custom: %.100s", name);
+    } else snprintf(g_vk_driver_status, sizeof g_vk_driver_status, "%s",
+                    drv && *drv ? "System (fallback)" : "System");
+    VKLOG("[driver] ACTIVE: %s; requested: %s", g_vk_driver_status, drv && *drv ? drv : "system");
+    atomic_store_explicit(&g_vk_driver_status_ready, 1, memory_order_release);
     vkCreateInstance = (PFN_vkCreateInstance)p_vkGetInstanceProcAddr(NULL, "vkCreateInstance");
     const char *iext[] = {"VK_KHR_surface", "VK_KHR_android_surface", "VK_EXT_debug_utils"};
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "dmhost", 1, "nxnative", 1, VK_API_VERSION_1_3};
