@@ -344,6 +344,10 @@ static int data_setup(ANativeActivity *a) {
     if (companion) {
         AAsset_close(companion);
         if (!atomic_load(&g_java_pack_ready)) return 0;
+        // On the same phone, Java may verify that the exported public data
+        // folder is directly readable and writable. Avoid copying multi-GB
+        // assets into private storage when that safe fast path works.
+        if (g_data_dir[0] && data_dir_valid(g_data_dir)) return 1;
         if (data_dir_valid(embedded)) {
             snprintf(g_data_dir, sizeof g_data_dir, "%s", embedded);
             return 1;
@@ -1380,6 +1384,28 @@ Java_org_nx2a_GameActivity_embeddedPackReady(JNIEnv *E, jclass cls) {
     if (!act || g_host_up) return;
     atomic_store(&g_java_pack_ready, 1);
     if (data_setup(act)) host_start(act);
+}
+
+// Validated zero-copy companion folder: Java checks the signed APK's expected
+// manifest SHA-256 and confirms raw filesystem read/write access before passing
+// the path here. Other devices use SAF import into the private data directory.
+__attribute__((visibility("default"))) JNIEXPORT jboolean JNICALL
+Java_org_nx2a_GameActivity_companionPackReady(JNIEnv *E, jclass cls, jstring path) {
+    (void)cls;
+    ANativeActivity *act = g_act;
+    if (!act || !path) return JNI_FALSE;
+    const char *dir = (*E)->GetStringUTFChars(E, path, NULL);
+    if (!dir) return JNI_FALSE;
+    int valid = dir[0] == '/' && strlen(dir) < sizeof g_data_dir && data_dir_valid(dir);
+    if (valid) snprintf(g_data_dir, sizeof g_data_dir, "%s", dir);
+    (*E)->ReleaseStringUTFChars(E, path, dir);
+    if (!valid) return JNI_FALSE;
+    atomic_store(&g_java_pack_ready, 1);
+    if (!g_host_up && data_setup(act)) host_start(act);
+    if (g_host_up) return JNI_TRUE;
+    atomic_store(&g_java_pack_ready, 0);
+    g_data_dir[0] = 0;
+    return JNI_FALSE;
 }
 
 // the player's start (jni_android.h): what the NativeActivity's onCreate and onResume would have done, with the

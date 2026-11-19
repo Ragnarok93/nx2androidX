@@ -95,6 +95,7 @@ public class GameActivity extends NativeActivity {
     }
 
     static native void embeddedPackReady();
+    static native boolean companionPackReady(String absoluteDirectory);
 
     @Override protected void onPause() { keyboard.pause(true); super.onPause(); }
     @Override protected void onDestroy() { keyboard.pause(true); super.onDestroy(); }

@@ -97,6 +97,9 @@ class SplitGameExportTests(unittest.TestCase):
         self.assertIn('manifest_sha256', java)
         self.assertIn('GameActivity.embeddedPackReady()', java)
         self.assertIn('new Thread(', java)
+        self.assertIn('bakedDataPath(activity)', java)
+        self.assertIn('GameActivity.companionPackReady(', java)
+        self.assertIn('Java_org_nx2a_GameActivity_companionPackReady', front)
         self.assertIn('Not enough free storage', java)
 
     def test_standalone_apk_matches_builder_legacy_runtime_target(self):

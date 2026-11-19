@@ -58,6 +58,18 @@ final class CompanionImporter {
         }
     }
 
+    private static String bakedDataPath(Activity activity) {
+        try (InputStream in = activity.getAssets().open("nx2a-data.txt")) {
+            byte[] value = new byte[1024];
+            int n = in.read(value);
+            if (n <= 0) return null;
+            String raw = new String(value, 0, n, StandardCharsets.UTF_8).trim();
+            return raw.startsWith("/") && raw.indexOf('\0') < 0 ? raw : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private static boolean exists(Activity activity) {
         try (InputStream in = activity.getAssets().open(DESCRIPTOR)) {
             return in.read() >= 0;
@@ -78,6 +90,31 @@ final class CompanionImporter {
             if (cached(root, info.getString("manifest_sha256"))) {
                 GameActivity.embeddedPackReady();
                 return true;
+            }
+            // When the exported folder is still at its original location
+            // and the OS gives this installed game raw read/write access,
+            // use it in place. This avoids an additional 20+ GiB copy.
+            // The path is signed into this APK, not provided by a third party.
+            String baked = bakedDataPath(activity);
+            if (baked != null) {
+                File folder = new File(baked);
+                if (folder.isDirectory() && folder.canRead() && folder.canWrite()) {
+                    File manifest = new File(folder, MANIFEST);
+                    if (manifest.isFile() &&
+                            info.getString("manifest_sha256").equals(digestFile(manifest))) {
+                        File probe = null;
+                        try {
+                            probe = File.createTempFile(".nx2a-write-", ".tmp", folder);
+                            if (!GameActivity.companionPackReady(folder.getCanonicalPath()))
+                                Log.w("nx2a-companion", "Native player could not use the public pack; importing privately");
+                            else return true;
+                        } catch (IOException | SecurityException inaccessible) {
+                            Log.i("nx2a-companion", "Direct data-folder access unavailable; using folder picker");
+                        } finally {
+                            if (probe != null) probe.delete();
+                        }
+                    }
+                }
             }
         } catch (Exception error) {
             failure(activity, "Cannot read game-data instructions", error);
