@@ -119,6 +119,16 @@ class SplitGameExportTests(unittest.TestCase):
         # An unreadable public path must not produce the fatal descriptor error.
         self.assertLess(java.index("} catch (Exception error) {", handled), dialog)
 
+    def test_game_activity_registers_dmhost_for_jni_pack_ready_callbacks(self):
+        game = (ROOT / "nxnative/dm/android/java/org/nx2a/GameActivity.java").read_text(encoding="utf-8")
+        front = (ROOT / "nxnative/dm/android/front_android.c").read_text(encoding="utf-8")
+        self.assertIn('System.loadLibrary("dmhost")', game)
+        self.assertIn("static native void embeddedPackReady();", game)
+        self.assertIn("static native boolean companionPackReady(String absoluteDirectory);", game)
+        self.assertIn("Java_org_nx2a_GameActivity_embeddedPackReady", front)
+        self.assertIn("Java_org_nx2a_GameActivity_companionPackReady", front)
+        self.assertLess(game.index('System.loadLibrary("dmhost")'), game.index("private final GameKeyboard keyboard"))
+
     def test_bootstrap_draws_before_starting_game_native_activity(self):
         java = (ROOT / "nxnative/dm/android/java/org/nx2a/BootstrapActivity.java").read_text(encoding="utf-8")
         self.assertLess(java.index("setContentView(status"), java.index("CompanionImporter.prepare(this)"))

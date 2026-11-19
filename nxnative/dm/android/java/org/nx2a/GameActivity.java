@@ -24,6 +24,15 @@ import java.nio.charset.StandardCharsets;
 
 /** Standalone game Activity: unpack the embedded port before the NativeActivity host starts. */
 public class GameActivity extends NativeActivity {
+    // NativeActivity's loadNativeCode() opens libdmhost.so for
+    // ANativeActivity_onCreate, but does NOT register it as a JNI library
+    // with ART. Our embeddedPackReady()/companionPackReady() callbacks
+    // require System.loadLibrary for Java's native-method resolution.
+    // The native loader then reuses the same library and class loader.
+    static {
+        System.loadLibrary("dmhost");
+    }
+
     private final GameKeyboard keyboard = new GameKeyboard(this);
 
     private static String text(byte[] value) {
