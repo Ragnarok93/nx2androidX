@@ -138,6 +138,18 @@ jobs:
           nmtool="$ANDROID_HOME/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           "$nmtool" -D --undefined-only "$so" | tee "$RUNNER_TEMP/nx2a-native-undef.txt"
           ! grep -E '\b(dm_haptics_android_device|dm_haptics_android_device_player)\b' "$RUNNER_TEMP/nx2a-native-undef.txt"
+          # Java's static native methods use dynamic symbol lookup after
+          # System.loadLibrary("dmhost"). The linker succeeding is insufficient
+          # if -fvisibility=hidden or llvm-strip hides the JNI entry points.
+          "$nmtool" -D --defined-only "$so" | tee "$RUNNER_TEMP/nx2a-native-exports.txt"
+          for symbol in ANativeActivity_onCreate \
+                        Java_org_nx2a_GameActivity_embeddedPackReady \
+                        Java_org_nx2a_GameActivity_companionPackReady; do
+            if ! awk '{print $NF}' "$RUNNER_TEMP/nx2a-native-exports.txt" | grep -Fxq "$symbol"; then
+              echo "::error::Native game host is missing required export: $symbol"
+              exit 1
+            fi
+          done
       - name: the app
         run: |
           export DOTNET="$(which dotnet)"
