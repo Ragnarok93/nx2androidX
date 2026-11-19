@@ -163,8 +163,9 @@ static void x_read(void) { cpu_ready_config(); const char *c = getenv("DM_VK_CB_
     if (g_x_listpasses) { g_x_listpasses = 0; setenv("DM_VK_TRACE_PASS", "-1", 1); }
     const char *tp = getenv("DM_VK_TRACE_PASS"); g_x_tracepass = tp ? atoi(tp) : -1;
     { const char *e = getenv("DM_VK_ORDER_KEEP"); g_order_keep = e ? atoi(e) != 0 : DM_GAME_ORDER_KEEP; g_order_pending = g_order_check = 0; }
-    { static uint64_t until; static int done; const char *la = getenv("DM_VK_LIST_AT");   // DM_VK_LIST_AT=<present>: the pass list of every submission over two presents from there
-      if (la && !done && g_tex_frame >= (uint64_t)atoll(la)) { done = 1; until = g_tex_frame + 2; }
+    { static uint64_t until, last_start = UINT64_MAX; const char *la = getenv("DM_VK_LIST_AT");   // re-arm when a later in-game capture requests a new present
+      uint64_t at = la && *la ? strtoull(la, NULL, 10) : UINT64_MAX;
+      if (at != UINT64_MAX && at != last_start && g_tex_frame >= at) { last_start = at; until = g_tex_frame + 2; }
       if (until && g_tex_frame < until) { g_x_tracepass = -2; g_x_listpasses = 1; g_lst_nrd = 0; VKLOG("--- submission at present %llu", (unsigned long long)g_tex_frame); } }
     { const char *w = getenv("DM_VK_WATCH"); static char last[40]; if (!w || !*w || !strcmp(w, "0")) g_watch_off = -1;
       else if (strcmp(w, last)) { g_watch_off = strtoll(w, NULL, 16); const char *h = strchr(w, '#'); g_watch_n = h ? atoi(h + 1) : 20; }
@@ -2436,8 +2437,12 @@ static void draw(const p_draw *d) {
 // readbacks; differences narrow the investigation but do not prove the count
 // that the GPU ultimately consumed. Never stall rendering to inspect them.
 static void indirect_log(const p_draw_idx *d) {
-    static int64_t at = -2;
-    if (at == -2) {
+    static int64_t at = -1;
+    static uint64_t checked = UINT64_MAX;
+    // One getenv per present, not per indirect draw. A menu capture can rearm
+    // this after the first battle has already issued millions of draws.
+    if (checked != g_tex_frame) {
+        checked = g_tex_frame;
         const char *e = getenv("DM_VK_INDIRECT_LOG_AT");
         at = e && *e ? atoll(e) : -1;
     }

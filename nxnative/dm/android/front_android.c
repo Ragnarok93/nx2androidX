@@ -586,13 +586,41 @@ static _Atomic int g_tx_ver;   // the text entry's edit count: the panel is draw
 static _Atomic int g_ed_st;    // the layout editor's state for dm_menu_state (overlay_layout.h OVE_ST)
 static _Atomic int g_sp_on, g_sp_hi = -1, g_sp_ver;   // the save picker (below): open, its highlighted row, its edit count
 static _Atomic int g_sv_st, g_sv_n;                   // Export save: its outcome (overlay_layout.h OVX_*), the exports made
+// Diagnostics have no per-frame overhead until the player arms a one-shot scene
+// capture. Trace details only affects that one capture, never the whole session.
+static _Atomic int g_diag_trace, g_diag_status, g_diag_ver;
+enum { DIAG_IDLE, DIAG_ARMED, DIAG_EXPORTING, DIAG_EXPORTED, DIAG_FAILED };
+static void diag_changed(void) { atomic_fetch_add_explicit(&g_diag_ver, 1, memory_order_relaxed); dm_overlay_redraw(); }
+void dm_menu_diag_note(char *out, int cap) {
+    if (cap <= 0) return;
+    int status = atomic_load(&g_diag_status);
+    const char *name = status == DIAG_ARMED ? "Capture armed" :
+                       status == DIAG_EXPORTING ? "Saving ZIP..." :
+                       status == DIAG_EXPORTED ? "ZIP saved" :
+                       status == DIAG_FAILED ? "Export failed" : "Logs available";
+    if (status == DIAG_ARMED || status == DIAG_IDLE) {
+        // The report manifest is written after the GPU fence completes; the
+        // older pass_00.ppm could belong to a previous run.
+        char path[620], row[256];
+        snprintf(path, sizeof path, "%s/pass_dump_manifest.tsv", g_root);
+        FILE *m = fopen(path, "r");
+        int have = m && fgets(row, sizeof row, m) && fgets(row, sizeof row, m);
+        if (m) fclose(m);
+        if (have) name = "Capture available";
+    }
+    snprintf(out, (size_t)cap, "%s", name);
+}
+
 int dm_menu_state(void) {
     if (atomic_load(&g_tx_on)) return 1 << 16 | (atomic_load(&g_tx_ver) & 0xffff);   // the text entry's panel (gfx_vk_present.c ov_text_panel)
     if (!atomic_load(&g_menu)) return -1;
     if (atomic_load(&g_edit)) return OVE_ST | atomic_load(&g_ed_st);
     if (atomic_load(&g_sp_on)) return OVS_ST | (atomic_load(&g_sp_hi) + 1) << 4 | (atomic_load(&g_sp_ver) & 255) << 20;
     return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 | atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
-           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24;
+           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 |
+           atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 |
+           (atomic_load(&g_menu_tab) == 3 ? atomic_load(&g_diag_ver) & 15 : atomic_load(&g_sv_n) & 15) << 24 |
+           atomic_load(&g_diag_trace) << 8;
 }
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
 static void menu_open(int hi) {
@@ -663,6 +691,84 @@ static void fg_flow_step(int direction) {
     atomic_store(&g_set_fg_flow, n);
     fg_apply();
 }
+const char *dm_vk_driver_status(void);
+static void diag_capture_arm(void) {
+    // Chosen explicitly from the game menu. Do not persist or automatically
+    // re-enable these memory-intensive flags on the next app start.
+    const char *driver = dm_vk_driver_status();
+    extern uint64_t g_tex_frame;
+    uint64_t frame = __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED);
+    // The report manifest is authoritative for the current capture. A new
+    // player-requested capture replaces it; older pass files are ignored by
+    // the ZIP exporter unless the manifest names their indices.
+    { char manifest[620]; snprintf(manifest, sizeof manifest, "%s/pass_dump_manifest.tsv", g_root);
+      unlink(manifest); }
+    setenv("DM_VK_PASSDUMP_ALL_COLORS", "1", 1);
+    setenv("DM_VK_PASSDUMP_MIN_COLORS", "2", 1);
+    setenv("DM_VK_PASSDUMP_DEPTH", "1", 1);
+    setenv("DM_VK_PASSDUMP_STENCIL", "1", 1);
+    setenv("DM_VK_PASSDUMP_LIMIT", "16", 1);
+    setenv("DM_VK_PASSDUMP_MAX_MB", "128", 1);
+    setenv("DM_VK_PASSDUMP_RAW", "1", 1);
+    setenv("DM_VK_PASSDUMP_SIZE", "0", 1);
+    setenv("DM_VK_PASSDUMP_SKIP", "0", 1);
+    setenv("DM_VK_PASSDUMP_PASS", "", 1);
+    setenv("DM_VK_PASSDUMP_FMT", "", 1);
+    setenv("DM_VK_PASSDUMP_FRAMES", "1", 1);
+    // The first present after closing the panel is a transition; the following
+    // scene present arms the capture. Never capture a frozen menu redraw.
+    setenv("DM_VK_PASSDUMP", "2", 1);
+    if (atomic_load(&g_diag_trace)) {
+        char start[32]; snprintf(start, sizeof start, "%llu", (unsigned long long)(frame + 2));
+        setenv("DM_VK_LIST_AT", start, 1);
+        setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
+    }
+    char meta[620]; snprintf(meta, sizeof meta, "%s/capture_meta.txt", g_root);
+    FILE *f = fopen(meta, "w");
+    if (f) {
+        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=one-shot\n"
+                   "max_targets=16\nmax_gpu_readback_mb=128\n"
+                   "all_mrt=1\ndepth=1\nstencil=1\nraw_bytes=1\n"
+                   "trace_details=%d\nvulkan_driver=%s\n"
+                   "indirect_arguments=guest_and_cached_shadows_only_not_gpu_authoritative\n",
+                (unsigned long long)frame, atomic_load(&g_diag_trace), driver ? driver : "(unknown)");
+        fclose(f);
+    }
+    atomic_store(&g_diag_status, DIAG_ARMED);
+    LOG("[diagnostics] scene capture armed by in-game menu for next gameplay frames; pass cap 16 / 128 MB; trace %s",
+        atomic_load(&g_diag_trace) ? "2 presents" : "off");
+    diag_changed();
+}
+static void diag_export_request(void) {
+    ANativeActivity *a = g_act;
+    if (!a || !a->vm || !a->clazz) {
+        atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return;
+    }
+    fflush(stderr); // best-effort snapshot of the current run before SAF selection
+    JNIEnv *E = jni_attach(a);
+    if (!E) { atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return; }
+    jclass cls = (*E)->GetObjectClass(E, a->clazz);
+    jmethodID call = cls ? (*E)->GetMethodID(E, cls, "exportDiagnostics", "(Ljava/lang/String;)V") : NULL;
+    if (call) {
+        jstring path = (*E)->NewStringUTF(E, g_root);
+        if (path) { (*E)->CallVoidMethod(E, a->clazz, call, path); (*E)->DeleteLocalRef(E, path); }
+    }
+    if ((*E)->ExceptionCheck(E) || !call) {
+        (*E)->ExceptionClear(E);
+        LOG("[RED] [diagnostics] standalone Activity lacks the exportDiagnostics bridge");
+        atomic_store(&g_diag_status, DIAG_FAILED);
+    } else atomic_store(&g_diag_status, DIAG_EXPORTING);
+    if (cls) (*E)->DeleteLocalRef(E, cls);
+    (*a->vm)->DetachCurrentThread(a->vm);
+    diag_changed();
+}
+__attribute__((visibility("default"))) JNIEXPORT void JNICALL
+Java_org_nx2a_GameActivity_diagnosticsExported(JNIEnv *E, jclass cls, jint result) {
+    (void)E; (void)cls;
+    atomic_store(&g_diag_status, result == 1 ? DIAG_EXPORTED : result == 2 ? DIAG_IDLE : DIAG_FAILED);
+    LOG("[diagnostics] report export %s", result == 1 ? "completed" : result == 2 ? "cancelled" : "failed");
+    diag_changed();
+}
 static void menu_do(int item) {
     if (item == OVM_OVERLAY) { atomic_store(&g_set_overlay, !atomic_load(&g_set_overlay)); atomic_store(&g_overlay, 1); settings_save(); }
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
@@ -678,6 +784,16 @@ static void menu_do(int item) {
     else if (item == OVM_FG_MULT) fg_mult_step(1);
     else if (item == OVM_FG_FLOW) fg_flow_step(1);
     else if (item == OVM_DRIVER) return; // read-only actual driver, cannot hot-swap a VkDevice
+    else if (item == OVM_DIAG_TRACE) {
+        atomic_store(&g_diag_trace, !atomic_load(&g_diag_trace)); diag_changed();
+        LOG("[diagnostics] detailed shader/indirect pass trace %s for the next requested capture",
+            atomic_load(&g_diag_trace) ? "enabled" : "disabled");
+    }
+    else if (item == OVM_DIAG_CAPTURE) {
+        diag_capture_arm(); dm_haptics_android_tap(); menu_close(); return;
+    }
+    else if (item == OVM_DIAG_EXPORT) { diag_export_request(); return; }
+    else if (item == OVM_DIAG_STATUS || item == OVM_DIAG_LIMIT) return;
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }
     else if (item == OVM_OPACITY) return;   // (the slider is dragged, or stepped with left and right)
@@ -1424,7 +1540,14 @@ static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char 
     if (g_host_up) return;   // the dialog's thread and the resume can both get here
     crash_install();   // the signal handlers: the Android host has no main.c to install them, so a crash here used to kill the game silently
     char p[700], q[720];
-    snprintf(p, sizeof p, "%s/log.txt", g_root); char prev[720]; snprintf(prev, sizeof prev, "%s/log.prev.txt", g_root); rename(p, prev);
+    // Preserve the previous three runs, even if a crash is followed by a
+    // restart before the player exports the diagnostic ZIP.
+    char hist2[720], hist3[720], prev[720];
+    snprintf(hist2, sizeof hist2, "%s/log.prev.2.txt", g_root);
+    snprintf(hist3, sizeof hist3, "%s/log.prev.3.txt", g_root);
+    snprintf(prev, sizeof prev, "%s/log.prev.txt", g_root);
+    rename(hist2, hist3); rename(prev, hist2);
+    snprintf(p, sizeof p, "%s/log.txt", g_root); rename(p, prev);
     if (!freopen(p, "w", stderr)) __android_log_print(ANDROID_LOG_ERROR, "dmhost", "cannot write %s", p);
     setvbuf(stderr, NULL, _IOLBF, 0);
     setenv("DM_ROOT", g_root, 1);

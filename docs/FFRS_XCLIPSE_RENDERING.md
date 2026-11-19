@@ -137,3 +137,53 @@ those Vulkan paths without a proven failure mechanism can mask the first
 incorrect stage and cause fidelity/performance regressions. This cleanup
 is covered by a compiled production-function fixture that verifies the
 device and driver guard and preservation of explicit overrides.
+
+
+## Standalone APK: exportable rendering diagnostics (opt-in)
+
+The game's **native pause menu** has a fourth **Diagnostics** tab (also
+reachable with a controller). Its rows are:
+
+- **Capture next frame — Capture**: one-shot capture on resumed gameplay.
+  Arm automatically sets \`DM_VK_PASSDUMP_ALL_COLORS=1\`,
+  \`DM_VK_PASSDUMP_MIN_COLORS=2\`, \`DM_VK_PASSDUMP_DEPTH=1\`,
+  \`DM_VK_PASSDUMP_STENCIL=1\`, \`DM_VK_PASSDUMP_RAW=1\`,
+  \`DM_VK_PASSDUMP_LIMIT=16\`, \`DM_VK_PASSDUMP_MAX_MB=128\`,
+  and \`DM_VK_PASSDUMP=2\` (avoid capturing a paused-menu redraw).
+- **Trace details — OFF by default**: when enabled, the next manually
+  requested capture also logs pass/dispatch/resource relationships and bounded
+  indirect argument records for two presents (\`DM_VK_LIST_AT\` and
+  \`DM_VK_INDIRECT_LOG_AT\`). These **CPU/cached-shadow values are not
+  authoritative GPU-consumed indirect readbacks**.
+- **Export diagnostics — Save ZIP**: Android's standard
+  \`ACTION_CREATE_DOCUMENT\` picker. The report is streamed asynchronously,
+  including current and up to three previous native-host logs, an opt-in
+  capture's \`pass_dump_manifest.tsv\`, the source-byte FNV hashes and
+  raw/preview/float attachments where available, the one-shot settings,
+  and a report README with actual device/Android fields. It can be exported
+  during a run or after restarting the game following a crash.
+- **Capture status** and **Capture limit** explain whether a request is
+  armed/available and the 16-target/128-MB GPU readback budget.
+
+Normal startup does not enable costly traces or per-pass readbacks.
+Opening the menu alone does not allocate diagnostic GPU resources. Trace mode
+is a per-process choice, **not** automatically persisted in \`settings.txt\`.
+The capture is a bounded one-shot request, not continuous video recording.
+No APK/debug signing or Android all-files permission is needed to save the ZIP.
+
+The Java archive writer only includes direct diagnostic files. It excludes
+RomFS, game images/libraries, shaders, imported DLLs, saves and signing
+material; streaming uses a 64-KiB buffer, a 128-MiB per-file cap, a
+384-MiB source-data budget and 310 candidate-file limit. Large native logs
+export their last 8 MiB *and* their first 64 KiB (preserving initial Vulkan
+driver identity). Only pass outputs indexed in the latest valid manifest
+belong to the exported capture: stale previous-capture files are omitted.
+The APK shows a completion/failure notification. A system document-provider
+failure may leave a partial destination, so a failed report must be retried.
+
+**Limitations:** The menu cannot be opened while the app is terminated,
+but relaunching preserves prior logs and capture files. Device graphics
+correctness is still unresolved; an exported report is not proof of fixed
+geometry. If a scene has no pass with at least two color attachments after
+arming, no MRT preview will be produced. No full-frame capture runs in the
+background without the explicit Capture action.
