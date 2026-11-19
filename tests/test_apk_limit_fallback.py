@@ -80,6 +80,8 @@ class ApkLimitFallbackTests(unittest.TestCase):
     def fake_mkapk(self, cmd, *args, **kwargs):
         # Command index 3 is the exported APK path in the real mkapk invocation.
         self.assertIn('--data-root', cmd)
+        self.assertIn('--dex', cmd)
+        self.assertIn('nx2a-companion.json=', ' '.join(map(str, cmd)))
         Path(cmd[3]).write_bytes(b'signed APK')
 
     def test_oversized_embedded_game_exports_its_own_apk_with_data(self):

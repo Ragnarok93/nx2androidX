@@ -4,6 +4,7 @@ import android.app.NativeActivity;
 import android.app.Activity;
 import android.app.ProgressDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.StatFs;
 import android.util.Log;
@@ -41,6 +42,11 @@ public class GameActivity extends NativeActivity {
         prepareEmbeddedPack(this);
     }
 
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        CompanionImporter.onActivityResult(this, requestCode, resultCode, data);
+    }
+
     @Override protected void onResume() {
         super.onResume();
         keyboard.pause(false);
@@ -58,7 +64,8 @@ public class GameActivity extends NativeActivity {
     }
 
     static void prepareEmbeddedPack(Activity activity) {
-        if (!hasEmbeddedPack(activity)) return;  // legacy split-folder APKs keep their native folder picker
+        if (CompanionImporter.prepare(activity)) return; // large APK + data: SAF first-run importer
+        if (!hasEmbeddedPack(activity)) return;  // old desktop APKs retain the native folder picker
         ProgressDialog dialog = new ProgressDialog(activity);
         dialog.setMessage("Preparing game data…");
         dialog.setIndeterminate(true);
@@ -87,7 +94,7 @@ public class GameActivity extends NativeActivity {
         worker.start();
     }
 
-    private static native void embeddedPackReady();
+    static native void embeddedPackReady();
 
     @Override protected void onPause() { keyboard.pause(true); super.onPause(); }
     @Override protected void onDestroy() { keyboard.pause(true); super.onDestroy(); }
@@ -205,14 +212,14 @@ public class GameActivity extends NativeActivity {
         }
     }
 
-    private static void writeText(File file, String value) throws IOException {
+    static void writeText(File file, String value) throws IOException {
         try (FileOutputStream out = new FileOutputStream(file)) {
             out.write(value.getBytes(StandardCharsets.US_ASCII));
             out.getFD().sync();
         }
     }
 
-    private static void copyFile(File from, File to) throws IOException {
+    static void copyFile(File from, File to) throws IOException {
         try (InputStream in = new FileInputStream(from); FileOutputStream out = new FileOutputStream(to)) {
             byte[] b = new byte[32 * 1024];
             int n;
@@ -221,7 +228,7 @@ public class GameActivity extends NativeActivity {
         }
     }
 
-    private static void deleteTree(File file) {
+    static void deleteTree(File file) {
         if (file.isDirectory()) {
             File[] children = file.listFiles();
             if (children != null) for (File child : children) deleteTree(child);

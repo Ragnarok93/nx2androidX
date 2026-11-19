@@ -86,6 +86,12 @@ class SelfContainedPipelineTests(unittest.TestCase):
             try: sys.path.remove(str(script.parent))
             except ValueError: pass
 
+    def test_split_game_apks_also_embed_java_launcher(self):
+        pipeline = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("external = self.external_activity()", pipeline)
+        self.assertIn("nx2a-companion.json=", pipeline)
+        self.assertIn("manifest_sha256", pipeline)
+
     def test_game_activity_is_launcher_when_optional_launcher_is_absent(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")
         pipeline = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")

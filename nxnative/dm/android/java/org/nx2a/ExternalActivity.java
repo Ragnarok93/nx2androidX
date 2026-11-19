@@ -4,6 +4,7 @@ import android.app.NativeActivity;
 import android.app.Dialog;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -81,6 +82,10 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
         phonePad.setContentView(pad);
         external = new ExternalDisplay(this, this);
         external.start();
+    }
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        CompanionImporter.onActivityResult(this, requestCode, resultCode, data);
     }
     @Override protected void onResume() { super.onResume(); }
 

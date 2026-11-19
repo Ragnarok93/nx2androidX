@@ -1196,15 +1196,32 @@ class Port:
             export_mode = self.aw / 'nx2a-export-mode'
             export_mode.write_text('1\n', encoding='ascii')
             data_assets = ['--asset', f'nx2a-data.zip={archive}', '--asset', f'nx2a-data.sha256={checksum}', '--asset', f'nx2a-export-mode={export_mode}']
-        external = self.external_activity() if self.o.self_contained or self.o.external_display or self.o.native_keyboard else []
+        # Even a split APK needs the Java Activity: the native host must not start
+        # before the companion-data folder is chosen and validated.
+        external = self.external_activity()
         driver = self.o.vulkan_driver
         if driver and driver.name != driver_lib_name(driver):   # packed under a lib*.so name (driver_lib_name), copied beside the host library
             driver = self.so.parent / driver_lib_name(driver); shutil.copyfile(self.o.vulkan_driver, driver)
             say(f'--vulkan-driver: {self.o.vulkan_driver.name} is packed as {driver.name} (Android extracts only lib*.so libraries)')
         cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
                '--version-code', str(code), '--version-name', self.display]
-        if self.o.self_contained: cmd += data_assets
-        else: cmd += ['--data-root', str(self.data_dir())]
+        if self.o.self_contained:
+            cmd += data_assets
+        else:
+            pack = self.data_dir()
+            manifest = pack / datapack.MANIFEST
+            if not manifest.is_file():
+                raise BuildError(f'companion game data is incomplete: {pack}')
+            info = json.loads(manifest.read_text(encoding='utf-8'))
+            descriptor = self.aw / 'nx2a-companion.json'
+            descriptor.parent.mkdir(parents=True, exist_ok=True)
+            descriptor.write_text(json.dumps({
+                'schema': 1, 'folder': pack.name,
+                'manifest_sha256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                'bytes': int(info.get('bytes', 0)),
+                'title_id': str(info.get('title_id', '')),
+            }, ensure_ascii=False) + '\n', encoding='utf-8')
+            cmd += ['--data-root', str(pack), '--asset', f'nx2a-companion.json={descriptor}']
         cmd += (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
         cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
         cmd += [a for f in dict.fromkeys(str(f) for f in (self.drivers() + self.loader_libs() + self.loader_so()

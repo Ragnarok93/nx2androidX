@@ -84,6 +84,21 @@ class SplitGameExportTests(unittest.TestCase):
             self.assertEqual(build.call_args.kwargs["pack_base"], ".")
             self.assertFalse(build.call_args.kwargs["require_links"])
 
+    def test_companion_descriptor_defers_native_start_until_java_importer(self):
+        java = (ROOT / "nxnative/dm/android/java/org/nx2a/CompanionImporter.java").read_text(encoding="utf-8")
+        front = (ROOT / "nxnative/dm/android/front_android.c").read_text(encoding="utf-8")
+        launcher = (ROOT / "nxnative/dm/android/java/org/nx2a/GameActivity.java").read_text(encoding="utf-8")
+        self.assertIn('AAssetManager_open(a->assetManager, "nx2a-companion.json"', front)
+        self.assertIn('if (!atomic_load(&g_java_pack_ready)) return 0;', front)
+        self.assertIn('atomic_store(&g_java_pack_ready, 1);', front)
+        self.assertIn('CompanionImporter.prepare(activity)', launcher)
+        self.assertIn('DocumentsContract.buildChildDocumentsUriUsingTree', java)
+        self.assertIn('Intent.ACTION_OPEN_DOCUMENT_TREE', java)
+        self.assertIn('manifest_sha256', java)
+        self.assertIn('GameActivity.embeddedPackReady()', java)
+        self.assertIn('new Thread(', java)
+        self.assertIn('not enough free storage', java)
+
     def test_standalone_apk_matches_builder_legacy_runtime_target(self):
         mkapk = (ROOT / "nxnative/dm/android/apk/mkapk.py").read_text(encoding="utf-8")
         builder = (ROOT / "android/app/build.gradle.kts").read_text(encoding="utf-8")

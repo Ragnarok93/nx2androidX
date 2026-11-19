@@ -160,6 +160,7 @@ static void host_start(ANativeActivity *act);   // the host and the game (below)
 #define DS_MAX_URIS 16
 static char g_data_dir[700];           // the folder with the game's files
 static int g_host_up;                  // the host is running (the setup is over)
+static _Atomic int g_java_pack_ready; // the Java importer has validated the private data tree
 
 static int jni_all_files(ANativeActivity *a) {   // Environment.isExternalStorageManager()
     JNIEnv *E = a->env;
@@ -336,6 +337,20 @@ static int data_setup(ANativeActivity *a) {
     // A self-contained game APK extracts its bundled pack into this app-private directory before NativeActivity starts.
     // Prefer it over the legacy external-folder picker: no shared-storage permission or companion -data folder is needed.
     char embedded[700]; snprintf(embedded, sizeof embedded, "%s/nx2a-data", a->internalDataPath);
+    // Split-game exports now carry a descriptor and a Java SAF importer. The
+    // native Activity must wait even if an OLD private pack exists: Java checks
+    // the descriptor's manifest hash before accepting a cached import.
+    AAsset *companion = AAssetManager_open(a->assetManager, "nx2a-companion.json", AASSET_MODE_BUFFER);
+    if (companion) {
+        AAsset_close(companion);
+        if (!atomic_load(&g_java_pack_ready)) return 0;
+        if (data_dir_valid(embedded)) {
+            snprintf(g_data_dir, sizeof g_data_dir, "%s", embedded);
+            return 1;
+        }
+        LOG("[RED] [companion] Java reported data ready but the private pack is missing: %s", embedded);
+        return 0;
+    }
     if (data_dir_valid(embedded)) { snprintf(g_data_dir, sizeof g_data_dir, "%s", embedded); return 1; }
     // The Java Activity extracts this APK asset on a worker thread. Do not fall through to the
     // legacy shared-storage picker while extraction is in progress; Java calls embeddedPackReady().
@@ -1363,6 +1378,7 @@ Java_org_nx2a_GameActivity_embeddedPackReady(JNIEnv *E, jclass cls) {
     (void)E; (void)cls;
     ANativeActivity *act = g_act;
     if (!act || g_host_up) return;
+    atomic_store(&g_java_pack_ready, 1);
     if (data_setup(act)) host_start(act);
 }
 
