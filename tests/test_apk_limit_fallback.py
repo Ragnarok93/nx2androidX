@@ -14,6 +14,7 @@ from porter import pipeline
 
 class FakePort:
     apk = pipeline.Port.apk
+    fallback_split_apk = pipeline.Port.fallback_split_apk
 
     def __init__(self, root):
         self.aw = root / 'work'
@@ -84,6 +85,7 @@ class ApkLimitFallbackTests(unittest.TestCase):
     def test_oversized_embedded_game_exports_its_own_apk_with_data(self):
         error = ValueError('even maximum compatible ZIP compression cannot fit this game in one installable APK')
         with mock.patch.object(pipeline.datapack, 'write_embedded_zip', side_effect=error), \
+             mock.patch.object(pipeline.shutil, 'disk_usage', return_value=SimpleNamespace(free=1 << 40)), \
              mock.patch.object(pipeline.nsp, 'run', side_effect=self.fake_mkapk):
             self.port.apk()
 
@@ -95,8 +97,19 @@ class ApkLimitFallbackTests(unittest.TestCase):
         self.assertTrue(Path(self.port.result['data']).is_dir())
         self.assertFalse((self.port.o.out / '.TestGame.nx2a-data.zip.partial').exists())
 
+    def test_low_export_space_falls_back_before_compression(self):
+        with mock.patch.object(pipeline.datapack, 'write_embedded_zip') as compress, \
+             mock.patch.object(pipeline.shutil, 'disk_usage', return_value=SimpleNamespace(free=1)), \
+             mock.patch.object(pipeline.nsp, 'run', side_effect=self.fake_mkapk):
+            self.port.apk()
+        compress.assert_not_called()
+        self.assertEqual(self.port.result['mode'], 'apk+data')
+        self.assertTrue(Path(self.port.result['apk']).is_file())
+        self.assertTrue(Path(self.port.result['data']).is_dir())
+
     def test_unrelated_archive_error_is_not_hidden_by_fallback(self):
-        with mock.patch.object(pipeline.datapack, 'write_embedded_zip', side_effect=ValueError('bad input')):
+        with mock.patch.object(pipeline.datapack, 'write_embedded_zip', side_effect=ValueError('bad input')), \
+             mock.patch.object(pipeline.shutil, 'disk_usage', return_value=SimpleNamespace(free=1 << 40)):
             with self.assertRaises(pipeline.BuildError):
                 self.port.apk()
         self.assertEqual(self.port.data_calls, 0)
