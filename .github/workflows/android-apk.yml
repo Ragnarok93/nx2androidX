@@ -12,7 +12,7 @@
 # after the version (nx2android-v0.3.0-alpha02.apk).
 #
 # Pull requests targeting android run the same tests and APK build as a release, and keep the artifact for review.
-# A release still builds only from a tag; the build waits for that release to appear before attaching its APK.
+# A release attaches only tagged builds; trusted android branch pushes keep their signed APK as a workflow artifact.
 #
 # A tag's build also tells the QQ group: the announcement (the version, the release's Chinese changelog, the
 # release's page and the netdisk link) goes out once the APK is attached. It is an extra: it never fails the
@@ -35,7 +35,21 @@ on:
       - 'requirements.txt'
       - '.github/workflows/android-apk.yml'
   push:
-    tags: ['v*']      # release builds are tag-only
+    # Trusted android-branch changes build an upgradeable test APK. Tags still
+    # attach their signed build to the release; PRs use an ephemeral signer.
+    branches: [android]
+    tags: ['v*']
+    paths:
+      - 'android/**'
+      - 'porter/**'
+      - 'packaging/android-apk/**'
+      - 'nxnative/dm/android/**'
+      - 'nxnative/dm/gfx/tools/**'
+      - 'nxnative/dm/tools/**'
+      - 'nxnative/scripts/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/android-apk.yml'
 
 permissions:
   contents: write   # the release's assets (the APK)
