@@ -372,3 +372,13 @@ For the same drivers run the [independent Vulkan depth probe](../devtools/vk_dep
 Use its raster color and sampled depth to evaluate the attachment separately
 from the D24 transfer representation. A post-change game capture on Xclipse
 is still needed even if the independent probe passes.
+
+### D24 capability check
+
+The in-game depth transfer control now logs the selected driver's D24S8
+format features and the result of an image-format query for the exact
+attachment and transfer usage. A SKIP means the request is unavailable;
+the public candidate RADV source explicitly rejects D24S8 attachments.
+If supported, compare the 64 words with the independent probe. See
+[D24 capability and driver provenance](NVN_VULKAN_XCLIPSE_AUDIT_20261119.md#d24-capability-and-driver-provenance)
+for the code path and the limits of the older capture.

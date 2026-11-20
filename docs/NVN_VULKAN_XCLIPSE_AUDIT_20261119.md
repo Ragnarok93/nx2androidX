@@ -251,3 +251,29 @@ self-contained game export are separate acceptance gates from builder CI.
 
 References: [Vulkan depth/stencil copy representations](https://docs.vulkan.org/spec/latest/chapters/copies.html)
 and [JimVulkan driver sources](https://github.com/JimVulkan/mesa-unified-drivers).
+
+### D24 capability and driver provenance
+
+The older 8×8 in-game control used `vkCreateImage` directly. The original
+archive therefore establishes what bytes the command returned, while
+the device's advertised support for that format and usage is unknown.
+The public [RADV Xclipse v1.9.0 source at `cc87fdf`](https://github.com/JimVulkan/radv-xclipse/blob/cc87fdf71267dd0acc3b470920a6566a1a46f0be/src/amd/vulkan/radv_formats.c#L249)
+excludes `D24_UNORM_S8_UINT` and `X8_D24_UNORM_PACK32` in
+`radv_is_zs_format_supported`. The tested binary's hash is still needed.
+
+The in-game control now logs the selected device's format features and
+queries the exact optimal-tiled attachment and transfer usage before
+creating its scratch image. An unsupported result means an identical
+request would be invalid for that driver. A supported result with
+float32 output would isolate a driver transfer discrepancy. On a binary
+that claims support, the source path to trace is
+`radv_CmdCopyImageToBuffer2` → `compute_copy_image_to_memory` →
+`radv_meta_image_to_buffer`, including source-aspect and destination
+buffer-view format selection.
+
+The game path also needs attention if the query rejects D24S8. The NVN
+`DEPTH24_STENCIL8` mapping in `vk_fmt` selects D24S8 directly, whereas
+depth-only D24 checks support and can select D32F. A future combined
+depth/stencil fallback requires proof of the exact installed driver
+capabilities and tests for guest precision, stencil, sampled views and
+pack/unpack. The existing CPU conversion and LRZ policies remain scoped.

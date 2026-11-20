@@ -445,11 +445,6 @@ static void pass_dump_depth_control(void) {
     if (g_pd_control_written || g_pd_state != 1 ||
         g_npd >= pass_dump_limit() ||
         !vk_pd_budget_allows(g_pd_bytes, 8u * 8u * 4u, pass_dump_budget())) return;
-    VkImage im = VK_NULL_HANDLE;
-    VkDeviceMemory imem = VK_NULL_HANDLE, bm = VK_NULL_HANDLE;
-    VkBuffer b = VK_NULL_HANDLE;
-    void *mapped = NULL;
-    VkResult r = VK_ERROR_INITIALIZATION_FAILED;
     const VkDeviceSize bytes = 8u * 8u * 4u;
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0,
         VK_IMAGE_TYPE_2D, VK_FORMAT_D24_UNORM_S8_UINT, {8,8,1}, 1, 1,
@@ -457,6 +452,25 @@ static void pass_dump_depth_control(void) {
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+    // vkCreateImage accepting the request does not establish device support.
+    // Check the exact format, tiling and usage before attributing a transfer
+    // representation mismatch to a supported Vulkan path.
+    VkImageFormatProperties supported;
+    VkResult r = vkGetPhysicalDeviceImageFormatProperties(V.pd, ci.format, ci.imageType,
+                                                           ci.tiling, ci.usage, ci.flags, &supported);
+    VkFormatProperties features;
+    vkGetPhysicalDeviceFormatProperties(V.pd, ci.format, &features);
+    VKLOG("[depthcontrol] D24S8 optimal features %#x, requested usage %#x, image-format query %d",
+          features.optimalTilingFeatures, ci.usage, r);
+    g_pd_control_written = 1;
+    if (r != VK_SUCCESS) {
+        VKLOG("[depthcontrol] SKIP: device did not report support for this D24S8 image");
+        return;
+    }
+    VkImage im = VK_NULL_HANDLE;
+    VkDeviceMemory imem = VK_NULL_HANDLE, bm = VK_NULL_HANDLE;
+    VkBuffer b = VK_NULL_HANDLE;
+    void *mapped = NULL;
     if ((r = vkCreateImage(V.dev, &ci, NULL, &im)) != VK_SUCCESS) goto failed;
     VkMemoryRequirements rq;
     vkGetImageMemoryRequirements(V.dev, im, &rq);
@@ -498,7 +512,7 @@ static void pass_dump_depth_control(void) {
         .f=VK_FORMAT_D24_UNORM_S8_UINT, .view_fmt=VK_FORMAT_D24_UNORM_S8_UINT,
         .bytes=bytes, .present=g_tex_frame, .pass=-200,
         .target=-1, .level=0, .layer=0};
-    g_pd_bytes += bytes; g_pd_control_written = 1;
+    g_pd_bytes += bytes;
     vk_defer_free_image(im, imem);
     VKLOG("[depthcontrol] isolated D24S8 8x8 image cleared to depth=0.625, stencil=0x5a then copied to a readback buffer; pass -200; verify raw depth is nonzero after fence");
     return;
