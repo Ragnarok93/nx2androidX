@@ -1,6 +1,73 @@
 # apksign.py: the stored ZIP and the APK Signature Scheme v2 signer (RSA-2048, SHA-256, self-signed certificate) of mkapk.py, with the Python standard library only.
 # mkapk.py builds an APK with them; apkdriver.py rebuilds an installed one with another Vulkan driver library
-import hashlib, os, secrets, shutil, struct, zlib
+from contextlib import contextmanager
+from pathlib import Path
+import errno, hashlib, json, os, secrets, shutil, struct, tempfile, time, zlib
+
+@contextmanager
+def signing_lock(path):
+    # Keep the lock inode in place. Both locks are automatically released if
+    # a recompile is interrupted after generating the key or signing.
+    with open(path, 'ab') as lock:
+        if os.name == 'nt':
+            import msvcrt
+            while True:
+                lock.seek(0)
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as e:
+                    if e.errno not in (errno.EACCES, errno.EDEADLK):
+                        raise
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+def write_signing_state(path, data):
+    # A fault or process kill must not leave a partial signer or version file.
+    fd, tmp = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='ascii') as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+def persistent_signer(path):
+    path = Path(path)
+    with signing_lock(path.with_suffix(path.suffix + '.lock')):
+        if path.exists():
+            record = json.loads(path.read_text(encoding='ascii'))
+            return {a: int(v) for a, v in record.items() if a != 'cert'}, bytes.fromhex(record['cert'])
+        t = time.monotonic()
+        key = gen_key()
+        certificate = cert(key)
+        write_signing_state(path, json.dumps({**{a: str(v) for a, v in key.items()}, 'cert': certificate.hex()}))
+        print(f'new signing key {path} ({time.monotonic() - t:.1f} s)')
+        return key, certificate
+
+@contextmanager
+def upgrade_version(key_path, package, requested):
+    directory = Path(str(key_path) + '.versions')
+    directory.mkdir(exist_ok=True)
+    path = directory / hashlib.sha256(package.encode('utf-8')).hexdigest()
+    with signing_lock(path.with_suffix('.lock')):
+        previous = int(path.read_text(encoding='ascii')) if path.exists() else 0
+        version = max(previous, requested)
+        # Reserve a high-water mark before any bytes under this version are
+        # published. A retry can still use exactly the same version.
+        if version != previous:
+            write_signing_state(path, f'{version}\n')
+        yield version
+
 
 # ---------------- RSA, DER, self-signed certificate ----------------
 def is_prime(n):

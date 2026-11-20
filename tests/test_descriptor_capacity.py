@@ -67,8 +67,8 @@ static uint64_t vk_tex_slot_handle(const uint64_t *t, const uint64_t *i, unsigne
 static uint32_t ubo_word(int st, int r, int o) { (void)st; (void)r; (void)o; return 11; }
 static uint64_t mem_handle(uint64_t h) { return h; }
 static uint64_t c2_handle(int st, int o) { (void)st; (void)o; return 11; }
-static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *d, int storage) {
-    (void)st; (void)b; (void)h;
+static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *d, unsigned element, int storage) {
+    (void)st; (void)b; (void)h; (void)element;
     assert(d >= images && d < images + image_capacity);
     *d = (VkDescriptorImageInfo){storage ? VK_NULL_HANDLE : (VkSampler)(uintptr_t)2,
                                (VkImageView)(uintptr_t)9, VK_IMAGE_LAYOUT_GENERAL};

@@ -11,8 +11,8 @@
 # The APK is the run's artifact (nx2android-android-apk), and a published release gets it as an asset named
 # after the version (nx2android-v0.3.0-alpha02.apk).
 #
-# Pull requests targeting android run the same tests and APK build as a release, and keep the artifact for review.
-# A release attaches only tagged builds; trusted android branch pushes keep their signed APK as a workflow artifact.
+# Pull requests targeting android run verification builds without publishing their APK.
+# Trusted branch builds keep their signed APK as an artifact. Only tags attach an APK to a release.
 #
 # A tag's build also tells the QQ group: the announcement (the version, the release's Chinese changelog, the
 # release's page and the netdisk link) goes out once the APK is attached. It is an extra: it never fails the
@@ -35,9 +35,7 @@ on:
       - 'requirements.txt'
       - '.github/workflows/android-apk.yml'
   push:
-    # Trusted android-branch changes build an upgradeable test APK. Tags still
-    # attach their signed build to the release; PRs use an ephemeral signer.
-    branches: [android]
+    branches: [android, fix/ffrs-xclipse-render-stage-capture-20261119]
     tags: ['v*']
     paths:
       - 'android/**'
@@ -106,12 +104,8 @@ jobs:
             echo "persistent=false" >> "$GITHUB_OUTPUT"
             echo "::warning::PR verification APK uses an ephemeral signing key and CANNOT update an installed app"
           elif [ -z "$NX2A_KEYSTORE_B64" ] || [ -z "$NX2A_KEYSTORE_PASSWORD" ]; then
-            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-              echo "::error::Cannot publish a tagged release: configure NX2A_KEYSTORE_B64 and NX2A_KEYSTORE_PASSWORD to preserve the original APK signing identity"
-              exit 1
-            fi
-            echo "persistent=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Permanent signing secrets are absent. Building a test-only APK with an ephemeral key; it CANNOT update an existing nx2android installation. Restore both GitHub Actions signing secrets to enable upgradeable APKs."
+            echo "::error::Restore NX2A_KEYSTORE_B64 and NX2A_KEYSTORE_PASSWORD to build an update-compatible APK"
+            exit 1
           else
             printf '%s' "$NX2A_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/nx2android.keystore"
             echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android.keystore" >> "$GITHUB_ENV"
@@ -155,6 +149,23 @@ jobs:
               exit 1
             fi
           done
+      - name: verify standalone update compatibility
+        run: |
+          sdk_tools="$ANDROID_HOME/build-tools/36.0.0"
+          fixture="$RUNNER_TEMP/standalone-upgrade"
+          mkdir -p "$fixture"
+          host="$RUNNER_TEMP/nx2a-native-host-smoke/libdmhost.so"
+          for requested in 42 7; do
+            apk="$fixture/standalone-$requested.apk"
+            python nxnative/dm/android/apk/mkapk.py "$host" "$apk" "$fixture/key.json" \
+              --package org.nx2a.upgrade.fixture --version-code "$requested" --preserve-version-floor
+            "$sdk_tools/apksigner" verify --min-sdk-version 26 --print-certs "$apk" > "$fixture/signer-$requested"
+            "$sdk_tools/aapt" dump badging "$apk" | awk '/^package:/{print $2,$3}' > "$fixture/package-$requested"
+          done
+          grep -Fx "name='org.nx2a.upgrade.fixture' versionCode='42'" "$fixture/package-42"
+          cmp "$fixture/package-42" "$fixture/package-7"
+          test -s "$fixture/signer-42"
+          cmp "$fixture/signer-42" "$fixture/signer-7"
       - name: the app
         run: |
           export DOTNET="$(which dotnet)"
@@ -203,8 +214,9 @@ jobs:
             echo "Verified permanent signing certificate fingerprint: $actual"
           fi
       - uses: actions/upload-artifact@v7
+        if: steps.signer.outputs.persistent == 'true'
         with:
-          name: ${{ steps.signer.outputs.persistent == 'true' && 'nx2android-android-apk' || 'nx2android-TEST-EPHEMERAL-NOT-UPDATABLE' }}
+          name: nx2android-android-apk
           path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 14
       - if: startsWith(github.ref, 'refs/tags/')

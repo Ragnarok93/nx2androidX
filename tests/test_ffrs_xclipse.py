@@ -40,7 +40,7 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('getenv("DM_VK_PASSDUMP_MIN_DRAWS")', part)
         self.assertIn('vk_pd_pass_has_draws(g_pass_draws', part)
         self.assertIn('vk_pd_depth_prepass_eligible', part)
-        self.assertIn('pass_dump_depth_control();', part)
+        self.assertIn('pass_dump_depth_control(VK_FORMAT_D24_UNORM_S8_UINT);', part)
         self.assertIn('getenv("DM_VK_PASSDUMP_DEPTH_CONTROL")', part)
         self.assertIn('vk_pd_d24_matches', exec_src)
         self.assertIn('[depthcontrol] RESULT:', exec_src)

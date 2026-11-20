@@ -93,6 +93,11 @@ uint64_t vk_fence_done(void);   // the highest submission fence the GPU has comp
 // dec: a BC format the device lacks, decoded on the CPU (gfx_vk_tex.c bc_decode) into vk, dbpp bytes a texel; bw, bh and bpb stay the guest's blocks
 typedef struct { VkFormat vk; VkComponentMapping swz; uint8_t kind; uint8_t depth, stencil, compressed, is_int, is_sint, bw, bh, bpb, dec, dbpp; } vkfmt_t;
 const vkfmt_t *vk_fmt(int nvn_format);   // NULL when the format has no Vulkan counterpart on this device
+static inline int vk_view_selects_stencil(const vkfmt_t *format, const tex_t *texture, const view_t *view) {
+    if (!format->stencil) return 0;
+    if (!format->depth) return 1;
+    return view && view->set_dsmode ? view->dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL : texture->stencil;
+}
 void vk_bc_decode(const vkfmt_t *f, const uint8_t *src, size_t pitch, uint32_t w, uint32_t h, uint32_t z, uint8_t *dst);   // (f->dec) gfx_vk_tex.c bc_decode
 typedef struct vkimg vkimg_t;
 struct vkimg {
@@ -142,6 +147,7 @@ void vk_watch(const vkimg_t *im, const char *what);   // DM_VK_WATCH (gfx_vk_exe
 vkimg_t *vk_tex_by_id(int tid, const view_t **view_out, const tex_t **tex_out);   // registered texture ID → image (NULL if none)
 VkSampler vk_samp_by_id(int sid);
 extern __thread VkFormat vk_view_fmt; extern __thread uint32_t vk_view_layers;   // the format and layer count of the view vk_tex_view last returned on this thread
+extern __thread VkImageSubresourceRange vk_view_range;
 VkImageView vk_dummy_view(int dim, int arrayed, int ms, int storage, int is_int);
 VkSampler vk_dummy_sampler(void);
 VkBufferView vk_dummy_tbuf(int storage);

@@ -1452,7 +1452,11 @@ void vk_dsl_register(VkDescriptorSetLayout l, const VkDescriptorSetLayoutBinding
 }
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout l) {
     vksub_t *s = cur();
-    pthread_mutex_lock(&g_dsl_mu); const uint32_t *need = nvn_hm_get(&g_dsl_need, &l); pthread_mutex_unlock(&g_dsl_mu);
+    uint32_t counts[9] = {0};
+    pthread_mutex_lock(&g_dsl_mu);
+    const uint32_t *registered = nvn_hm_get(&g_dsl_need, &l);
+    if (registered) memcpy(counts, registered, sizeof counts);
+    pthread_mutex_unlock(&g_dsl_mu);
     for (;;) {
         if (s->dp_cur == s->ndp) {
             VkDescriptorPoolSize sz[9]; uint32_t nz = 0;
@@ -1463,11 +1467,11 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout l) {
         }
         if (s->dp_cur != s->dp_counted) { memset(s->dp_used, 0, sizeof s->dp_used); s->dp_sets = 0; s->dp_counted = s->dp_cur; }
         int fits = s->dp_sets < DP_SETS;
-        if (need) for (int t = 0; t < 9 && fits; t++) if (need[t] && s->dp_used[t] + need[t] > DP_CAP[t]) fits = 0;
+        for (int t = 0; t < 9 && fits; t++) if (counts[t] && s->dp_used[t] + counts[t] > DP_CAP[t]) fits = 0;
         if (!fits) { s->dp_cur++; continue; }
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, s->dp[s->dp_cur], 1, &l};
         VkDescriptorSet set; VkResult r = vkAllocateDescriptorSets(V.dev, &ai, &set);
-        if (r == VK_SUCCESS) { s->dp_sets++; if (need) for (int t = 0; t < 9; t++) s->dp_used[t] += need[t]; return set; }
+        if (r == VK_SUCCESS) { s->dp_sets++; for (int t = 0; t < 9; t++) s->dp_used[t] += counts[t]; return set; }
         if (r != VK_ERROR_OUT_OF_POOL_MEMORY && r != VK_ERROR_FRAGMENTED_POOL) die("[vk] vkAllocateDescriptorSets: %d", r);
         s->dp_cur++;
     }

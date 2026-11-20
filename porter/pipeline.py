@@ -1259,7 +1259,7 @@ class Port:
         # exist, aborting an otherwise successful Xclipse port in build_zip_file().
         vulkan_libs = self.apk_vulkan_libraries()
         cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
-               '--version-code', str(code), '--version-name', self.display]
+               '--version-code', str(code), '--preserve-version-floor', '--version-name', self.display]
         if self.o.self_contained:
             cmd += data_assets
         else:

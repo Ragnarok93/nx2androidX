@@ -81,6 +81,15 @@ static void vkCmdBlitImage(VkCommandBuffer cb,VkImage s,VkImageLayout sl,VkImage
 }
 static void vkCmdClearColorImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearColorValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)r;assert(n==1);last_clear=*v;}
 static void vkCmdClearDepthStencilImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearDepthStencilValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)v;(void)n;(void)r;abort();}
+static int g_pd_state, g_pd_full;
+static void surface_transfer(const vkimg_t *im, VkImageSubresourceLayers sub, const char *role) {
+    (void)im; (void)sub; (void)role;
+    abort();
+}
+static void surface_clear(const vkimg_t *im, VkImageSubresourceRange range, const VkClearValue *clear) {
+    (void)im; (void)range; (void)clear;
+    abort();
+}
 /* FUNCTIONS */
 static p_copy_t2t setup(int fmt,VkFormat sf,VkFormat df) {
     src=(tex_t){.d={.format=fmt}};dst=src;nimages=2;copies=blits=resolves=retired=barriers=same_image=red_calls=0;fail_alloc=dedicated=direct_allocs=pool_calls=pooled_retired=direct_retired=destroyed=0;bound_offset=0;create_calls=0;fail_n=1;

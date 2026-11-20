@@ -27,7 +27,10 @@ int g_ubd_heap = 1;   // gfx_vk_exec.c's (vk_sub_update reads it)
 int g_pool_slots = 1;   // gfx_vk_exec.c's (vk_pool_of reads it)
 static int g_x_tracepass = -1, g_sub_pass, g_prof_on, g_prereset = 1;
 static uint64_t g_prof_ns[8], g_fence, g_tex_frame;
-static int g_pd_state, g_pd_effects, g_ch_enabled;
+static int g_pd_state, g_pd_effects, g_pd_full, g_ch_enabled;
+static struct { unsigned storage_count; } g_sc;
+static void surface_dispatch(void) { abort(); }
+static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage) { abort(); }
 static void compute_record(const uint64_t key[3], int slow) { (void)key; (void)slow; }
 static long long g_td_off = -1;
 static struct { uint64_t dispatches; } g_vkst;
@@ -57,7 +60,7 @@ void vk_shader_c1(vkshader_t *s, VkBuffer *b, VkDeviceSize *o, VkDeviceSize *n) 
 VkBuffer vk_support_buffer(void) { abort(); }
 VkBuffer vk_zero_buffer(void) { abort(); }
 static void vk_cross(int k, uint64_t a, uint64_t n, const vkpool_t *p) { abort(); }
-static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *i, int storage) { abort(); }
+static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *i, unsigned element, int storage) { abort(); }
 VkSampler vk_samp_by_id(int id) { abort(); }
 VkSampler vk_dummy_sampler(void) { abort(); }
 vkimg_t *vk_tex_by_id(int id, const view_t **v, const tex_t **t) { abort(); }

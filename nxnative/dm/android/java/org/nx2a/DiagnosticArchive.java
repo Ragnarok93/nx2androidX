@@ -26,11 +26,15 @@ final class DiagnosticArchive {
     static final long FILE_LIMIT = 128L << 20;
     static final long TOTAL_LIMIT = 384L << 20;
     static final int ENTRY_LIMIT = 310;        // 96 x (preview, raw, floats) + metadata
+    private static boolean metadataName(String name) {
+        return name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
+               name.equals("gpu_draw_inputs.tsv") || name.equals("surface_usage.tsv") ||
+               name.equals("surface_samples.tsv");
+    }
     static boolean allowedName(String name) {
         return name.equals("log.txt") || name.equals("log.prev.txt") ||
                name.equals("log.prev.2.txt") || name.equals("log.prev.3.txt") ||
-               name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
-               name.equals("gpu_draw_inputs.tsv") ||
+               metadataName(name) || name.equals("surface_samples.raw") ||
                name.matches("pass_[0-9]{2}\\.ppm(?:\\.f32)?") ||
                name.matches("pass_[0-9]{2}\\.raw") ||
                name.matches("frame_[0-9]{6}\\.ppm");
@@ -40,16 +44,14 @@ final class DiagnosticArchive {
     }
     private static int exportPriority(File file) {
         String name = file.getName();
-        if (name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
-                name.equals("gpu_draw_inputs.tsv")) return 0;
+        if (metadataName(name)) return 0;
         if (logName(name)) return 1;
         if (name.endsWith(".raw")) return 2;
         return 3;
     }
     private static String entryName(String name) {
-        return logName(name) ? "logs/" + name : name.equals("capture_meta.txt") ||
-               name.equals("pass_dump_manifest.tsv") || name.equals("gpu_draw_inputs.tsv")
-               ? "metadata/" + name : "captures/" + name;
+        return logName(name) ? "logs/" + name :
+               metadataName(name) ? "metadata/" + name : "captures/" + name;
     }
     private static void entry(ZipOutputStream zip, String name, byte[] data) throws IOException {
         zip.putNextEntry(new ZipEntry(name));
@@ -72,6 +74,10 @@ final class DiagnosticArchive {
         }
         zip.closeEntry();
     }
+    private static boolean currentFile(File f, long captureTime) {
+        return f.isFile() && !Files.isSymbolicLink(f.toPath()) && f.length() > 0 &&
+               f.lastModified() >= captureTime;
+    }
     static void write(File directory, OutputStream out, String systemInfo) throws IOException {
         File root = directory.getCanonicalFile();
         if (!root.isDirectory()) throw new IOException("Game diagnostic folder is unavailable");
@@ -85,6 +91,12 @@ final class DiagnosticArchive {
         boolean restrictPasses = manifest.isFile() || captureInfo.isFile();
         long captureTime = captureInfo.isFile() ? captureInfo.lastModified() : 0;
         boolean manifestCurrent = manifest.isFile() && manifest.lastModified() >= captureTime;
+        File catalog = new File(root, "surface_usage.tsv");
+        File samples = new File(root, "surface_samples.tsv");
+        File raw = new File(root, "surface_samples.raw");
+        boolean catalogCurrent = currentFile(catalog, captureTime);
+        boolean surfacesCompleted = catalogCurrent && currentFile(samples, captureTime) &&
+                                    currentFile(raw, captureTime);
         if (manifestCurrent) {
             try (BufferedReader lines = Files.newBufferedReader(manifest.toPath(), StandardCharsets.UTF_8)) {
                 String line;
@@ -112,7 +124,10 @@ final class DiagnosticArchive {
                     !name.equals("pass_dump_manifest.tsv") &&
                     (!currentPasses.contains(name.substring(0, 7)) || f.lastModified() < captureTime)) continue;
             if (f.getName().equals("gpu_draw_inputs.tsv") &&
-                    (!manifestCurrent || f.lastModified() < captureTime)) continue;
+                    (!(manifestCurrent || catalogCurrent) || f.lastModified() < captureTime)) continue;
+            if (name.equals("surface_usage.tsv") && !catalogCurrent) continue;
+            if ((name.equals("surface_samples.tsv") || name.equals("surface_samples.raw")) &&
+                    !surfacesCompleted) continue;
             if (!f.getCanonicalPath().startsWith(prefix)) continue;
             inputs.add(f);
         }
@@ -130,7 +145,10 @@ final class DiagnosticArchive {
                     "gpu_draw_inputs.tsv contains completed GPU buffer copies taken after read-only passes.\n" +
                     "Index and vertex rows are binding prefixes. Rasterization requires separate evidence.\n" +
                     "CPU/shadow indirect diagnostics are explicitly non-authoritative.\n" +
-                    "High-overhead full MRT/depth/stencil readback is OFF unless Capture is pressed.\n" +
+                    "High-overhead full MRT/depth/stencil readback is OFF unless Capture graphics is pressed.\n" +
+                    "surface_usage.tsv lists attachment, shader image, transfer and presentation bindings.\n" +
+                    "Tile status encodes offset:bytes:x:y:width:height in surface_samples.raw,\n" +
+                    "indexed by offset and hash in surface_samples.tsv. Metadata-only and skipped rows give their status.\n" +
                     "The last three prior runtime logs are retained across app launches.\n" +
                     "No game ROM, shaders, saves or user DLLs are included.\n" +
                     "Logs may contain device identifiers, filesystem paths, shader keys and GPU addresses.\n" +

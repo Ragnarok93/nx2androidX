@@ -587,8 +587,8 @@ static _Atomic int g_ed_st;    // the layout editor's state for dm_menu_state (o
 static _Atomic int g_sp_on, g_sp_hi = -1, g_sp_ver;   // the save picker (below): open, its highlighted row, its edit count
 static _Atomic int g_sv_st, g_sv_n;                   // Export save: its outcome (overlay_layout.h OVX_*), the exports made
 // Diagnostics have no per-frame overhead until the player arms a one-shot scene
-// capture. Trace details only affects that one capture, never the whole session.
-static _Atomic int g_diag_trace, g_diag_status, g_diag_ver;
+// capture. The switch arms all capture instrumentation for the next gameplay frame.
+static _Atomic int g_diag_status, g_diag_ver;
 enum { DIAG_IDLE, DIAG_ARMED, DIAG_EXPORTING, DIAG_EXPORTED, DIAG_FAILED };
 static void diag_changed(void) { atomic_fetch_add_explicit(&g_diag_ver, 1, memory_order_relaxed); dm_overlay_redraw(); }
 void dm_menu_diag_note(char *out, int cap) {
@@ -602,7 +602,7 @@ void dm_menu_diag_note(char *out, int cap) {
         // The report manifest is written after the GPU fence completes; the
         // older pass_00.ppm could belong to a previous run.
         char path[620], row[256];
-        snprintf(path, sizeof path, "%s/pass_dump_manifest.tsv", g_root);
+        snprintf(path, sizeof path, "%s/surface_usage.tsv", g_root);
         FILE *m = fopen(path, "r");
         int have = m && fgets(row, sizeof row, m) && fgets(row, sizeof row, m);
         if (m) fclose(m);
@@ -619,8 +619,7 @@ int dm_menu_state(void) {
     return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 | atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
            atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 |
            atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 |
-           (atomic_load(&g_menu_tab) == 3 ? atomic_load(&g_diag_ver) & 15 : atomic_load(&g_sv_n) & 15) << 24 |
-           atomic_load(&g_diag_trace) << 8;
+           (atomic_load(&g_menu_tab) == 3 ? atomic_load(&g_diag_ver) & 15 : atomic_load(&g_sv_n) & 15) << 24;
 }
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
 static void menu_open(int hi) {
@@ -692,71 +691,55 @@ static void fg_flow_step(int direction) {
     fg_apply();
 }
 const char *dm_vk_driver_status(void);
-static void diag_capture_arm(int effects) {
-    // Chosen explicitly from the game menu. Do not persist or automatically
-    // re-enable these memory-intensive flags on the next app start.
-    const char *driver = dm_vk_driver_status();
+int vk_pass_dump_user_begin(void);
+static int diag_capture_arm(void) {
+    if (!vk_pass_dump_user_begin()) return 0;
+    static const char *const settings[][2] = {
+        {"DM_VK_PASSDUMP_FULL", "1"}, {"DM_VK_PASSDUMP_EFFECTS", "0"},
+        {"DM_VK_PASSDUMP_DEPTH_STATE", "1"}, {"DM_VK_PASSDUMP_INPUTS", "1"},
+        {"DM_VK_PASSDUMP_INPUT_VS", ""}, {"DM_VK_PASSDUMP_LIMIT", "96"},
+        {"DM_VK_PASSDUMP_MAX_MB", "128"}, {"DM_VK_PASSDUMP_RAW", "1"},
+        {"DM_VK_PASSDUMP_FRAMES", "1"}, {"DM_VK_PASSDUMP_SKIP", "0"},
+        {"DM_VK_PASSDUMP_SIZE", "0"},
+    };
+    static const char *const reports[] = {
+        "pass_dump_manifest.tsv", "gpu_draw_inputs.tsv", "surface_usage.tsv",
+        "surface_samples.tsv", "surface_samples.raw",
+    };
+    char path[620];
+    for (unsigned i = 0; i < sizeof reports / sizeof reports[0]; i++) {
+        snprintf(path, sizeof path, "%s/%s", g_root, reports[i]);
+        unlink(path);
+    }
+    for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
+        setenv(settings[i][0], settings[i][1], 1);
+
     extern uint64_t g_tex_frame;
     uint64_t frame = __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED);
-    // The report manifest is authoritative for the current capture. A new
-    // player-requested capture replaces it; older pass files are ignored by
-    // the ZIP exporter unless the manifest names their indices.
-    { char manifest[620]; snprintf(manifest, sizeof manifest, "%s/pass_dump_manifest.tsv", g_root);
-      unlink(manifest);
-      snprintf(manifest, sizeof manifest, "%s/gpu_draw_inputs.tsv", g_root);
-      unlink(manifest); }
-    setenv("DM_VK_PASSDUMP_EFFECTS", effects ? "1" : "0", 1);
-    setenv("DM_VK_PASSDUMP_ALL_COLORS", effects ? "0" : "1", 1);
-    setenv("DM_VK_PASSDUMP_MIN_COLORS", effects ? "0" : "2", 1);
-    // Do not spend GPU readbacks on the frame's first clear-only passes.
-    setenv("DM_VK_PASSDUMP_MIN_DRAWS", effects ? "1" : "10", 1);
-    setenv("DM_VK_PASSDUMP_DEPTH", "1", 1);
-    setenv("DM_VK_PASSDUMP_DEPTH_PREPASS", effects ? "0" : "1", 1);
-    // Standalone D24S8 transfer control: a separate 8x8 scratch image with
-    // known depth 0.625 tests that raw depth readback itself is reliable.
-    setenv("DM_VK_PASSDUMP_DEPTH_CONTROL", effects ? "0" : "1", 1);
-    int trace = atomic_load(&g_diag_trace);
-    setenv("DM_VK_PASSDUMP_DEPTH_STATE", trace ? "1" : "0", 1);
-    setenv("DM_VK_PASSDUMP_INPUTS", trace ? "1" : "0", 1);
-    setenv("DM_VK_PASSDUMP_STENCIL", "1", 1);
-    setenv("DM_VK_PASSDUMP_LIMIT", "24", 1);
-    setenv("DM_VK_PASSDUMP_MAX_MB", "128", 1);
-    setenv("DM_VK_PASSDUMP_RAW", "1", 1);
-    setenv("DM_VK_PASSDUMP_SIZE", "0", 1);
-    setenv("DM_VK_PASSDUMP_SKIP", "0", 1);
-    setenv("DM_VK_PASSDUMP_PASS", "", 1);
-    setenv("DM_VK_PASSDUMP_FMT", "", 1);
-    setenv("DM_VK_PASSDUMP_FRAMES", "1", 1);
-    // The first present after closing the panel is a transition; the following
-    // scene present arms the capture. Never capture a frozen menu redraw.
-    setenv("DM_VK_PASSDUMP", "2", 1);
-    if (trace) {
-        char start[32]; snprintf(start, sizeof start, "%llu", (unsigned long long)(frame + 2));
-        setenv("DM_VK_LIST_AT", start, 1);
-        setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
-    }
-    char meta[620]; snprintf(meta, sizeof meta, "%s/capture_meta.txt", g_root);
-    FILE *f = fopen(meta, "w");
+    char start[32];
+    snprintf(start, sizeof start, "%llu", (unsigned long long)(frame + 2));
+    setenv("DM_VK_LIST_AT", start, 1);
+    setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
+
+    snprintf(path, sizeof path, "%s/capture_meta.txt", g_root);
+    FILE *f = fopen(path, "w");
     if (f) {
-        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=%s\n"
-                   "max_targets=24\nmax_gpu_readback_mb=128\n"
-                   "min_pass_draws=%d\nfirst_depth_prepass=%d\n"
-                   "isolated_depth_transfer_control=%s\n"
-                   "depth_pipeline_trace=player_opt_in\n"
-                   "all_mrt=%d\ndepth=1\nstencil=1\nraw_bytes=1\n"
-                   "trace_details=%d\nvulkan_driver=%s\nframe_generation_at_arm=%d\n"
-                   "gpu_draw_inputs=%s\n"
-                   "cpu_indirect_trace=guest_and_cached_shadows_only\n",
-                (unsigned long long)frame, effects ? "effects-and-shadows" : "one-shot",
-                effects ? 1 : 10, !effects, effects ? "off" : "0.625", !effects,
-                trace, driver ? driver : "(unknown)", atomic_load(&g_set_fg),
-                trace ? "bounded_end_of_pass_for_read_only_indexed_indirect_draws" : "off");
+        const char *driver = dm_vk_driver_status();
+        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=full-frame\n"
+                   "max_gpu_readback_mb=128\nsurface_tile=16x16\n"
+                   "isolated_depth_transfer_control=0.625\n"
+                   "vulkan_driver=%s\nframe_generation_at_arm=%d\n",
+                (unsigned long long)frame, driver ? driver : "(unknown)", atomic_load(&g_set_fg));
+        for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
+            fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
         fclose(f);
     }
+    // Wait out the first post-menu present, then record the next gameplay frame.
+    setenv("DM_VK_PASSDUMP", "2", 1);
     atomic_store(&g_diag_status, DIAG_ARMED);
-    LOG("[diagnostics] %s capture armed for next gameplay frame; cap 24 targets / 128 MB; trace %s",
-        effects ? "effects and shadows" : "scene", trace ? "2 presents" : "off");
+    LOG("[diagnostics] full graphics capture armed for the next gameplay frame");
     diag_changed();
+    return 1;
 }
 static void diag_export_request(void) {
     ANativeActivity *a = g_act;
@@ -803,13 +786,9 @@ static void menu_do(int item) {
     else if (item == OVM_FG_MULT) fg_mult_step(1);
     else if (item == OVM_FG_FLOW) fg_flow_step(1);
     else if (item == OVM_DRIVER) return; // read-only actual driver, cannot hot-swap a VkDevice
-    else if (item == OVM_DIAG_TRACE) {
-        atomic_store(&g_diag_trace, !atomic_load(&g_diag_trace)); diag_changed();
-        LOG("[diagnostics] detailed shader/indirect pass trace %s for the next requested capture",
-            atomic_load(&g_diag_trace) ? "enabled" : "disabled");
-    }
-    else if (item == OVM_DIAG_CAPTURE || item == OVM_DIAG_EFFECTS) {
-        diag_capture_arm(item == OVM_DIAG_EFFECTS); dm_haptics_android_tap(); menu_close(); return;
+    else if (item == OVM_DIAG_CAPTURE) {
+        if (diag_capture_arm()) { dm_haptics_android_tap(); menu_close(); }
+        return;
     }
     else if (item == OVM_DIAG_EXPORT) { diag_export_request(); return; }
     else if (item == OVM_DIAG_STATUS) return;

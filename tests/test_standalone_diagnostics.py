@@ -65,6 +65,10 @@ public final class DiagnosticArchiveFixture {
             "dump\tpresent\tpass\ttarget\n0\t1500\t18\t0\n2\t1500\t18\t-1\n"));
         put(root, "gpu_draw_inputs.tsv", bytes("present\traw_hex\n1500\t02000000\n"));
         put(root, "gpu_draw_inputs.tsv.tmp", bytes("incomplete input report"));
+        put(root, "surface_samples.raw", new byte[] {0, 2, 4, 6, 8});
+        put(root, "surface_samples.tsv", bytes("offset\tbytes\tfnv1a64\n0\t5\t89\n"));
+        put(root, "surface_usage.tsv", bytes("role\tstatus\ncolor\ttile:0:5:0:0:1:1\n"));
+        put(root, "surface_usage.tsv.tmp", bytes("incomplete surface report"));
         put(root, "pass_00.ppm", bytes("new MRT 0"));
         put(root, "pass_00.raw", new byte[] {0, (byte)255, 31, 42});
         put(root, "pass_00.ppm.f32", new byte[] {1, 2, 3, 4});
@@ -87,6 +91,10 @@ public final class DiagnosticArchiveFixture {
         check(zip.containsKey("README.txt") && zip.containsKey("archive-status.txt"), "report metadata");
         check(zip.containsKey("metadata/capture_meta.txt"), "capture settings metadata");
         check(zip.containsKey("metadata/pass_dump_manifest.tsv"), "manifest");
+        check(zip.containsKey("metadata/surface_usage.tsv"), "surface catalog");
+        check(zip.containsKey("metadata/surface_samples.tsv"), "sample index");
+        check(Arrays.equals(zip.get("captures/surface_samples.raw"), new byte[]{0,2,4,6,8}), "exact tile bytes");
+        check(!zip.containsKey("metadata/surface_usage.tsv.tmp"), "partial catalog excluded");
         check(Arrays.equals(zip.get("metadata/gpu_draw_inputs.tsv"),
                             bytes("present\traw_hex\n1500\t02000000\n")), "completed GPU samples");
         check(!zip.containsKey("metadata/gpu_draw_inputs.tsv.tmp"), "temporary sample report excluded");
@@ -115,9 +123,13 @@ public final class DiagnosticArchiveFixture {
         // retired, never mislabel stale files as belonging to the new run.
         Files.setLastModifiedTime(root.resolve("pass_dump_manifest.tsv"),
             java.nio.file.attribute.FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(root.resolve("surface_usage.tsv"),
+            java.nio.file.attribute.FileTime.fromMillis(1000L));
         ByteArrayOutputStream second = new ByteArrayOutputStream();
         DiagnosticArchive.write(root.toFile(), second, "driver=RADV\n");
         Map<String, byte[]> pending = unpack(second.toByteArray());
+        check(!pending.containsKey("captures/surface_samples.raw"), "orphaned tile bytes excluded");
+        check(!pending.containsKey("metadata/surface_samples.tsv"), "orphaned sample index excluded");
         check(!pending.containsKey("metadata/pass_dump_manifest.tsv"), "pending capture excludes stale manifest");
         check(!pending.containsKey("captures/pass_00.ppm"), "pending capture excludes stale target");
         check(!pending.containsKey("metadata/gpu_draw_inputs.tsv"), "pending capture excludes stale samples");

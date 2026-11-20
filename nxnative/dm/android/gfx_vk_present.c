@@ -374,8 +374,8 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 }
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
-static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Capture next frame", "Trace details", "Export diagnostics", "Capture status", "Capture effects / shadows", "Resume", ""};
-static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select", [OVM_DIAG_CAPTURE] = "Capture", [OVM_DIAG_EFFECTS] = "Capture", [OVM_DIAG_EXPORT] = "Save ZIP"};   // the rows that are a button: its word
+static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Capture graphics", "Export diagnostics", "Capture status", "Resume", ""};
+static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select", [OVM_DIAG_CAPTURE] = "Capture", [OVM_DIAG_EXPORT] = "Save ZIP"};   // the rows that are a button: its word
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
 static const char *const OVM_PADS[2] = {"Position", "Label"};
 int dm_menu_fg_mult(void);
@@ -448,7 +448,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_rrect(cv, x0 + cur * segw, cy - hh / 2, x0 + (cur + 1) * segw, cy + hh / 2, hh / 2, C_ACCENT);
             for (int k = 0; k < 2; k++) cv_text(cv, x0 + k * segw + (segw - cv_text_w(seg[k], is)) / 2, cy, seg[k], is, k == cur ? C_WHITE : C_DIM);
         } else {   // a switch
-            int on = st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_FG ? 19 : it == OVM_DIAG_TRACE ? 8 : 3) & 1; float sx0 = x1 - sw;
+            int on = st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_FG ? 19 : 3) & 1; float sx0 = x1 - sw;
             cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
             cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
             const char *word = it == OVM_FG && !dm_menu_fg_has_dll() ? "Need DLL" : on ? "ON" : "OFF";
@@ -1195,11 +1195,13 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         void vk_pass_report(void); vk_pass_report();
         pe = g_vkst.ns_exec; pd = g_vkst.ns_desc; pp = g_vkst.ns_pipe; ps = g_ns_submit; pb = g_ubd_bytes; pdr = g_vkst.draws; pg = g_gpu_ns; pkn = g_pkg_n; pkb = g_pkg_bytes; pkt = g_pkg_ns; psb = g_ns_set_build; psh = g_ns_set_hash; psn = g_ns_set_new; psm = g_set_memo;
     }
+    { void vk_pass_dump_poll(uint64_t done, vkimg_t *present);
+      uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done(), im); }
     if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period); }
     if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period); }   // never drawn into: nothing to show yet
     shown++;
     if (shot_wanted(n)) shot(im, n);
-    { void vk_pass_dump_poll(uint64_t done); uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done()); void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
+    { void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
     if (n % 1800 == 0) {   // every ~30 s: the pipeline cache to disk on a thread of its own (an Android app can be killed without any exit path)
         void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
         pthread_create(&th, &a, (void *(*)(void *))(void *)vk_pipeline_cache_save, NULL); pthread_attr_destroy(&a);

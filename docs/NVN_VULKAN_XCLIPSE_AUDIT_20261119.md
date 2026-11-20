@@ -411,3 +411,37 @@ which had changed from depth to HDR color. The native capture now
 removes stale sidecars and publishes the manifest after readback files
 are closed. The exporter prioritizes metadata, logs and exact readbacks
 ahead of previews and ignores files older than the armed capture.
+
+### Follow-up after the rendering improvement
+
+The descriptor allocator now snapshots the descriptor counts while the layout registry
+mutex owns them. A re-registration of a deduplicated Vulkan layout handle can occur
+during allocation. The executable regression performs that replacement from the
+mock Vulkan allocation call and checks the actual pool accounting.
+
+For sampled combined depth/stencil images, an explicit NVN depth/stencil view mode
+takes precedence over the texture's default. The same selection drives the Vulkan
+view aspect and the integer shader variant. The executable view test verifies
+explicit depth over a stencil default, explicit stencil over a depth default, and
+the returned range on a cached view.
+
+In the standalone game's Diagnostics tab, **Capture graphics** records one gameplay
+frame. The ZIP includes the resolved subresource ranges for MRTs, depth and stencil
+attachments, sampled and storage image bindings, texture transfers and clears, and
+the presented game image. It includes driver logs, eligible GPU draw-input samples,
+D24S8 and D32F transfer controls, and a packed, fence-completed tile dump with hashes.
+For attachment, compute image, and texture-clear outputs, the capture samples up to
+16-by-16 texels per eligible layer. The catalog identifies multisampled, discarded,
+unresolved and budget-limited rows. Sampled bindings, transfer requests, and the
+presentation source are also tracked by identity and subresource. The swapchain
+overlay and full-resolution pixels of every surface are outside this capture.
+The packed allocation is at most 16 MiB and counts toward the 128 MiB GPU budget.
+The report records any limit reached. Frame generation should be off for matched
+scene comparisons.
+
+Opening flames, transient material corruption, transparency and shadow behavior
+still require a scene-matched Xclipse and Adreno comparison. The transfer controls
+measure transfer representation, while the pass and shader-binding catalog is needed
+to locate an earlier divergence in the game. Capture a warm run and measure frame
+times separately with capture off to isolate remaining pipeline compilation stalls
+from replay or GPU costs.
