@@ -37,6 +37,8 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('getenv("DM_VK_PASSDUMP_MIN_COLORS")', part)
         self.assertIn('S.rt_has_col[i]', part)
         self.assertIn('if (have < need) return;', part)
+        self.assertIn('getenv("DM_VK_PASSDUMP_MIN_DRAWS")', part)
+        self.assertIn('vk_pd_pass_has_draws(g_pass_draws', part)
         self.assertIn('g_npd >= pass_dump_limit()', part)
         self.assertIn('getenv("DM_VK_PASSDUMP_LIMIT")', exec_src)
         self.assertIn('g_npd < pass_dump_limit() - 1', exec_src)
@@ -57,6 +59,8 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('strcmp(enabled, "1")', tune)
         self.assertIn('if (!getenv("DM_FPS_TARGET"))', tune)
         self.assertIn('setenv("DM_FPS_TARGET", "30", 0)', tune)
+        self.assertIn('if (!getenv("DM_VK_ASYNC_PIPE"))', tune)
+        self.assertIn('setenv("DM_VK_ASYNC_PIPE", "0", 0)', tune)
         for speculative in ("DM_OPMODE", "RADV_XCLIPSE_DCC_SMALL",
                             "DM_VK_RP", "RADV_XCLIPSE_DLC", "DM_VK_MT_REPLAY"):
             self.assertNotIn(f'setenv("{speculative}"', tune)

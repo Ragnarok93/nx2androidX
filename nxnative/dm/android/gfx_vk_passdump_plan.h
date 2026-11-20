@@ -25,6 +25,10 @@ static inline unsigned vk_pd_select_colors(const uint8_t bound[8], unsigned ncol
         if (bound[i]) slots[count++] = (uint8_t)i;
     return count;
 }
+// Opt-in scene capture should leave its bounded budget for real geometry.
+static inline int vk_pd_pass_has_draws(uint64_t submitted_draws, unsigned minimum) {
+    return submitted_draws >= minimum;
+}
 static inline int vk_pd_budget_allows(uint64_t used, uint64_t requested, uint64_t budget) {
     return requested && used <= budget && requested <= budget - used;
 }

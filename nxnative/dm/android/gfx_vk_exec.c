@@ -404,6 +404,7 @@ void vk_ubd_land(VkCommandBuffer cb); int vk_ubd_shadow(uint64_t a, uint64_t n, 
 // DM_VK_PASSDUMP_SIZE=WxH[,WxH...] (read when a dump starts): only passes whose first colour target has one of these sizes, over every submission of the frame (no depth),
 // to follow one effect's targets when the pass numbers move from frame to frame (Xenoblade Chronicles 3's 384x216 clouds)
 // DM_VK_PASSDUMP_FRAMES=N (read when a dump starts): keep dumping for N presents (up to 96 dumps in all), to catch an effect that is wrong in single frames
+// DM_VK_PASSDUMP_MIN_DRAWS=N (live): skip clear-only passes below N valid draws.
 // DM_VK_PASSDUMP_MIN_COLORS=N (live): only dump passes with at least N attached colour targets. UE's early scene/G-buffer
 // passes write multiple render targets; this avoids the final postprocessing+HUD-only captures of FFRS's missing characters.
 // DM_VK_PASSDUMP_LIMIT=N (live): cap GPU readback allocations to N images (1..96), preserving memory on 8 GB phones.
@@ -477,6 +478,12 @@ static int pass_dump_color(int ci) {
 static void pass_dump(void) {
     texdump_flush();
     if (g_pd_state != 1) return;
+    // The first two passes in the S25 FE report contained 1 and 0 draws,
+    // yet consumed 12 of the 16 capture slots. This optional filter
+    // prioritizes actual geometry, and is off during normal gameplay.
+    { const char *md = getenv("DM_VK_PASSDUMP_MIN_DRAWS");
+      int minimum = md && *md ? atoi(md) : 0;
+      if (minimum > 0 && !vk_pd_pass_has_draws(g_pass_draws, (unsigned)minimum)) return; }
     if (g_sub_pass - 1 < g_pd_skip) return;
     { const char *pp = getenv("DM_VK_PASSDUMP_PASS");
       if (pp && *pp) {

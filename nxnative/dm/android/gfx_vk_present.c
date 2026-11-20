@@ -435,7 +435,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                 if (!scale) snprintf(value, sizeof value, "Auto");
                 else snprintf(value, sizeof value, "%d%%", scale);
             } else if (it == OVM_DIAG_STATUS) dm_menu_diag_note(value, sizeof value);
-            else if (it == OVM_DIAG_LIMIT) snprintf(value, sizeof value, "16 targets / 128 MB");
+            else if (it == OVM_DIAG_LIMIT) snprintf(value, sizeof value, "24 targets / 128 MB");
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
             while (vs > 1 && cv_text_w(value, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;

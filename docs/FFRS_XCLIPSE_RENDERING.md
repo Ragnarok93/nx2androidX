@@ -187,3 +187,45 @@ correctness is still unresolved; an exported report is not proof of fixed
 geometry. If a scene has no pass with at least two color attachments after
 arming, no MRT preview will be produced. No full-frame capture runs in the
 background without the explicit Capture action.
+
+
+## User capture: 2026-11-19, SM-S731U, imported RADV
+
+The attached standalone ZIP was taken in the field at present 2675, not during
+a verified battle scene. It captures 1384x780 scene targets. Pass 1 had
+**one** prepared draw and uniform clear values in its four MRTs and
+zero depth/stencil. Pass 2 had **zero** prepared draws and six black MRTs.
+Those clears are not evidence of missing geometry.
+
+The initial 16-entry budget captured all 12 outputs from those two passes,
+then only four of pass 3's six MRTs (107 draws). Passes 4 and 5 each have
+around 100 draws but none were read back. The fourth pass-3 output contains
+both level geometry and a small player model, so *some* actor triangles do
+reach the G-buffer. No conclusion about battle actors or composition follows
+from this field frame alone.
+
+The log records **384 skipped draws: no pipeline** by present 4200, with
+zero missing shader programs or render targets and no reported Vulkan
+pipeline-creation errors. The native source's asynchronous shader pipeline
+queue intentionally omits draws until first-use compilation completes.
+For this one phone/profile, `DM_VK_ASYNC_PIPE=0` is now the default:
+first-use graphics pipelines must exist for the draw to execute. This removes
+one **measured** class of skipped draws, but can cause first-use compilation
+hitches, and is **not proven to fix persistent geometry**. An explicit
+`DM_VK_ASYNC_PIPE=1` in env.txt wins. Snapdragon is not changed.
+
+Two presents logged 96 indirect draws with nonzero **guest** index/instance
+arguments, but the Xclipse buffers have no accessible copied-pool shadow.
+These are not authoritative GPU-consumed arguments. The log has a single
+stale texture-alias warning; its relationship to the missing meshes is unknown.
+
+**Capture improvement**: the menu's one-shot capture now ignores passes
+with fewer than **10 successfully prepared draws** and captures up to
+**24 attachments**, still capped at **128 MiB GPU readback**. This should
+include scene MRTs and depth/stencil after geometry rather than clearing
+passes. No readbacks run when capture is not explicitly armed.
+
+Next acceptance test: capture the *battle frame where combatants are absent*,
+then compare pass/depth/stencil and GPU-produced vertex/indirect buffer bytes
+against a known-good Adreno frame at the equivalent scene. Do not ship a
+claim of zero graphical glitches without this confirmation.

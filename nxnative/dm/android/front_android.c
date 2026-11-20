@@ -705,9 +705,11 @@ static void diag_capture_arm(void) {
       unlink(manifest); }
     setenv("DM_VK_PASSDUMP_ALL_COLORS", "1", 1);
     setenv("DM_VK_PASSDUMP_MIN_COLORS", "2", 1);
+    // Do not spend GPU readbacks on the frame's first clear-only passes.
+    setenv("DM_VK_PASSDUMP_MIN_DRAWS", "10", 1);
     setenv("DM_VK_PASSDUMP_DEPTH", "1", 1);
     setenv("DM_VK_PASSDUMP_STENCIL", "1", 1);
-    setenv("DM_VK_PASSDUMP_LIMIT", "16", 1);
+    setenv("DM_VK_PASSDUMP_LIMIT", "24", 1);
     setenv("DM_VK_PASSDUMP_MAX_MB", "128", 1);
     setenv("DM_VK_PASSDUMP_RAW", "1", 1);
     setenv("DM_VK_PASSDUMP_SIZE", "0", 1);
@@ -727,7 +729,8 @@ static void diag_capture_arm(void) {
     FILE *f = fopen(meta, "w");
     if (f) {
         fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=one-shot\n"
-                   "max_targets=16\nmax_gpu_readback_mb=128\n"
+                   "max_targets=24\nmax_gpu_readback_mb=128\n"
+                   "min_pass_draws=10\n"
                    "all_mrt=1\ndepth=1\nstencil=1\nraw_bytes=1\n"
                    "trace_details=%d\nvulkan_driver=%s\n"
                    "indirect_arguments=guest_and_cached_shadows_only_not_gpu_authoritative\n",
@@ -735,7 +738,7 @@ static void diag_capture_arm(void) {
         fclose(f);
     }
     atomic_store(&g_diag_status, DIAG_ARMED);
-    LOG("[diagnostics] scene capture armed by in-game menu for next gameplay frames; pass cap 16 / 128 MB; trace %s",
+    LOG("[diagnostics] scene capture armed by in-game menu for next gameplay frames; min 10 draws/pass, cap 24 targets / 128 MB; trace %s",
         atomic_load(&g_diag_trace) ? "2 presents" : "off");
     diag_changed();
 }
@@ -1529,6 +1532,15 @@ static void tune_ffrs_s25fe_radv(void) {
     if (!getenv("DM_FPS_TARGET")) {
         setenv("DM_FPS_TARGET", "30", 0);
         LOG("[profile] FFRS S25 FE/RADV: Switch-reference 30 FPS target (override with DM_FPS_TARGET=60)");
+    }
+    // The uploaded run recorded 384 omitted draws for unavailable pipelines
+    // by present 4200. The asynchronous pipeline path deliberately drops
+    // draws while compiling. On this one GPU/profile, require the pipeline
+    // before drawing; first-use compilation hitches are a known tradeoff.
+    // Explicit env.txt DM_VK_ASYNC_PIPE=1 and Snapdragon are untouched.
+    if (!getenv("DM_VK_ASYNC_PIPE")) {
+        setenv("DM_VK_ASYNC_PIPE", "0", 0);
+        LOG("[profile] FFRS S25 FE/RADV: require first-use pipelines; async draw omission disabled");
     }
     // Past trials of handheld mode, DCC_SMALL=0, dynamic rendering, DLC=1,
     // and forced single-thread replay did not repair missing actors. Do not

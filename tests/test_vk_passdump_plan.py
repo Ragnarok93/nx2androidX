@@ -27,6 +27,12 @@ int main(void) {
     assert(vk_pd_select_colors(sparse,8,-1,1,0,slots)==0);
     assert(vk_pd_select_colors(sparse,0,-1,1,8,slots)==0);
     uint8_t empty[8]={0}; assert(vk_pd_select_colors(empty,8,-1,0,8,slots)==0);
+    assert(vk_pd_pass_has_draws(0,0));
+    assert(!vk_pd_pass_has_draws(0,1));
+    assert(!vk_pd_pass_has_draws(1,10));
+    assert(vk_pd_pass_has_draws(10,10));
+    assert(vk_pd_pass_has_draws(107,10));
+    assert(vk_pd_pass_has_draws(UINT64_MAX,10));
     assert(vk_pd_budget_allows(0,64,64));
     assert(!vk_pd_budget_allows(0,65,64));
     assert(!vk_pd_budget_allows(UINT64_MAX,1,64));

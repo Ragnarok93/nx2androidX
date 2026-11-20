@@ -39,5 +39,12 @@ setting	fps=1
 # (DCC, imageless/dynamic pass selection, DLC, forced replay mode, handheld
 # resolution) are removed from this profile; user-provided env.txt controls
 # remain available for controlled A/B experiments.
+# The 2026-11-19 Xclipse run reports 384 skipped "no pipeline" draws by
+# present 4200, with no shader/target misses or Vulkan creation failures.
+# Its asynchronous pipeline path intentionally drops draws during compile.
+# S25 FE + imported RADV therefore disables that draw-omission mechanism by
+# default (DM_VK_ASYNC_PIPE=0), preserving explicit env.txt overrides and the
+# tested Snapdragon pipeline behavior. This is accuracy hardening, not a
+# demonstrated repair of persistent missing combatants.
 # Remove this row or set it to 0 to opt out of the 30 FPS device reference.
 env	DM_FFRS_S25FE_RADV_TUNE=1
