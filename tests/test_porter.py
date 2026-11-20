@@ -203,6 +203,67 @@ class DataPack(unittest.TestCase):
         finally:
             shutil.rmtree(t, ignore_errors=True)
 
+    def test_changed_companion_assets_update_without_replacing_the_folder(self):
+        t = Path(tempfile.mkdtemp(prefix='nx2a_test_incremental_pack_'))
+        try:
+            (t / 'patched').mkdir()
+            (t / 'patched/main.bin').write_bytes(b'CODE')
+            (t / 'romfs/Data').mkdir(parents=True)
+            (t / 'romfs/Data/game.bin').write_bytes(b'UNCHANGED-ROMFS')
+            (t / 'shaders.dmsv').write_bytes(b'OLD-SHADER')
+            p, dst = profiles.load(NEO), t / 'game-data'
+            def export(version):
+                return datapack.build(dst, profile=p, version=version, display='1.0',
+                                      patched=t / 'patched', romfs=t / 'romfs', shaders=t / 'shaders.dmsv')
+            export('v1')
+            original_folder = dst.stat().st_ino
+            original_romfs = (dst / 'RomFS/Data/game.bin').stat().st_ino
+            (dst / 'saves').mkdir()
+            (dst / 'saves/save.dat').write_bytes(b'KEEP-SAVE')
+            replacement = t / 'new-shaders.dmsv'
+            replacement.write_bytes(b'NEW-SHADER')
+            replacement.replace(t / 'shaders.dmsv')
+            export('v2')
+            self.assertEqual(dst.stat().st_ino, original_folder)
+            self.assertEqual((dst / 'RomFS/Data/game.bin').stat().st_ino, original_romfs)
+            self.assertEqual((dst / 'shaders.dmsv').read_bytes(), b'NEW-SHADER')
+            self.assertEqual((dst / 'saves/save.dat').read_bytes(), b'KEEP-SAVE')
+            self.assertEqual(datapack.read_manifest(dst)['version'], 'v2')
+            self.assertFalse((dst / ('.' + datapack.MANIFEST + '.previous')).exists())
+            self.assertFalse((t / 'game-data.partial').exists())
+        finally:
+            shutil.rmtree(t, ignore_errors=True)
+
+    def test_interrupted_companion_refresh_recovers_in_place(self):
+        t = Path(tempfile.mkdtemp(prefix='nx2a_test_interrupted_pack_'))
+        try:
+            (t / 'patched').mkdir()
+            (t / 'patched/main.bin').write_bytes(b'CODE')
+            (t / 'romfs').mkdir()
+            (t / 'shaders.dmsv').write_bytes(b'OLD')
+            p, dst = profiles.load(NEO), t / 'game-data'
+            def export(version):
+                return datapack.build(dst, profile=p, version=version, display='1.0',
+                                      patched=t / 'patched', romfs=t / 'romfs', shaders=t / 'shaders.dmsv')
+            export('v1')
+            original_folder = dst.stat().st_ino
+            (dst / 'saves').mkdir()
+            (dst / 'saves/save.dat').write_bytes(b'KEEP')
+            (t / 'new-shader').write_bytes(b'NEW')
+            (t / 'new-shader').replace(t / 'shaders.dmsv')
+            with mock.patch.object(datapack, 'link_or_copy', side_effect=OSError('simulated disk failure')):
+                with self.assertRaisesRegex(OSError, 'simulated disk failure'):
+                    export('v2')
+            self.assertFalse((dst / datapack.MANIFEST).exists())
+            self.assertTrue((dst / ('.' + datapack.MANIFEST + '.previous')).exists())
+            export('v2')
+            self.assertEqual(dst.stat().st_ino, original_folder)
+            self.assertEqual((dst / 'shaders.dmsv').read_bytes(), b'NEW')
+            self.assertEqual((dst / 'saves/save.dat').read_bytes(), b'KEEP')
+            self.assertEqual(datapack.read_manifest(dst)['version'], 'v2')
+        finally:
+            shutil.rmtree(t, ignore_errors=True)
+
     def test_app_mode_pack(self):   # --app: the pack carries what the APK used to (host, drivers, icon, the gamepad's theme), named in the manifest
         t = Path(tempfile.mkdtemp(prefix='nx2a_test_pack_'))
         try:
@@ -630,6 +691,22 @@ class Misc(unittest.TestCase):
             with self.assertRaises(pipeline.BuildError): pipeline.Port.check_space(p)
             work.mkdir(); (work / 'x').write_bytes(b'\0' * 2**20); pipeline.Port.check_space(p)   # a build folder already there counts
         finally: shutil.disk_usage = real
+
+    def test_cached_extraction_can_start_without_a_second_full_game_copy(self):
+        from types import SimpleNamespace as NS
+        d = Path(tempfile.mkdtemp(prefix='nx2a_test_cached_space_'))
+        try:
+            game_file = d / 'g.nsp'
+            game_file.write_bytes(b'game')
+            work = d / 'build'
+            (work / 'extract/v0/ExeFS').mkdir(parents=True)
+            (work / 'extract/v0/ExeFS/main').write_bytes(b'main')
+            p = NS(o=NS(app=False, self_contained=True, out=d),
+                   work=work, fam={'base': game_file, 'updates': [], 'dlc': []})
+            with mock.patch.object(pipeline.shutil, 'disk_usage', return_value=NS(free=128 << 20)):
+                pipeline.Port.check_space(p)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def space_port(self, folder, fam, work, app=False, pack_dir=None):   # a port-like object for the space check alone (the check reads the picked game's files and the build folder)
         from types import SimpleNamespace as NS
