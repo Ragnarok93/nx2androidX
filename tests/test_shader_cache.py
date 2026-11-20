@@ -54,6 +54,7 @@ class ShaderCache(unittest.TestCase):
             (out / 'dmsh_xlate.runtimeconfig.json').write_text('{}')
             return
         self.exports += 1
+        self.export_args = argv
         out = Path(argv[3])
         entries = [] if self.empty else [(1, 5, SPV, REFL)]
         dmsv.write(str(out), entries, level=0)
@@ -72,6 +73,14 @@ class ShaderCache(unittest.TestCase):
     def export(self):
         with mock.patch.object(pipeline.Port, 'translator', return_value=(self.dll, 'source-key')):
             with contextlib.redirect_stdout(io.StringIO()): self.p.shaders()
+
+    def test_android_port_limits_translator_batch_size(self):
+        with mock.patch.object(pipeline.resources, 'is_android', return_value=True), \
+             mock.patch.object(pipeline.resources, 'memory_mb', return_value=(7800, 5000)):
+            self.p.o.jobs = 8
+            self.export()
+        self.assertEqual(self.export_args[self.export_args.index('--jobs') + 1], '1')
+        self.assertEqual(self.export_args[self.export_args.index('--batch-size') + 1], '512')
 
     def test_unchanged_bundle_reused(self):
         self.export(); first = self.p.dmsv.read_bytes()

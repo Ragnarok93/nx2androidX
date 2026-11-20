@@ -110,6 +110,24 @@ class OodleResults(unittest.TestCase):
             f.seek(12); expected = hashlib.file_digest(f, 'sha256').digest()
         self.assertEqual(actual, expected)
 
+    def test_unreal_round_uses_a_bounded_buffer_and_preserves_complete_streams(self):
+        size = 8 << 20
+        paths = {(b'one', size): self.root / 'first', (b'two', size): self.root / 'second'}
+        with self.result.open('wb') as f:
+            f.write(b'DMOR' + struct.pack('<II', 2, size))
+            f.seek(size, 1)
+            f.write(struct.pack('<I', size) + b'truncated')
+        tracemalloc.start()
+        try:
+            with self.assertRaisesRegex(pipeline.BuildError, 'truncated Unreal stream'):
+                pipeline.save_ue_streams(self.result, paths)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 << 20)
+        self.assertEqual((self.root / 'first').stat().st_size, size)
+        self.assertFalse((self.root / 'second').exists())
+
     def test_truncated_result_does_not_publish_decoded_files(self):
         self.gfpak('a.gfpak', 1)
         header = b'DMOR' + struct.pack('<I', 1)

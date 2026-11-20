@@ -12,6 +12,7 @@ import json
 import os
 import re
 from pathlib import Path
+import signal
 import struct
 import subprocess
 import sys
@@ -66,11 +67,16 @@ class ExportChecks(unittest.TestCase):
         self.root = Path(self.tmp.name); self.out = self.root / 'out.dmsv'; self.out.write_bytes(b'previous bundle')
         self.report = self.root / 'report.json'; self.stage = 'cs'; self.calls = 0
         self.behavior = 'ok'; self.reflect = True; self.second_shader = False; self.bad_resource = None
-        self.jobs = 1; self.bad_key = None; self.log = io.StringIO(); self.bindings = []
+        self.jobs = 1; self.batch_size = 0; self.batch_lengths = []; self.bad_key = None; self.log = io.StringIO(); self.bindings = []
         (self.root / 'pkg').mkdir()
 
     def translate(self, argv, **kwargs):
         self.calls += 1; jobs = json.loads(Path(argv[2]).read_text()); dest = Path(argv[3])
+        self.batch_lengths.append(len(jobs))
+        if self.behavior == 'always-killed' or (self.behavior == 'pressure' and len(jobs) > 1):
+            key = jobs[0]['key']
+            (dest / f'{key}.spv').write_bytes(b'interrupted write')
+            return subprocess.CompletedProcess(argv, -signal.SIGKILL, '', '')
         affected = self.bad_key is None or any(job['key'] == self.bad_key for job in jobs)
         if affected and self.behavior == 'launch-failed': raise OSError('translator unavailable')
         bad = 0
@@ -97,10 +103,10 @@ class ExportChecks(unittest.TestCase):
         try: products = importlib.import_module('shader_products')
         except ModuleNotFoundError: products = None
         env = dict(collections=collections, cf=cf, gc=gc, os=os, json=json, mmap=mmap, struct=struct,
-                   tempfile=tempfile, subprocess=subprocess, dmsv=dmsv, Path=Path, re=re,
+                   tempfile=tempfile, subprocess=subprocess, dmsv=dmsv, Path=Path, re=re, signal=signal,
                    shader_products=products, GAME=game, MAP=str(table), XLATE_DLL='translator.dll',
                    a=SimpleNamespace(pkg=str(self.root/'pkg'), out=str(self.out), capture=None, keys='',
-                                     jobs=self.jobs, dotnet='dotnet', zstd=0, report=str(self.report)),
+                                     jobs=self.jobs, batch_size=self.batch_size, dotnet='dotnet', zstd=0, report=str(self.report)),
                    STAGES={'vs': 0, 'cs': 5}, kinds_all=collections.Counter(),
                    captured=lambda _: {}, records=lambda _: [b'fixture'],
                    record_at=lambda mapped, offsets, idx: offsets[idx],
@@ -113,7 +119,27 @@ class ExportChecks(unittest.TestCase):
         nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main']
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), env)
         with mock.patch.dict(os.environ, {'WORK': str(self.root)}), mock.patch.object(subprocess, 'run', side_effect=self.translate), contextlib.redirect_stdout(self.log):
-            env['main']()
+            with tempfile.TemporaryDirectory(dir=self.root) as work:
+                env['main'](work)
+
+    def test_memory_kill_retries_with_smaller_batches(self):
+        self.second_shader = True
+        self.batch_size = 2
+        self.behavior = 'pressure'
+        self.run_export()
+        self.assertEqual(self.batch_lengths, [2, 1, 1])
+        self.assertEqual(json.loads(self.report.read_text())['failed'], [])
+        with dmsv.Bundle(str(self.out)) as bundle:
+            self.assertEqual([entry[0] for entry in bundle.entries], [1, 2])
+
+    def test_persistent_memory_kill_preserves_previous_bundle(self):
+        self.second_shader = True
+        self.batch_size = 2
+        self.behavior = 'always-killed'
+        with self.assertRaisesRegex(RuntimeError, 'still ran out of memory or was killed'):
+            self.run_export()
+        self.assertEqual(self.out.read_bytes(), b'previous bundle')
+        self.assertFalse(self.report.exists())
 
     def test_normal_per_shader_failure_keeps_best_effort_export(self):
         self.behavior = 'partial'; self.second_shader = True

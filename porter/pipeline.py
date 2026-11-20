@@ -345,6 +345,41 @@ def oodle_job(roms, tmp):
     return recs, job
 
 
+def save_ue_streams(path, streams):
+    """Read a DMOR reply in request order and publish complete streams to the retry cache."""
+    got = 0
+    with path.open('rb') as result:
+        size = os.fstat(result.fileno()).st_size
+        if result.read(8) != b'DMOR' + struct.pack('<I', len(streams)):
+            raise BuildError("the game's Oodle decoder answered for other streams than it was given")
+        for (_, expected), destination in streams.items():
+            word = result.read(4)
+            if len(word) != 4:
+                raise BuildError("the game's Oodle decoder returned a truncated Unreal stream header")
+            length = struct.unpack('<I', word)[0]
+            if length in (0, 0xffffffff):
+                continue
+            if length > size - result.tell():
+                raise BuildError("the game's Oodle decoder returned a truncated Unreal stream")
+            if length != expected:
+                result.seek(length, os.SEEK_CUR)
+                continue
+            pending = destination.with_suffix('.partial')
+            with pending.open('wb') as saved:
+                remaining = length
+                while remaining:
+                    chunk = result.read(min(remaining, 1 << 20))
+                    if not chunk:
+                        raise BuildError("the game's Oodle decoder returned a truncated Unreal stream")
+                    saved.write(chunk)
+                    remaining -= len(chunk)
+            pending.replace(destination)
+            got += 1
+        if result.read(1):
+            raise BuildError("the game's Oodle decoder returned trailing Unreal stream data")
+    return got
+
+
 def oodle_result(tmp, recs, why='', where=''):
     """The decoder's answer (DMOR: u32 count, then per record u32 decoded length — 0 failed, 0xffffffff left out, no BNSH in it — and the decoded bytes): the entries that hold a
     BNSH shader, written back as the split's decoded folders (shader_split.py gfpak_decoded, trpfs_decoded) → the folder. The answer is read in ranges, not as one buffer: a
@@ -886,7 +921,7 @@ class Port:
         todo = {v: self.dirs[v] for v in self.versions if not ((self.dirs[v] / 'ue_shaders/stamp').exists() and (self.dirs[v] / 'ue_shaders/stamp').read_text() == nsp.ue_stamp(self.dirs[v]))}
         if not todo: return
         PROG.add(1); PROG.stage('UE shader decode', step='the shader code archives')
-        tmp = self.work / 'tmp/ue'; total = 0
+        tmp = self.work / 'tmp/ue'; tmp.mkdir(parents=True, exist_ok=True); total = 0
         for v, d in todo.items():
             jd = tmp / f'job_{v}'
             sdir = d / 'ue_streams' / hashlib.sha1(nsp.ue_stamp(d).encode()).hexdigest()[:16]   # the streams decoded so far, on disk
@@ -895,31 +930,36 @@ class Port:
                 if old != sdir: nsp.rmtree(old)   # another pak set's streams are of no use
             for rnd in range(self.UE_ROUNDS):
                 want = {}
-                def dec(comp, n):
-                    k = (hashlib.sha1(comp).digest(), n)
-                    f = sdir / f'{k[0].hex()}-{k[1]}'
-                    if f.is_file():
-                        b = f.read_bytes()
-                        if len(b) == n: return b   # decoded in an earlier run
-                    want.setdefault(k, bytes(comp)); return bytes(n)
-                nsp.rmtree(jd); PROG.set(step=f'{v}: the shader code archives (round {rnd + 1})')
-                try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
-                except (ValueError, struct.error, IndexError) as e:
-                    if not want: raise BuildError(f'{v}: the Unreal shader code archives do not read: {e}') from e
-                if not want: break
                 job, out = tmp / 'round.job', tmp / 'round.out'
-                with open(job, 'wb') as f:
-                    f.write(b'DMOJ' + struct.pack('<I', len(want)))
-                    for (_, raw), comp in want.items(): f.write(struct.pack('<II', len(comp), raw) + comp)
+                nsp.rmtree(jd)
+                PROG.set(step=f'{v}: the shader code archives (round {rnd + 1})')
+                with job.open('wb') as requests:
+                    requests.write(b'DMOJ' + bytes(4))
+                    def dec(comp, n):
+                        k = (hashlib.sha1(comp).digest(), n)
+                        f = sdir / f'{k[0].hex()}-{n}'
+                        if f.is_file() and f.stat().st_size == n:
+                            return f.read_bytes()
+                        if k not in want:
+                            requests.write(struct.pack('<II', len(comp), n))
+                            requests.write(comp)
+                            want[k] = f
+                        return bytes(n)
+                    try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
+                    except (ValueError, struct.error, IndexError) as e:
+                        if not want: raise BuildError(f'{v}: the Unreal shader code archives do not read: {e}') from e
+                    requests.seek(4)
+                    requests.write(struct.pack('<I', len(want)))
+                if not want:
+                    job.unlink()
+                    break
                 PROG.set(step=f"{v}: {len(want):,} Oodle streams with the game's decoder {self.oodle_where} (round {rnd + 1})")
-                self.oodle_job(job, out)
-                b = out.read_bytes(); nsp.rmtree(out)
-                if b[:4] != b'DMOR' or struct.unpack_from('<I', b, 4)[0] != len(want): raise BuildError("the game's Oodle decoder answered for other streams than it was given")
-                o, got = 8, 0
-                for k in want:
-                    ln = struct.unpack_from('<I', b, o)[0]; o += 4
-                    if ln == k[1]: (sdir / f'{k[0].hex()}-{k[1]}').write_bytes(b[o:o + ln]); got += 1   # a stream decoded from zeros fails (0) and is asked for again with its real bytes
-                    o += ln if ln != 0xffffffff else 0
+                try:
+                    self.oodle_job(job, out)
+                    got = save_ue_streams(out, want)
+                finally:
+                    out.unlink(missing_ok=True)
+                    job.unlink(missing_ok=True)
                 say(f'{v}: round {rnd + 1}: {got:,} of {len(want):,} Oodle streams decoded {self.oodle_where}')
                 if not got: raise BuildError(f"{v}: the game's Oodle decoder decoded none of {len(want):,} streams (see {self.logs / 'android_oodle_job.log'})")
             else: raise BuildError(f'{v}: the Unreal shader code archives still need Oodle streams after {self.UE_ROUNDS} rounds')
@@ -1030,9 +1070,13 @@ class Port:
         report = Path(str(tmp) + '.report.json'); nsp.rmtree(report)
         def line(s):
             if m := re.match(r'(translating|compressing) (\d+) shaders', s): PROG.set(step=f'{m.group(1)} {int(m.group(2)):,} shaders')   # compressing: the bundle's SPIR-V (dmsv.py)
+            elif s.startswith('Vulkan translation: '): PROG.set(step=s)
             elif s.startswith('[RED] '): say(s)
-        nsp.run([PY, DM / 'android/tools/shader_vk.py', pkg, tmp, '--jobs', str(self.o.jobs), '--dotnet', self.tools['dotnet'], '--xlate', xlate, '--capture', cap, '--report', report],
-                self.logs / 'android_shaders.log', env=self.env, on_line=line)
+        command = [PY, DM / 'android/tools/shader_vk.py', pkg, tmp, '--jobs', str(self.o.jobs),
+                   '--dotnet', self.tools['dotnet'], '--xlate', xlate, '--capture', cap, '--report', report]
+        if resources.is_android():
+            command.extend(['--batch-size', '512'])
+        nsp.run(command, self.logs / 'android_shaders.log', env=self.env, on_line=line)
         import shader_products
         try:
             count, expected, complete = shader_products.check_bundle(tmp, json.loads(report.read_text(encoding='utf-8')))

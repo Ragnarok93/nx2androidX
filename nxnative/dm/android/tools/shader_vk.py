@@ -8,7 +8,7 @@
 #   control section, code area), translated beside the package's; a file whose content does not hash to its name, or whose key the package has, is left out
 # Bundle (read by the Vulkan backend, dm/android/gfx_vk_shader.c): dmsv.py has the format and writes it. Each shader's SPIR-V and its binary reflection (refl_bin, below);
 #   version 2, the SPIR-V of each module zstd-compressed (--zstd, default dmsv.LEVEL; 0 or a Python without zstd: version 1, uncompressed).
-import argparse, collections, concurrent.futures as cf, gc, hashlib, json, mmap, os, re, struct, subprocess, sys, tempfile
+import argparse, collections, concurrent.futures as cf, gc, hashlib, json, mmap, os, re, signal, struct, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -20,6 +20,7 @@ from shader_stage import glslc_stage   # a code area's stage: the package reader
 ap = argparse.ArgumentParser()
 ap.add_argument('pkg'); ap.add_argument('out')
 ap.add_argument('--jobs', type=int, default=int(os.environ.get('J', os.cpu_count() or 8)))
+ap.add_argument('--batch-size', type=int, default=0, help='maximum jobs per translator process (0: one process per worker)')
 ap.add_argument('--keys', default='')
 ap.add_argument('--dotnet', default=os.environ.get('DOTNET', 'dotnet'))
 ap.add_argument('--report', help='write the expected and omitted shader inventory as JSON')
@@ -27,6 +28,7 @@ ap.add_argument('--capture', help='a folder of shaders captured at run time on t
 ap.add_argument('--zstd', type=int, default=dmsv.LEVEL, help=f'zstd level of the SPIR-V in the bundle (default {dmsv.LEVEL}); 0: version 1, uncompressed')
 ap.add_argument('--xlate', help="the translator (dmsh_xlate.dll) to run (default: the iOS chain's dm/gfx/tools/dmsh_xlate_bin; the porter builds one from the in-repo source)")
 a = ap.parse_args()
+if a.jobs < 1 or a.batch_size < 0: ap.error("expected positive --jobs and non-negative --batch-size")
 
 GAME = dmsh_chain.load_game()
 FACTS = dmsh_facts.load()
@@ -369,7 +371,7 @@ def int_inputs(spv):
             else: other.add(loads[x])
     return {str(loc[v]): 'sint' if v in sint else 'uint' for v in uses if v not in other and v in loc}
 
-def main():
+def main(w):
     handle_remaps = {}
     table = GAME.table('android_shader_handles.tsv')
     if table.exists():
@@ -386,7 +388,6 @@ def main():
     keys = sorted(k for k in (a.keys.split(',') if a.keys else [*loc, *cap]) if k in loc or k in cap)
     packs = {}
     source = mapped = offsets = rec = None
-    w = tempfile.mkdtemp(prefix='shvk_', dir=os.environ.get('WORK'))
     jobs, c1s, stages = {}, {}, {}
     for k in keys:
         if k in cap: stages[k], rec = cap[k]
@@ -399,6 +400,11 @@ def main():
             source, mapped, offsets = packs[name]
             stages[k], rec = name[:2], record_at(mapped, offsets, idx)
         jobs[k], c1s[k] = job_for(k, stages[k], rec, w)
+    for source, mapped, _ in packs.values():
+        mapped.close()
+        source.close()
+    packs.clear()
+    source = mapped = offsets = rec = None
     # A geometry shader's input primitive is the draw's (Maxwell's shader header doesn't say it; Ryujinx asks the GPU state): one translation for each kind, as the Mac
     # chain's _g0.._g4 (dmsh_build.py), triangles under the shader's own key and the others under gs_variant_key, chosen by the pipeline's topology (gfx_vk_shader.c
     # vk_shader_gs_topo). Xenoblade Chronicles 3's particle updates draw points into theirs: read as triangles, each took three particles as one and their records came out wrong
@@ -409,25 +415,55 @@ def main():
     keys = keys + sorted(gs_var)
     if not keys: raise ValueError('no shaders selected for export')
     if a.report and os.path.abspath(a.report) == os.path.abspath(a.out): raise ValueError('shader report must not overwrite the bundle')
-    batch_errors, failures, rs = {}, {}, []
+    batch_errors, failures, errs = {}, {}, collections.Counter()
     def xl(ch):
-        result = None
+        jp = Path(w) / f'job_{ch[0]}.json'
         try:
-            jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); Path(jp).write_text(json.dumps([jobs[k] for k in ch]), encoding='utf-8')
-            result = subprocess.run([a.dotnet, XLATE_DLL, jp, w], capture_output=True, text=True, errors='replace')
+            jp.write_text(json.dumps([jobs[k] for k in ch]), encoding='utf-8')
+            result = subprocess.run([a.dotnet, XLATE_DLL, str(jp), w], capture_output=True, text=True, errors='replace')
+        except OSError as e:
+            if a.batch_size: raise RuntimeError(f"could not run shader translator: {e}") from e
+            return [(ch, None, str(e))]
+        finally:
+            jp.unlink(missing_ok=True)
+        # A killed process can leave incomplete or stale products. Retry this
+        # slice using fresh processes with less work before accepting its output.
+        if a.batch_size and (result.returncode in (-signal.SIGKILL, 128 + signal.SIGKILL) or
+                             'OutOfMemoryException' in result.stderr or 'out of memory' in result.stderr.lower()):
+            if len(ch) == 1:
+                raise RuntimeError(f'shader translator still ran out of memory or was killed on {ch[0]} (exit {result.returncode})')
+            for key in ch:
+                for suffix in ('.spv', '.res.json'):
+                    (Path(w) / (key + suffix)).unlink(missing_ok=True)
+            print(f'Vulkan translation: retrying {len(ch)} shaders in smaller batches after memory pressure', flush=True)
+            middle = len(ch) // 2
+            return xl(ch[:middle]) + xl(ch[middle:])
+        try:
             shader_products.check_batch(result, len(ch))
-            return result, None
-        except Exception as e:
-            return result, str(e)
+            return [(ch, result, None)]
+        except RuntimeError as e:
+            if a.batch_size: raise
+            return [(ch, result, str(e))]
     def translate(selected):
-        chunks = [selected[i::a.jobs] for i in range(a.jobs) if selected[i::a.jobs]]
-        with cf.ThreadPoolExecutor(len(chunks)) as ex:
-            for ch, (result, error) in zip(chunks, ex.map(xl, chunks)):
-                if result is not None: rs.append(result)
-                # A failed process may have written valid products before it stopped.
-                # Keep its diagnostic for keys with no output, and validate each product.
-                batch_errors.update(dict.fromkeys(ch, error))
-    print(f'translating {len(keys)} shaders in {min(a.jobs, len(keys))} batches ...', flush=True)
+        if a.batch_size:
+            chunks = [selected[i:i + a.batch_size] for i in range(0, len(selected), a.batch_size)]
+        else:
+            chunks = [selected[i::a.jobs] for i in range(min(a.jobs, len(selected)))]
+        done = 0
+        workers = min(a.jobs, len(chunks))
+        with cf.ThreadPoolExecutor(workers) as ex:
+            for i in range(0, len(chunks), workers):
+                for batch in ex.map(xl, chunks[i:i + workers]):
+                    for ch, result, error in batch:
+                        if result is not None:
+                            for line in result.stderr.splitlines():
+                                if line.strip(): errs[line.strip()[:120]] += 1
+                        if error is not None:
+                            batch_errors.update(dict.fromkeys(ch, error))
+                        done += len(ch)
+                    if a.batch_size:
+                        print(f'Vulkan translation: {done:,}/{len(selected):,} shaders processed', flush=True)
+    print(f'translating {len(keys)} shaders with up to {min(a.jobs, len(keys))} worker(s) ...', flush=True)
     translate(keys)
     # second pass (as the Mac chain's dmsh_build.py finish): vertex shaders with inputs used only as integers, translated again with those inputs reported as uint (int_inputs)
     again = []
@@ -446,10 +482,6 @@ def main():
     if again:
         print(f'translating {len(again)} vertex shaders again with their integer inputs ...', flush=True)
         translate(again)
-    errs = collections.Counter()
-    for r in rs:
-        for ln in r.stderr.splitlines():
-            if ln.strip(): errs[ln.strip()[:120]] += 1
     entries, fails, failed = [], collections.Counter(), []
     expected = [[f'{gs_var[k] if k in gs_var else int(k, 16):016x}', STAGES[stages[k]]] for k in keys]
     if len({k for k, _ in expected}) != len(expected): raise ValueError('shader keys collide with geometry variants')
@@ -457,7 +489,7 @@ def main():
         try:
             if k in failures: raise ValueError(failures[k])
             product = shader_products.output(w, k, STAGES[stages[k]])
-            if product is None: raise ValueError(batch_errors[k] or 'no output')
+            if product is None: raise ValueError(batch_errors.get(k) or 'no output')
             spv, res = product
             binds, local, io = spirv_bindings(spv)
             shader_products.validate_bindings(binds, res)
@@ -479,13 +511,8 @@ def main():
             print(f'[RED] {failed[-1][0]}: {reason}', flush=True)
     # Translator state and package mappings are dead now. SPIR-V stays file-backed until
     # dmsv writes the bundle, avoiding a second copy of the complete shader set in RAM.
-    for source, mapped, _ in packs.values():
-        mapped.close(); source.close()
-    packs.clear()
-    product = rec = source = mapped = offsets = None
-    spv = res = binds = local = io = cl = hdr3 = st = None
-    r = None
-    del jobs, c1s, stages, gs_var, rs, loc, cap, handle_remaps, batch_errors, failures, again, keys
+    product = spv = res = binds = local = io = cl = hdr3 = st = None
+    del jobs, c1s, stages, gs_var, loc, cap, handle_remaps, batch_errors, failures, again, keys
     gc.collect()
     if a.zstd: print(f'compressing {len(entries)} shaders (zstd level {a.zstd}, {a.jobs} worker(s), disk-backed output) ...', flush=True)
     ver, raw, stored = dmsv.write(a.out, entries, level=a.zstd, jobs=a.jobs)
@@ -495,4 +522,5 @@ def main():
           f'{f", {stored / 2**20:.1f} MB compressed" if ver > 1 else ""}); failed: {dict(fails)}; binding kinds: {dict(kinds_all)}')
     for e, n in errs.most_common(8): print(f'  translator: {n:5d}  {e}')
 
-main()
+with tempfile.TemporaryDirectory(prefix='shvk_', dir=os.environ.get('WORK')) as work:
+    main(work)
