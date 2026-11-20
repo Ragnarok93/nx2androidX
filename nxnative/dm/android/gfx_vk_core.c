@@ -8,6 +8,7 @@
 //   (event writes, counter reports), as nvn_mtl.m does in its completion handler.
 #define _GNU_SOURCE
 #include "gfx_vk.h"
+#include "gfx_vk_img_alloc_plan.h"
 #include "nvn_hmap.h"
 #include "nvn_dirty.h"
 #include <android/hardware_buffer.h>
@@ -1036,7 +1037,9 @@ void mtl_alias_drop_pool(const void *pool) { void vk_tex_drop_pool(const void *)
 // The NVN flags of the pool at mem (hle_nvn.c, after mtl_pool_add): a copied pool the CPU maps uncached (CPU_UNCACHED, 0x2) is one the game writes and the GPU reads;
 // the game reads GPU results from cached memory, so such a pool is not copied back after each submission
 void vk_pool_set_flags(const void *mem, int flags) {
-    pthread_rwlock_rdlock(&g_pool_mu);
+    // Writes to pool flags must exclude concurrent readers (vk_pools_sync,
+    // guest buffer and texture lookups). A read lock did not do so.
+    pthread_rwlock_wrlock(&g_pool_mu);
     for (int i = 0; i < g_npool; i++) if (g_pool[i].base == (uint64_t)(uintptr_t)mem) g_pool[i].flags = flags;   // (every chunk of it)
     pthread_rwlock_unlock(&g_pool_mu);
 }
@@ -1368,7 +1371,7 @@ static void df_add(int kind, void *a, void *b) {
 // ones that need more than 4 KB alignment, get memory of their own
 enum { IMG_CLASSES = 18, IMG_BLOCK = 32 << 20 };
 #define IMG_SLOT_MAX ((VkDeviceSize)2 << 20)
-typedef struct imgblk { VkDeviceMemory m; uint32_t type, cls, nslot, nfree; uint64_t bits[128]; struct imgblk *next; } imgblk;   // bits: 1 = slot free
+typedef struct imgblk { VkDeviceMemory m; VkDeviceSize stride; uint32_t type, cls, nslot, nfree; uint64_t bits[128]; struct imgblk *next; } imgblk;   // bits: 1 = slot free
 typedef struct { imgblk *b; uint32_t slot; } imgsub;
 static imgblk *g_imgblk[IMG_CLASSES]; static pthread_mutex_t g_imgblk_mu = PTHREAD_MUTEX_INITIALIZER;
 static VkDeviceSize img_class_size(int c) { return (c & 1 ? 6144ull : 4096ull) << (c >> 1); }   // 4K, 6K, 8K, 12K, 16K, 24K, ... 2M
@@ -1379,11 +1382,22 @@ VkDeviceMemory vk_image_memory(const VkMemoryRequirements *req, uint32_t type, V
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req->size, type}; VkDeviceMemory m;
         return vkAllocateMemory(V.dev, &ai, NULL, &m) ? VK_NULL_HANDLE : m;
     }
+    // VkBindImageMemory requires an offset divisible by this image's
+    // VkMemoryRequirements::alignment. The original 6144-byte class is
+    // not divisible by 4096: its second slot could be bound illegally.
+    // Blocks of the same size class but different strides may not share
+    // offsets, even if their memory type matches.
+    VkDeviceSize stride = vk_img_aligned_stride(img_class_size(c), req->alignment);
     pthread_mutex_lock(&g_imgblk_mu);
-    imgblk *b = g_imgblk[c]; while (b && (b->type != type || !b->nfree)) b = b->next;
+    imgblk *b = g_imgblk[c];
+    while (b && (b->type != type || b->stride != stride || !b->nfree)) b = b->next;
     if (!b) {
-        b = calloc(1, sizeof *b); b->type = type; b->cls = (uint32_t)c; VkDeviceSize bs = img_class_size(c) * 64; if (bs < (2 << 20)) bs = 2 << 20; if (bs > IMG_BLOCK) bs = IMG_BLOCK; b->nslot = (uint32_t)(bs / img_class_size(c));   // 64 slots, 2 MB to 32 MB
-        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, (VkDeviceSize)b->nslot * img_class_size(c), type};
+        b = calloc(1, sizeof *b); b->type = type; b->cls = (uint32_t)c; b->stride = stride;
+        VkDeviceSize bs = stride * 64;
+        if (bs < (2 << 20)) bs = 2 << 20;
+        if (bs > IMG_BLOCK) bs = IMG_BLOCK;
+        b->nslot = (uint32_t)(bs / stride);
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, (VkDeviceSize)b->nslot * stride, type};
         if (vkAllocateMemory(V.dev, &ai, NULL, &b->m)) { pthread_mutex_unlock(&g_imgblk_mu); free(b); return VK_NULL_HANDLE; }
         for (uint32_t i = 0; i < b->nslot; i++) b->bits[i >> 6] |= 1ull << (i & 63);
         b->nfree = b->nslot; b->next = g_imgblk[c]; g_imgblk[c] = b;
@@ -1391,7 +1405,7 @@ VkDeviceMemory vk_image_memory(const VkMemoryRequirements *req, uint32_t type, V
     uint32_t i = 0; while (!b->bits[i >> 6]) i += 64; i += (uint32_t)__builtin_ctzll(b->bits[i >> 6]);
     b->bits[i >> 6] &= ~(1ull << (i & 63)); b->nfree--;
     pthread_mutex_unlock(&g_imgblk_mu);
-    imgsub *s = malloc(sizeof *s); s->b = b; s->slot = i; *sub = s; *off = (VkDeviceSize)i * img_class_size(c);
+    imgsub *s = malloc(sizeof *s); s->b = b; s->slot = i; *sub = s; *off = (VkDeviceSize)i * b->stride;
     return b->m;
 }
 static void img_sub_free(imgsub *s) {   // the slot is free again; blocks are kept (the next images of the class take them)
