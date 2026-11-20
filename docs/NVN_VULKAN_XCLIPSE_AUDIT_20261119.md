@@ -277,3 +277,30 @@ depth-only D24 checks support and can select D32F. A future combined
 depth/stencil fallback requires proof of the exact installed driver
 capabilities and tests for guest precision, stencil, sampled views and
 pack/unpack. The existing CPU conversion and LRZ policies remain scoped.
+
+### Gameplay D24S8 fallback on the captured RADV device
+
+The Nov 20 capture identifies `Mesa 27.0.0-devel (git-cc87fdf712)`.
+At present 3346, the device reported zero optimal-tiling features for
+`VK_FORMAT_D24_UNORM_S8_UINT` and returned
+`VK_ERROR_FORMAT_NOT_SUPPORTED` for the attachment/transfer query. The
+game's first depth-only pass still bound that Vulkan format for 92 draws.
+Depth readbacks for the prepass and subsequent G-buffer passes were zero.
+This establishes a Vulkan format-selection error in the renderer.
+
+NVN D24S8 now selects a supported sampled/transfer-capable depth/stencil
+backing. Native D24S8 gets first preference. The fallback uses D32F+S8
+with both aspects present, including for GPU rendering and sampled views.
+CPU uploads unpack the guest's 24-bit UNORM depth and eight-bit stencil
+into separate Vulkan transfer planes. CPU readback repacks them into the
+original guest layout. Same-size copies between fallback images transfer
+both aspects. Direct copies between a guest GPU buffer and a fallback
+image require a GPU pack/unpack path and are reported as unsupported.
+
+The new capture contained 60 completed GPU buffer samples. All 20 sampled
+indexed indirect commands had nonzero index and instance counts. Its ZIP ended
+mid-entry; the native log and completed entries were recovered. The log
+shows a late 600-present window averaging 20.40 ms replay CPU, including
+15.87 ms in pipeline keys/creation, and 13.82 ms GPU busy. This is a
+baseline from the failing build. Correctness and performance of D32F+S8
+still need a matched first-battle run on the device.

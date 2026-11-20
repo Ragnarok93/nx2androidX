@@ -58,7 +58,7 @@ int main(void) {
     assert(!strcmp(getenv("DM_FPS_TARGET"),"30"));
     assert(!strcmp(getenv("DM_VK_ASYNC_PIPE"),"0"));
     assert(!strcmp(getenv("DM_VK_LRZ_TOUCH"),"0"));
-    assert(!strcmp(getenv("DM_VK_D24_FLOAT_COPY"),"1"));
+    assert(getenv("DM_VK_D24_FLOAT_COPY")==NULL);
     assert(!getenv("DM_OPMODE") && !getenv("RADV_XCLIPSE_DCC_SMALL"));
     assert(!getenv("DM_VK_RP") && !getenv("RADV_XCLIPSE_DLC"));
     assert(!getenv("DM_VK_MT_REPLAY"));

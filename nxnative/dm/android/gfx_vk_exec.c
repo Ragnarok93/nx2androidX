@@ -2859,6 +2859,12 @@ static void copy_b2t(const p_copy_b2t *c, int to_texture) {
     vk_end_pass_land();
     vkimg_t *im = vk_tex(c->tex); const vkfmt_t *f = vk_fmt(c->tex->d.format);
     if (!im || !f) return;
+    // These commands address live guest GPU buffers, so CPU upload conversion
+    // cannot be used. A direct transfer would interpret packed NVN words as float.
+    if (c->tex->d.format == 0x35 && im->fmt == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+        VKRED_ONCE(127, "packed NVN D24S8 GPU buffer transfer needs format conversion: skipped");
+        return;
+    }
     VkBuffer b; VkDeviceSize o;
     if (!vk_buf_at(c->src, 1, &b, &o)) { VKRED_ONCE(70, "buffer of a buffer ↔ texture copy outside the memory pools"); return; }
     VkCommandBuffer cb = vk_cmd(); vk_tex_prepare(cb, im); vk_img_barrier_all(cb);
@@ -3025,7 +3031,12 @@ static void copy_t2t(const p_copy_t2t *c) {
     } else if (!mir && c->sr.width == c->dr.width && c->sr.height == c->dr.height && sf->vk == df->vk) {
         VkImageCopy r = {ss, {c->sr.xoffset, c->sr.yoffset, s->layers > 1 ? 0 : c->sr.zoffset}, ds, {c->dr.xoffset, c->dr.yoffset, d->layers > 1 ? 0 : c->dr.zoffset},
                          {(uint32_t)c->sr.width, (uint32_t)(c->sr.height ? c->sr.height : 1), s->layers > 1 ? 1 : (uint32_t)(c->sr.depth ? c->sr.depth : 1)}};
-        vkCmdCopyImage(cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+        if (s->aspect == d->aspect && (s->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) &&
+            (s->nvn_format == 0x35 || d->nvn_format == 0x35) && s->fmt == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+            VkImageCopy copy[2] = {r, r};
+            copy[1].srcSubresource.aspectMask = copy[1].dstSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+            vkCmdCopyImage(cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 2, copy);
+        } else vkCmdCopyImage(cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
     } else {
         VkImageBlit r = {ss, {{c->sr.xoffset, c->sr.yoffset, 0}, {c->sr.xoffset + c->sr.width, c->sr.yoffset + (c->sr.height ? c->sr.height : 1), 1}},
                          ds, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + (c->dr.height ? c->dr.height : 1), 1}}};

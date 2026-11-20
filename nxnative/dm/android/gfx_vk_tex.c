@@ -78,6 +78,24 @@ static void bc_target(vkfmt_t *o) {
     default: o->dec = 11; o->vk = rgba; o->dbpp = 4; break;   // BC7
     }
 }
+// Scene depth images are sampled, attached and transferred. RADV Xclipse
+// cc87fdf reports no D24S8 support but can accept vkCreateImage requests.
+static VkFormat vk_d24s8_attachment_format(void) {
+    const VkFormat candidates[] = {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT};
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    for (unsigned i = 0; i < sizeof candidates / sizeof candidates[0]; i++) {
+        VkFormatProperties features;
+        vkGetPhysicalDeviceFormatProperties(V.pd, candidates[i], &features);
+        if ((features.optimalTilingFeatures & required) != required) continue;
+        VkImageFormatProperties props;
+        if (vkGetPhysicalDeviceImageFormatProperties(V.pd, candidates[i], VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, usage, 0, &props) == VK_SUCCESS) return candidates[i];
+    }
+    return VK_FORMAT_UNDEFINED;
+}
 // Decodes BC blocks (rows of whole blocks pitch bytes apart, (h + 3) / 4 rows a slice, z slices) into w x h x z texels of f->vk, rows of w * f->dbpp bytes
 static void bc_decode(const vkfmt_t *f, const uint8_t *src, size_t pitch, uint32_t w, uint32_t h, uint32_t z, uint8_t *dst) {
     // Retain the renderer's tight-output interface; the shared decoder also
@@ -114,9 +132,16 @@ const vkfmt_t *vk_fmt(int f) {
                 VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(V.pd, VK_FORMAT_S8_UINT, &fp);
                 if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) o->vk = VK_FORMAT_D24_UNORM_S8_UINT;
             }
+            if (f == 0x35) {
+                o->vk = vk_d24s8_attachment_format();
+                if (o->vk == VK_FORMAT_D32_SFLOAT_S8_UINT)
+                    VKLOG("[depth] NVN D24S8 uses Vulkan D32F+S8 backing (D24S8 unavailable for sampled attachments)");
+                else if (o->vk == VK_FORMAT_UNDEFINED)
+                    VKRED_ONCE(127, "device has no usable Vulkan backing for NVN D24S8");
+            }
             o->depth = f >= 0x32 && f <= 0x36; o->stencil = f == 0x31 || f == 0x35 || f == 0x36 || (f == 0x31);
             o->compressed = o->bw > 1 || o->bh > 1;
-            o->is_int = e.kind == K_INT || e.kind == K_SINT; o->is_sint = e.kind == K_SINT; o->kind = 1;
+            o->is_int = e.kind == K_INT || e.kind == K_SINT; o->is_sint = e.kind == K_SINT; o->kind = o->vk != VK_FORMAT_UNDEFINED;
             o->swz = (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, e.noalpha ? VK_COMPONENT_SWIZZLE_ONE : VK_COMPONENT_SWIZZLE_IDENTITY};
             if (o->compressed && o->vk >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && o->vk <= VK_FORMAT_BC7_SRGB_BLOCK && !V.has_bc) {
                 // no BC on the device (the Adreno 618 / 619 drivers of 2021, 512.530): an uncompressed image the CPU decodes into (bc_decode), 4 to 8 times the memory
@@ -317,6 +342,17 @@ static void pkg_upload(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
     pkg_upload_(im, t, f);
     clock_gettime(CLOCK_MONOTONIC, &b); g_pkg_ns += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); g_pkg_n++; g_pkg_bytes += t->L.size;
 }
+// Convert tight guest D24S8 words to the two host transfer planes. Depth
+// occupies the same four-byte stride, so the upload can reuse its staging.
+static void vk_d24s8_unpack_upload(uint8_t *depth, uint8_t *stencil, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        uint32_t packed;
+        memcpy(&packed, depth + i * 4, 4);
+        stencil[i] = (uint8_t)(packed >> 24);
+        float z = (float)(packed & 0xffffffu) / 16777215.f;
+        memcpy(depth + i * 4, &z, 4);
+    }
+}
 static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
     { static int n; const char *e = getenv("DM_VK_LOG_UPLOADS"); if (e && atoi(e) && n < 60) { n++;   // which packaged textures are (re-)uploaded
         VKLOG("upload: serial %llu %ux%ux%u nvn format %#x (vk %d) target %d levels %u layers %u flags %#x stride %u size %llu mem %p, tileH*100+pkg_block_h %d%s",
@@ -354,6 +390,15 @@ static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
             } else if (nvn_deswizzle(&t->d, lv, ly, mem, dst, pitch)) { free(blocks); free(copy); VKRED_ONCE(13, "deswizzle refused texture format %#x target %d", t->d.format, t->d.target); return; }
             if (blocks) { dst = vk_scratch((size_t)w * h * z * f->dbpp, 16, &sb, &so); bc_decode(f, blocks, pitch, w, h, z, dst); free(blocks); }   // (BC the device lacks)
             VkBufferImageCopy r = {so, 0, 0, {im->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, lv, ly, 1}, {0, 0, 0}, {w, h, z}};
+            if (t->d.format == 0x35 && im->fmt == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+                VkBuffer stencil_buffer; VkDeviceSize stencil_offset;
+                uint8_t *stencil = vk_scratch(slab / 4, 16, &stencil_buffer, &stencil_offset);
+                vk_d24s8_unpack_upload(dst, stencil, slab / 4);
+                VkBufferImageCopy sr = r;
+                sr.bufferOffset = stencil_offset;
+                sr.imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+                vkCmdCopyBufferToImage(cb, stencil_buffer, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &sr);
+            }
             vkCmdCopyBufferToImage(cb, sb, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
         }
     }
@@ -1023,11 +1068,16 @@ static void ds_texels(int nvn_format, VkFormat host, const uint8_t *dep, const u
     for (size_t i = 0; i < n; i++) {
         uint32_t d = 0; if (dep) memcpy(&d, dep + (host == VK_FORMAT_D16_UNORM ? 2 : 4) * i, host == VK_FORMAT_D16_UNORM ? 2 : 4);
         uint8_t st = sten ? sten[i] : 0;
+        if ((nvn_format == 0x33 || nvn_format == 0x35) &&
+            (host == VK_FORMAT_D32_SFLOAT || host == VK_FORMAT_D32_SFLOAT_S8_UINT)) {
+            float depth;
+            memcpy(&depth, &d, 4);
+            d = vk_d24_copy_float_to_unorm(depth);
+        }
         switch (nvn_format) {
         case 0x31: out[i] = st; break;   // STENCIL8
         case 0x32: memcpy(out + 2 * i, &d, 2); break;   // DEPTH16
-        case 0x33: if (host == VK_FORMAT_D32_SFLOAT) { float x; memcpy(&x, &d, 4); d = x <= 0 || x != x ? 0 : x >= 1 ? 0xffffffu : (uint32_t)(x * 16777215.0f + 0.5f); }   // DEPTH24
-                   d &= 0xffffffu; memcpy(out + 4 * i, &d, 4); break;
+        case 0x33: d &= 0xffffffu; memcpy(out + 4 * i, &d, 4); break;   // DEPTH24
         case 0x35: d = (d & 0xffffffu) | (uint32_t)st << 24; memcpy(out + 4 * i, &d, 4); break;   // DEPTH24_STENCIL8
         case 0x36: memcpy(out + 8 * i, &d, 4); out[8 * i + 4] = st; memset(out + 8 * i + 5, 0, 3); break;   // DEPTH32F_STENCIL8
         default: memcpy(out + 4 * i, &d, 4); break;   // DEPTH32F
