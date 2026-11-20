@@ -143,6 +143,13 @@ jobs:
           test -s "$RUNNER_TEMP/nx2a-native-host-smoke/libdmplay.so"
           nmtool="$ANDROID_HOME/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           "$nmtool" -D --undefined-only "$so" | tee "$RUNNER_TEMP/nx2a-native-undef.txt"
+          # A second build of the same data folder must reuse every native object.
+          python nxnative/dm/android/build.py \
+            --game 0100000000010000 \
+            --ndk "$ANDROID_HOME/ndk/27.3.13750724" \
+            --out "$RUNNER_TEMP/nx2a-native-host-smoke" \
+            --exe --lib --play --release --jobs 4 | tee "$RUNNER_TEMP/nx2a-native-warm.log"
+          grep -Eq '^native objects: 0 rebuilt, [1-9][0-9]* reused$' "$RUNNER_TEMP/nx2a-native-warm.log"
           ! grep -E '\b(dm_haptics_android_device|dm_haptics_android_device_player)\b' "$RUNNER_TEMP/nx2a-native-undef.txt"
           # Java's static native methods use dynamic symbol lookup after
           # System.loadLibrary("dmhost"). The linker succeeding is insufficient

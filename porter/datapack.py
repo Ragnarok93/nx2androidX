@@ -111,6 +111,41 @@ def romfs_sizes(d):   # {path in the RomFS: size} of the pack in d, '/'-separate
     return {p.relative_to(r).as_posix(): p.stat().st_size for p in r.rglob('*') if p.is_file()} if r.is_dir() else {}
 
 
+def reusable_companion(dst, expected, metadata, payload):
+    previous = read_manifest(dst)
+    if not isinstance(previous, dict) or dst.is_symlink():
+        return False
+    if {k: v for k, v in previous.items() if k != 'made'} != {k: v for k, v in expected.items() if k != 'made'}:
+        return False
+    assets = dict(payload)
+    assets.update((p.relative_to(metadata).as_posix(), p) for p in metadata.rglob('*') if p.is_file())
+    try:
+        actual = set()
+        for root, dirs, files in os.walk(dst):
+            if Path(root) == dst:
+                dirs[:] = [d for d in dirs if d != 'saves']
+            if any((Path(root) / d).is_symlink() for d in dirs):
+                return False
+            actual.update((Path(root) / f).relative_to(dst).as_posix() for f in files)
+        if actual != set(assets) | {MANIFEST}:
+            return False
+        for name, source in assets.items():
+            existing = dst / name
+            if existing.is_symlink() or existing.stat().st_size != source.stat().st_size:
+                return False
+            if existing.samefile(source):
+                # A shared inode can have changed since the previous export.
+                # In that case give the rebuilt pack a fresh manifest.
+                return False
+            with existing.open('rb') as old, source.open('rb') as new:
+                while block := new.read(1024 * 1024):
+                    if old.read(len(block)) != block:
+                        return False
+    except OSError:
+        return False
+    return True
+
+
 def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, text=None,
           host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None, require_links=False):
     """Write the pack to dst (replacing it). profile: the AndroidProfile; package: the app's, when not the profile's; env: more env.txt rows, after the profile's; settings: settings.txt values over the profile's;
@@ -125,16 +160,21 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     tmp = dst.with_name(dst.name + '.partial')
     shutil.rmtree(tmp, ignore_errors=True)   # the half-made pack of a killed port: it may be gone already, and one that vanishes while it is removed must not stop the port
     tmp.mkdir(parents=True)
-    n = b = 0
+    # List the file-backed inputs before staging. If a prior standalone
+    # companion still matches, keep its directory and its manifest hash.
+    payload = {}
     for what, src, sub in (('the rewritten modules', patched, 'mods'), ('the RomFS', romfs, 'RomFS'), ('the DLC', aoc, 'aoc'), ('the system data', sysdata, 'sysdata')):
         if not src: continue
         if progress: progress(what)
-        dn, db = link_tree(src, tmp / sub, require_links=require_links); n += dn; b += db
-    if shaders: link_or_copy(shaders, tmp / 'shaders.dmsv', require_links=require_links); n += 1; b += shaders.stat().st_size   # none for an OpenGL ES game
+        for root, _, names in os.walk(src):
+            for name in names:
+                path = Path(root) / name
+                payload[(Path(sub) / path.relative_to(src)).as_posix()] = path
+    if shaders: payload['shaders.dmsv'] = shaders
     for name, src in (files or {}).items():
-        f = tmp / name
-        f.parent.mkdir(parents=True, exist_ok=True)   # the app's files live in subfolders (host/, drivers/, overlay/)
-        shutil.copyfile(src, f); n += 1; b += Path(src).stat().st_size
+        payload[name] = Path(src)
+    n = len(payload)
+    b = sum(path.stat().st_size for path in payload.values())
     for name, body in (text or {}).items(): (tmp / name).write_text(body, encoding='utf-8', newline='\n'); n += 1; b += len(body.encode('utf-8'))
     base = pack_base or str(dst)   # where the pack lives on the device: its own folder (the app's mode); the PC tool's install puts it in the app's files folder
     rows = [f'# Written by nx2android\'s porter for {profile.name} ({profile.id}); KEY=VALUE per line, read by the app at launch',
@@ -156,6 +196,19 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     if profile_h: man['profile_h'] = profile_h
     if romfs_at: man['romfs_at'] = romfs_at   # the folder the RomFS is read from: the pack does not carry it, so the app checks that folder before the game runs
     man['player_api_revision'] = PLAYER_API_REVISION   # the runtime interface the pack was built against: the app rebuilds the runtime when its own revision differs
+    if pack_base == '.' and not require_links and dst.is_dir() and progress:
+        progress('checking the previous companion data')
+    if pack_base == '.' and not require_links and reusable_companion(dst, man, tmp, payload):
+        shutil.rmtree(tmp)
+        if progress: progress('reused the previous companion data')
+        return read_manifest(dst)
+    for name, src in payload.items():
+        if name in (files or {}):
+            dest = tmp / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+        else:
+            link_or_copy(src, tmp / name, require_links=require_links)
     (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
     # the exported saves (the player's backups) are not the build's own: the pack is rebuilt whole, so they are put aside and put back
     keep = dst.with_name(dst.name + '.saves-keep')

@@ -527,6 +527,8 @@ class Port:
         root = Path(os.environ.get('NX2A_WORK', '')).expanduser() if os.environ.get('NX2A_WORK') else o.folder
         self.work_root = root
         self.work = root / f'{tid}_build'
+        if self.work.is_dir():
+            say(f'checking cached build products in {self.work}')
         g, ap = profiles.by_title(self.app)
         self.provisional = False
         if o.self_contained:
@@ -537,8 +539,9 @@ class Port:
                 (old / name).unlink(missing_ok=True)
             if g and ap:
                 stem = app_stem(g, o.app_name or g.get('name', ''))
-                self.cleanup_legacy_self_contained_pack(stem, g.id, o.package or ap.package)
-                (o.out / f'.{stem}.nx2a-data.zip.partial').unlink(missing_ok=True)
+                # Keep a completed -data folder. The installed game may
+                # still use it, or a split fallback can reuse it.
+                self.cleanup_interrupted_archive(stem)
         self.check_space()      # before the survey, which unpacks the game
         if not (g and ap):
             what = f'no game profile for {tid}' if not g else f'{g.get("name", g.id)} ({g.id}) has a game profile but is not ported to Android yet (no android.tsv in {g.dir})'
@@ -567,15 +570,8 @@ class Port:
         # DM_GAME picks the profile for every tool; WORK keeps their temporary folders inside the build folder (the shader translator writes thousands of files)
         self.env.update(DM_GAME=g.id, DM_ROOT=str(self.work), WORK=str(self.work / 'tmp'))
 
-    def cleanup_legacy_self_contained_pack(self, stem, title_id, package):
-        """Reclaim an old export-only copy in Downloads, but never touch foreign packs or saved games."""
-        old = self.o.out / f'{stem}-data'
-        if not old.is_dir() or old.is_symlink() or (old / 'saves').exists(): return
-        try: manifest = json.loads((old / 'nx2a-data.json').read_text(encoding='utf-8'))
-        except (OSError, ValueError): return
-        if manifest.get('title_id') != title_id or manifest.get('package') != package: return
-        shutil.rmtree(old)
-        say(f'reclaimed old standalone export staging pack: {old}')
+    def cleanup_interrupted_archive(self, stem):
+        (self.o.out / f'.{stem}.nx2a-data.zip.partial').unlink(missing_ok=True)
 
     def check_space(self):
         """Stop before extracting when the game folder's drive cannot hold the port: a build folder takes about 1 to 2 times the game files (NEO 7.0 GB of 6.8,
@@ -689,8 +685,11 @@ class Port:
         m = self.unpack([p for v in self.versions if not fresh(v) for p in picks[v] if p] + ([] if dlc_reused else zdlc))
         picks = {v: tuple(m.get(p, p) if p else None for p in bu) for v, bu in picks.items()}
         PROG.stage('build nx_extract')
-        nx = nsp.build_nx_extract(NXNATIVE, self.work, self.logs, self.env)
-        PROG.end()
+        needs_extraction = (not all(fresh(v) for v in self.versions) or
+                            (bool(self.fam['dlc']) and not dlc_reused) or
+                            bool(o.firmware and self.ap.sysdata))
+        nx = nsp.build_nx_extract(NXNATIVE, self.work, self.logs, self.env) if needs_extraction else None
+        PROG.end('skipped (existing extraction)' if nx is None else '')
         self.dirs = {ver: nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g) for ver in self.versions}
         for d in self.dirs.values(): nsp.require_64bit(d / 'ExeFS', f'{g.get("name", g.id)} ({g.id})')
         bad = [] if self.derived else [f'{v}: {x}' for v in self.versions for x in nsp.build_mismatch(self.dirs[v], v, g)]
@@ -1053,18 +1052,21 @@ class Port:
         PROG.stage('Vulkan shaders', step='building the translator')
         xlate, xkey = self.translator()
         PROG.set(step='checking the inputs')
-        def input_key():
+        def input_key(translator_key):
             # The translator's own inputs, found by following its imports (the bundle's readers are none of
             # them): a change to the split's readers must not cost a port the whole translation again.
             # The three helpers the export runs are named as well, so the key follows the tree this build
             # reads from (a checkout of another tree is a change of the tree).
             helpers = [DM / 'android/tools' / name for name in ('shader_vk.py', 'dmsv.py', 'shader_products.py')]
             return nsp.fingerprint(nsp.package_key(pkg), ('files', nsp.vulkan_files(NXNATIVE) + helpers),
-                                   ('files', nsp.profile_files(self.g)), xkey, product_cache.inventory(Path(xlate).parent),
+                                   ('files', nsp.profile_files(self.g)), translator_key, product_cache.inventory(Path(xlate).parent),
                                    ('files', sorted(cap.glob('*.bin'))))
-        key = input_key()
+        key = input_key(xkey)
         published_report = Path(str(self.dmsv) + '.report.json')
-        if (note := product_cache.reused(kf, key, self.dmsv, companions=(published_report,))) is not None:
+        previous = getattr(self, 'prebuilt_translator_previous_key', None)
+        legacy_key = (lambda: input_key(previous)) if previous else None
+        if (note := product_cache.reused(kf, key, self.dmsv, companions=(published_report,),
+                                         legacy_key=legacy_key)) is not None:
             PROG.end(f'{note}, reused (inputs unchanged)'); return
         tmp = self.dmsv.with_name('shaders.dmsv.partial'); nsp.rmtree(tmp)
         report = Path(str(tmp) + '.report.json'); nsp.rmtree(report)
@@ -1080,7 +1082,7 @@ class Port:
         import shader_products
         try:
             count, expected, complete = shader_products.check_bundle(tmp, json.loads(report.read_text(encoding='utf-8')))
-            if input_key() != key: raise ValueError('shader inputs changed during export; port again')
+            if input_key(xkey) != key: raise ValueError('shader inputs changed during export; port again')
         except (OSError, ValueError, TypeError, KeyError) as e:
             raise BuildError(f'invalid shader export: {e} (see {self.logs / "android_shaders.log"})') from e
         if count == 0: raise BuildError(f'no shader translated (see {self.logs / "android_shaders.log"})')
@@ -1112,6 +1114,7 @@ class Port:
         (its lock fingerprints Apple's Metal compiler): Android takes a translator fix as soon as it is in the source.
         A build made for the phone (NX2A_DMSH_XLATE) is used as it is: the phone has no SDK to restore the packages with (no network) and its NuGet settings
         read never ends, so the phone does not build the translator but runs one that was built for it"""
+        self.prebuilt_translator_previous_key = None
         pre = os.environ.get('NX2A_DMSH_XLATE') or (NXNATIVE.parent / 'tools' / 'dmsh_xlate')   # the build shipped with the phone
         if not Path(pre).is_dir() and not _has_network() and not _packages_cached():
             # without the prebuilt the translator has to be built here, and the restore needs the network: on the
@@ -1122,9 +1125,23 @@ class Port:
         if Path(pre).is_dir():
             src = Path(pre)
             if not (src / 'dmsh_xlate.dll').is_file(): raise BuildError(f'NX2A_DMSH_XLATE has no dmsh_xlate.dll: {src}')
-            out = paths.user_dir() / 'tools/dmsh_xlate'; nsp.rmtree(out); shutil.copytree(src, out)
-            key = nsp.fingerprint(('stat', out), ('cmd', ['dmsh_xlate', 'prebuilt']), env=self.env)
-            return out / 'dmsh_xlate.dll', key
+            out = paths.user_dir() / 'tools/dmsh_xlate'
+            inventory = product_cache.inventory(src)
+            try:
+                identical = product_cache.inventory(out) == inventory
+            except (OSError, ValueError):
+                identical = False
+            if identical:
+                # Old phone builds keyed receipts on timestamps of the installed
+                # translator copy. Recover that key only after matching its bytes.
+                self.prebuilt_translator_previous_key = nsp.fingerprint(
+                    ('stat', out), ('cmd', ['dmsh_xlate', 'prebuilt']), env=self.env)
+            else:
+                tmp = out.with_name('dmsh_xlate.partial')
+                nsp.rmtree(tmp)
+                shutil.copytree(src, tmp)
+                nsp.swap_in(tmp, out)
+            return out / 'dmsh_xlate.dll', nsp.fingerprint('prebuilt-translator-v2', inventory)
         src = DM / 'gfx/tools/dmsh_xlate'; ryu = DM / 'third_party/ryujinx'
         def source_key():
             files = sorted([p for root in (src, ryu) for p in root.rglob('*') if p.is_file() and

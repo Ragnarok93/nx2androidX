@@ -34,19 +34,20 @@ def file_state(product):
     return [st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_dev, st.st_ino]
 
 
-def reused(path, key, product, companions=()):
+def reused(path, key, product, companions=(), legacy_key=None):
     try:
         record = json.loads(Path(path).read_text(encoding='utf-8'))
-        if (not isinstance(record, dict) or record.get('schema') != 2 or record.get('key') != key or
+        if (not isinstance(record, dict) or record.get('schema') != 2 or
                 type(record.get('complete')) is not bool or not isinstance(record.get('note'), str)):
             return None
+        migrate = record.get('key') != key
+        if migrate and (legacy_key is None or legacy_key() != record.get('key')): return None
         if record.get('companions', []) != [inventory(p) for p in companions]: return None
         state = file_state(product)
-        if state is not None and record.get('stat') == state: return record['note']
-        if record.get('files') != inventory(product): return None
-        if state is not None:
-            if file_state(product) != state: return None
-            record['stat'] = state
+        if state is None or record.get('stat') != state:
+            if record.get('files') != inventory(product) or file_state(product) != state: return None
+        if migrate or (state is not None and record.get('stat') != state):
+            record.update(key=key, stat=state)
             write_json(path, record)
         return record['note']
     except (OSError, ValueError, TypeError):

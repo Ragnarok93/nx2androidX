@@ -49,3 +49,21 @@ For a rooted Android device, a one-time **data-preserving migration** is possibl
 **WARNING:** This sequence requires root and reliable rollback/backup handling. Never simply uninstall or clear app data to fix a signature mismatch when work in `files/work` must be preserved. If the signed APK is obtained from an untrusted source or data cannot be backed up, stop before uninstalling.
 
 Once migrated to the permanent key, normal `pm install -r` updates work as long as the same keystore signs every subsequent version.
+
+
+## Reusing a prior build
+
+For a normal builder upgrade, keep the existing app data. For a one-time signing
+migration, preserve the builder's private `files/work` and the standalone signing
+key before replacing the builder, then restore them under the new app's ownership.
+Select the same game source and version to pick up `files/work/<TITLE_ID>_build`.
+The porter reuses matching extractions, rewrites and shader bundles. Native object
+receipts use compiler inputs and dependency contents, so a tools refresh with the
+same file bytes does not force recompilation. Native objects from a builder that
+predates these receipts are compiled once to establish the receipts.
+
+A split APK export also checks the previous `-data` folder in its output location.
+If the metadata and tracked files match, it keeps the original manifest so the
+standalone app can reuse its imported copy. Keep the private workspace for
+recompilation. The exported companion contains runtime files and cannot supply
+all the inputs and receipts used by the compiler.
