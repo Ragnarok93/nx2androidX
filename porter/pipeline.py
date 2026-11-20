@@ -542,7 +542,7 @@ class Port:
                 # Keep a completed -data folder. The installed game may
                 # still use it, or a split fallback can reuse it.
                 self.cleanup_interrupted_archive(stem)
-        self.check_space()      # before the survey, which unpacks the game
+        self.check_space()      # a cached rebuild defers bulk-space checks to the stages that actually write data
         if not (g and ap):
             what = f'no game profile for {tid}' if not g else f'{g.get("name", g.id)} ({g.id}) has a game profile but is not ported to Android yet (no android.tsv in {g.dir})'
             if not o.experimental: raise BuildError(f'{what}: --experimental tries it anyway (profiles: `porter profiles`)')
@@ -580,6 +580,23 @@ class Port:
         The pack is a copy of the game's files (Android's SELinux never lets an app link), so the port needs room for the build's files and for the pack.
         The app's mode copies no RomFS into the pack (the pack points at the build folder's own), so there the build's files are the only copy and the room is half.
         A self-contained export also stages a compressed data archive and the APK; their space is budgeted on the build and output volumes separately."""
+        # This estimate is only useful for a cold port. On a retry, extracted files,
+        # patched modules and shader products may already occupy almost all usable
+        # storage. Requiring space for another copy rejects valid incremental builds.
+        # The extractor and final APK exporter check their own remaining write needs.
+        cached = (self.work.is_dir() and (
+            any((self.work / 'extract').glob('*/ExeFS/main')) or
+            (self.work / 'android/shaders.dmsv').is_file() or
+            any((self.work / 'android').glob('patched_*/*'))
+        ))
+        if cached:
+            free = shutil.disk_usage(self.work).free
+            if free < (64 << 20):
+                raise BuildError(f'less than 64 MiB free in the cached build workspace {self.work}; '
+                                 'the prior compiled assets are preserved')
+            say(f'incremental build: using existing workspace {self.work}; '
+                'checking additional disk needs when a stage writes new assets')
+            return
         fam = self.fam
         files = [fam['base'], *[p for _, p in fam['updates']], *[p for _, _, p in fam['dlc']]]
         game, temp = sum(dumps.size(f) for f in files), sum(dumps.size(f) for f in files if dumps.compressed(f))
@@ -602,24 +619,15 @@ class Port:
         while pack_where is not None and not pack_where.exists() and pack_where.parent != pack_where:
             pack_where = pack_where.parent
         if self.o.self_contained:
-            # The pack uses hard links or symlinks inside private workspace. The compressed archive and
-            # signed APK are the only additional full-size files, both in the output directory.
-            # APKs use classic ZIP offsets, so each of these is at most 4 GiB.
-            export = 2 * min(game + (64 << 20), 0xffffffff)
-            work_need = max(0, game + temp - built)
-            if shares_disk_budget(where, pack):
-                need, free = work_need + export + margin, shutil.disk_usage(where).free
-                if free < need:
-                    raise BuildError(f'not enough storage for the self-contained APK: need about {need / 2**30:.1f} GiB, '
-                                     f'only {free / 2**30:.1f} GiB free; work and emulated Downloads share the same storage')
-            else:
-                need, free = work_need + margin, shutil.disk_usage(where).free
-                if free < need:
-                    raise BuildError(f'not enough private work storage: need about {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free')
-                need, free = export + margin, shutil.disk_usage(pack_where).free
-                if free < need:
-                    raise BuildError(f'not enough APK output storage at {pack}: need about {need / 2**30:.1f} GiB, '
-                                     f'{free / 2**30:.1f} GiB free')
+            # Only extracted/compiled products need to fit at this stage. The
+            # archive and final APK are streamed later on the export volume;
+            # reserving both before recompilation makes an otherwise reusable
+            # cached build impossible on a nearly full phone.
+            need, free = max(0, game + temp - built) + margin, shutil.disk_usage(where).free
+            if free < need:
+                raise BuildError(f'not enough private work storage for a fresh port: '
+                                 f'need about {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free')
+            say('APK output storage will be checked at export, after cached products have been reused')
             return
         if pack is not None and not shares_disk_budget(pack, where):
             # the pack goes to another volume (the removable card): the build's files stay here, the pack's copy goes there
@@ -672,10 +680,16 @@ class Port:
         o, g = self.o, self.g
         picks = nsp.pick_nsps(self.fam, self.have, self.versions)
         ex = self.work / 'extract'; ex.mkdir(parents=True, exist_ok=True)
-        need = sum(dumps.size(p) * (2 if dumps.compressed(p) else 1) for p in {p for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 6
-        if nsp.free_gb(self.work) < need and not all((ex / v).exists() for v in self.versions): raise BuildError(f'less than {need:.0f} GB free on the volume of {self.work}')
-        # NSZ / XCZ: only what a stage will read is decompressed, all in one stage before nx_extract runs (a version nsp.extract reuses reads nothing)
+        # NSZ / XCZ: only what a missing version will read is decompressed.
+        # A previous successful extraction takes no new full-game allocation.
         fresh = lambda v: (ex / v / 'ExeFS/main').exists() and (ex / v / 'RomFS' / g.get('romfs_marker')).exists()   # nsp.extract's reuse test
+        missing = [v for v in self.versions if not fresh(v)]
+        sources = {p for v in missing for p in picks[v] if p}
+        additional = sum(dumps.size(p) * (2 if dumps.compressed(p) else 1) for p in sources)
+        if missing and nsp.free_gb(self.work) * (1 << 30) < additional + (256 << 20):
+            raise BuildError(f'not enough space to extract missing version(s) {", ".join(missing)}: '
+                             f'about {(additional + (256 << 20)) / 2**30:.1f} GiB needed; '
+                             'already extracted versions remain available for reuse')
         zdlc = [p for _, _, p in self.fam['dlc'] if dumps.compressed(p)]
         # extract_aoc keys its reuse on the names, sizes and times of the NSPs it reads, decompressed ones here: with NSZ / XCZ DLC, porter keys it on those files instead
         dkey = nsp.fingerprint(sorted((t, p.name, p.stat().st_size, p.stat().st_mtime_ns) for t, _, p in self.fam['dlc']),
