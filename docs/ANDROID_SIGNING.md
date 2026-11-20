@@ -2,22 +2,29 @@
 
 ## Stable signing identity
 
-Release and manually dispatched Android APK builds must use the same persistent, privately held signing certificate. A random GitHub runner debug keystore cannot update the APK produced by a different runner. The workflow now refuses release/dispatch builds when either signing secret is absent, verifies the APK signature, and checks its certificate against the keystore.
+Local release builds and publishing workflows require the original signing certificate pinned in
+[`packaging/android-apk/signing-cert.sha256`](../packaging/android-apk/signing-cert.sha256).
+The application ID remains `com.nx.android`. Use a non-decreasing Android version code for updates.
 
-For the owner's alpha16 migration, the permanent signing certificate's SHA-256 fingerprint is:
+Set these repository secrets under **Settings → Secrets and variables → Actions**:
 
-`24c2fde0b7e75d5a8325ad21079fccbc5cd0929fe26e0a3e6dda7b4235026953`
+- `NX2A_KEYSTORE_B64` holds the base64 encoding of the original keystore.
+- `NX2A_KEYSTORE_PASSWORD` unlocks the keystore.
+- `NX2A_KEY_PASSWORD` is optional when the private key has a different password.
 
-This is public certificate metadata **not** the private key. Keep the private keystore out of source control and GitHub Actions artifacts.
+GitHub Actions expects the alias `nx2android`. On a trusted machine with the original keystore and an
+authenticated GitHub CLI, enter the two required secrets directly:
 
-Set two repository secrets under **Settings > Secrets and variables > Actions**:
+```bash
+base64 < /path/to/original/nx2android.keystore | tr -d '\n' | gh secret set NX2A_KEYSTORE_B64 --repo Ragnarok93/nx2androidX
+gh secret set NX2A_KEYSTORE_PASSWORD --repo Ragnarok93/nx2androidX
+```
 
-- `NX2A_KEYSTORE_B64`: the complete base64 encoding of the persistent PKCS12 keystore
-- `NX2A_KEYSTORE_PASSWORD`: the corresponding keystore password
-
-Keep the keystore and password backed up offline. Never regenerate the signing key for ordinary updates. The keystore alias must be `nx2android`; the key password defaults to the store password, consistent with `android/app/build.gradle.kts`. Future updateable APKs must preserve the application ID `com.nx.android`, the signer and a non-decreasing Android versionCode (increment for each release).
-
-PR verification builds deliberately use a throwaway key even if the secrets are configured. Their artifact is labeled `nx2android-PR-EPHEMERAL-NOT-UPDATABLE` and must not be distributed as an update.
+Then rerun the failed trusted branch build. CI checks the certificate before building and checks the final
+APK before publishing. PR verification uses a runner-only debug signer. Its APK stays inside the verification
+job. For a local release, set `NX2A_KEYSTORE` to the original keystore path or place it at
+`~/.android/nx2android.keystore`. The same password variables apply. Keep a private offline backup of the
+keystore and password.
 
 ## Recovering installations signed by an ephemeral key
 
