@@ -100,3 +100,154 @@ At audit baseline, \`gfx_vk_core.c::vk_pool_set_flags\` writes \`g_pool[i].flags
 Do **not** add more global driver toggles. First produce the minimal depth raster reproducer (to separate D24 transfer from depth attachment correctness) and the GPU-visible indirect/vertex capture at a confirmed faulty draw. The precise **first failing scene stage** remains unknown. The highest-confidence source fixes from this audit are C3 and C4; other items require on-device evidence before production changes.
 
 **References:** Vulkan \`vkBindImageMemory\` alignment valid-usage rules (VUID 01046) and Vulkan Copy Commands' depth/stencil aspect buffer representation. Both are public Khronos specifications; all project-specific details above are taken from the repository and attached diagnostic ZIPs.
+
+## P0 follow-up on the existing draft
+
+Repository baseline `android` resolved to `e4d1a6176ec380cac5134bea89c5a8df986b628e`.
+PR #4 remained open and draft on integration HEAD `d0430843f26767b963ece309aecba8ba124389c7`.
+This follow-up starts from that head and retains its allocator alignment, pool
+locking, FFRS Xclipse D24 CPU conversion, and scoped LRZ policy.
+
+### Rechecked player evidence
+
+| Archive | GPU-completed evidence | Diagnostic limit |
+|---|---|---|
+| `194209`, present 3665 | Three scene passes each supplied six MRTs. Saved D24 and S8 planes for passes 3–5 were all zero. | No early depth-only capture and no independent transfer control. |
+| `214247`, present 2502 | Pass 1 recorded 92 depth-only draws. The phase trace shows depth test and writes enabled, compare ALWAYS, rasterizer discard disabled, and vertex shader `406bc59dec6d556d` on the first recorded draw. The trace and archive contain populated color targets in later passes. | The 24-target budget captured scene depth/stencil from passes 3 and 4. It did not capture pass 5 depth/stencil. All captured scene depth planes were zero, a byte pattern compatible with either D24 or float representation of zero. |
+| `214247`, isolated pass -200 | All 64 words were `0x3f200000`, float32 0.625. The expected D24 word is approximately `0x009fffff` in the low 24 bits. | This test uses a transfer clear and a depth copy. Attachment rasterization, preservation, and sampling require independent tests. |
+| `214247`, indexed indirect trace | 96 CPU/shadow diagnostic lines across two presents. The first at present 2502, pass 5, vertex shader `1a970a5d8e09b226`, showed 1188 indices and one instance in guest memory with no copied-pool shadow. | The archive contains no fence-completed indirect buffers. These counts cannot establish GPU-visible geometry. |
+
+Both ZIPs passed their CRC checks. All 48 manifest-indexed raw files matched
+the recorded lengths and FNV-1a hashes, and all ZIP entries were nonempty. The
+39.35-second video shows broken battle world/characters with readable HUD
+and dialogue. The native logs identify custom `libvulkan.radeon.so`, RADV
+MAGELLAN CARL, driver ID 3, Vulkan 1.4.368, and driver version
+`0x06863063`. They contain no binary digest or source revision sufficient
+to bind the imported driver to a Mesa commit. Treat `cc87fdf` as a candidate
+source attribution until verified against the binary.
+
+The newer archive contains 15 stale-image warnings. A representative pair
+shares the pool-relative start 593920 but has overlapping ranges
+[593920, 659456) and [593920, 618496) with different formats and dimensions.
+The warning contains neither a consumer draw nor mip/layer write provenance.
+This proves overlap detection reached its warning path. Linking those reads
+to the missing actors requires a pass-correlated producer and consumer trace.
+
+### NVN and Vulkan operation coverage
+
+These classifications describe the reviewed path. Device-level accuracy
+requires the scene comparison for each operation used by the affected draws.
+
+| Operation | Source to Vulkan path | Coverage |
+|---|---|---|
+| Record, end and call command handles | `hle_nvn.c` segmented records and `OP_CALL` → Vulkan replay; asynchronous submissions flatten a copy before replay | Implemented, device lifetime coverage unverified |
+| Queue submit and CPU sync waits | Ordered replay → submission fence / Linux completion; `SyncWait` checks the captured timeline value | Implemented, cross-producer visibility unverified |
+| Queue and command-buffer GPU waits | Queue wait returns success even for a future signal; command-buffer wait has no replay opcode | Unimplemented for arbitrary future or cross-queue producers |
+| Record command fence and signal event | `OP_FENCE_SYNC` and `OP_SIGNAL_EVENT` → replay and submission completion | Partial, NVN condition/location/flags require verification |
+| Wait event | Registered no-op | Unimplemented |
+| Memory barriers | Barrier bits recorded; backend may close a pass or use a conservative Vulkan memory barrier | Partial, exact visibility for each guest hazard unverified |
+| Set depth bounds | Registered no-op | Unimplemented. Early call count exists, enable and bounds require startup trace. |
+| Depth test/write, stencil, bias and clamp | Recorded state → graphics pipeline and dynamic state; depth/stencil aspects selected from target | Implemented, device raster and sample accuracy unverified |
+| Viewport, depth mode, front face and scissor | NVN origin and depth mode drive viewport conversion, clip-control variant and Vulkan winding | Implemented, exact target draw position and clipping unverified |
+| Program stage bindings | Program keys saved from live shader metadata → DMSV lookup → modules, specialization and pipeline stages | Implemented, individual translation equivalence unverified |
+| Vertex and index binding | Reflection and NVN stream metadata → pipeline attributes, rate/divisor and pool buffers | Implemented with explicit fallback paths, failing-draw input bytes unverified |
+| Draw, indexed draw, indirect count | Replay chooses Vulkan direct or indirect commands; `mdi_group` selects a real count buffer only when supported and usable | Partial, fallback draws individual records and does not enforce a GPU count |
+| Dispatch and indirect dispatch | Compute pipeline/set, ordered execution and GPU buffer arguments, including multi-chunk scratch reconstruction | Executable host fixture covers packing and lifetime, hardware visibility unverified |
+| Transform feedback | Vulkan transform feedback and indirect byte count where supported | Partial, unsupported topology and indirect combinations reported |
+| Uniform/storage/image descriptors | Reflection → `stage_set`, dynamic uniform offsets, memoization and typed views | Implemented, actual failing draw's effective ranges and stage bindings unverified |
+| Render targets and clears | Track aspects, color slots, views and subresources → render pass/dynamic rendering, folded clear and load/store policy | Implemented, NVN pass equivalence still unverified |
+| Texture copy and overlapping guest storage | Texture staging, block layouts and aspect copies; compatible aliases may share storage, other overlaps warn | Partial, independent overlapping Vulkan images lack full reconciliation |
+| Memory pools and CPU/GPU visibility | AHardwareBuffer import or copied chunks, dirty tracking and deferred UBO shadow/landing | Partial, sparse mapping and alias cases remain open |
+| Present and UI composition | Render target → Vulkan present queue and Android overlays | Observed for these captures, earlier scene output remains defective |
+| Patch size, custom sample locations, scratch state and debug annotations | Selected operations ignored or used for tracing | Unimplemented or partial depending on operation |
+
+`StructuredProgram.cs` initially builds most expression sources from
+`AstOperand` values and emits vector extract against a temporary. Consequently,
+the top-level checks in `AstOptimizer` establish a source-level concern
+when handed a nested memory operation, but a reachable nested counterexample
+in the FFRS translation chain has yet to be demonstrated. Existing writable
+load and atomic guards remain in place. The only hardware subgroup evidence
+is wave64 with a 32–64 supported range. Translation's model of 128 partitions
+into Maxwell warps in the emitter. Ballots, shuffles, divergent lanes and
+radix histogram/scan/scatter outputs require device comparison. The scalar
+fallback cannot independently establish cross-lane equivalence.
+
+### What the new diagnostics measure
+
+- With **Trace details** enabled when the player arms **Capture next frame**,
+  Vulkan copies indexed indirect argument records and the count word from
+  their actual draw allocations. It records pool identity/generation, guest
+  and Vulkan buffer offsets, draw and submission ordinals, preceding dispatch
+  count, shader keys and pipeline vertex format/stride/divisor information.
+  Index and vertex rows sample binding prefixes. The first element consumed
+  may lie outside a sampled prefix.
+- The copies run at the natural pass end before attachment writeback or the
+  next producer. Passes detected with shader memory writes or transform
+  feedback are excluded. Coverage is up to four draws per pass, 96 ranges
+  and 24 KiB of logical output, charged at actual allocation size against
+  the same readback budget as scene images. The report is published after
+  the submission fence and host-cache invalidation as
+  `metadata/gpu_draw_inputs.tsv`. An absent row does not imply a zero draw.
+- A pass-end copy can observe correct producer bytes even if a faulty
+  producer-to-draw dependency let the draw see stale bytes earlier. The
+  preceding dispatch count is a correlation point, not a unique last-writer
+  identity. Resolve that ambiguity with matching traces, exact descriptor
+  ranges, vertex output capture and a targeted hazard test if needed.
+- Runtime startup records the selected physical device's driver ID, name,
+  driverInfo, version, UUID and loader identity. Hash the imported driver
+  separately on the device to tie it to a specific binary.
+- `DM_NVN_SEQ=4` at process startup logs the ignored depth-bounds arguments,
+  command wait sync identity and observed submit/fence context. These APIs
+  retain their previous no-op behavior. Startup tracing matters because the
+  existing logs record some calls in the first frames.
+
+### Independent depth discriminator
+
+The `devtools/vk_depth_probe` executable has no game or recompiler dependency.
+It uses a separate transfer clear and render-pass clear, two depth/stencil
+passes with STORE/LOAD, indexed triangles, reversed-Z GREATER, early and
+late fragment-test variants, color readback, stencil copy and depth sampling
+through a separate compute pipeline. The D32F control uses the depth aspect
+of D32FS8 where supported.
+
+Linux llvmpipe 25.0.7 ran all four cases with 64/64 passing pixels for
+color, clear and drawn depth/stencil transfers, and sampled depth. Vulkan
+synchronization validation produced no diagnostics on that run. All probe
+SPIR-V passed `spirv-val --target-env vulkan1.2`. The probe also compiled
+for Android ARM64 API 31. The device comparison remains open.
+
+The local host suite ran 633 tests with 12 skipped and no failures. The
+production input-capture fixture checks range rejection, slab offsets, budget
+accounting, exclusion of writable passes, delayed Vulkan-copy execution,
+cache invalidation and report bytes. The production Java archive fixture
+checks export of completed GPU samples and omission of pending/stale files.
+The Android NDK r27d FFRS host built and linked all 200 source units into
+`dmhost`, `libdmhost.so` and `libdmplay.so`. These are build and host tests.
+
+| Result on Xclipse | What it would establish |
+|---|---|
+| Color and sampling pass, D24 copy fails, D32F control passes | Isolated transfer-format defect within the tested path |
+| Color fails or differs by early/late variant | Rasterization, depth/stencil test or LOAD/STORE behavior requires isolation before attributing the result to transfer |
+| Color passes but sampled depth fails | Attachment writes reach the tests. Inspect depth view/sample visibility and representation. |
+| Probe passes but the scene fails | Inspect recorded/gpu-visible scene inputs and rendering state, or a more specific driver feature interaction. |
+
+### Performance and acceptance status
+
+The only quantified baseline is the prior Xclipse trace, with replay CPU
+7.30 ms/frame, descriptors 1.95 ms, pipeline keys 1.37 ms, submission
+0.78 ms and GPU busy 12.40 ms. Descriptors and pipeline keys account for about
+45% of replay CPU. This is a diagnostic run and does not establish current
+performance or an optimization gain. Paired p50/p95/p99, thermal and 8 GB
+endurance measurements require the same scene and a build whose renders
+match. P2 and P3 remain gated behind P0 and P1.
+
+Open evidence includes the matching imported-RADV, Samsung and Adreno runs,
+the first differing scene stage, underlying gameplay root cause, exact
+driver source for the transfer discrepancy, end-to-end shader regression
+vectors, stencil resolve, captured clip positions and exact uniform/storage
+bindings. No ADB-connected hardware, FFRS game files or standalone signing
+identity were available for this iteration. Validation and signing of a
+self-contained game export are separate acceptance gates from builder CI.
+
+References: [Vulkan depth/stencil copy representations](https://docs.vulkan.org/spec/latest/chapters/copies.html)
+and [JimVulkan driver sources](https://github.com/JimVulkan/mesa-unified-drivers).

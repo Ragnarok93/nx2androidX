@@ -31,6 +31,7 @@ final class DiagnosticArchive {
         return name.equals("log.txt") || name.equals("log.prev.txt") ||
                name.equals("log.prev.2.txt") || name.equals("log.prev.3.txt") ||
                name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
+               name.equals("gpu_draw_inputs.tsv") ||
                name.matches("pass_[0-9]{2}\\.ppm(?:\\.f32)?") ||
                name.matches("pass_[0-9]{2}\\.raw") ||
                name.matches("frame_[0-9]{6}\\.ppm");
@@ -40,7 +41,8 @@ final class DiagnosticArchive {
     }
     private static String entryName(String name) {
         return logName(name) ? "logs/" + name : name.equals("capture_meta.txt") ||
-               name.equals("pass_dump_manifest.tsv") ? "metadata/" + name : "captures/" + name;
+               name.equals("pass_dump_manifest.tsv") || name.equals("gpu_draw_inputs.tsv")
+               ? "metadata/" + name : "captures/" + name;
     }
     private static void entry(ZipOutputStream zip, String name, byte[] data) throws IOException {
         zip.putNextEntry(new ZipEntry(name));
@@ -99,6 +101,9 @@ final class DiagnosticArchive {
             if (restrictPasses && f.getName().startsWith("pass_") &&
                     !f.getName().equals("pass_dump_manifest.tsv") &&
                     !currentPasses.contains(f.getName().substring(0, 7))) continue;
+            if (f.getName().equals("gpu_draw_inputs.tsv") &&
+                    (!manifest.isFile() || (captureInfo.isFile() &&
+                    f.lastModified() < captureInfo.lastModified()))) continue;
             if (!f.getCanonicalPath().startsWith(prefix)) continue;
             inputs.add(f);
         }
@@ -110,7 +115,8 @@ final class DiagnosticArchive {
         // The only archive created is one the player selected with ACTION_CREATE_DOCUMENT.
         try (ZipOutputStream zip = new ZipOutputStream(out)) {
             entry(zip, "README.txt", ("nx2androidX standalone rendering diagnostics\n" +
-                    "These captures are not proof of correct rasterization or GPU-consumed indirect arguments.\n" +
+                    "gpu_draw_inputs.tsv contains completed GPU buffer copies taken after read-only passes.\n" +
+                    "Index and vertex rows are binding prefixes. Rasterization requires separate evidence.\n" +
                     "CPU/shadow indirect diagnostics are explicitly non-authoritative.\n" +
                     "High-overhead full MRT/depth/stencil readback is OFF unless Capture is pressed.\n" +
                     "The last three prior runtime logs are retained across app launches.\n" +

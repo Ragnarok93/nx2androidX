@@ -234,6 +234,25 @@ void vk_init(void) {
     const char *want[] = {"VK_KHR_swapchain", "VK_ANDROID_external_memory_android_hardware_buffer", "VK_EXT_queue_family_foreign", "VK_EXT_custom_border_color",
                           "VK_EXT_robustness2", "VK_EXT_depth_clip_control", "VK_EXT_provoking_vertex", "VK_EXT_index_type_uint8", "VK_EXT_transform_feedback",
                           "VK_GOOGLE_display_timing"};
+    // Identify the physical device used by the replay, including when a custom
+    // loader falls back. The custom-loader discovery probe enumerates separately.
+    if (vkGetPhysicalDeviceProperties2 && V.props.apiVersion >= VK_API_VERSION_1_1) {
+        VkPhysicalDeviceDriverProperties driver = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+        int has_driver = V.props.apiVersion >= VK_API_VERSION_1_2 ||
+                         has_ext(ex, ne, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+        VkPhysicalDeviceIDProperties id = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+                                          .pNext = has_driver ? &driver : NULL };
+        VkPhysicalDeviceProperties2 props = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &id };
+        vkGetPhysicalDeviceProperties2(V.pd, &props);
+        char uuid[VK_UUID_SIZE * 2 + 1];
+        for (unsigned i = 0; i < VK_UUID_SIZE; ++i) snprintf(uuid + i * 2, 3, "%02x", id.driverUUID[i]);
+        Dl_info loader = {0};
+        dladdr((void *)p_vkGetInstanceProcAddr, &loader);
+        VKLOG("[driver] selected Vulkan device: driver ID %d, name '%s', info '%s', version %#x, UUID %s, %s; loader '%s'",
+              has_driver ? (int)driver.driverID : -1, has_driver ? driver.driverName : "unavailable",
+              has_driver ? driver.driverInfo : "unavailable", V.props.driverVersion, uuid,
+              g_vk_driver_status, loader.dli_fname ? loader.dli_fname : "unavailable");
+    }
     const char *on[64]; uint32_t non = 0;
     for (unsigned i = 0; i < sizeof want / sizeof *want; i++) if (has_ext(ex, ne, want[i])) on[non++] = want[i]; else VKLOG("device has no %s", want[i]);
     // NVN vertex streams step per N instances (gfx_vk_exec.c build_pipeline's divisor state): VK_EXT_vertex_attribute_divisor, or the KHR one (core in Vulkan 1.4, the same

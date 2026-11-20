@@ -63,6 +63,8 @@ public final class DiagnosticArchiveFixture {
         put(root, "capture_meta.txt", bytes("capture=player-armed\n"));
         put(root, "pass_dump_manifest.tsv", bytes(
             "dump\tpresent\tpass\ttarget\n0\t1500\t18\t0\n"));
+        put(root, "gpu_draw_inputs.tsv", bytes("present\traw_hex\n1500\t02000000\n"));
+        put(root, "gpu_draw_inputs.tsv.tmp", bytes("incomplete input report"));
         put(root, "pass_00.ppm", bytes("new MRT 0"));
         put(root, "pass_00.raw", new byte[] {0, (byte)255, 31, 42});
         put(root, "pass_00.ppm.f32", new byte[] {1, 2, 3, 4});
@@ -81,6 +83,9 @@ public final class DiagnosticArchiveFixture {
         check(zip.containsKey("README.txt") && zip.containsKey("archive-status.txt"), "report metadata");
         check(zip.containsKey("metadata/capture_meta.txt"), "capture settings metadata");
         check(zip.containsKey("metadata/pass_dump_manifest.tsv"), "manifest");
+        check(Arrays.equals(zip.get("metadata/gpu_draw_inputs.tsv"),
+                            bytes("present\traw_hex\n1500\t02000000\n")), "completed GPU samples");
+        check(!zip.containsKey("metadata/gpu_draw_inputs.tsv.tmp"), "temporary sample report excluded");
         check(Arrays.equals(zip.get("captures/pass_00.raw"), new byte[]{0,(byte)255,31,42}), "exact GPU bytes");
         check(zip.containsKey("captures/pass_00.ppm.f32"), "float depth");
         check(!zip.containsKey("captures/pass_01.ppm"), "stale pass suppressed by manifest");
@@ -103,6 +108,7 @@ public final class DiagnosticArchiveFixture {
         DiagnosticArchive.write(root.toFile(), second, "driver=RADV\n");
         Map<String, byte[]> pending = unpack(second.toByteArray());
         check(!pending.containsKey("captures/pass_00.ppm"), "pending capture excludes stale target");
+        check(!pending.containsKey("metadata/gpu_draw_inputs.tsv"), "pending capture excludes stale samples");
         boolean badFolder = false;
         try { DiagnosticArchive.write(root.resolve("RomFS/no-dir").toFile(),
                                      new ByteArrayOutputStream(), ""); }

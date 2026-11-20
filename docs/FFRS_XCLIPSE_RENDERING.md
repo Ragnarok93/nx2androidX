@@ -346,3 +346,29 @@ CPU conversion enabled. If still wrong, reduce D24 rendering itself
 to a small Vulkan raster/depth test with matching Adreno
 reference, and inspect GPU-consumed indirect and vertex data.
 Do not claim zero-defect visuals before that comparison.
+
+## GPU buffer samples and depth probe
+
+For the next matched battle capture, enable **Trace details** and press
+**Capture next frame** on both phones. Confirm frame generation is off,
+the scene settings and camera match, and the startup `[driver] selected
+Vulkan device` line names the expected driver. Attach the exact imported
+driver binary's SHA-256 to the test record. Select a targeted vertex shader
+with `DM_VK_PASSDUMP_INPUT_VS=<hex key>` when a general capture fills its
+sample budget before reaching the intended draw.
+
+The completed ZIP adds `metadata/gpu_draw_inputs.tsv` when eligible
+indexed indirect draws were sampled. Compare matching shader, pass and
+draw context first. Pool IDs and addresses can differ across runs. Decode
+little-endian command records as `indexCount, instanceCount, firstIndex,
+vertexOffset (signed), firstInstance`, using the recorded stride. A
+`draw-count` row provides the GPU count before clamping to max draw count.
+Vertex `attributes` are `location:VkFormat:byteOffset`. Index and vertex
+prefix rows need to be checked against the indirect draw's actual range
+before drawing conclusions. See the [audit](NVN_VULKAN_XCLIPSE_AUDIT_20261119.md)
+for ordering and coverage limits.
+
+For the same drivers run the [independent Vulkan depth probe](../devtools/vk_depth_probe/README.md).
+Use its raster color and sampled depth to evaluate the attachment separately
+from the D24 transfer representation. A post-change game capture on Xclipse
+is still needed even if the independent probe passes.

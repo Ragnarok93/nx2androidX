@@ -414,7 +414,7 @@ void vk_ubd_land(VkCommandBuffer cb); int vk_ubd_shadow(uint64_t a, uint64_t n, 
 // DM_VK_PASSDUMP_RAW=1: also save exact, unclamped transfer bytes for reference comparisons.
 // Each capture writes pass_dump_manifest.tsv with present/pass, target slot, mip/layer, format, pool and raw byte hash.
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; uint32_t w, h; VkFormat f, view_fmt; VkDeviceSize bytes;
-    uint64_t fence, present, pool; int pass, target; uint32_t level, layer; int64_t off; } pdump_t;
+    uint64_t present, pool; int pass, target; uint32_t level, layer; int64_t off; } pdump_t;
 enum { PD_MAX = 96 };
 static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];
 static int g_pd_prepass_written; // only the first eligible depth-only pass of a one-shot capture
@@ -432,6 +432,7 @@ static int pass_dump_limit(void) {
     int n = e && *e ? atoi(e) : PD_MAX;
     return n > 0 && n < PD_MAX ? n : PD_MAX;
 }   // state 0 off, 1 dumping this submission's passes, 2 waiting to write
+#include "gfx_vk_input_capture.inc"
 static void pass_dump_depth(void);
 static void pass_dump_depth_aspect(VkImageAspectFlags aspect);
 static void texdump_flush(void);
@@ -692,6 +693,7 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         const char *fr = getenv("DM_VK_PASSDUMP_FRAMES"); g_pd_frames = fr && atoi(fr) > 1 ? atoi(fr) : 1;
         g_pd_state = 1; g_npd = 0; g_pd_bytes = 0;
         g_pd_prepass_written = 0; g_pd_control_written = 0;
+        input_capture_arm();
         setenv("DM_VK_PASSDUMP", "0", 1);
         { const char *root = getenv("DM_ROOT"); char path[1024];
           snprintf(path, sizeof path, "%s/pass_dump_manifest.tsv", root ? root : ".");
@@ -699,9 +701,15 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
           if (mf) { fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\n", mf); fclose(mf); } }
         VKLOG("pass dump: next submission from pass %d, limit %d images, %llu MB raw readback",
             g_pd_skip, pass_dump_limit(), (unsigned long long)(pass_dump_budget() / 1048576)); return; }
-    if (g_pd_state == 1 && g_npd && --g_pd_frames > 0 && g_npd < pass_dump_limit() - 1) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
-    if (g_pd_state == 1 && g_npd) { g_pd_state = 2; for (int i = 0; i < g_npd; i++) g_pd[i].fence = mtl_last_fence() + 1; return; }
-    if (g_pd_state != 2 || !g_npd || done_fence < g_pd[g_npd - 1].fence) return;
+    if (g_pd_state == 1 && (g_npd || g_input_count) && --g_pd_frames > 0 && g_npd < pass_dump_limit() - 1) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
+    static uint64_t capture_fence;
+    if (g_pd_state == 1 && (g_npd || g_input_count)) {
+        g_pd_state = 2;
+        capture_fence = mtl_last_fence() + 1;
+        return;
+    }
+    if (g_pd_state != 2 || done_fence < capture_fence) return;
+    input_capture_write();
     const char *root = getenv("DM_ROOT");
     for (int i = 0; i < g_npd; i++) {
         pdump_t *d = &g_pd[i]; char path[1024]; snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
@@ -876,7 +884,7 @@ static void bc_draw_back(void) {
 void vk_end_pass(void) {
     if (g_x_listpasses && S.pass_open == 1) { Dl_info di; void *ra = __builtin_return_address(0); uintptr_t base = dladdr((void *)vk_end_pass, &di) ? (uintptr_t)di.dli_fbase : 0; VKLOG("    ended from %#llx (%llu draws)", (unsigned long long)((uintptr_t)ra - base), (unsigned long long)g_pass_draws); list_reads("it"); }   // (DM_VK_TRACE_PASS=-2: who ends each pass)
     if (S.pass_open == 2 && P_cleared) (void)pass_commit();   // only clears: the pass still runs, for its load ops
-    if (S.pass_open == 1) { if (S.rp_pass) vkCmdEndRenderPass(vk_cmd()); else vkCmdEndRendering(vk_cmd()); bc_draw_back(); void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(1, S.pass_w, S.pass_h, (uint32_t)S.cfmt[0], (uint32_t)g_pass_draws | (g_pass_draws ? (uint32_t)((g_pass_bb[2] - g_pass_bb[0]) & 0xffff) << 16 : 0));  pass_dump(); if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) { setenv("DM_VK_TRACE_PASS", "-1", 1); g_x_tracepass = -1; } }
+    if (S.pass_open == 1) { if (S.rp_pass) vkCmdEndRenderPass(vk_cmd()); else vkCmdEndRendering(vk_cmd()); if (g_input_pending) input_capture_end_pass(); bc_draw_back(); void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(1, S.pass_w, S.pass_h, (uint32_t)S.cfmt[0], (uint32_t)g_pass_draws | (g_pass_draws ? (uint32_t)((g_pass_bb[2] - g_pass_bb[0]) & 0xffff) << 16 : 0));  pass_dump(); if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) { setenv("DM_VK_TRACE_PASS", "-1", 1); g_x_tracepass = -1; } }
     if (S.pass_open == 1 && g_lin_back && g_pass_draws) lin_back();
     if (S.pass_open == 1) crumb_mark(0);
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_tf_in_pass = 0;
@@ -2074,6 +2082,7 @@ static void texbind(const pkey *k) {
         }
     }
 }
+static pkey g_input_key; // last prepared indexed draw, only while input diagnostics are armed
 static int prepare_draw(int prim, int indexed) {
     // DM_VK_CB_DRAWS (read every submission, default 128, 0 = never): the replay is cut every that many draws and what is recorded goes to the GPU at once
     // (vk_cmd_split), so the GPU works on the frame while the rest is replayed instead of after all of it: NEO's Scramble Crossing 36.7 → 15.7 ms a frame
@@ -2298,7 +2307,8 @@ static int prepare_draw(int prim, int indexed) {
         if (g_var_now == 5) { buf = vk_zero_buffer(); off = 0; }
         if (!(dbg_draw() & 2) && b < 17) { int fresh = bc_fresh(); if (fresh || g_bc.vb[b] != buf || g_bc.vo[b] != off) { vkCmdBindVertexBuffers(cb, b, 1, &buf, &off); g_bc.vb[b] = buf; g_bc.vo[b] = off; } }
     }
-    (void)indexed;
+    if (g_input_capture && g_pd_state == 1 && indexed &&
+        (!g_input_vs || g_input_vs == k.key[0])) g_input_key = k;
     return 1;
 }
 // quads without an index buffer: one buffer of 0 1 2 0 2 3, 4 5 6 4 6 7, ... for up to QUAD_MAX quads (more are drawn as the first QUAD_MAX)
@@ -2611,6 +2621,56 @@ static void indirect_log(const p_draw_idx *d) {
           guest[0], guest[1], guest[2], (int32_t)guest[3],
           has_shadow ? "" : "unavailable; ", shadow[0], shadow[1], shadow[2], (int32_t)shadow[3]);
 }
+static void capture_indexed_inputs(const p_draw_idx *d, VkBuffer arguments, VkDeviceSize argument_offset,
+                                   VkBuffer count_buffer, VkDeviceSize count_offset,
+                                   VkBuffer indices, VkDeviceSize index_offset, VkIndexType type) {
+    if (g_input_draws >= INPUT_PER_PASS || (g_input_vs && g_input_vs != S.sh[0]->key)) return;
+    unsigned stride = count_buffer ? (unsigned)d->mdi_stride : 20;
+    unsigned max = count_buffer ? (unsigned)d->mdi_max : 1;
+    unsigned records = 1 + (INPUT_BYTES - 20) / stride;
+    if (records > max) records = max;
+    input_sample_t sample = {
+        .present = g_tex_frame, .submission = g_set_epoch, .pass = g_sub_pass - 1,
+        .draw = g_vkst.draws, .dispatches = g_vkst.dispatches, .vs = S.sh[0]->key,
+        .fs = S.sh[1] ? S.sh[1]->key : 0, .gs = S.sh[2] ? S.sh[2]->key : 0,
+        .index_type = type, .stream = -1, .stride = stride, .count = max,
+        .binding_extent = (uint64_t)(max - 1) * stride + 20,
+    };
+    if (!input_capture_add(sample, "indexed-indirect", d->ind, arguments, argument_offset,
+                           (uint64_t)(records - 1) * stride + 20, 0)) return;
+    ++g_input_draws;
+    if (count_buffer) {
+        input_sample_t count = sample;
+        count.stride = 4;
+        count.binding_extent = 4;
+        input_capture_add(count, "draw-count", d->mdi_cnt, count_buffer, count_offset, 4, 0);
+    }
+    sample.stride = d->itype == 0 ? 1 : d->itype == 1 ? 2 : 4;
+    sample.count = 0;
+    sample.binding_extent = 0; // Vulkan's vkCmdBindIndexBuffer has no explicit size.
+    input_capture_add(sample, "index-binding-prefix", d->ibuf, indices, index_offset, INPUT_BYTES, 1);
+    // A prefix is only a sample of the binding. firstIndex, vertexOffset and
+    // firstInstance are in the GPU argument records and may point outside it.
+    for (unsigned i = 0; i < g_input_key.nbind; i++) {
+        unsigned binding = g_input_key.bind[i].binding;
+        if (binding >= 16) continue; // default attributes have no guest pool
+        sample.stream = (int)binding;
+        sample.stride = g_input_key.bind[i].stride;
+        sample.divisor = g_input_key.bind[i].divisor;
+        sample.attr_count = 0;
+        for (unsigned a = 0; a < g_input_key.nattr; a++) {
+            if (g_input_key.attr[a].binding != binding) continue;
+            unsigned n = sample.attr_count++;
+            sample.attr[n].location = g_input_key.attr[a].loc;
+            sample.attr[n].format = g_input_key.attr[a].fmt;
+            sample.attr[n].offset = g_input_key.attr[a].off;
+        }
+        uint64_t size = S.vbuf[binding].size;
+        sample.binding_extent = size;
+        input_capture_add(sample, "vertex-binding-prefix", S.vbuf[binding].address,
+                          g_bc.vb[binding], g_bc.vo[binding], size < INPUT_BYTES ? size : INPUT_BYTES, 1);
+    }
+}
 static void draw_idx(const p_draw_idx *d) {
     graphics_updates_ready();
     graphics_cpu_ready();
@@ -2655,7 +2715,14 @@ static void draw_idx(const p_draw_idx *d) {
     { static int n; if (n < 12 && (d->itype == 0 || d->ind || (uint32_t)d->count > (1u << 20) || inst > (1u << 16))) { n++;
         VKLOG("unusual indexed draw: itype %d count %u instances %u indirect %#llx prim %d base vertex %d", d->itype, (unsigned)d->count, inst, (unsigned long long)d->ind, d->prim, d->base_vertex); } }
     if (d->ind) { indirect_log(d); VkBuffer b; VkDeviceSize o; bc_index(cb, ib, io, it); if (!vk_buf_at(d->ind, mcb ? (uint64_t)d->mdi_stride * (uint64_t)d->mdi_max : 20, &b, &o)) VKRED_ONCE(97, "indexed indirect draw arguments outside the memory pools");
-        else if (!(dbg_draw() & 1) && g_ok) { if (mcb) vkCmdDrawIndexedIndirectCount(cb, b, o, mcb, mco, (uint32_t)d->mdi_max, (uint32_t)d->mdi_stride); else vkCmdDrawIndexedIndirect(cb, b, o, 1, 20); } return; }
+        else if (!(dbg_draw() & 1) && g_ok) {
+            if (g_input_capture && g_pd_state == 1 && !(dbg_draw() & 2))
+                capture_indexed_inputs(d, b, o, mcb, mco, ib, io, it);
+            if (mcb) vkCmdDrawIndexedIndirectCount(cb, b, o, mcb, mco, (uint32_t)d->mdi_max, (uint32_t)d->mdi_stride);
+            else vkCmdDrawIndexedIndirect(cb, b, o, 1, 20);
+        }
+        return;
+    }
     if (prim == 7) { VkBuffer b; VkDeviceSize o; int n = quad_indices((uint32_t)d->count, (const uint8_t *)(uintptr_t)d->ibuf, d->itype, 0, &b, &o); if (!n) return;
         bc_index(cb, b, o, VK_INDEX_TYPE_UINT32); if (!(dbg_draw() & 1) && g_ok) vkCmdDrawIndexed(cb, (uint32_t)n, inst, 0, d->base_vertex, (uint32_t)d->base_instance); return; }
     if (io % isz) { VKRED_ONCE(57, "index buffer offset not aligned to its index size"); return; }

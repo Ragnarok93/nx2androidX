@@ -702,6 +702,8 @@ static void diag_capture_arm(void) {
     // player-requested capture replaces it; older pass files are ignored by
     // the ZIP exporter unless the manifest names their indices.
     { char manifest[620]; snprintf(manifest, sizeof manifest, "%s/pass_dump_manifest.tsv", g_root);
+      unlink(manifest);
+      snprintf(manifest, sizeof manifest, "%s/gpu_draw_inputs.tsv", g_root);
       unlink(manifest); }
     setenv("DM_VK_PASSDUMP_ALL_COLORS", "1", 1);
     setenv("DM_VK_PASSDUMP_MIN_COLORS", "2", 1);
@@ -712,7 +714,9 @@ static void diag_capture_arm(void) {
     // Standalone D24S8 transfer control: a separate 8x8 scratch image with
     // known depth 0.625 tests that raw depth readback itself is reliable.
     setenv("DM_VK_PASSDUMP_DEPTH_CONTROL", "1", 1);
-    setenv("DM_VK_PASSDUMP_DEPTH_STATE", atomic_load(&g_diag_trace) ? "1" : "0", 1);
+    int trace = atomic_load(&g_diag_trace);
+    setenv("DM_VK_PASSDUMP_DEPTH_STATE", trace ? "1" : "0", 1);
+    setenv("DM_VK_PASSDUMP_INPUTS", trace ? "1" : "0", 1);
     setenv("DM_VK_PASSDUMP_STENCIL", "1", 1);
     setenv("DM_VK_PASSDUMP_LIMIT", "24", 1);
     setenv("DM_VK_PASSDUMP_MAX_MB", "128", 1);
@@ -725,7 +729,7 @@ static void diag_capture_arm(void) {
     // The first present after closing the panel is a transition; the following
     // scene present arms the capture. Never capture a frozen menu redraw.
     setenv("DM_VK_PASSDUMP", "2", 1);
-    if (atomic_load(&g_diag_trace)) {
+    if (trace) {
         char start[32]; snprintf(start, sizeof start, "%llu", (unsigned long long)(frame + 2));
         setenv("DM_VK_LIST_AT", start, 1);
         setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
@@ -740,8 +744,10 @@ static void diag_capture_arm(void) {
                    "depth_pipeline_trace=player_opt_in\n"
                    "all_mrt=1\ndepth=1\nstencil=1\nraw_bytes=1\n"
                    "trace_details=%d\nvulkan_driver=%s\n"
-                   "indirect_arguments=guest_and_cached_shadows_only_not_gpu_authoritative\n",
-                (unsigned long long)frame, atomic_load(&g_diag_trace), driver ? driver : "(unknown)");
+                   "gpu_draw_inputs=%s\n"
+                   "cpu_indirect_trace=guest_and_cached_shadows_only\n",
+                (unsigned long long)frame, trace, driver ? driver : "(unknown)",
+                trace ? "bounded_end_of_pass_for_read_only_indexed_indirect_draws" : "off");
         fclose(f);
     }
     atomic_store(&g_diag_status, DIAG_ARMED);
