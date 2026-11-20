@@ -5,6 +5,7 @@
 //   dirty-page tracker saw a write to its pages; any other texture is the GPU's (render targets, images), filled only by GPU work.
 //   Version 1 keeps every image in VK_IMAGE_LAYOUT_GENERAL after its first use, ordered by whole-pipeline barriers.
 #include "gfx_vk.h"
+#include "gfx_vk_d24_copy.h"
 #include "nvn_tex.h"
 #include "../gfx/tex/nvn_deswizzle.h"
 #include "nvn_hmap.h"
@@ -1056,9 +1057,27 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
                                    {r->xoffset, r->yoffset, is3d ? r->zoffset : 0}, {(uint32_t)r->width, (uint32_t)r->height, is3d ? (uint32_t)depth : 1}};
             vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, a ? sb_b : db_b, 1, &c); }
         mtl_wait(mtl_sub_commit(), ~0ull);
+        // Normalize only the observed nonconforming Xclipse D24S8 copy
+        // before passing bytes to the original tested NVN ds_texels
+        // decoder. This preserves its ABI and all other depth formats.
+        const char *opt = getenv("DM_VK_D24_FLOAT_COPY");
+        if (dp && im->fmt == VK_FORMAT_D24_UNORM_S8_UINT &&
+            (t->d.format == 0x33 || t->d.format == 0x35) &&
+            opt && atoi(opt) != 0) {
+            for (size_t i = 0; i < n; ++i) {
+                float depthValue;
+                memcpy(&depthValue, dp + 4 * i, sizeof depthValue);
+                uint32_t packed = vk_d24_copy_float_to_unorm(depthValue);
+                memcpy(dp + 4 * i, &packed, sizeof packed);
+            }
+            static int logged; if (!logged++)
+                VKLOG("[d24] converted nonconforming Xclipse float32 D24 transfer to packed NVN D24 ReadTexels");
+        }
         uint8_t *line = malloc(pitch); if (!line) { for (size_t z = 0; z < depth; z++) for (size_t y = 0; y < rows; y++) memset(dst + z * img + y * row, 0, row); return; }
         for (size_t z = 0; z < depth; z++) for (size_t y = 0; y < rows; y++) { size_t k = (z * rows + y) * (size_t)r->width;
-            ds_texels(t->d.format, im->fmt, dp ? dp + k * db : NULL, sp ? sp + k : NULL, (size_t)r->width, line); memcpy(dst + z * img + y * row, line, pitch < row ? pitch : row); }
+            ds_texels(t->d.format, im->fmt, dp ? dp + k * db : NULL, sp ? sp + k : NULL,
+                      (size_t)r->width, line);
+            memcpy(dst + z * img + y * row, line, pitch < row ? pitch : row); }
         free(line); return;
     }
     VkBuffer sb; VkDeviceSize so; uint8_t *p = vk_scratch(pitch * rows * depth, 16, &sb, &so);

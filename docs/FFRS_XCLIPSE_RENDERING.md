@@ -292,3 +292,57 @@ upon until the depth-copy failure is independently investigated. A valid
 control and all-zero depth after a write-enabled depth prepass implicates
 the actual rendering or depth-load/store path. Either way the next step is
 evidence, not a guessed rendering override.
+
+## 2026-11-19, 21:42 CST: isolated RADV D24S8 format violation
+
+User supplied `nx2android-render-diagnostics-20261119-214247.zip` and
+`1000025928.mp4`. The movie shows UI and dialogue sprites rendered correctly
+but combatant geometry missing or corrupted in the battle. The 1384x780
+capture at present 2502 contains: an early **92-draw** depth-only pass
+(pass 1), six color MRTs in scene passes 3-5, and entirely zero raw
+depth readbacks for the scene passes. The traced prepass has depth test
+and write **enabled**, compare **ALWAYS** (VkCompareOp=7), and no
+rasterizer discard. No pipeline/program/target skips were recorded.
+
+The 8x8 isolated depth control, `pass_00.raw`, is definitive about
+one **driver behavior**: all 64 32-bit words equal `0x3f200000` (IEEE-754
+float32 depth **0.625**). Vulkan's `vkCmdCopyImageToBuffer` with
+`VK_FORMAT_D24_UNORM_S8_UINT` requires a 32-bit word with **packed
+UNORM D24 in the lowest 24 bits** (approximately `0x009fffff`).
+Therefore the driver returned the right numeric clear as the **wrong
+transfer format**. The previous 0/64 FAIL was correct about
+conformance but not explicit about the float format.
+See Vulkan specification, Copy Commands, image-to-buffer depth
+aspect representation.
+
+Two *scoped* mitigations for **FFRS on SM-S731* with selected RADV**:
+1. `DM_VK_LRZ_TOUCH=0` removes the **Adreno-specific** low-resolution
+   depth workaround, which defaults to enabled globally and repeatedly
+   copies and writes depth texels back. On this RADV build, the D24
+   transfer representation is nonconforming, so copying it back into
+   real scene depth images is unsafe. This removes a concrete
+   incompatibility mechanism from Xclipse gameplay, while retaining
+   the proven Adreno behavior.
+2. `DM_VK_D24_FLOAT_COPY=1`: where the guest calls CPU ReadTexels on a
+   D24S8 image, normalize the observed float32 depth into the guest's
+   required packed UNORM D24. No change to shaders, GPU texture reads,
+   draw depth state or vertex generation. Explicit env.txt overrides
+   take priority. The conversion is covered by a host-compiled
+   executable test, including 0.625, 0, 1, NaN, and out-of-range.
+
+The **opt-in** depthcontrol now distinguishes packed D24 from
+float32 and logs the exact raw first word and per-format match
+counts instead of a misleading generic FAIL. On this one driver, PPM
+and .f32 preview data decode float32 too; raw copies always stay
+unmodified for evidence and later comparisons.
+
+**Open:** This transfer conformance defect is confirmed, but may
+not be the sole cause of missing battle geometry. In particular,
+zero-valued scene depth can represent valid reverse-Z clear values
+when no primitives rasterize, or could be related to driver depth
+metadata/cache incoherency. The next hardware test must verify the
+same battle with the LRZ copies disabled and the driver-specific
+CPU conversion enabled. If still wrong, reduce D24 rendering itself
+to a small Vulkan raster/depth test with matching Adreno
+reference, and inspect GPU-consumed indirect and vertex data.
+Do not claim zero-defect visuals before that comparison.

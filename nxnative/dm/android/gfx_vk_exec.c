@@ -709,12 +709,15 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         VkMappedMemoryRange inv = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, NULL, d->m, 0, VK_WHOLE_SIZE};
         VKCHK(vkInvalidateMappedMemoryRanges(V.dev, 1, &inv));
         if (d->pass == -200 && d->w == 8 && d->h == 8 && d->bytes == 256) {
-            const uint32_t expected = 0x9fffffu; // 0.625f * (2^24 - 1)
-            unsigned matches = vk_pd_d24_matches((const uint32_t *)d->p, 64,
+            const uint32_t expected = 0x9fffffu; // Vulkan D24 image-to-buffer: low24 UNORM
+            unsigned packed = vk_pd_d24_matches((const uint32_t *)d->p, 64,
                                                    expected, 1);
-            VKLOG("[depthcontrol] RESULT: %u/64 D24 values match known 0.625 clear (expected 0x%06x, tolerance 1); %s",
-                  matches, expected, matches == 64 ? "PASS" :
-                  "FAIL -- do not trust a zero scene-depth readback yet");
+            unsigned floats = vk_pd_d24_float_matches((const uint32_t *)d->p, 64, 0.625f);
+            VKLOG("[depthcontrol] RESULT: valid packed D24 %u/64, nonconforming float32 0.625 %u/64, first raw word 0x%08x; %s",
+                  packed, floats, ((const uint32_t *)d->p)[0],
+                  packed == 64 ? "PASS: Vulkan D24 copy representation" :
+                  floats == 64 ? "CONFIRMED DRIVER COPY FORMAT MISMATCH: numeric depth correct, D24 bytes are float32" :
+                  "FAIL: unexpected D24 buffer contents");
         }
         uint64_t raw_hash = vk_pd_hash(d->p, (size_t)d->bytes);
         VKLOG("pass dump %02d: present %llu pass %d target %d mip %u layer %u %ux%u storage/view formats %d/%d pool %#llx+%lld bytes %llu raw FNV1a64 %016llx",
@@ -738,7 +741,13 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
             for (size_t k = 0; k < np; k++) { float x;
                 if (d->f == VK_FORMAT_D16_UNORM) x = ((const uint16_t *)d->p)[k] / 65535.f;
                 else if (d->f == VK_FORMAT_D32_SFLOAT || d->f == VK_FORMAT_D32_SFLOAT_S8_UINT) memcpy(&x, (const uint8_t *)d->p + 4 * k, 4);
-                else x = (((const uint32_t *)d->p)[k] & 0xffffff) / 16777215.f;
+                else {
+                    const char *e = getenv("DM_VK_D24_FLOAT_COPY");
+                    if (d->f == VK_FORMAT_D24_UNORM_S8_UINT && e && atoi(e))
+                        memcpy(&x, (const uint8_t *)d->p + 4 * k, 4);
+                    else
+                        x = (((const uint32_t *)d->p)[k] & 0xffffff) / 16777215.f;
+                }
                 v[k] = x; if (x < lo) lo = x; if (x > hi) hi = x; }
             for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) { float t = hi > lo ? (v[(size_t)y * d->w + x] - lo) / (hi - lo) : 0; row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = (uint8_t)(t * 255); } fwrite(row, 1, (size_t)d->w * 3, f); }
             { char rp[1100]; snprintf(rp, sizeof rp, "%s.f32", path); FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(v, sizeof *v, np, rf); fclose(rf); } }   // the values themselves

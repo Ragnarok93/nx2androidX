@@ -31,7 +31,8 @@ int __system_property_get(const char *name, char *out) {
 static void clean(void) {
     const char *keys[] = {"DM_FFRS_S25FE_RADV_TUNE","DM_VK_DRIVER","DM_FPS_TARGET",
                           "DM_OPMODE","RADV_XCLIPSE_DCC_SMALL","DM_VK_RP",
-                          "RADV_XCLIPSE_DLC","DM_VK_MT_REPLAY","DM_VK_ASYNC_PIPE"};
+                          "RADV_XCLIPSE_DLC","DM_VK_MT_REPLAY","DM_VK_ASYNC_PIPE",
+                          "DM_VK_LRZ_TOUCH","DM_VK_D24_FLOAT_COPY"};
     for (unsigned i=0; i<sizeof keys/sizeof keys[0]; ++i) unsetenv(keys[i]);
 }
 int main(void) {
@@ -51,14 +52,20 @@ int main(void) {
     assert(getenv("DM_FPS_TARGET")==NULL); // Adreno path unaffected
     assert(getenv("DM_VK_ASYNC_PIPE")==NULL);
     setenv("DM_VK_DRIVER","libvulkan_radeon.so",1);
+    assert(getenv("DM_VK_LRZ_TOUCH")==NULL);
+    assert(getenv("DM_VK_D24_FLOAT_COPY")==NULL);
     tune_ffrs_s25fe_radv();
     assert(!strcmp(getenv("DM_FPS_TARGET"),"30"));
     assert(!strcmp(getenv("DM_VK_ASYNC_PIPE"),"0"));
+    assert(!strcmp(getenv("DM_VK_LRZ_TOUCH"),"0"));
+    assert(!strcmp(getenv("DM_VK_D24_FLOAT_COPY"),"1"));
     assert(!getenv("DM_OPMODE") && !getenv("RADV_XCLIPSE_DCC_SMALL"));
     assert(!getenv("DM_VK_RP") && !getenv("RADV_XCLIPSE_DLC"));
     assert(!getenv("DM_VK_MT_REPLAY"));
     setenv("DM_FPS_TARGET","60",1);
     setenv("DM_VK_ASYNC_PIPE","1",1);
+    setenv("DM_VK_LRZ_TOUCH","14",1);
+    setenv("DM_VK_D24_FLOAT_COPY","0",1);
     setenv("DM_OPMODE","1",1);
     setenv("RADV_XCLIPSE_DCC_SMALL","1",1);
     setenv("DM_VK_RP","1",1);
@@ -67,6 +74,8 @@ int main(void) {
     tune_ffrs_s25fe_radv();
     assert(!strcmp(getenv("DM_FPS_TARGET"),"60"));
     assert(!strcmp(getenv("DM_VK_ASYNC_PIPE"),"1"));
+    assert(!strcmp(getenv("DM_VK_LRZ_TOUCH"),"14"));
+    assert(!strcmp(getenv("DM_VK_D24_FLOAT_COPY"),"0"));
     assert(!strcmp(getenv("DM_OPMODE"),"1"));
     assert(!strcmp(getenv("RADV_XCLIPSE_DCC_SMALL"),"1"));
     assert(!strcmp(getenv("DM_VK_RP"),"1"));

@@ -67,6 +67,8 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('setenv("DM_FPS_TARGET", "30", 0)', tune)
         self.assertIn('if (!getenv("DM_VK_ASYNC_PIPE"))', tune)
         self.assertIn('setenv("DM_VK_ASYNC_PIPE", "0", 0)', tune)
+        self.assertIn('setenv("DM_VK_LRZ_TOUCH", "0", 0)', tune)
+        self.assertIn('setenv("DM_VK_D24_FLOAT_COPY", "1", 0)', tune)
         for speculative in ("DM_OPMODE", "RADV_XCLIPSE_DCC_SMALL",
                             "DM_VK_RP", "RADV_XCLIPSE_DLC", "DM_VK_MT_REPLAY"):
             self.assertNotIn(f'setenv("{speculative}"', tune)

@@ -49,6 +49,13 @@ static inline unsigned vk_pd_d24_matches(const uint32_t *data, unsigned count,
     }
     return hits;
 }
+static inline unsigned vk_pd_d24_float_matches(const uint32_t *words, unsigned n,
+                                                float known) {
+    uint32_t bits = 0; __builtin_memcpy(&bits, &known, sizeof bits);
+    unsigned hits = 0;
+    for (unsigned i = 0; i < n; ++i) if (words[i] == bits) ++hits;
+    return hits;
+}
 static inline int vk_pd_budget_allows(uint64_t used, uint64_t requested, uint64_t budget) {
     return requested && used <= budget && requested <= budget - used;
 }

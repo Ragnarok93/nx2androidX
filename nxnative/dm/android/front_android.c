@@ -1549,6 +1549,21 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("DM_VK_ASYNC_PIPE", "0", 0);
         LOG("[profile] FFRS S25 FE/RADV: require first-use pipelines; async draw omission disabled");
     }
+    // Qualcomm's default LRZ workaround copies a D24S8 texel from an image
+    // to a buffer and writes it back on pass changes. The imported Xclipse
+    // RADV returned float32 0.625 (0x3f200000) for that image-to-buffer
+    // operation, not Vulkan's specified packed low-24 UNORM depth.
+    // Do not feed those nonconforming bytes back to an Xclipse depth image.
+    if (!getenv("DM_VK_LRZ_TOUCH")) {
+        setenv("DM_VK_LRZ_TOUCH", "0", 0);
+        LOG("[profile] FFRS Xclipse: disabled Adreno-only LRZ depth copy/writeback on broken D24 transfers");
+    }
+    // Normalize CPU-visible NVN D24 ReadTexels only (no GPU draw changes).
+    // An explicit env.txt override still wins.
+    if (!getenv("DM_VK_D24_FLOAT_COPY")) {
+        setenv("DM_VK_D24_FLOAT_COPY", "1", 0);
+        LOG("[profile] FFRS Xclipse: normalize float32 D24 readbacks to NVN packed D24");
+    }
     // Past trials of handheld mode, DCC_SMALL=0, dynamic rendering, DLC=1,
     // and forced single-thread replay did not repair missing actors. Do not
     // impose any of them on a new port: respect the normal NVN/Vulkan

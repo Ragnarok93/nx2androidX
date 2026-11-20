@@ -42,6 +42,9 @@ int main(void) {
     assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,1)==4);
     assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,0)==2);
     assert(vk_pd_d24_matches(ctrl+4,1,0x9fffffu,1)==0);
+    uint32_t rawFloat[] = {0x3f200000u,0x3f200000u,0x3f200000u,0};
+    assert(vk_pd_d24_float_matches(rawFloat,4,0.625f)==3);
+    assert(vk_pd_d24_matches(rawFloat,4,0x9fffffu,1)==0);
     assert(vk_pd_budget_allows(0,64,64));
     assert(!vk_pd_budget_allows(0,65,64));
     assert(!vk_pd_budget_allows(UINT64_MAX,1,64));

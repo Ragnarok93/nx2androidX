@@ -48,3 +48,10 @@ setting	fps=1
 # demonstrated repair of persistent missing combatants.
 # Remove this row or set it to 0 to opt out of the 30 FPS device reference.
 env	DM_FFRS_S25FE_RADV_TUNE=1
+
+# 2026-11-19 diagnostic: this RADV driver copied D24S8 depth to a buffer
+# as float32 (0x3f200000 for 0.625) instead of Vulkan-required packed
+# D24. The shared renderer's default LRZ copy/writeback is explicitly
+# an Adreno workaround. The S25 FE RADV-only profile disables it and
+# converts guest CPU-facing ReadTexels D24 depth. Both are overridable
+# via DM_VK_LRZ_TOUCH and DM_VK_D24_FLOAT_COPY in env.txt.
