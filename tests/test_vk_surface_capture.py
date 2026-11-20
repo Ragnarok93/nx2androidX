@@ -17,6 +17,13 @@ class SurfaceCapture(unittest.TestCase):
         header = (DM / "gfx_vk.h").read_text()
         types = header[header.index("typedef struct { VkFormat vk;"):header.index("const vkfmt_t *vk_fmt")]
         types += header[header.index("typedef struct vkimg vkimg_t;"):header.index("vkimg_t *vk_tex(")]
+        replay = (DM / "gfx_vk_exec.c").read_text()
+        dump_type = replay[replay.index("typedef struct { VkBuffer b; VkDeviceMemory m; void *p;"):
+                           replay.index("enum { PD_MAX = 96 }")]
+        host_barrier = replay[replay.index("static void pass_dump_host_barrier("):
+                              replay.index("// Known-value depth transfer control:")]
+        full_capture = host_barrier + replay[replay.index("static int pass_dump_color_preview("):
+                              replay.index("static void pass_dump_effects(")]
         source = r'''
 #define _POSIX_C_SOURCE 200809L
 #define VK_NO_PROTOTYPES
@@ -33,7 +40,8 @@ class SurfaceCapture(unittest.TestCase):
 ''' + types + r'''
 static struct { VkDevice dev; } V;
 static struct { uint64_t draws, dispatches; } g_vkst;
-static struct { int pass_open, rp_pass, rt_has_col[8], rt_has_dep, samples; struct { uint64_t key; } *sh[6]; } S;
+static struct { int pass_open, rp_pass, rt_has_col[8], rt_has_dep, samples, ncol, pass_w, pass_h;
+    view_t rt_cview[8], rt_dview; uint8_t rt_has_cview[8], rt_has_dview; struct { uint64_t key; } *sh[6]; } S;
 static struct { vkimg_t *im; VkFormat fmt; VkImageSubresourceRange range; } P_att[9];
 static VkRenderingInfo P_ri;
 static VkRenderingAttachmentInfo P_ca[8], P_da, P_sa;
@@ -43,7 +51,8 @@ static VkImageSubresourceRange vk_view_range;
 static uint64_t g_tex_frame = 42, g_set_epoch = 3, g_pd_bytes;
 static int g_sub_pass = 8;
 static unsigned copies, invalidates;
-static VkBufferImageCopy captured[8];
+static VkBufferImageCopy captured[32];
+static VkDeviceSize requested_size;
 static unsigned char memory[16 * 1024 * 1024];
 static const vkfmt_t rgba = {.vk=VK_FORMAT_R8G8B8A8_UNORM, .bpb=4};
 static const vkfmt_t bc = {.vk=VK_FORMAT_BC1_RGBA_UNORM_BLOCK, .compressed=1, .bpb=8, .bw=4, .bh=4};
@@ -53,12 +62,12 @@ static uint32_t vk_mem_type(uint32_t types, VkMemoryPropertyFlags a, VkMemoryPro
 static VkCommandBuffer vk_cmd(void) { return (VkCommandBuffer)(uintptr_t)1; }
 static void vk_img_barrier_all(VkCommandBuffer cb) { assert(cb); }
 static VkResult vkCreateBuffer(VkDevice d, const VkBufferCreateInfo *ci, const void *a, VkBuffer *out) {
-    assert(ci->size == sizeof memory);
+    requested_size = ci->size;
     *out = (VkBuffer)(uintptr_t)1;
     return VK_SUCCESS;
 }
 static void vkGetBufferMemoryRequirements(VkDevice d, VkBuffer b, VkMemoryRequirements *rq) {
-    *rq = (VkMemoryRequirements){sizeof memory, 64, 1};
+    *rq = (VkMemoryRequirements){requested_size, 64, 1};
 }
 static VkResult vkAllocateMemory(VkDevice d, const VkMemoryAllocateInfo *ai, const void *a, VkDeviceMemory *out) {
     *out = (VkDeviceMemory)(uintptr_t)2;
@@ -83,12 +92,19 @@ static void vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags a, VkP
     assert(n == 1 && m->dstAccessMask == VK_ACCESS_HOST_READ_BIT);
 }
 static void vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage im, VkImageLayout layout, VkBuffer b, unsigned n, const VkBufferImageCopy *r) {
-    assert(n == 1 && copies < 8 && r->imageExtent.depth == 1 && layout == VK_IMAGE_LAYOUT_GENERAL);
+    assert(n == 1 && copies < 32 && r->imageExtent.depth == 1 && layout == VK_IMAGE_LAYOUT_GENERAL);
     captured[copies++] = *r;
     memset(memory + r->bufferOffset, 0x50 + copies, 4);
 }
 #include "gfx_vk_surface_capture.inc"
-
+''' + dump_type + r'''
+static pdump_t g_pd[96];
+static int g_npd, g_pd_full=1, g_pd_prepass_written, g_pd_mrt_written, g_pd_effect_images;
+static uint32_t g_pd_scene_w, g_pd_scene_h;
+static uint64_t g_pass_draws=12;
+static char g_pd_size[128];
+static int pass_dump_limit(void) { return 96; }
+''' + full_capture + r'''
 int main(int argc, char **argv) {
     assert(argc == 2);
     setenv("DM_ROOT", argv[1], 1);
@@ -113,6 +129,42 @@ int main(int argc, char **argv) {
     assert(copies == 3 && invalidates == 0);
     surface_capture_write();
     assert(invalidates == 1);
+
+    // The menu capture runs first depth/stencil, an MRT, and a later effect.
+    vkimg_t ds = {.w=96, .h=48, .d=1, .layers=1, .levels=1, .samples=1,
+        .fmt=VK_FORMAT_D32_SFLOAT_S8_UINT, .usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .layout=VK_IMAGE_LAYOUT_GENERAL, .aspect=VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT};
+    P_da.storeOp = P_sa.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    P_ri.pDepthAttachment = &P_da;
+    P_ri.pStencilAttachment = &P_sa;
+    P_att[8].im = &ds;
+    P_att[8].fmt = ds.fmt;
+    pass_dump_full_attachments();
+    assert(g_npd == 2 && g_pd[0].target == -1 && g_pd[1].target == -3);
+    assert(g_pd[0].bytes == 96*48*4 && g_pd[1].bytes == 96*48);
+
+    vkimg_t color = ds;
+    color.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    color.fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    S.ncol = 3; S.pass_w = 96; S.pass_h = 48;
+    for (int i=0;i<3;i++) {
+        P_att[i].im = &color; P_att[i].fmt = color.fmt; P_alias[i] = i;
+        P_ca[i].imageView = (VkImageView)(uintptr_t)(i+1);
+        P_ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
+    pass_dump_full_attachments();
+    assert(g_npd == 5 && g_pd[2].target == 0 && g_pd[4].target == 2);
+    S.ncol = 1;
+    pass_dump_full_attachments();
+    assert(g_npd == 6 && g_pd_effect_images == 1);
+
+    // Scene images must leave space for a source image and its reported crop.
+    g_pd_bytes = pass_dump_budget() - 16u*1024u*1024u;
+    assert(!pass_dump_color(0));
+    const int crop[4] = {2, 4, 90, 40};
+    assert(pass_dump_image(&color,color.fmt,color.aspect,0,0,-202,-4,crop));
+    assert(g_npd == 7 && captured[copies-1].imageExtent.width == 96);
+    assert(g_pd[6].target == -4 && g_pd[6].crop[0] == 2 && g_pd[6].crop[3] == 40);
 }
 '''
         with tempfile.TemporaryDirectory(prefix="nx2a-surfaces-") as tmp:

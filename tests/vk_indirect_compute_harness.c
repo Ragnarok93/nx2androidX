@@ -30,11 +30,16 @@ static uint64_t g_prof_ns[8], g_fence, g_tex_frame;
 static int g_pd_state, g_pd_effects, g_pd_full, g_ch_enabled;
 static struct { unsigned storage_count; } g_sc;
 static void surface_dispatch(void) { abort(); }
-static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage) { abort(); }
+static void pass_dump_aliases(void) { abort(); }
+static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage, int snapshot) { abort(); }
 static void compute_record(const uint64_t key[3], int slow) { (void)key; (void)slow; }
 static long long g_td_off = -1;
 static struct { uint64_t dispatches; } g_vkst;
 static nvn_hmap g_cpipes = {.klen = 24};
+static pthread_cond_t g_cpipe_ready = PTHREAD_COND_INITIALIZER;
+static uint64_t g_cpipe_warm_key[3], g_cpipe_demand_key[3];
+static int g_cpipe_warming, g_cpipe_demand;
+static uint64_t g_compute_attempts, g_compute_failed, g_compute_compile_ns, g_compute_wait_ns;
 static pthread_mutex_t g_cpipe_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t tick(void) { return 0; }
 static VkPipeline compute_build(vkshader_t *s, uint64_t u, uint64_t i) { return (VkPipeline)2; }
@@ -65,6 +70,7 @@ VkSampler vk_samp_by_id(int id) { abort(); }
 VkSampler vk_dummy_sampler(void) { abort(); }
 vkimg_t *vk_tex_by_id(int id, const view_t **v, const tex_t **t) { abort(); }
 static int view_num(const tex_t *t, const view_t *v) { abort(); }
+VkBufferView vk_tbuf_snapshot(const tex_t *t, int *direct) { abort(); }
 VkBufferView vk_tbuf_view(const tex_t *t, int storage) { abort(); }
 VkBufferView vk_dummy_tbuf(int storage) { abort(); }
 VkImageView vk_dummy_view(int a, int b, int c, int d, int e) { abort(); }
@@ -240,6 +246,7 @@ int main(int argc, char **argv) {
         assert(!memcmp(events[nevent-2].values,a,12));
         assert(!memcmp(buffer(zero_before.c0[0].buffer)->bytes+zero_before.c0[0].offset+0x200,(uint32_t[3]){0,0,0},12));
         assert(ndispatch==7 && ncopies==3);
+        assert(g_compute_attempts==7 && g_compute_failed==0 && g_vkst.dispatches==7);
     } else if (!strcmp(argv[1],"two") || !strcmp(argv[1],"three")) {
         int three=!strcmp(argv[1],"three");
         make_pool(addr,addr+4,addr,addr+12,64);
@@ -256,6 +263,7 @@ int main(int argc, char **argv) {
         g_pool[1].base=addr; g_pool[1].boff=127; g_pool_gen++; invoke(addr); assert(!ndispatch && !ncopies);
         g_pool[1].boff=UINT64_MAX-3; g_pool_gen++; invoke(addr); assert(!ndispatch && !ncopies);
         g_pool[1].boff=128; g_pool[1].end=addr+8; g_pool_gen++; invoke(addr); assert(!ndispatch && !ncopies);
+        assert(g_compute_attempts==8 && g_compute_failed==8 && g_vkst.dispatches==0);
     } else if (!strcmp(argv[1],"deferred")) {
         make_pool(addr,addr+sizeof cpu_args,addr,addr+sizeof cpu_args,64); S.pass_open=1;
         vk_sub_update(addr,a,12); assert(!ncopies); invoke(addr); assert(!S.pass_open && ndispatch==1); run_gpu();

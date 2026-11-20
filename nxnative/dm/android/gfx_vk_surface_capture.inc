@@ -21,6 +21,8 @@ static struct {
     struct { size_t offset, size; } samples[SC_SAMPLES];
     unsigned storage_count;
     struct { const vkimg_t *im; surface_binding_t binding; } storage[96];
+    unsigned alias_count;
+    struct { vkimg_t image; surface_binding_t binding; const char *role; } aliases[32];
     int alloc_failed;
     // A direct-mapped cache suppresses identical descriptor bindings in the
     // same pass or dispatch. A collision emits the row instead of hiding it.
@@ -102,7 +104,7 @@ static void surface_descriptor(const vkimg_t *im, VkImageView view, int st, int 
                   view ? "metadata" : "dummy-binding");
 }
 
-static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage) {
+static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage, int snapshot) {
     const vkfmt_t *format = t ? vk_fmt(t->d.format) : NULL;
     surface_binding_t b = surface_binding(NULL, VK_NULL_HANDLE, format ? format->vk : VK_FORMAT_UNDEFINED,
         (VkImageSubresourceRange){0}, binding, st, S.sh[st] ? S.sh[st]->key : 0);
@@ -116,7 +118,7 @@ static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int 
         b.nvn_format = t->d.format;
     }
     surface_usage(storage ? "storage-texel-buffer" : "sampled-texel-buffer", &b, -1, -1,
-                  NULL, view ? "metadata" : "dummy-binding");
+                  NULL, view ? (snapshot ? "gpu-snapshot" : "direct-view") : "dummy-binding");
 }
 
 static void surface_capture_free(void) {
@@ -245,6 +247,35 @@ static void surface_read(const char *role, const vkimg_t *im, surface_binding_t 
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
             0, 1, &host, 0, NULL, 0, NULL);
     }
+}
+
+static void surface_alias_add(const char *role, const vkimg_t *im, VkImageView view,
+                              VkFormat fmt, VkImageSubresourceRange range,
+                              int st, int binding, uint64_t key) {
+    surface_binding_t b = surface_binding(im, view, fmt, range, binding, st, key);
+    if (g_sc.alias_count == sizeof g_sc.aliases / sizeof g_sc.aliases[0]) {
+        surface_usage(role, &b, -1, -1, NULL, "binding-limit");
+        return;
+    }
+    unsigned i = g_sc.alias_count++;
+    // Deferred deletion keeps the VkImage live for this submission even if
+    // a guest pool retires before the pass closes.
+    g_sc.aliases[i].image = *im;
+    g_sc.aliases[i].binding = b;
+    g_sc.aliases[i].role = role;
+}
+
+static void surface_alias_flush(void) {
+    for (unsigned i = 0; i < g_sc.alias_count; i++) {
+        surface_binding_t b = g_sc.aliases[i].binding;
+        // A single representative layer and mip keeps these optional
+        // candidate samples from taking the scene attachment budget.
+        if (b.layers) b.layers = 1;
+        const vkimg_t *im = &g_sc.aliases[i].image;
+        surface_read(g_sc.aliases[i].role, im, b, NULL,
+                     b.aspect && !(b.aspect & (b.aspect - 1)) ? NULL : "unsupported-aspect");
+    }
+    g_sc.alias_count = 0;
 }
 
 static void surface_dispatch(void) {

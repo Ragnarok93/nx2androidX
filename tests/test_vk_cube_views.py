@@ -52,9 +52,15 @@ static void surface_descriptor(const vkimg_t *im, VkImageView view, int stage, i
     (void)im; (void)view; (void)stage; (void)binding; (void)element; (void)storage;
     abort();
 }
-static void vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
-                               uint64_t submission, int pass, uint64_t capture) {
-    (void)im; (void)shader; (void)stage; (void)binding; (void)submission; (void)pass; (void)capture;
+static int vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
+                               uint64_t submission, int pass, uint64_t capture, vkimg_t *producer) {
+    (void)im; (void)shader; (void)stage; (void)binding; (void)submission; (void)pass; (void)capture; (void)producer;
+    abort();
+}
+static void vk_tex_mark_written(vkimg_t *im) { im->wseq = ++g_wseq; im->gpu_w = 1; }
+static void surface_alias_add(const char *role, const vkimg_t *im, VkImageView v, VkFormat fmt,
+                              VkImageSubresourceRange range, int stage, int binding, uint64_t shader) {
+    (void)role; (void)im; (void)v; (void)fmt; (void)range; (void)stage; (void)binding; (void)shader;
     abort();
 }
 static struct { struct { uint64_t key; } *sh[2]; } S;

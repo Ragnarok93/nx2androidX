@@ -49,6 +49,10 @@ setting	fps=1
 # Remove this row or set it to 0 to opt out of the 30 FPS device reference.
 env	DM_FFRS_S25FE_RADV_TUNE=1
 
+# Seven expensive integer-view compute variants from the Nov 20 RADV run.
+# Tried first by the selected driver's background history worker.
+env	DM_VK_COMPUTE_WARM_SEEDS=7d5360e7217da425:100:420,1d1b5d2228ef28a1:200:880,d17e8ae4746091e7:200:880,871a956888714cad:100:440,f0cb690586962b91:200:840,571584e1b477256c:200:840,3e901071781cb805:80:220
+
 # 2026-11-19 diagnostic: this RADV driver copied D24S8 depth to a buffer
 # as float32 (0x3f200000 for 0.625) instead of Vulkan-required packed
 # D24. The shared renderer's default LRZ copy/writeback is explicitly

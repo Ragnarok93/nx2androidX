@@ -1037,6 +1037,11 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferSetDepthBounds, void, NVNcommandBuffer *c, uint32_t enable, float n, float f) {
+    *REC(c, OP_DEPTH_BOUNDS, p_depth_bounds) = (p_depth_bounds){enable & 0xff, n, f};
+}
+#endif
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
@@ -1413,20 +1418,23 @@ static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h) {
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
 static void nvn_nop(void) {}
+#ifndef __ANDROID__
 static void trace_depth_bounds(NVNcommandBuffer *c, uint32_t enable, float near, float far) {
     SEQ("ignored depth bounds cmd=%p enabled=%u min=%.9g max=%.9g",
         (void *)c, enable, (double)near, (double)far);
 }
+#endif
 static void trace_cmd_wait(NVNcommandBuffer *c, const NVNsync *sync) {
     // Capture identity at record time. A producer may fence later or on
     // another thread, so the recording's observation alone cannot order it.
     SEQ("ignored command wait cmd=%p sync=%p", (void *)c, (const void *)sync);
 }
-static const NVNT_nvnCommandBufferSetDepthBounds g_check_bounds __attribute__((unused)) = trace_depth_bounds;
 static const NVNT_nvnCommandBufferWaitSync g_check_wait __attribute__((unused)) = trace_cmd_wait;
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
+#ifndef __ANDROID__
     "nvnCommandBufferSetDepthBounds",
+#endif
     "nvnCommandBufferWaitSync",
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferPushDebugGroupDynamic",
@@ -1448,8 +1456,11 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
         while (i < NVN_NFUNC && strcmp(nvn_names[i], g_nops[k])) i++;
         if (i == NVN_NFUNC) die("NVN empty implementation %s is not in main's name table", g_nops[k]);
         if (nvn_slot[i].fn != (void *)nvn_unimpl_entry) die("NVN %s has an implementation and is also listed as an empty implementation", g_nops[k]);
+#ifndef __ANDROID__
         if (!strcmp(g_nops[k], "nvnCommandBufferSetDepthBounds")) nvn_slot[i].fn = (void *)trace_depth_bounds;
-        else if (!strcmp(g_nops[k], "nvnCommandBufferWaitSync")) nvn_slot[i].fn = (void *)trace_cmd_wait;
+        else
+#endif
+        if (!strcmp(g_nops[k], "nvnCommandBufferWaitSync")) nvn_slot[i].fn = (void *)trace_cmd_wait;
         else nvn_slot[i].fn = (void *)nvn_nop;
     }
     unsigned nnop = sizeof g_nops / sizeof *g_nops;

@@ -37,6 +37,23 @@ static inline int vk_compute_history_observe(vk_compute_key *keys, unsigned *cou
     return 1;
 }
 
+// Built-in profile observations are separate from the player's saved cache.
+static inline unsigned vk_compute_history_seeds(const char *list, vk_compute_key *keys) {
+    unsigned count = 0;
+    while (list && *list && count < VK_COMPUTE_HISTORY_STARTUP) {
+        unsigned long long shader, um, im;
+        int used = 0;
+        if (sscanf(list, "%16llx:%16llx:%16llx%n", &shader, &um, &im, &used) == 3 &&
+            used > 0 && (!list[used] || list[used] == ',')) {
+            vk_compute_key key = {{shader, um, im}};
+            count = vk_compute_history_add(keys, count, &key);
+        }
+        list = strchr(list, ',');
+        if (list) list++;
+    }
+    return count;
+}
+
 static inline unsigned vk_compute_history_read(FILE *f, vk_compute_key *keys) {
     char magic[sizeof vk_compute_history_magic];
     if (fread(magic, sizeof magic, 1, f) != 1 ||

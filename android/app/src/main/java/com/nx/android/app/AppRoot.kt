@@ -1,5 +1,9 @@
 package com.nx.android.app
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
@@ -35,8 +39,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.compose.runtime.mutableIntStateOf
@@ -233,10 +241,28 @@ fun AppRoot(
                     onDiagnosticLog = { logOpen = true },
                     onEnvCheck = { envCheckOpen = true })
             }
-            val volumes = remember(ctx, locale.mode) { StorageVolumes.list(ctx, locale) }
             pickerReq?.let { req ->
+                var storageRevision by remember(req) { mutableIntStateOf(0) }
+                LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { storageRevision++ }
+                DisposableEffect(ctx, req) {
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(context: Context, intent: Intent) { storageRevision++ }
+                    }
+                    val filter = IntentFilter().apply {
+                        addAction(Intent.ACTION_MEDIA_MOUNTED)
+                        addAction(Intent.ACTION_MEDIA_UNMOUNTED)
+                        addAction(Intent.ACTION_MEDIA_EJECT)
+                        addAction(Intent.ACTION_MEDIA_REMOVED)
+                        addAction(Intent.ACTION_MEDIA_BAD_REMOVAL)
+                        addDataScheme("file")
+                    }
+                    ContextCompat.registerReceiver(ctx, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+                    onDispose { ctx.unregisterReceiver(receiver) }
+                }
+                val storageOk = remember(req, storageRevision) { actions.storageOk() }
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f))) {
-                    if (!actions.storageOk()) {
+                    if (!storageOk) {
+                        BackHandler { pickerReq = null }
                         // 内置文件管理器读不了没有全文件访问的存储：给授权入口
                         Column(
                             Modifier.fillMaxSize().padding(24.dp),
@@ -254,15 +280,16 @@ fun AppRoot(
                                 Spacer(Modifier.weight(1f))
                                 QuietButton(stringResource(R.string.common_cancel), onClick = { pickerReq = null })
                                 CapsuleButton(stringResource(R.string.app_grant_permission), onClick = {
-                                    pickerReq = null
                                     actions.onAskStorage()
                                 })
                             }
                         }
                     } else {
+                        val volumes = remember(ctx, locale.mode, storageRevision) { StorageVolumes.list(ctx, locale) }
                         FilePickerScreen(
                             req = req,
                             volumes = volumes,
+                            storageRevision = storageRevision,
                             onPicked = { f ->
                                 pickerReq = null
                                 req.onPicked(f)

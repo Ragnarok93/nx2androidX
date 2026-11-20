@@ -33,7 +33,7 @@ def production():
         header = header.replace('X(' + name + ')', '')
     state = replay[replay.index('static struct {'):replay.index('} S;') + 4]
     slots = core[core.index('#define SCRATCH_BLOCK'):core.index('static uint64_t pool_merge_back')]
-    drvs = replay[replay.index('static uint32_t g_dispatch'):replay.index('// vk_samp_by_id without')]
+    drvs = replay[replay.index('static uint64_t texel_handle('):replay.index('// vk_samp_by_id without')]
     cache = replay[replay.index('enum { SETC'):replay.index('// A binding that runs past')]
     memo = replay[replay.index('enum { MEMO_CB'):replay.index('// ---------------- draws')]
     indirect = replay[replay.index('static void compute_warm_start(void) {'):replay.index('// ---------------- copies and clears')]

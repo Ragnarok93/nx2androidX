@@ -412,6 +412,10 @@ static void vk_tex_view_drop_all(vkimg_t *im);
 // one over its memory rendered, here it does not. They are linked both ways at creation (up to 8 each), and a sampled image older than an overlapping
 // image's last rendering is logged ([alias] stale read), to find what a game reinterprets
 static uint64_t g_wseq;
+void vk_tex_mark_written(vkimg_t *im) {
+    im->gpu_w = 1;
+    im->wseq = ++g_wseq;
+}
 static void alias_link(vkimg_t *im) {
     for (uint32_t i = 0; i < g_by_key.cap; i++) {
         vkimg_t *o = g_by_key.vals[i]; if (!o || o == im || o->pool != im->pool || o->off >= im->off + im->size || im->off >= o->off + o->size) continue;
@@ -432,15 +436,16 @@ static void alias_check(vkimg_t *im) {   // im is about to be sampled
             o->w, o->h, o->nvn_format, o->levels, (long long)o->off, (long long)(o->off + o->size), (unsigned long long)o->wseq);
     }
 }
-void vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
-                        uint64_t submission, int pass, uint64_t capture) {
+int vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
+                        uint64_t submission, int pass, uint64_t capture, vkimg_t *producer) {
     // Diagnostics only, with one report per sampled storage/shader/binding.
     enum { LIMIT = 80 };
     static struct { uint64_t pool, shader; int64_t offset; unsigned stage, binding; } seen[LIMIT];
     static unsigned n;
     static uint64_t last_capture;
     if (capture != last_capture) { n = 0; last_capture = capture; }
-    if (n == LIMIT) return;
+    if (!im->novl || n == LIMIT) return 0;
+    int discovered = 0;
     pthread_mutex_lock(&g_img_mu);
     const vkimg_t *writer = NULL;
     for (int i = 0; i < im->novl; i++) {
@@ -452,8 +457,10 @@ void vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned b
         for (; i < n; i++) if (seen[i].pool == im->pool && seen[i].offset == im->off &&
                                seen[i].shader == shader && seen[i].stage == stage && seen[i].binding == binding) break;
         if (i == n) {
+            if (producer) *producer = *writer;
+            discovered = 1;
             seen[n++] = (typeof(seen[0])){im->pool, shader, im->off, stage, binding};
-            VKLOG("[alias-consumer] submission %llu pass %d shader %016llx stage %u binding %u pool %#llx: sampled fmt %#x +%lld size %lld uploads %d, overlaps attachment fmt %#x +%lld size %lld sequence %llu",
+            VKLOG("[alias-consumer] submission %llu pass %d shader %016llx stage %u binding %u pool %#llx: sampled fmt %#x +%lld size %lld uploads %d, overlaps GPU writer fmt %#x +%lld size %lld sequence %llu",
                   (unsigned long long)submission, pass, (unsigned long long)shader, stage, binding,
                   (unsigned long long)im->pool, im->nvn_format, (long long)im->off, (long long)im->size,
                   im->packaged, writer->nvn_format, (long long)writer->off, (long long)writer->size,
@@ -461,6 +468,7 @@ void vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned b
         }
     }
     pthread_mutex_unlock(&g_img_mu);
+    return discovered;
 }
 extern uint64_t g_tex_frame;   // presents so far, for the packaged textures' last use (vk_tex_sweep)
 // Images are kept per storage key until their pool goes, so a texture the game streams into memory another texture had before gets an image of its own and the old one
@@ -498,6 +506,17 @@ static vkimg_t *vk_tex_(const tex_t *t) {
     // initialization metadata may close a family but cannot split existing peers.
     pthread_mutex_lock(&g_img_mu);
     vkimg_t *im = keyed ? texture_storage_lookup(&k, t) : nvn_hm_get(&g_by_serial, &t->serial);
+    // A sampled wrapper can use an already-written storage image when the
+    // guest describes exactly the same layout with only IMAGE cleared.
+    // Keep existing owners and independently initialized textures separate.
+    if (!im && keyed && !(k.d.flags & NVN_TEXTURE_FLAGS_IMAGE) &&
+        !f->depth && !f->stencil && !f->compressed && !t->has_layout && !t->has_pkg_data) {
+        akey producer = k;
+        producer.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+        vkimg_t *peer = nvn_hm_get(&g_by_key, &producer);
+        if (peer && peer->gpu_w && !peer->packaged && peer->size == (int64_t)t->L.size &&
+            (!k.family || (peer->family_formats & texture_family_bit(t->d.format)))) im = peer;
+    }
     if (!im) {
         if (keyed) evict_overlaps(k.pool, t->off, (int64_t)t->L.size);
         im = img_new(t, vk_fmt(k.d.format)); if (!im) { pthread_mutex_unlock(&g_img_mu); return NULL; }
@@ -747,7 +766,7 @@ static int bc_standin_ok(const vkimg_t *im, const vkfmt_t *cf, const vkfmt_t *vf
 VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arrayed, int as_attachment, vkimg_t **img_out, VkFormat vfmt) {
     vkimg_t *im = vk_tex(t); if (img_out) *img_out = im;
     if (!im) return VK_NULL_HANDLE;
-    if (as_attachment) { im->wseq = ++g_wseq; im->gpu_w = 1; } else if (im->novl) alias_check(im);
+    if (as_attachment) vk_tex_mark_written(im); else if (im->novl) alias_check(im);
     vk_watch(im, as_attachment ? "attachment" : "sampled or image");
     if (!as_attachment) { void vk_texdump_note(vkimg_t *im); vk_texdump_note(im); }
     const vkfmt_t *f = vk_fmt(vw && vw->set_format ? vw->format : t->d.format); if (!f) f = vk_fmt(t->d.format);
@@ -1044,11 +1063,53 @@ VkBufferView vk_dummy_tbuf(int storage) {
     VKCHK(vkCreateBufferView(V.dev, &ci, NULL, &v[storage]));
     return v[storage];
 }
-// a buffer texture's texel buffer view over its pool (cached by texture contents: the registered copy). One at an offset that is not a multiple of
-// minTexelBufferOffsetAlignment cannot have a view there: a read-only one (storage 0) is given a copy of its bytes as the CPU sees them, at an aligned place in
-// this submission's scratch memory, made at each bind and freed with the submission. Final Fantasy Resonance (Unreal Engine 5.6) binds its sprite particles'
-// parameters (R32F, 44 elements: colours, sizes) at offsets 36 bytes past a multiple of Adreno's 64, and they read the zero dummy (its battle fires stay missing with
-// the copy: another cause). A buffer the GPU writes in the same submission would be read as last copied back; a storage one keeps the dummy (its writes would go to the copy)
+// Uniform and storage texel views share pools. Any direct view must meet
+// both alignments because the backing VkBuffer advertises both usages.
+static VkDeviceSize texel_alignment(const vkfmt_t *f) {
+    const VkPhysicalDeviceTexelBufferAlignmentProperties *p = &V.texel_alignment;
+    if (!p->uniformTexelBufferOffsetAlignmentBytes || !p->storageTexelBufferOffsetAlignmentBytes)
+        return V.props.limits.minTexelBufferOffsetAlignment;
+    VkDeviceSize texel = f->bpb % 3 == 0 ? f->bpb / 3 : f->bpb;
+    VkDeviceSize uniform = p->uniformTexelBufferOffsetAlignmentBytes;
+    VkDeviceSize storage = p->storageTexelBufferOffsetAlignmentBytes;
+    if (p->uniformTexelBufferOffsetSingleTexelAlignment && texel < uniform) uniform = texel;
+    if (p->storageTexelBufferOffsetSingleTexelAlignment && texel < storage) storage = texel;
+    return uniform > storage ? uniform : storage;
+}
+
+static int texel_range(const tex_t *t, const vkfmt_t **format, VkBuffer *buf, VkDeviceSize *off, VkDeviceSize *n) {
+    const vkfmt_t *f = vk_fmt(t->d.format);
+    if (!f || !f->bpb || !t->mem || !t->d.width ||
+        t->d.width > V.props.limits.maxTexelBufferElements) return 0;
+    *format = f;
+    *n = (VkDeviceSize)t->d.width * f->bpb;
+    return vk_buf_at((uint64_t)(uintptr_t)t->mem, *n, buf, off);
+}
+
+// Record before descriptor assembly, outside a render pass. A CPU copy can
+// predate an earlier compute write even when both use the same mapped pool.
+VkBufferView vk_tbuf_snapshot(const tex_t *t, int *direct) {
+    const vkfmt_t *f;
+    VkBuffer src, dst;
+    VkDeviceSize off, aligned, n;
+    if (!texel_range(t, &f, &src, &off, &n)) return VK_NULL_HANDLE;
+    if (off % texel_alignment(f) == 0) {
+        *direct = 1;
+        return VK_NULL_HANDLE;
+    }
+    vk_end_pass_land();
+    vk_scratch(n, V.props.limits.minTexelBufferOffsetAlignment, &dst, &aligned);
+    VkBufferView view = VK_NULL_HANDLE;
+    VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, dst, f->vk, aligned, n};
+    if (vkCreateBufferView(V.dev, &ci, NULL, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkCommandBuffer cb = vk_cmd();
+    VkBufferCopy copy = {off, aligned, n};
+    vk_img_barrier_all(cb);
+    vkCmdCopyBuffer(cb, src, dst, 1, &copy);
+    vk_img_barrier_all(cb);
+    vk_defer_free_bview(view);
+    return view;
+}
 typedef struct { uint64_t mem, pool; uint32_t fmt, n; } tbkey;   // pool: the chunk's serial (vkpool_t.serial)
 static nvn_hmap g_tbuf_cache = {.klen = sizeof(tbkey)}; static pthread_mutex_t g_tbuf_mu = PTHREAD_MUTEX_INITIALIZER;
 // A pool chunk goes (gfx_vk_core.c mtl_pool_del): the views over its buffer leave the cache and are destroyed once the GPU is past the submission open or next (vk_defer_free_bview,
@@ -1077,21 +1138,22 @@ VkBufferView vk_tbuf_view(const tex_t *t, int storage) {
     pthread_mutex_lock(&g_tbuf_mu);
     VkBufferView v = nvn_hm_get(&g_tbuf_cache, &k);
     if (!v) {
-        const vkfmt_t *f = vk_fmt(t->d.format); VkBuffer b; VkDeviceSize off = 0;
-        uint32_t al = (uint32_t)V.props.limits.minTexelBufferOffsetAlignment;
-        int in = f && t->mem && vk_buf_at((uint64_t)(uintptr_t)t->mem, (uint64_t)t->d.width * f->bpb, &b, &off);
-        if (in && off % al == 0) {
-            VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, b, f->vk, off, (VkDeviceSize)t->d.width * f->bpb};
-            if (vkCreateBufferView(V.dev, &ci, NULL, &v)) v = VK_NULL_HANDLE; else nvn_hm_put(&g_tbuf_cache, &k, v);
-        } else if (in && !storage) {
-            VkDeviceSize n = (VkDeviceSize)t->d.width * f->bpb, so; VkBuffer sb; void vk_ubd_read(uint64_t a, uint64_t n, uint8_t *dst);
-            uint8_t *p = vk_scratch(n, al, &sb, &so); vk_ubd_read((uint64_t)(uintptr_t)t->mem, n, p);
-            VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, sb, f->vk, so, n};
-            if (vkCreateBufferView(V.dev, &ci, NULL, &v)) v = VK_NULL_HANDLE; else vk_defer_free_bview(v);
-            static unsigned nc; if (nc++ < 4) VKLOG("buffer texture at a misaligned offset (%llu, not a multiple of %u; format %#x, %u elements): read from a copy", (unsigned long long)off, al, t->d.format, t->d.width);
-            pthread_mutex_unlock(&g_tbuf_mu); return v;   // (not cached: a copy of this bind's bytes)
-        } else if (in) VKRED_ONCE(16, "storage buffer texture at a misaligned offset: %llu, not a multiple of %u (format %#x, %u elements): zeros", (unsigned long long)off, al, t->d.format, t->d.width);
-        else VKRED_ONCE(16, "buffer texture not in a pool (format %#x, %u elements)", t->d.format, t->d.width);
+        const vkfmt_t *f;
+        VkBuffer b;
+        VkDeviceSize off, n;
+        if (texel_range(t, &f, &b, &off, &n)) {
+            VkDeviceSize align = texel_alignment(f);
+            if (off % align == 0) {
+                VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, b, f->vk, off, n};
+                if (vkCreateBufferView(V.dev, &ci, NULL, &v) == VK_SUCCESS) nvn_hm_put(&g_tbuf_cache, &k, v);
+                else v = VK_NULL_HANDLE;
+            } else {
+                VKRED_ONCE(16, "%s texel buffer at unsupported offset %llu (requires %llu alignment, format %#x)",
+                    storage ? "storage" : "sampled", (unsigned long long)off, (unsigned long long)align, t->d.format);
+            }
+        } else {
+            VKRED_ONCE(16, "invalid texel buffer extent or pool (format %#x, %u elements)", t->d.format, t->d.width);
+        }
     }
     pthread_mutex_unlock(&g_tbuf_mu);
     return v;

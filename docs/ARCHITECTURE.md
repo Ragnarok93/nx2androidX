@@ -99,6 +99,20 @@ Zero-copy pools can be lazy (`DM_VK_ZEROCOPY_LAZY`: `0` none; `1` also the 256 M
 
 `DM_VK_POOL_READBACK_RANGES=1` independently opts cached guest pools into range-limited completion merges for submissions containing only known transfer writes and read-only shader descriptors. Writable/unknown shader descriptors (checked before descriptor memo returns), transform feedback and texture-to-guest-buffer writes disable the mode for the whole submission. Uncertain submissions keep full cached-pool merging and whole-mapping invalidation. Eligible ranges keep the baseline complete for both cached and NVN CPU_UNCACHED guest pools because all device writes are covered. Outside the covered writes the GPU copy and baseline stay unchanged; their next tracked sync overwrites whole dirty blocks from guest memory before refreshing those baseline blocks. Uncertain CPU_UNCACHED submissions merge their tracked ranges, as with the switch off, and initialization/untracked pools still copy whole. Both switches are off by default. New GPU buffer-write paths must either register their full destination or force the conservative fallback.
 
+For texel-buffer views Vulkan 1.3 can use the per-format alignments of both
+buffer usages. A sampled binding that still needs realignment is copied on the
+GPU in replay order before descriptor assembly. The scratch view belongs to that
+command, so a later draw or dispatch cannot reuse stale bytes through the
+descriptor memo. A writable binding still requires a legal direct view.
+
+The standalone Capture graphics action includes bounded full images for one
+geometry depth/stencil pass, one MRT pass, subsequent effect outputs and the
+source before Android composition. The source has a reserved image slot and
+readback capacity. The manifest names the source crop and records exact raw
+bytes when a color preview is unavailable. Surface rows pair alias consumers and
+candidate producers and link small consumer images to their full dump. An
+overlapping guest range by itself leaves the contents of separate images alone.
+
 Vulkan indirect compute dispatches copy their three GPU-written group counts into submission scratch memory in command order. A shader that reads c0 gets a private driver segment, outside the immutable segment cache, with the counts at `c0 + 0x200`; the dispatch reads that same record. Without c0, only a 12-byte record is allocated. Argument records may cross chunks of the same pool, with each chunk's buffer offset preserved. All words are validated before any argument copy, and a transfer barrier makes the record visible to both uniform reads and indirect dispatch. Scratch storage is retained until the submission completes. Direct compute dispatches and other driver segments retain their existing content caching.
 
 The Vulkan backend supplies disabled generic vertex attributes as Maxwell's `(0, 0, 0, 1)`, keeping the float register bit pattern when a shader reads integers. This has separate storage from zero-filled unbound uniform buffers. Enabled attributes with an invalid format or missing buffer retain the conservative zero fallback. The distinction matters when a depth pre-pass uses an absent attribute's W as a displacement weight: a zero weight can disagree with the material pass, fail depth equality and retain colour from older frames.

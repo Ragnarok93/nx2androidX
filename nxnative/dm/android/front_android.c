@@ -1528,6 +1528,7 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("DM_FPS_TARGET", "30", 0);
         LOG("[profile] FFRS S25 FE/RADV: Switch-reference 30 FPS target (override with DM_FPS_TARGET=60)");
     }
+    LOG("[profile] FFRS S25 FE/RADV: effective DM_FPS_TARGET=%s", getenv("DM_FPS_TARGET"));
     // The uploaded run recorded 384 omitted draws for unavailable pipelines
     // by present 4200. The asynchronous pipeline path deliberately drops
     // draws while compiling. On this one GPU/profile, require the pipeline

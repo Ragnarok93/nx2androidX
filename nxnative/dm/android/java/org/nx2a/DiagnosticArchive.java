@@ -147,6 +147,9 @@ final class DiagnosticArchive {
                     "CPU/shadow indirect diagnostics are explicitly non-authoritative.\n" +
                     "High-overhead full MRT/depth/stencil readback is OFF unless Capture graphics is pressed.\n" +
                     "surface_usage.tsv lists attachment, shader image, transfer and presentation bindings.\n" +
+                    "Alias rows pair the sampled view with a candidate producer's base subresource.\n" +
+                    "pass_dump_manifest.tsv identifies full images, including presentation source target -4 and its crop.\n" +
+                    "A blank preview column means the attachment is exported as exact raw bytes.\n" +
                     "Tile status encodes offset:bytes:x:y:width:height in surface_samples.raw,\n" +
                     "indexed by offset and hash in surface_samples.tsv. Metadata-only and skipped rows give their status.\n" +
                     "The last three prior runtime logs are retained across app launches.\n" +

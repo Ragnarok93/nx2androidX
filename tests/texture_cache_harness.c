@@ -131,6 +131,13 @@ int main(void) {
     a.d.samples=b.d.samples=4;assert(!same(a,b));a.d.samples=b.d.samples=0;
     a.d.target=b.d.target=NVN_TEXTURE_TARGET_3D;assert(!same(a,b));
     a.d.target=b.d.target=NVN_TEXTURE_TARGET_CUBEMAP;assert(!same(a,b));
+    // An IMAGE-backed GPU producer is visible through an identical sampled wrapper.
+    reset(); a=base_tex(NVN_FORMAT_RGBA8,1); b=base_tex(NVN_FORMAT_RGBA8,2);
+    a.d.flags=NVN_TEXTURE_FLAGS_IMAGE;
+    image=vk_tex_(&a); image->gpu_w=1; image->content=0x65;
+    assert(vk_tex_(&b)==image && image->content==0x65 && g_by_key.n==1);
+    b.d.format=NVN_FORMAT_RGBA8_SRGB;
+    assert(vk_tex_(&b)!=image);
     // Streaming may rewrite the same BC storage and register a new object.
     // Only the old serial has a CPU-written mark. The image is still shared.
     reset(); a=base_tex(0x44,1); b=base_tex(0x44,2);

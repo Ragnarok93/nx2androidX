@@ -18,6 +18,9 @@ class ComputeHistoryTests(unittest.TestCase):
 int main(int argc, char **argv) {
     assert(argc == 2);
     vk_compute_key written[VK_COMPUTE_HISTORY_MAX], loaded[VK_COMPUTE_HISTORY_MAX];
+    vk_compute_key seeds[VK_COMPUTE_HISTORY_STARTUP];
+    assert(vk_compute_history_seeds("5:100:420,6:1:1,broken,5:100:420,7:80:220", seeds) == 2);
+    assert(seeds[0].word[0] == 5 && seeds[0].word[1] == 0x100 && seeds[1].word[2] == 0x220);
     vk_compute_key base = {{0x5854663e6002c250, 0, 0}};
     vk_compute_key variant = {{0x5854663e6002c250, 6, 8}};
     vk_compute_key invalid = {{1, 6, 2}};
