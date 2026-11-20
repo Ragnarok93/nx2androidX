@@ -304,3 +304,35 @@ shows a late 600-present window averaging 20.40 ms replay CPU, including
 15.87 ms in pipeline keys/creation, and 13.82 ms GPU busy. This is a
 baseline from the failing build. Correctness and performance of D32F+S8
 still need a matched first-battle run on the device.
+
+### Follow-up Xclipse capture at present 5493
+
+The `023353` archive passed ZIP integrity checks. The selected imported
+RADV driver again reported Mesa commit `cc87fdf712`. The first geometry
+depth pass used Vulkan format 130 for 47 draws. Its D32F sample contains
+1,075,974 values in (0, 1] out of 1,079,520 texels. The player confirmed
+substantial visual improvement and reported some missing textures and effects.
+
+The log contains 76 overlapping-storage warnings, including BC3 over
+B10G11R11 render targets and unequal extents even for same-format pairs.
+Those overlaps may be allocator reuse. The warning alone cannot identify
+the shader's expected bytes. A host reproduction found an independent
+stale-texture path: a new NVN serial can resolve to the existing cached
+image over identical BC storage but bypass its dirty-page check. Sampled
+compressed images initialized from the CPU now check the existing tracked
+range across serial replacement as long as the GPU has never written them.
+The executable texture cache regression reproduces the old stale bytes
+and checks both the refresh and preservation of GPU-owned images.
+
+The app began with zero binary cache bytes and zero recorded pipelines.
+After frame generation was enabled, the window ending at frame 11,400
+reported frame p95 96.73 ms and p99 308.66 ms, NVN submit/present p95
+92.02 ms and GPU p95 17.80 ms. Pipeline processing averaged 9.23 ms
+of 12.72 ms replay CPU in the corresponding 600-present window. The
+capture itself preceded frame generation. These figures identify a
+stutter window but do not quantify a native-only performance improvement.
+
+The standalone binary pipeline cache now lives in the private files
+directory outside the replaceable game pack. Existing cache data retains
+device and driver validation on load. Measure cold and warm launches of
+the same scene with frame generation off to determine the effect.

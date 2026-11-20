@@ -70,6 +70,21 @@ int main(int argc,char **argv) {
     unsigned char original[sizeof(pcache_header)+sizeof payload];
     FILE *f=fopen(g_pcache_path,"rb"); assert(f); assert(fread(original,1,sizeof original,f)==sizeof original); fclose(f);
     pcache_load(); assert(loaded==sizeof payload);
+    if (mode==6) {
+        char directory[1024], old[1024];
+        assert(pcache_path(old,sizeof old,argv[1]));
+        snprintf(directory,sizeof directory,"%s/private-cache",argv[1]);
+        assert(!mkdir(directory,0700));
+        setenv("DM_VK_PCACHE_DIR",directory,1);
+        assert(pcache_load()==sizeof payload && g_pcache_migrate);
+        vk_pipeline_cache_save();
+        assert(!g_pcache_migrate && strcmp(old,g_pcache_path));
+        assert(!unlink(old));  // re-export replaces the data pack
+        assert(pcache_load()==sizeof payload);
+        V.props.driverVersion++;
+        assert(pcache_load()==0);  // persistent storage still rejects another driver
+        return 0;
+    }
     if (mode==1) {
         // Legacy cache migration must work even without a newly created pipeline.
         disk(payload,sizeof payload); pcache_load(); assert(loaded==sizeof payload);
@@ -165,7 +180,8 @@ int main(int argc,char **argv) {
                             '-I'+str(DM/'android/compat/include'),str(path/'test.c'),str(DM/'android/compat/sha256.c'),
                             '-o',str(path/'test')],check=True)
             subprocess.run([str(path/'test'),tmp,str(mode)],check=True)
-            self.assertEqual(sorted(p.name for p in path.glob('vk_pipeline_cache.bin*')), ['vk_pipeline_cache.bin'])
+            cache_dir = path/'private-cache' if mode == 6 else path
+            self.assertEqual(sorted(p.name for p in cache_dir.glob('vk_pipeline_cache.bin*')), ['vk_pipeline_cache.bin'])
 
     def test_disk_cache_boundary(self): self.check_case(0)
     def test_legacy_cache_migrates_without_new_pipelines(self): self.check_case(1)
@@ -173,6 +189,7 @@ int main(int argc,char **argv) {
     def test_next_save_reuses_interrupted_temporary_file(self): self.check_case(3)
     def test_empty_cache_creation_failure_is_logged(self): self.check_case(4)
     def test_burst_of_new_pipelines_saves(self): self.check_case(5)
+    def test_standalone_cache_survives_pack_replacement(self): self.check_case(6)
 
 
 if __name__ == '__main__': unittest.main()

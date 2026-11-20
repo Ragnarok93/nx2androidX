@@ -426,8 +426,10 @@ static void alias_check(vkimg_t *im) {   // im is about to be sampled
     for (int i = 0; i < im->novl; i++) {
         vkimg_t *o = im->ovl[i]; if (o->wseq <= im->wseq || o->wseq <= im->rseen) continue;
         im->rseen = o->wseq;
-        static int n; if (n++ < 200) VKLOG("[alias] stale read: %ux%u fmt %#x levels %u at %+lld..%+lld sampled, but %ux%u fmt %#x levels %u at %+lld..%+lld rendered over its memory later",
-            im->w, im->h, im->nvn_format, im->levels, (long long)im->off, (long long)(im->off + im->size), o->w, o->h, o->nvn_format, o->levels, (long long)o->off, (long long)(o->off + o->size));
+        static int n; if (n++ < 200) VKLOG("[alias] possible stale read: pool %#llx, %ux%u fmt %#x levels %u at %+lld..%+lld sampled (CPU uploads %d, attachment sequence %llu), overlaps %ux%u fmt %#x levels %u at %+lld..%+lld (attachment sequence %llu)",
+            (unsigned long long)im->pool, im->w, im->h, im->nvn_format, im->levels,
+            (long long)im->off, (long long)(im->off + im->size), im->packaged, (unsigned long long)im->wseq,
+            o->w, o->h, o->nvn_format, o->levels, (long long)o->off, (long long)(o->off + o->size), (unsigned long long)o->wseq);
     }
 }
 extern uint64_t g_tex_frame;   // presents so far, for the packaged textures' last use (vk_tex_sweep)
@@ -480,8 +482,13 @@ static vkimg_t *vk_tex_(const tex_t *t) {
     // a texture's first use: written by the CPU since it was registered (profile tex_dirty_upload), it is CPU-written from now on, as at nvn_mtl.m's first resolution;
     // otherwise only a later nvn_ft_poll pass finds it, and its first draws read zeros
     int nvn_ft_written(const tex_t *);
+    // A streamed BC texture can be registered under a new serial while
+    // keeping the same cached image. Its CPU-write mark belonged to the
+    // old serial, but the image still tracks this exact CPU storage range.
+    int tracked_cpu_blocks = im->packaged && f->compressed && !im->gpu_w &&
+        !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && im->pkg_mem == t->mem && im->pkg_len == t->L.size;
     if (t->mem && lin_copy(im, t, f)) {}
-    else if (t->mem && (packaged_tex(t) || (first && (nvn_ft_written(t) || cpu_content_tex(t, f))))) {
+    else if (t->mem && (tracked_cpu_blocks || packaged_tex(t) || (first && (nvn_ft_written(t) || cpu_content_tex(t, f))))) {
         im->pkg_used = g_tex_frame;
         if (!im->packaged) { im->packaged = 1; pkg_upload(im, t, f); }
         else {

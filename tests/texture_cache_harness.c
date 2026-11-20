@@ -11,7 +11,7 @@ typedef int pthread_mutex_t;
 #define PTHREAD_MUTEX_INITIALIZER 0
 #define pthread_mutex_lock(p) ((void)(p))
 #define pthread_mutex_unlock(p) ((void)(p))
-typedef struct { int depth,stencil,vk; } vkfmt_t;
+typedef struct { int depth,stencil,vk,compressed; } vkfmt_t;
 typedef struct vkimg {
     uint64_t pool,used,pkg_used,pkg_vgen,pkg_stamp,pkg_seen,pkg_hash;
     int64_t off,size; int flags,looked,packaged,pkg_sparse,pkg_released,gpu_w;
@@ -22,9 +22,10 @@ typedef struct vkimg {
     int format,content;
 } vkimg_t;
 static unsigned written,uploads,created,dropped;
+static uint64_t dirty_now=1;
 static unsigned char retired[4096];
 static uint64_t g_tex_frame;
-static const vkfmt_t *vk_fmt(int format) {static vkfmt_t f;f=(vkfmt_t){.vk=format};return &f;}
+static const vkfmt_t *vk_fmt(int format) {static vkfmt_t f;f=(vkfmt_t){.vk=format,.compressed=format==0x44};return &f;}
 static vkimg_t *img_new(const tex_t *t,const vkfmt_t *f) {(void)t;vkimg_t *im=calloc(1,sizeof *im);assert(im);im->format=f->vk;im->img=(void*)(uintptr_t)++created;assert(created<sizeof retired);return im;}
 static void alias_link(vkimg_t *im) {(void)im;}
 static void alias_unlink(vkimg_t *im) {(void)im;}
@@ -40,14 +41,14 @@ static int lin_copy(vkimg_t *im,const tex_t *t,const vkfmt_t *f) {(void)im;(void
 static int packaged_tex(const tex_t *t) {return t->has_pkg_data || t->has_layout || (written&(1u<<(t->serial-1)));}
 int nvn_ft_written(const tex_t *t) {(void)t;return 0;}
 static int cpu_content_tex(const tex_t *t,const vkfmt_t *f) {(void)t;(void)f;return 0;}
-static uint64_t nvn_dirty_now(void) {return 1;}
+static uint64_t nvn_dirty_now(void) {return dirty_now;}
 static uint64_t pkg_hash(const uint8_t *mem,size_t size) {(void)size;return mem[0];}
 static void pkg_upload(vkimg_t *im,const tex_t *t,const vkfmt_t *f) {
-    (void)f;uploads++;im->content=t->mem[0];im->pkg_seen=im->pkg_stamp=1;
+    (void)f;uploads++;im->packaged++;im->content=t->mem[0];im->pkg_seen=im->pkg_stamp=dirty_now;
     im->pkg_hash=pkg_hash(t->mem,t->L.size);im->pkg_mem=t->mem;im->pkg_span=t->mem;im->pkg_len=t->L.size;
 }
 static int nvn_sparse_since(const void *pool,uint64_t addr,size_t size,uint64_t gen,uint64_t stamp) {(void)pool;(void)addr;(void)size;(void)gen;(void)stamp;return 0;}
-static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uint64_t stamp) {(void)span;(void)mem;(void)size;(void)stamp;return 0;}
+static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uint64_t stamp) {(void)span;(void)mem;(void)size;return stamp<dirty_now;}
 static void nvn_dirty_protect(const void *mem,size_t size) {(void)mem;(void)size;}
 /* CACHE KEYS */
 /* CACHE LIFETIME */
@@ -130,6 +131,18 @@ int main(void) {
     a.d.samples=b.d.samples=4;assert(!same(a,b));a.d.samples=b.d.samples=0;
     a.d.target=b.d.target=NVN_TEXTURE_TARGET_3D;assert(!same(a,b));
     a.d.target=b.d.target=NVN_TEXTURE_TARGET_CUBEMAP;assert(!same(a,b));
+    // Streaming may rewrite the same BC storage and register a new object.
+    // Only the old serial has a CPU-written mark. The image is still shared.
+    reset(); a=base_tex(0x44,1); b=base_tex(0x44,2);
+    written=1; image=vk_tex_(&a);
+    assert(image->content==0x83 && vk_tex_(&b)==image);
+    before=uploads;
+    storage[0]=0x53; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x53 && uploads==before+1);
+    assert(vk_tex_(&b)==image && uploads==before+1);
+    image->gpu_w=1; image->content=0x79; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x79 && uploads==before+1);
+    storage[0]=0x83;
     reset();free(g_by_key.keys);free(g_by_key.vals);free(g_by_serial.keys);free(g_by_serial.vals);
     assert(created==dropped);puts("family pairs, metadata peers, upload visibility, closure and unique retirement passed");
 }

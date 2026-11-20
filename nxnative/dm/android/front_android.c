@@ -743,10 +743,10 @@ static void diag_capture_arm(void) {
                    "isolated_depth_transfer_control=0.625\n"
                    "depth_pipeline_trace=player_opt_in\n"
                    "all_mrt=1\ndepth=1\nstencil=1\nraw_bytes=1\n"
-                   "trace_details=%d\nvulkan_driver=%s\n"
+                   "trace_details=%d\nvulkan_driver=%s\nframe_generation_at_arm=%d\n"
                    "gpu_draw_inputs=%s\n"
                    "cpu_indirect_trace=guest_and_cached_shadows_only\n",
-                (unsigned long long)frame, trace, driver ? driver : "(unknown)",
+                (unsigned long long)frame, trace, driver ? driver : "(unknown)", atomic_load(&g_set_fg),
                 trace ? "bounded_end_of_pass_for_read_only_indexed_indirect_draws" : "off");
         fclose(f);
     }
@@ -1589,6 +1589,11 @@ static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char 
     if (gid && gid[0] && strlen(gid) < sizeof sub - 2) snprintf(sub, sizeof sub, "/%s", gid);
     snprintf(p, sizeof p, "%s/save", internal); mkdir(p, 0700); snprintf(q, sizeof q, "%s%s", p, sub); mkdir(q, 0700); setenv("DM_SAVE", q, 0);
     snprintf(p, sizeof p, "%s/temp", internal); mkdir(p, 0700); snprintf(q, sizeof q, "%s%s", p, sub); mkdir(q, 0700); setenv("DM_TEMP", q, 0);
+    // An embedded or companion APK update replaces the game data directory.
+    // Standalone APKs have a private files directory for this one game.
+    if (!sub[0] && snprintf(p, sizeof p, "%s/vulkan-cache", internal) < (int)sizeof p &&
+        (mkdir(p, 0700) == 0 || errno == EEXIST))
+        setenv("DM_VK_PCACHE_DIR", p, 1);
     snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
     snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p);
     tune_ffrs_s25fe_radv();

@@ -223,6 +223,7 @@ public class GameActivity extends NativeActivity {
         File backup = new File(base, "nx2a-data.backup");
         File marker = new File(target, "nx2a-export.sha256");
         if (target.isDirectory() && marker.isFile() && expected.equals(readText(marker).trim())) {
+            preserveVulkanCache(base, backup);
             deleteTree(backup);  // a prior process may have died after activating the new directory
             return;
         }
@@ -287,7 +288,20 @@ public class GameActivity extends NativeActivity {
             deleteTree(partial);
             throw new IOException("cannot activate extracted game data");
         }
+        preserveVulkanCache(base, backup);
         deleteTree(backup);
+    }
+
+    // Migrate a pre-update cache left inside the old data pack. The native
+    // loader still validates the driver identity and contents before use.
+    static void preserveVulkanCache(File files, File previousPack) {
+        File oldCache = new File(previousPack, "vk_pipeline_cache.bin");
+        if (!oldCache.isFile()) return;
+        File directory = new File(files, "vulkan-cache");
+        if (!directory.isDirectory() && !directory.mkdir()) return;
+        File cache = new File(directory, oldCache.getName());
+        if (!cache.exists() && !oldCache.renameTo(cache))
+            android.util.Log.w("nx2a-game", "Could not move the previous Vulkan pipeline cache");
     }
 
     private static boolean safeEntry(String name) {
