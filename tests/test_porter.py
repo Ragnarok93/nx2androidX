@@ -687,8 +687,8 @@ class Misc(unittest.TestCase):
         d = Path(tempfile.mkdtemp(prefix='nx2a_previous_data_'))
         try:
             profile = game.load(NEO)
-            stem = pipeline.app_stem(profile, 'NEO')
-            dst = d / (stem + '-data')
+            # Renamed legacy data folders are found by manifest, not label.
+            dst = d / 'legacy-renamed-data'
             marker = profile.get('romfs_marker')
             (dst / 'RomFS' / marker).parent.mkdir(parents=True)
             (dst / 'RomFS' / marker).write_bytes(b'previous verified data')

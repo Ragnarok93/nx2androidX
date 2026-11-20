@@ -592,26 +592,34 @@ class Port:
                  Path('/storage/emulated/0/Download/nx2android-ports')]
         seen = set()
         for root in roots:
-            path = Path(root) / filename
-            if str(path) in seen: continue
-            seen.add(str(path))
-            if path.is_symlink() or not path.is_dir(): continue
-            man = datapack.read_manifest(path)
-            if not isinstance(man, dict): continue
-            if (man.get('title_id') != self.g.id or
-                    man.get('package') != self.package or
-                    man.get('version') != self.pkg_ver):
-                say(f'previous data folder title/package/version differs; not reused: {path}')
-                continue
-            rom = path / 'RomFS'
-            marker = self.g.get('romfs_marker')
-            if (not marker or rom.is_symlink() or not rom.is_dir() or
-                    not (rom / marker).is_file()):
-                say(f'previous data folder lacks a readable uncompressed RomFS: {path}')
-                continue
-            say(f'previous companion data found for {self.pkg_ver}: {path} '
-                '(verifying RomFS before reusing)')
-            return path
+            root = Path(root)
+            # Legacy exporter names can change with the application label;
+            # manifest title/package/version, not the directory name, is authority.
+            candidates = [root / filename]
+            if root.is_dir():
+                candidates += sorted(root.glob('*-data'))
+            for path in candidates:
+                if str(path) in seen: continue
+                seen.add(str(path))
+                if path.is_symlink() or not path.is_dir(): continue
+                man = datapack.read_manifest(path)
+                if not isinstance(man, dict): continue
+                if (man.get('title_id') != self.g.id or
+                        man.get('package') != self.package or
+                        man.get('version') != self.pkg_ver):
+                    say(f'previous data folder title/package/version differs; not reused: {path}')
+                    continue
+                rom = path / 'RomFS'
+                marker = self.g.get('romfs_marker')
+                if (not marker or rom.is_symlink() or not rom.is_dir() or
+                        not (rom / marker).is_file()):
+                    say(f'previous data folder lacks a readable uncompressed RomFS: {path}')
+                    continue
+                say(f'previous companion data found for {self.pkg_ver}: {path} '
+                    '(verifying RomFS before reusing)')
+                return path
+        say(f'no reusable companion data found for {self.g.id} {self.pkg_ver}; '
+            f'searched: {", ".join(str(x) for x in roots)}')
         return None
 
     def restore_companion_romfs(self, nx, ex, version, base, update):
