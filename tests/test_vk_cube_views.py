@@ -45,7 +45,13 @@ static void capture_red(const char *fmt, ...) {
         code += r'''
 static struct { VkDevice dev; VkPhysicalDevice pd; } V;
 static uint64_t g_wseq, g_tex_gen=1, g_set_epoch=1, g_x_logfs;
-static int g_var_now, g_tracing;
+static int g_var_now, g_tracing, g_pd_state, g_pd_effects, g_sub_pass;
+static uint64_t g_pd_capture_id;
+static void vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
+                               uint64_t submission, int pass, uint64_t capture) {
+    (void)im; (void)shader; (void)stage; (void)binding; (void)submission; (void)pass; (void)capture;
+    abort();
+}
 static struct { struct { uint64_t key; } *sh[2]; } S;
 static vkimg_t image;
 static tex_t texture;
@@ -131,6 +137,15 @@ int main(int argc, char **argv) {
         reset(4,16,16,14,1); has_subview=1; subview=(view_t){.set_layers=1,.min_layer=2,.nlayers=12}; accepted(1,2,12);
         vk_tex_view_drop_all(&image); free(g_views.keys); free(g_views.vals); return 0;
     }
+    reset(1,32,32,1,1);
+    texture.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+    dmsv_bind float_image = {.dim=1};
+    VkDescriptorImageInfo info;
+    assert(tex_desc_for(0,&float_image,1,&info,0) == 0 && info.imageView && !image.gpu_w);
+    assert(lookup_calls == 1);
+    assert(tex_desc_for(0,&float_image,1,&info,1) == 0 && info.imageView && image.gpu_w);
+    assert(lookup_calls == 2);
+    assert(tex_desc_for(0,&float_image,1,&info,1) == 0 && lookup_calls == 2);
     // The reported failure: an ordinary 2D view already exists in the cache.
     reset(1,16,16,1,1); assert(vk_tex_view(&texture,NULL,1,0,0,NULL)); rejected(0);
     assert(red_calls==1 && strstr(last_red,"[RED]") && strstr(last_red,"image 16x16x1") && strstr(last_red,"layers 1") && strstr(last_red,"cflags 0x"));

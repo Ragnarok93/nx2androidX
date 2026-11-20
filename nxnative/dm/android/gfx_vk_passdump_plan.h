@@ -36,6 +36,13 @@ static inline int vk_pd_depth_prepass_eligible(unsigned ncolor,
                                              unsigned min_draws, int already_done) {
     return !ncolor && has_depth && !already_done && draws >= min_draws;
 }
+// Preserve the image budget for composition. Allow smaller two-target
+// effects passes (e.g. layered fog) as well as half-size and larger outputs.
+static inline int vk_pd_effect_color(unsigned colors, uint32_t width, uint32_t height,
+                                     uint32_t scene_width, uint32_t scene_height) {
+    return scene_width && scene_height && colors && colors <= 2 &&
+           (colors == 2 || (width >= (scene_width + 1) / 2 && height >= (scene_height + 1) / 2));
+}
 // In VK_FORMAT_D24_UNORM_S8_UINT depth-aspect transfers the 24-bit UNORM
 // value occupies the low 24 bits of each 32-bit word. High bits undefined.
 // Allow +/- 1 ULP for conversion/rounding to the expected known-depth clear.

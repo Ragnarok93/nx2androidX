@@ -414,10 +414,13 @@ void vk_ubd_land(VkCommandBuffer cb); int vk_ubd_shadow(uint64_t a, uint64_t n, 
 // DM_VK_PASSDUMP_RAW=1: also save exact, unclamped transfer bytes for reference comparisons.
 // Each capture writes pass_dump_manifest.tsv with present/pass, target slot, mip/layer, format, pool and raw byte hash.
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; uint32_t w, h; VkFormat f, view_fmt; VkDeviceSize bytes;
-    uint64_t present, pool; int pass, target; uint32_t level, layer; int64_t off; } pdump_t;
+    uint64_t present, submission, pool; int pass, target; uint32_t level, layer; int64_t off; } pdump_t;
 enum { PD_MAX = 96 };
 static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];
 static int g_pd_prepass_written; // only the first eligible depth-only pass of a one-shot capture
+static int g_pd_effects, g_pd_shadow_reads;
+static uint32_t g_pd_scene_w, g_pd_scene_h;
+static uint64_t g_pd_capture_id;
 static int g_pd_control_written; // one isolated depth-transfer readback, never a scene attachment
 static uint64_t g_pd_bytes;
 static uint64_t pass_dump_budget(void) {
@@ -510,7 +513,7 @@ static void pass_dump_depth_control(void) {
     pdump_t *entry = &g_pd[g_npd++];
     *entry = (pdump_t){.b=b, .m=bm, .p=mapped, .w=8, .h=8,
         .f=VK_FORMAT_D24_UNORM_S8_UINT, .view_fmt=VK_FORMAT_D24_UNORM_S8_UINT,
-        .bytes=bytes, .present=g_tex_frame, .pass=-200,
+        .bytes=bytes, .present=g_tex_frame, .submission=g_set_epoch, .pass=-200,
         .target=-1, .level=0, .layer=0};
     g_pd_bytes += bytes;
     vk_defer_free_image(im, imem);
@@ -554,7 +557,7 @@ static int pass_dump_color(int ci) {
     }
     pdump_t *d = &g_pd[g_npd++];
     *d = (pdump_t){.w = w, .h = h, .f = im->fmt, .view_fmt = S.cfmt[ci], .bytes = n,
-        .pass = g_sub_pass - 1, .present = g_tex_frame, .target = ci, .level = lv, .layer = ly,
+        .pass = g_sub_pass - 1, .present = g_tex_frame, .submission = g_set_epoch, .target = ci, .level = lv, .layer = ly,
         .pool = im->pool, .off = im->off};
     g_pd_bytes += n;
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, n, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
@@ -567,6 +570,39 @@ static int pass_dump_color(int ci) {
     vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, d->b, 1, &c); vk_img_barrier_all(cb);
     return 1;
 }
+static void pass_dump_effects(void) {
+    if (g_npd >= pass_dump_limit()) return;
+    unsigned colors = 0;
+    int first = -1;
+    for (int i = 0; i < S.ncol && i < 8; i++) if (P_ca[i].imageView && P_att[i].im) {
+        if (first < 0) first = i;
+        colors++;
+    }
+    if (colors >= 3) {
+        if (!g_pd_scene_w) { g_pd_scene_w = S.pass_w; g_pd_scene_h = S.pass_h; }
+        return;
+    }
+    if (vk_pd_effect_color(colors, S.pass_w, S.pass_h, g_pd_scene_w, g_pd_scene_h)) {
+        pass_dump_color(first);
+        return;
+    }
+    if (colors || !P_da.imageView || !P_att[8].im || g_pd_shadow_reads >= 4) return;
+    const vkimg_t *im = P_att[8].im;
+    const view_t *v = S.rt_has_dview ? &S.rt_dview : NULL;
+    unsigned level = v && v->set_levels ? v->base_level : 0;
+    unsigned layer = v && v->set_layers ? v->min_layer : 0;
+    for (int i = 0; i < g_npd; i++) {
+        const pdump_t *d = &g_pd[i];
+        if (d->target == -1 && d->pool == im->pool && d->off == im->off &&
+            d->level == level && d->layer == layer) return;
+    }
+    int before = g_npd;
+    pass_dump_depth_aspect(VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (g_npd != before) {
+        g_pd_shadow_reads++;
+        pass_dump_depth_aspect(VK_IMAGE_ASPECT_STENCIL_BIT);
+    }
+}
 static void pass_dump(void) {
     texdump_flush();
     if (g_pd_state != 1) return;
@@ -577,6 +613,7 @@ static void pass_dump(void) {
       int minimum = md && *md ? atoi(md) : 0;
       if (minimum > 0 && !vk_pd_pass_has_draws(g_pass_draws, (unsigned)minimum)) return; }
     if (g_sub_pass - 1 < g_pd_skip) return;
+    if (g_pd_effects) { pass_dump_effects(); return; }
     { const char *ctrl = getenv("DM_VK_PASSDUMP_DEPTH_CONTROL");
       if (ctrl && atoi(ctrl)) pass_dump_depth_control(); }
     // A field/battle frame's early 91-draw depth prepass was never captured:
@@ -648,7 +685,7 @@ static void texdump_flush(void) {   // DM_VK_TEXDUMP: outside a render pass (pas
         vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, ti, VK_IMAGE_LAYOUT_GENERAL, 1, &r, VK_FILTER_NEAREST); vk_img_barrier_all(cb);
         pdump_t *d = &g_pd[g_npd++]; *d = (pdump_t){.w = w, .h = h, .f = VK_FORMAT_R16G16B16A16_SFLOAT,
             .view_fmt = im->fmt, .bytes = dump_bytes, .pass = -100 - (int)ly,
-            .present = g_tex_frame, .target = -2, .level = lv, .layer = ly, .pool = im->pool, .off = im->off};
+            .present = g_tex_frame, .submission = g_set_epoch, .target = -2, .level = lv, .layer = ly, .pool = im->pool, .off = im->off};
         g_pd_bytes += dump_bytes;
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, (VkDeviceSize)w * h * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
         VKCHK(vkCreateBuffer(V.dev, &bi, NULL, &d->b)); vkGetBufferMemoryRequirements(V.dev, d->b, &rq);
@@ -676,7 +713,7 @@ static void pass_dump_depth_aspect(VkImageAspectFlags aspect) {
     pdump_t *d = &g_pd[g_npd++];
     *d = (pdump_t){.w = w, .h = h,
         .f = aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? VK_FORMAT_S8_UINT : im->fmt,
-        .view_fmt = im->fmt, .bytes = n, .pass = g_sub_pass - 1, .present = g_tex_frame,
+        .view_fmt = im->fmt, .bytes = n, .pass = g_sub_pass - 1, .present = g_tex_frame, .submission = g_set_epoch,
         .target = aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? -3 : -1,
         .level = lv, .layer = ly, .pool = im->pool, .off = im->off};
     g_pd_bytes += n;
@@ -706,13 +743,18 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         { const char *td = getenv("DM_VK_TEXDUMP"); const char *pl = td ? strchr(td, '+') : NULL; g_td_pool = pl ? strtoull(td, NULL, 16) : 0; g_td_off = pl ? strtoll(pl + 1, NULL, 16) : -1; g_td_im = NULL; g_td_done = 0; }
         const char *fr = getenv("DM_VK_PASSDUMP_FRAMES"); g_pd_frames = fr && atoi(fr) > 1 ? atoi(fr) : 1;
         g_pd_state = 1; g_npd = 0; g_pd_bytes = 0;
+        const char *effects = getenv("DM_VK_PASSDUMP_EFFECTS");
+        g_pd_effects = effects && atoi(effects);
+        g_pd_scene_w = g_pd_scene_h = 0;
+        g_pd_capture_id++;
+        g_pd_shadow_reads = 0;
         g_pd_prepass_written = 0; g_pd_control_written = 0;
         input_capture_arm();
         setenv("DM_VK_PASSDUMP", "0", 1);
         { const char *root = getenv("DM_ROOT"); char path[1024];
           snprintf(path, sizeof path, "%s/pass_dump_manifest.tsv", root ? root : ".");
           FILE *mf = fopen(path, "w");
-          if (mf) { fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\n", mf); fclose(mf); } }
+          if (mf) { fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\tsubmission\n", mf); fclose(mf); } }
         VKLOG("pass dump: next submission from pass %d, limit %d images, %llu MB raw readback",
             g_pd_skip, pass_dump_limit(), (unsigned long long)(pass_dump_budget() / 1048576)); return; }
     if (g_pd_state == 1 && (g_npd || g_input_count) && --g_pd_frames > 0 && g_npd < pass_dump_limit() - 1) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
@@ -748,10 +790,10 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
             (unsigned long long)d->bytes, (unsigned long long)raw_hash);
         { char mfpath[1024]; snprintf(mfpath, sizeof mfpath, "%s/pass_dump_manifest.tsv", root ? root : ".");
           FILE *mf = fopen(mfpath, "a");
-          if (mf) { fprintf(mf, "%d\t%llu\t%d\t%d\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llx\t%lld\t%016llx\tpass_%02d.ppm\n",
+          if (mf) { fprintf(mf, "%d\t%llu\t%d\t%d\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llx\t%lld\t%016llx\tpass_%02d.ppm\t%llu\n",
               i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
               d->f, d->view_fmt, (unsigned long long)d->bytes, (unsigned long long)d->pool,
-              (long long)d->off, (unsigned long long)raw_hash, i); fclose(mf); } }
+              (long long)d->off, (unsigned long long)raw_hash, i, (unsigned long long)d->submission); fclose(mf); } }
         { const char *raw = getenv("DM_VK_PASSDUMP_RAW");
           if (raw && atoi(raw)) { char rp[1100]; snprintf(rp, sizeof rp, "%s/pass_%02d.raw", root ? root : ".", i);
               FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(d->p, 1, (size_t)d->bytes, rf); fclose(rf); } } }
@@ -1311,7 +1353,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     if (p) { g_last_k = *k; g_last_p = p; return p == (void *)1 ? VK_NULL_HANDLE : p; }
     if (async_pipe(k)) return VK_NULL_HANDLE;
     vkshader_t *stg[3] = {S.sh[0], S.sh[1], S.sh[2]};
-    uint64_t tb = g_prof_on ? tick() : 0; p = build_pipeline(k, layout, stg); if (g_prof_on) g_prof_ns[0] += tick() - tb; g_vkst.pipes_built++;
+    uint64_t tb = g_prof_on ? tick() : 0; p = build_pipeline(k, layout, stg); if (g_prof_on) g_prof_ns[0] += tick() - tb;
     pthread_mutex_lock(&g_pipe_mu);
     VkPipeline had = nvn_hm_get(&g_pipes, k);
     if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; }   // a prewarm thread made it meanwhile
@@ -1616,9 +1658,14 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
     int tid = (int)(h & 0xfffff); const view_t *v = NULL; const tex_t *t = NULL;
     ii->imageLayout = VK_IMAGE_LAYOUT_GENERAL; ii->sampler = storage ? VK_NULL_HANDLE : samp_for(st, b, h, 0); ii->imageView = VK_NULL_HANDLE;
     int sc = storage ? img_fmt_cls(b->fmt) : 0;   // FINAL FANTASY TACTICS' UI composite declares its window image r32ui over an RGBA8 texture: the view is in the shader's class
-    unsigned ck = ((unsigned)tid * 2654435761u ^ (unsigned)b->dim * 97u ^ (unsigned)(b->flags & 1) ^ (unsigned)sc * 0x9E37u) % TVC;
+    // A float storage binding and a sampled binding both have sc == 0.
+    // Keep their cache classes separate so a sampled hit cannot bypass
+    // marking the image as a GPU write destination.
+    int cache_class = storage ? sc + 1 : 0;
+    int trace_alias = !storage && g_pd_state == 1 && g_pd_effects;
+    unsigned ck = ((unsigned)tid * 2654435761u ^ (unsigned)b->dim * 97u ^ (unsigned)(b->flags & 1) ^ (unsigned)cache_class * 0x9E37u) % TVC;
     int logfs = g_x_logfs && S.sh[1] && S.sh[1]->key == g_x_logfs && st == 1; static int nlogfs; if (logfs && nlogfs >= 60) logfs = 0;
-    if (tid && g_var_now != 3 && !g_tracing && !logfs && g_tvc[ck].epoch == g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == sc) {
+    if (tid && g_var_now != 3 && !g_tracing && !logfs && !trace_alias && g_tvc[ck].epoch == g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == cache_class) {
         ii->imageView = g_tvc[ck].v; if (g_tvc[ck].im) g_tvc[ck].im->last_use = mtl_last_fence() + 1; vk_texdump_note(g_tvc[ck].im);
         if (g_tvc[ck].num && !storage) ii->sampler = samp_for(st, b, h, 1);
         return g_tvc[ck].num;
@@ -1631,7 +1678,9 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         extern __thread VkFormat vk_view_fmt;
         VkFormat vf = 0; const vkfmt_t *tf = sc && !view_num(t, v) ? vk_fmt(v && v->set_format ? v->format : t->d.format) : NULL;
         if (tf && !tf->compressed && !tf->dec && !tf->depth && !tf->stencil) vf = vk_int_fmt(tf->bpb, sc == 2);
-        vkimg_t *im = NULL; ii->imageView = vf ? vk_tex_view_as(t, v, b->dim, b->flags & 1, 0, &im, vf) : vk_tex_view(t, v, b->dim, b->flags & 1, 0, &im); if (storage && im) im->gpu_w = 1;
+        vkimg_t *im = NULL; ii->imageView = vf ? vk_tex_view_as(t, v, b->dim, b->flags & 1, 0, &im, vf) : vk_tex_view(t, v, b->dim, b->flags & 1, 0, &im); if (storage && im && ii->imageView) im->gpu_w = 1;
+        if (trace_alias && ii->imageView && im && S.sh[st])
+            vk_tex_trace_alias(im, S.sh[st]->key, st, b->binding, g_set_epoch, g_sub_pass - 1, g_pd_capture_id);
         if (vf && ii->imageView && vk_view_fmt == vf) { static int once; if (!once++) VKLOG("storage image: nvn format %#x viewed as vk %d for a %s image binding", t->d.format, vf, sc == 1 ? "uint" : "int"); }
         // DM_VK_BIND_DUMP=<pixel shader key hex>:<binding>: write the storage of the texture that binding really resolved to (slots alone are polluted by stale
         // entries from earlier draws and say nothing about which binding reads which); deswizzle it offline with the dimensions in the line
@@ -1657,7 +1706,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
                              (unsigned long long)t->serial, (const void *)t->pool, (unsigned long long)t->off, (unsigned long long)t->L.size, (const void *)t->mem, (unsigned)t->d.flags, t->pool ? (unsigned)t->pool->flags : 0u, (int)t->has_layout, (void *)im, im ? im->w : 0, im ? im->h : 0, im ? im->fmt : 0, im ? im->layers : 0, im ? im->levels : 0, im ? (int)im->gpu_w : -1, (void *)ii->imageView);
         if (im) im->last_use = mtl_last_fence() + 1;
         if (ii->imageView) num = view_num(t, v);
-        if (ii->imageView) { g_tvc[ck].epoch = g_set_epoch; g_tvc[ck].gen = g_tex_gen; g_tvc[ck].tid = tid; g_tvc[ck].dim = b->dim; g_tvc[ck].arr = b->flags & 1; g_tvc[ck].v = ii->imageView; g_tvc[ck].im = im; g_tvc[ck].num = num; g_tvc[ck].sc = sc; }
+        if (ii->imageView) { g_tvc[ck].epoch = g_set_epoch; g_tvc[ck].gen = g_tex_gen; g_tvc[ck].tid = tid; g_tvc[ck].dim = b->dim; g_tvc[ck].arr = b->flags & 1; g_tvc[ck].v = ii->imageView; g_tvc[ck].im = im; g_tvc[ck].num = num; g_tvc[ck].sc = cache_class; }
     }
     if (num && !storage) ii->sampler = samp_for(st, b, h, 1);
     if (!ii->imageView) {
@@ -1797,7 +1846,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         if (k == RK_SBUF || k == RK_SBUF_UBO || k == RK_IMG || k == RK_IMG_UBO || k == RK_IMG_TBUF) { vk_readback_unknown(); break; }
         if (d != RD_UBO && d != RD_SAMPLED && d != RD_TBUF && d != RD_IMAGE && d != RD_SAMPLER) { vk_readback_unknown(); break; }
     }
-    int memo = st < 3 && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
+    int memo = st < 3 && !(g_pd_state == 1 && g_pd_effects) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
     uint32_t vd[96]; uint64_t vum = 0, vim = 0;   // verify: what the memo gave
     if (memo && set_memo_get(st, s, dofs)) { static unsigned nv; if (!g_x_setverify || ++nv % 64) { g_set_memo++; return g_smemo[st].set; }
         verify = 1; memcpy(vd, dofs, sizeof *dofs * (size_t)s->ndyn); vum = g_num_um; vim = g_num_im; }
@@ -2745,42 +2794,101 @@ static void draw_idx(const p_draw_idx *d) {
 }
 static nvn_hmap g_cpipes = {.klen = 24};   // {shader, its integer-texel bindings}
 static pthread_mutex_t g_cpipe_mu = PTHREAD_MUTEX_INITIALIZER;   // the replay thread and compute_warm
+static int g_compute_alt;
 static VkPipeline compute_build(vkshader_t *cs, uint64_t um, uint64_t im) {   // (VkPipeline)1 when it fails
     VkDescriptorSetLayout dsl[5] = {cs->dsl}; VkPipeline p;
     int bs = build_begin();   // (the crash dump's note: build_pipeline)
     if (bs >= 0) { snprintf(g_build[bs].what, sizeof g_build[bs].what, "compute pipeline, shader %016llx, integer-texel views %#llx/%#llx", (unsigned long long)cs->key, (unsigned long long)um, (unsigned long long)im); g_build[bs].phase = 1; }
     // DM_VK_SPV_ALT=1 in env.txt (with DM_VK_SPV_DIR): compute shaders take the alternative code too, from the start (compute_warm builds them all then, and they are kept)
-    static int alt = -1; if (alt < 0) { const char *e = getenv("DM_VK_SPV_ALT"); alt = e && atoi(e); }
-    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_COMPUTE_BIT, cs->local), 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, um, im, alt && !um && !im ? 1u << 31 : 0, 0), "main", NULL}, vk_pipeline_layout(dsl, 1), VK_NULL_HANDLE, -1};   // (pNext: DM_VK_SUBGROUP_PIN)
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_COMPUTE_BIT, cs->local), 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, um, im, g_compute_alt && !um && !im ? 1u << 31 : 0, 0), "main", NULL}, vk_pipeline_layout(dsl, 1), VK_NULL_HANDLE, -1};   // (pNext: DM_VK_SUBGROUP_PIN)
     if (bs >= 0) g_build[bs].phase = 2;
     VkResult r = vkCreateComputePipelines(V.dev, V.pcache, 1, &ci, NULL, &p); build_end(bs);
-    vk_pipeline_cache_changed();
+    if (!r) vk_pipeline_cache_changed();
     if (r) { LOG("[RED] [vk] compute pipeline failed: %016llx", (unsigned long long)cs->key); p = (VkPipeline)1; }
     return p;
 }
-// Compute pipelines made ahead. One depends only on its shader (and integer-texel variants, rare), and building one costs Adreno 45-105 ms: Super Mario Odyssey's
-// particle emitters run on compute shaders (EffectPtcl), and the first cap throw at a breakable object built one on the replay thread (a 65 ms frame), the first scenes
-// several. A game has few (Odyssey 41), so at the first submission a background thread builds every compute shader in the bundle with no integer-texel variant (up to a cap, below)
+// Record a small set of successfully used variants. The history worker owns
+// the file and never makes replay wait for a write or a background compile.
+#include "gfx_vk_compute_history.h"
+static pthread_mutex_t g_ch_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_ch_cv = PTHREAD_COND_INITIALIZER;
+static vk_compute_key g_ch_pending[VK_COMPUTE_HISTORY_MAX];
+static unsigned g_ch_pending_count, g_ch_queued;
+static int g_ch_enabled;
+static void compute_record(const uint64_t ck[3]) {
+    if (!g_ch_enabled || g_ch_queued >= VK_COMPUTE_HISTORY_MAX) return;
+    pthread_mutex_lock(&g_ch_mu);
+    memcpy(g_ch_pending[g_ch_pending_count++].word, ck, sizeof(vk_compute_key));
+    g_ch_queued++;
+    pthread_cond_signal(&g_ch_cv);
+    pthread_mutex_unlock(&g_ch_mu);
+}
+static int compute_warm_key(const uint64_t ck[3]) {
+    pthread_mutex_lock(&g_cpipe_mu);
+    int have = nvn_hm_get(&g_cpipes, ck) != NULL;
+    pthread_mutex_unlock(&g_cpipe_mu);
+    vkshader_t *cs = have ? NULL : vk_shader(ck[0], 5);
+    if (!cs) return 0;
+    VkPipeline p = compute_build(cs, ck[1], ck[2]);
+    if (p == (void *)1) return 0; // a speculative compile failure must not block demand
+    pthread_mutex_lock(&g_cpipe_mu);
+    if (!nvn_hm_get(&g_cpipes, ck)) nvn_hm_put(&g_cpipes, ck, p);
+    else vkDestroyPipeline(V.dev, p, NULL);
+    pthread_mutex_unlock(&g_cpipe_mu);
+    return 1;
+}
+static void compute_history(const char *path) {
+    vk_compute_key known[VK_COMPUTE_HISTORY_MAX], pending[VK_COMPUTE_HISTORY_MAX];
+    FILE *f = fopen(path, "rb");
+    unsigned n = f ? vk_compute_history_read(f, known) : 0;
+    if (f) fclose(f);
+    unsigned made = 0;
+    uint64_t t0 = tick();
+    for (unsigned i = 0; i < n; i++) made += compute_warm_key(known[i].word);
+    VKLOG("compute prewarm from history: %u of %u observed variants in %.0f ms", made, n, (tick() - t0) / 1e6);
+    while (n < VK_COMPUTE_HISTORY_MAX) {
+        pthread_mutex_lock(&g_ch_mu);
+        while (!g_ch_pending_count) pthread_cond_wait(&g_ch_cv, &g_ch_mu);
+        unsigned count = g_ch_pending_count;
+        memcpy(pending, g_ch_pending, count * sizeof(*pending));
+        g_ch_pending_count = 0;
+        pthread_mutex_unlock(&g_ch_mu);
+        unsigned before = n;
+        for (unsigned i = 0; i < count; i++) n = vk_compute_history_add(known, n, &pending[i]);
+        if (n != before && !vk_compute_history_save(path, known, n))
+            VKLOG("compute prewarm history could not be saved");
+    }
+}
 static void *compute_warm(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk compute warm"); setpriority(PRIO_PROCESS, 0, 10);
+    if (g_ch_enabled) {
+        const char *dir = getenv("DM_VK_PCACHE_DIR");
+        if (!dir || !*dir) dir = getenv("DM_ROOT");
+        char path[1024];
+        int len = dir ? snprintf(path, sizeof path, "%s/vk_compute_history.bin", dir) : -1;
+        if (len > 0 && len < (int)sizeof path) compute_history(path);
+        return NULL;
+    }
     int vk_shader_keys(uint32_t stage, uint64_t *out, int max); static uint64_t keys[4096]; int n = vk_shader_keys(5, keys, 4096), made = 0; uint64_t t0 = tick();
-    // A bundle with many compute shaders is left to the replay: Monster Hunter Rise's (4096 or more) held ~550 MB more from the title on, and a Retroid Pocket 5
-    // (Adreno 650, 8 GB) ran out of GPU memory loading the first area (vkAllocateMemory -2 at a 4 MB pool). DM_VK_COMPUTE_WARM_MAX (start-up, default 256): the most made ahead
+    // Preserve the original base-variant prewarm for smaller shader bundles.
     { const char *e = getenv("DM_VK_COMPUTE_WARM_MAX"); int cap = e ? atoi(e) : 256;
       if (n > cap) { VKLOG("compute pipelines made ahead: none, the bundle has %d%s compute shaders (more than %d, DM_VK_COMPUTE_WARM_MAX)", n, n == 4096 ? " or more" : "", cap); return NULL; } }
     for (int i = 0; i < n; i++) {
         uint64_t ck[3] = {keys[i], 0, 0};
-        pthread_mutex_lock(&g_cpipe_mu); int have = nvn_hm_get(&g_cpipes, ck) != NULL; pthread_mutex_unlock(&g_cpipe_mu);
-        vkshader_t *cs = have ? NULL : vk_shader(keys[i], 5); if (!cs) continue;
-        VkPipeline p = compute_build(cs, 0, 0); made++;
-        pthread_mutex_lock(&g_cpipe_mu); if (!nvn_hm_get(&g_cpipes, ck)) nvn_hm_put(&g_cpipes, ck, p); else if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); pthread_mutex_unlock(&g_cpipe_mu);
+        made += compute_warm_key(ck);
     }
     VKLOG("compute pipelines made ahead: %d of %d compute shaders in %.0f ms", made, n, (tick() - t0) / 1e6);
     return NULL;
 }
 static void compute_warm_start(void) {
+    const char *alt = getenv("DM_VK_SPV_ALT");
+    g_compute_alt = alt && atoi(alt);
     if (getenv("DM_VK_NOPREWARM")) return;
-    pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, compute_warm, NULL); pthread_attr_destroy(&a);
+    const char *history = getenv("DM_VK_COMPUTE_WARM_HISTORY");
+    g_ch_enabled = history && atoi(history) && !g_compute_alt;
+    pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t, &a, compute_warm, NULL)) g_ch_enabled = 0;
+    pthread_attr_destroy(&a);
 }
 // Validate all three indirect argument words before recording any copy. A pool can have several VkBuffers (chunks), and a slab's
 // buffer begins at boff. CPU memory is not a source: a preceding GPU command may generate these counts during this submission.
@@ -2820,10 +2928,23 @@ static void dispatch(const p_dispatch *d) {
     uint64_t ck[3] = {cs->key, g_num_um, g_num_im};
     pthread_mutex_lock(&g_cpipe_mu); VkPipeline p = nvn_hm_get(&g_cpipes, ck); pthread_mutex_unlock(&g_cpipe_mu);
     if (!p) {
-        uint64_t tb = g_prof_on ? tick() : 0; p = compute_build(cs, ck[1], ck[2]); if (g_prof_on) g_prof_ns[7] += tick() - tb;
+        uint64_t tb = tick();
+        p = compute_build(cs, ck[1], ck[2]);
+        uint64_t elapsed = tick() - tb;
+        if (g_prof_on) g_prof_ns[7] += elapsed;
+        if (g_ch_enabled && elapsed >= 8000000) {
+            static unsigned reported;
+            if (reported < 32) {
+                reported++;
+                VKLOG("compute first use: present %llu shader %016llx integer views %#llx/%#llx %.2f ms",
+                      (unsigned long long)g_tex_frame, (unsigned long long)ck[0],
+                      (unsigned long long)ck[1], (unsigned long long)ck[2], elapsed / 1e6);
+            }
+        }
         pthread_mutex_lock(&g_cpipe_mu); VkPipeline had = nvn_hm_get(&g_cpipes, ck);
         if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; } else nvn_hm_put(&g_cpipes, ck, p);   // (compute_warm made it meanwhile)
         pthread_mutex_unlock(&g_cpipe_mu);
+        if (p != (void *)1) compute_record(ck);
     }
     if (p == (void *)1) return;
     vk_img_barrier_all(cb);

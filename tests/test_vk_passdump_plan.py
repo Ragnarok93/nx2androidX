@@ -38,6 +38,12 @@ int main(void) {
     assert(!vk_pd_depth_prepass_eligible(2,1,91,10,0));
     assert(!vk_pd_depth_prepass_eligible(0,0,91,10,0));
     assert(!vk_pd_depth_prepass_eligible(0,1,91,10,1));
+    assert(!vk_pd_effect_color(1,1384,780,0,0)); // before G-buffer
+    assert(!vk_pd_effect_color(6,1384,780,1384,780)); // MRT
+    assert(vk_pd_effect_color(2,32,32,1384,780)); // small fog volume
+    assert(vk_pd_effect_color(1,692,390,1384,780)); // translucency
+    assert(!vk_pd_effect_color(1,346,195,1384,780)); // bloom pyramid
+    assert(vk_pd_effect_color(1,1920,1080,1384,780)); // composition
     uint32_t ctrl[] = {0x009fffffu,0xab9ffffeu,0x009fffffu,0x00a00000u,0x00000000u};
     assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,1)==4);
     assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,0)==2);

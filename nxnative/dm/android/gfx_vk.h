@@ -133,6 +133,8 @@ struct vkimg {
 vkimg_t *vk_tex(const tex_t *t);                                 // the image of a texture object (created, uploaded or refreshed as needed)
 void vk_lrz_forget(vkimg_t *im);                                 // an image is being dropped: the pass code forgets it (gfx_vk_exec.c)
 int vk_window_bottom_up(void);                                   // the game draws in lower-left origin mode: its window image is stored bottom-up (gfx_vk_exec.c)
+void vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
+                        uint64_t submission, int pass, uint64_t capture);
 VkImageView vk_tex_view(const tex_t *t, const view_t *v, int dim, int arrayed, int as_attachment, vkimg_t **img_out);   // a view for sampling / storage / rendering
 VkImageView vk_tex_view_as(const tex_t *t, const view_t *v, int dim, int arrayed, int as_attachment, vkimg_t **img_out, VkFormat want);   // the same, in the format want (a storage view of the shader's integer class; 0: the texture's own)
 VkFormat vk_int_fmt(uint32_t bytes, int sint);   // the uint (or sint) format of a texel size (1, 2, 4, 8, 16 bytes) that can be stored into; VK_FORMAT_UNDEFINED when none (gfx_vk_tex.c)

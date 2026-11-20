@@ -336,3 +336,47 @@ The standalone binary pipeline cache now lives in the private files
 directory outside the replaceable game pack. Existing cache data retains
 device and driver validation on load. Measure cold and warm launches of
 the same scene with frame generation off to determine the effect.
+
+### Warm-cache captures at presents 1193 and 1826
+
+Both archives passed integrity checks. The 120501 capture was taken with
+frame generation off. The run loaded 4,106,272 cache bytes and prewarmed
+632 graphics pipelines. There were no additional graphics pipeline builds
+between presents 600 and 2400. The frame-time p99 ending at frames 900
+and 1200 was 185.23 and 137.32 ms. Graphics pipeline processing averaged
+0.26 ms per frame for presents 601–1200. Those hitches cannot all be
+attributed to new graphics pipelines. Compute prewarm declined the
+2,934-shader archive and several integer-view compute variants, including
+the FFRS radix sort variants, were created on demand during the interval.
+
+The scoped Xclipse profile now remembers up to 96 successful compute
+keys, including the exact signed and unsigned view masks, and prewarms
+them on the existing background compute worker on subsequent runs. First
+use still builds synchronously if a key is absent. Slow on-demand compute
+builds produce a bounded timing line. A cold run seeds the history, and
+the next launch can verify the new prewarm count and its effect. Graphics
+pipeline accounting now counts each build once.
+
+Both exports spent all 24 raw attachment slots on early depth and MRT
+passes. The FG-off trace lists the layered fog and subsequent composition
+passes, but the archive did not contain their image outputs. The
+Diagnostics menu now offers **Capture effects / shadows**. It captures
+distinct depth-only targets and selects smaller dual-output effects passes
+and half-resolution or larger single-output passes after the first MRT.
+The same 24-image and 128 MiB bounds apply. Manifest rows include the
+submission number. Opt-in alias-consumer lines give the actual shader
+binding and overlapping guest ranges for the selected frame.
+
+The FG-off run contains 19 potential aliases, including an 87x49
+R16G16_FLOAT consumer with no CPU upload over the exact range of an
+87x49 B10G11R11 attachment. This merits a producer/consumer comparison.
+Other warnings involve partial overlaps or CPU-uploaded textures and
+cannot establish which contents the game expected. No cross-format copy
+is justified by those records alone. The shared descriptor view cache
+now distinguishes sampled resources from float storage images so prior
+sampling cannot bypass GPU-write tracking at a subsequent storage bind.
+
+The reference profile reports that the first-battle background flames
+are absent on Adreno as well, while haze, fog and the fire lighting are
+present. That observation does not identify the opening flames described
+by the player. A matched capture of that location is still needed.

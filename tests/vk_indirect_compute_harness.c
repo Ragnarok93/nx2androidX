@@ -26,7 +26,9 @@ int g_x_inflkeep;   // gfx_vk_exec.c's (vk_ubd_land reads it)
 int g_ubd_heap = 1;   // gfx_vk_exec.c's (vk_sub_update reads it)
 int g_pool_slots = 1;   // gfx_vk_exec.c's (vk_pool_of reads it)
 static int g_x_tracepass = -1, g_sub_pass, g_prof_on, g_prereset = 1;
-static uint64_t g_prof_ns[8], g_fence;
+static uint64_t g_prof_ns[8], g_fence, g_tex_frame;
+static int g_pd_state, g_pd_effects, g_ch_enabled;
+static void compute_record(const uint64_t key[3]) { (void)key; }
 static long long g_td_off = -1;
 static struct { uint64_t dispatches; } g_vkst;
 static nvn_hmap g_cpipes = {.klen = 24};

@@ -692,7 +692,7 @@ static void fg_flow_step(int direction) {
     fg_apply();
 }
 const char *dm_vk_driver_status(void);
-static void diag_capture_arm(void) {
+static void diag_capture_arm(int effects) {
     // Chosen explicitly from the game menu. Do not persist or automatically
     // re-enable these memory-intensive flags on the next app start.
     const char *driver = dm_vk_driver_status();
@@ -705,15 +705,16 @@ static void diag_capture_arm(void) {
       unlink(manifest);
       snprintf(manifest, sizeof manifest, "%s/gpu_draw_inputs.tsv", g_root);
       unlink(manifest); }
-    setenv("DM_VK_PASSDUMP_ALL_COLORS", "1", 1);
-    setenv("DM_VK_PASSDUMP_MIN_COLORS", "2", 1);
+    setenv("DM_VK_PASSDUMP_EFFECTS", effects ? "1" : "0", 1);
+    setenv("DM_VK_PASSDUMP_ALL_COLORS", effects ? "0" : "1", 1);
+    setenv("DM_VK_PASSDUMP_MIN_COLORS", effects ? "0" : "2", 1);
     // Do not spend GPU readbacks on the frame's first clear-only passes.
-    setenv("DM_VK_PASSDUMP_MIN_DRAWS", "10", 1);
+    setenv("DM_VK_PASSDUMP_MIN_DRAWS", effects ? "1" : "10", 1);
     setenv("DM_VK_PASSDUMP_DEPTH", "1", 1);
-    setenv("DM_VK_PASSDUMP_DEPTH_PREPASS", "1", 1);
+    setenv("DM_VK_PASSDUMP_DEPTH_PREPASS", effects ? "0" : "1", 1);
     // Standalone D24S8 transfer control: a separate 8x8 scratch image with
     // known depth 0.625 tests that raw depth readback itself is reliable.
-    setenv("DM_VK_PASSDUMP_DEPTH_CONTROL", "1", 1);
+    setenv("DM_VK_PASSDUMP_DEPTH_CONTROL", effects ? "0" : "1", 1);
     int trace = atomic_load(&g_diag_trace);
     setenv("DM_VK_PASSDUMP_DEPTH_STATE", trace ? "1" : "0", 1);
     setenv("DM_VK_PASSDUMP_INPUTS", trace ? "1" : "0", 1);
@@ -737,22 +738,24 @@ static void diag_capture_arm(void) {
     char meta[620]; snprintf(meta, sizeof meta, "%s/capture_meta.txt", g_root);
     FILE *f = fopen(meta, "w");
     if (f) {
-        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=one-shot\n"
+        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=%s\n"
                    "max_targets=24\nmax_gpu_readback_mb=128\n"
-                   "min_pass_draws=10\nfirst_depth_prepass=1\n"
-                   "isolated_depth_transfer_control=0.625\n"
+                   "min_pass_draws=%d\nfirst_depth_prepass=%d\n"
+                   "isolated_depth_transfer_control=%s\n"
                    "depth_pipeline_trace=player_opt_in\n"
-                   "all_mrt=1\ndepth=1\nstencil=1\nraw_bytes=1\n"
+                   "all_mrt=%d\ndepth=1\nstencil=1\nraw_bytes=1\n"
                    "trace_details=%d\nvulkan_driver=%s\nframe_generation_at_arm=%d\n"
                    "gpu_draw_inputs=%s\n"
                    "cpu_indirect_trace=guest_and_cached_shadows_only\n",
-                (unsigned long long)frame, trace, driver ? driver : "(unknown)", atomic_load(&g_set_fg),
+                (unsigned long long)frame, effects ? "effects-and-shadows" : "one-shot",
+                effects ? 1 : 10, !effects, effects ? "off" : "0.625", !effects,
+                trace, driver ? driver : "(unknown)", atomic_load(&g_set_fg),
                 trace ? "bounded_end_of_pass_for_read_only_indexed_indirect_draws" : "off");
         fclose(f);
     }
     atomic_store(&g_diag_status, DIAG_ARMED);
-    LOG("[diagnostics] scene capture armed by in-game menu for next gameplay frames; min 10 draws/pass, cap 24 targets / 128 MB; trace %s",
-        atomic_load(&g_diag_trace) ? "2 presents" : "off");
+    LOG("[diagnostics] %s capture armed for next gameplay frame; cap 24 targets / 128 MB; trace %s",
+        effects ? "effects and shadows" : "scene", trace ? "2 presents" : "off");
     diag_changed();
 }
 static void diag_export_request(void) {
@@ -805,11 +808,11 @@ static void menu_do(int item) {
         LOG("[diagnostics] detailed shader/indirect pass trace %s for the next requested capture",
             atomic_load(&g_diag_trace) ? "enabled" : "disabled");
     }
-    else if (item == OVM_DIAG_CAPTURE) {
-        diag_capture_arm(); dm_haptics_android_tap(); menu_close(); return;
+    else if (item == OVM_DIAG_CAPTURE || item == OVM_DIAG_EFFECTS) {
+        diag_capture_arm(item == OVM_DIAG_EFFECTS); dm_haptics_android_tap(); menu_close(); return;
     }
     else if (item == OVM_DIAG_EXPORT) { diag_export_request(); return; }
-    else if (item == OVM_DIAG_STATUS || item == OVM_DIAG_LIMIT) return;
+    else if (item == OVM_DIAG_STATUS) return;
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }
     else if (item == OVM_OPACITY) return;   // (the slider is dragged, or stepped with left and right)
@@ -1555,6 +1558,7 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("DM_VK_ASYNC_PIPE", "0", 0);
         LOG("[profile] FFRS S25 FE/RADV: require first-use pipelines; async draw omission disabled");
     }
+    setenv("DM_VK_COMPUTE_WARM_HISTORY", "1", 0);
     // Qualcomm's LRZ copy/writeback workaround targets Adreno. The
     // Xclipse depth attachment format is selected from advertised support.
     if (!getenv("DM_VK_LRZ_TOUCH")) {

@@ -432,6 +432,36 @@ static void alias_check(vkimg_t *im) {   // im is about to be sampled
             o->w, o->h, o->nvn_format, o->levels, (long long)o->off, (long long)(o->off + o->size), (unsigned long long)o->wseq);
     }
 }
+void vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
+                        uint64_t submission, int pass, uint64_t capture) {
+    // Diagnostics only, with one report per sampled storage/shader/binding.
+    enum { LIMIT = 80 };
+    static struct { uint64_t pool, shader; int64_t offset; unsigned stage, binding; } seen[LIMIT];
+    static unsigned n;
+    static uint64_t last_capture;
+    if (capture != last_capture) { n = 0; last_capture = capture; }
+    if (n == LIMIT) return;
+    pthread_mutex_lock(&g_img_mu);
+    const vkimg_t *writer = NULL;
+    for (int i = 0; i < im->novl; i++) {
+        const vkimg_t *other = im->ovl[i];
+        if (other->wseq > (writer ? writer->wseq : im->wseq)) writer = other;
+    }
+    if (writer) {
+        unsigned i = 0;
+        for (; i < n; i++) if (seen[i].pool == im->pool && seen[i].offset == im->off &&
+                               seen[i].shader == shader && seen[i].stage == stage && seen[i].binding == binding) break;
+        if (i == n) {
+            seen[n++] = (typeof(seen[0])){im->pool, shader, im->off, stage, binding};
+            VKLOG("[alias-consumer] submission %llu pass %d shader %016llx stage %u binding %u pool %#llx: sampled fmt %#x +%lld size %lld uploads %d, overlaps attachment fmt %#x +%lld size %lld sequence %llu",
+                  (unsigned long long)submission, pass, (unsigned long long)shader, stage, binding,
+                  (unsigned long long)im->pool, im->nvn_format, (long long)im->off, (long long)im->size,
+                  im->packaged, writer->nvn_format, (long long)writer->off, (long long)writer->size,
+                  (unsigned long long)writer->wseq);
+        }
+    }
+    pthread_mutex_unlock(&g_img_mu);
+}
 extern uint64_t g_tex_frame;   // presents so far, for the packaged textures' last use (vk_tex_sweep)
 // Images are kept per storage key until their pool goes, so a texture the game streams into memory another texture had before gets an image of its own and the old one
 // stayed: Xenoblade Chronicles 3 streams its field textures through pools that live for good, the device's GPU memory grew by about 470 MB a minute while walking (6.3 GB

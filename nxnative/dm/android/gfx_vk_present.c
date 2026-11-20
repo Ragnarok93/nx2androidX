@@ -374,8 +374,8 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 }
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
-static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Capture next frame", "Trace details", "Export diagnostics", "Capture status", "Capture limit", "Resume", ""};
-static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select", [OVM_DIAG_CAPTURE] = "Capture", [OVM_DIAG_EXPORT] = "Save ZIP"};   // the rows that are a button: its word
+static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Capture next frame", "Trace details", "Export diagnostics", "Capture status", "Capture effects / shadows", "Resume", ""};
+static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select", [OVM_DIAG_CAPTURE] = "Capture", [OVM_DIAG_EFFECTS] = "Capture", [OVM_DIAG_EXPORT] = "Save ZIP"};   // the rows that are a button: its word
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
 static const char *const OVM_PADS[2] = {"Position", "Label"};
 int dm_menu_fg_mult(void);
@@ -394,7 +394,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             float lw = cv_text_w(OVM_LABELS[i], is),
                 cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) :
                      i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) :
-                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_DIAG_STATUS || i == OVM_DIAG_LIMIT) ? cv_text_w("System (fallback)", is) :
+                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_DIAG_STATUS) ? cv_text_w("System (fallback)", is) :
                      OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
             need = fmaxf(need, i == OVM_OPACITY ? fmaxf(lw / 0.38f, cv_text_w("80%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
         }
@@ -427,7 +427,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
-        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_DIAG_STATUS || it == OVM_DIAG_LIMIT) {
+        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_DIAG_STATUS) {
             char value[128];
             if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
             else if (it == OVM_FG_FLOW) {
@@ -435,7 +435,6 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                 if (!scale) snprintf(value, sizeof value, "Auto");
                 else snprintf(value, sizeof value, "%d%%", scale);
             } else if (it == OVM_DIAG_STATUS) dm_menu_diag_note(value, sizeof value);
-            else if (it == OVM_DIAG_LIMIT) snprintf(value, sizeof value, "24 targets / 128 MB");
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
             while (vs > 1 && cv_text_w(value, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
