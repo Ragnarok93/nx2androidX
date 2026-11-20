@@ -417,6 +417,8 @@ typedef struct { VkBuffer b; VkDeviceMemory m; void *p; uint32_t w, h; VkFormat 
     uint64_t fence, present, pool; int pass, target; uint32_t level, layer; int64_t off; } pdump_t;
 enum { PD_MAX = 96 };
 static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];
+static int g_pd_prepass_written; // only the first eligible depth-only pass of a one-shot capture
+static int g_pd_control_written; // one isolated depth-transfer readback, never a scene attachment
 static uint64_t g_pd_bytes;
 static uint64_t pass_dump_budget(void) {
     const char *e = getenv("DM_VK_PASSDUMP_MAX_MB");
@@ -431,7 +433,82 @@ static int pass_dump_limit(void) {
     return n > 0 && n < PD_MAX ? n : PD_MAX;
 }   // state 0 off, 1 dumping this submission's passes, 2 waiting to write
 static void pass_dump_depth(void);
+static void pass_dump_depth_aspect(VkImageAspectFlags aspect);
 static void texdump_flush(void);
+// Known-value depth transfer control: copied through the same Vulkan D24S8
+// image->buffer operation as the scene, but never bound to game rendering.
+// A working control (nonzero raw D24) with zero scene depth points upstream,
+// while a zero control means the readback cannot yet be trusted as evidence.
+// This diagnostic alone is opt-in and creates only an 8x8 scratch image.
+static void pass_dump_depth_control(void) {
+    if (g_pd_control_written || g_pd_state != 1 ||
+        g_npd >= pass_dump_limit() ||
+        !vk_pd_budget_allows(g_pd_bytes, 8u * 8u * 4u, pass_dump_budget())) return;
+    VkImage im = VK_NULL_HANDLE;
+    VkDeviceMemory imem = VK_NULL_HANDLE, bm = VK_NULL_HANDLE;
+    VkBuffer b = VK_NULL_HANDLE;
+    void *mapped = NULL;
+    VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+    const VkDeviceSize bytes = 8u * 8u * 4u;
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0,
+        VK_IMAGE_TYPE_2D, VK_FORMAT_D24_UNORM_S8_UINT, {8,8,1}, 1, 1,
+        VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+    if ((r = vkCreateImage(V.dev, &ci, NULL, &im)) != VK_SUCCESS) goto failed;
+    VkMemoryRequirements rq;
+    vkGetImageMemoryRequirements(V.dev, im, &rq);
+    uint32_t mt = vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (mt == UINT32_MAX) goto failed;
+    VkMemoryAllocateInfo ma = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, mt};
+    if ((r = vkAllocateMemory(V.dev, &ma, NULL, &imem)) != VK_SUCCESS ||
+        (r = vkBindImageMemory(V.dev, im, imem, 0)) != VK_SUCCESS) goto failed;
+    VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0,
+        bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE};
+    if ((r = vkCreateBuffer(V.dev, &bc, NULL, &b)) != VK_SUCCESS) goto failed;
+    vkGetBufferMemoryRequirements(V.dev, b, &rq);
+    mt = vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                     VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
+    if (mt == UINT32_MAX) goto failed;
+    ma.allocationSize = rq.size; ma.memoryTypeIndex = mt;
+    if ((r = vkAllocateMemory(V.dev, &ma, NULL, &bm)) != VK_SUCCESS ||
+        (r = vkBindBufferMemory(V.dev, b, bm, 0)) != VK_SUCCESS ||
+        (r = vkMapMemory(V.dev, bm, 0, VK_WHOLE_SIZE, 0, &mapped)) != VK_SUCCESS) goto failed;
+    VkCommandBuffer cb = vk_cmd();
+    VkImageSubresourceRange region = {VK_IMAGE_ASPECT_DEPTH_BIT |
+                                      VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED,
+        VK_QUEUE_FAMILY_IGNORED, im, region};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
+                         1, &barrier);
+    VkClearDepthStencilValue value = {0.625f, 0x5a};
+    vkCmdClearDepthStencilImage(cb, im, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &region);
+    vk_img_barrier_all(cb);
+    VkBufferImageCopy copy = {0,0,0,{VK_IMAGE_ASPECT_DEPTH_BIT,0,0,1},
+                              {0,0,0}, {8,8,1}};
+    vkCmdCopyImageToBuffer(cb, im, VK_IMAGE_LAYOUT_GENERAL, b, 1, &copy);
+    vk_img_barrier_all(cb);
+    pdump_t *entry = &g_pd[g_npd++];
+    *entry = (pdump_t){.b=b, .m=bm, .p=mapped, .w=8, .h=8,
+        .f=VK_FORMAT_D24_UNORM_S8_UINT, .view_fmt=VK_FORMAT_D24_UNORM_S8_UINT,
+        .bytes=bytes, .present=g_tex_frame, .pass=-200,
+        .target=-1, .level=0, .layer=0};
+    g_pd_bytes += bytes; g_pd_control_written = 1;
+    vk_defer_free_image(im, imem);
+    VKLOG("[depthcontrol] isolated D24S8 8x8 image cleared to depth=0.625, stencil=0x5a then copied to a readback buffer; pass -200; verify raw depth is nonzero after fence");
+    return;
+failed:
+    VKLOG("[depthcontrol] isolated D24S8 validation could not allocate/memmap: result %d; no conclusion about scene depth copies", r);
+    // No successful mapping can reach this allocation-failure path.
+    if (b) vkDestroyBuffer(V.dev, b, NULL);
+    if (bm) vkFreeMemory(V.dev, bm, NULL);
+    if (im) vkDestroyImage(V.dev, im, NULL);
+    if (imem) vkFreeMemory(V.dev, imem, NULL);
+}
 static int pass_dump_color(int ci) {
     if (ci < 0 || ci >= 8 || g_npd >= pass_dump_limit()) return 0;
     vkimg_t *im = vk_tex(&S.rt_col[ci]);
@@ -485,6 +562,28 @@ static void pass_dump(void) {
       int minimum = md && *md ? atoi(md) : 0;
       if (minimum > 0 && !vk_pd_pass_has_draws(g_pass_draws, (unsigned)minimum)) return; }
     if (g_sub_pass - 1 < g_pd_skip) return;
+    { const char *ctrl = getenv("DM_VK_PASSDUMP_DEPTH_CONTROL");
+      if (ctrl && atoi(ctrl)) pass_dump_depth_control(); }
+    // A field/battle frame's early 91-draw depth prepass was never captured:
+    // DM_VK_PASSDUMP_MIN_COLORS=2 filtered it out. Snapshot precisely the
+    // first depth-only pass with real draws, before the MRTs run, so we can
+    // separate a failed prepass from later depth loss. This is opt-in only.
+    { const char *dp = getenv("DM_VK_PASSDUMP_DEPTH_PREPASS");
+      const char *md = getenv("DM_VK_PASSDUMP_MIN_DRAWS");
+      unsigned min = md && atoi(md) > 0 ? (unsigned)atoi(md) : 1;
+      if (dp && atoi(dp) &&
+          vk_pd_depth_prepass_eligible((unsigned)S.ncol,
+              (S.daspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0,
+              g_pass_draws, min, g_pd_prepass_written)) {
+          int before = g_npd;
+          pass_dump_depth_aspect(VK_IMAGE_ASPECT_DEPTH_BIT);
+          if (g_npd > before) {
+              g_pd_prepass_written = 1;
+              VKLOG("[depthtrace] captured first geometry depth-only pass %d (%llu draws, fmt %d) before any MRT color pass",
+                    g_sub_pass - 1, (unsigned long long)g_pass_draws, S.dfmt);
+          }
+      }
+    }
     { const char *pp = getenv("DM_VK_PASSDUMP_PASS");
       if (pp && *pp) {
           int hit = 0;
@@ -591,7 +690,9 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         const char *sz = getenv("DM_VK_PASSDUMP_SIZE"); snprintf(g_pd_size, sizeof g_pd_size, "%s", sz && strcmp(sz, "0") ? sz : "");
         { const char *td = getenv("DM_VK_TEXDUMP"); const char *pl = td ? strchr(td, '+') : NULL; g_td_pool = pl ? strtoull(td, NULL, 16) : 0; g_td_off = pl ? strtoll(pl + 1, NULL, 16) : -1; g_td_im = NULL; g_td_done = 0; }
         const char *fr = getenv("DM_VK_PASSDUMP_FRAMES"); g_pd_frames = fr && atoi(fr) > 1 ? atoi(fr) : 1;
-        g_pd_state = 1; g_npd = 0; g_pd_bytes = 0; setenv("DM_VK_PASSDUMP", "0", 1);
+        g_pd_state = 1; g_npd = 0; g_pd_bytes = 0;
+        g_pd_prepass_written = 0; g_pd_control_written = 0;
+        setenv("DM_VK_PASSDUMP", "0", 1);
         { const char *root = getenv("DM_ROOT"); char path[1024];
           snprintf(path, sizeof path, "%s/pass_dump_manifest.tsv", root ? root : ".");
           FILE *mf = fopen(path, "w");
@@ -607,6 +708,14 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         // done_fence covers this buffer's transfer write; HOST_CACHED does not imply HOST_COHERENT.
         VkMappedMemoryRange inv = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, NULL, d->m, 0, VK_WHOLE_SIZE};
         VKCHK(vkInvalidateMappedMemoryRanges(V.dev, 1, &inv));
+        if (d->pass == -200 && d->w == 8 && d->h == 8 && d->bytes == 256) {
+            const uint32_t expected = 0x9fffffu; // 0.625f * (2^24 - 1)
+            unsigned matches = vk_pd_d24_matches((const uint32_t *)d->p, 64,
+                                                   expected, 1);
+            VKLOG("[depthcontrol] RESULT: %u/64 D24 values match known 0.625 clear (expected 0x%06x, tolerance 1); %s",
+                  matches, expected, matches == 64 ? "PASS" :
+                  "FAIL -- do not trust a zero scene-depth readback yet");
+        }
         uint64_t raw_hash = vk_pd_hash(d->p, (size_t)d->bytes);
         VKLOG("pass dump %02d: present %llu pass %d target %d mip %u layer %u %ux%u storage/view formats %d/%d pool %#llx+%lld bytes %llu raw FNV1a64 %016llx",
             i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
@@ -2124,6 +2233,29 @@ static int prepare_draw(int prim, int indexed) {
     VkPipeline p = graphics_pipeline(&k, layout);
     uint64_t t1 = tick(); g_vkst.ns_pipe += t1 - t0 - tdesc;
     if (!p) { g_vkst.skip_pipe++; return 0; }
+    // A per-pass trace of the *actual* Vulkan raster/depth pipeline state.
+    // Read only for an explicitly armed one-shot capture; at most three
+    // samples from each depth-using pass and 72 lines per submission. The
+    // trace never changes the draw, pipeline or depth attachment.
+    if (g_pd_state == 1 && (S.daspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+        const char *dt = getenv("DM_VK_PASSDUMP_DEPTH_STATE");
+        if (dt && atoi(dt)) {
+            static uint64_t last_epoch = UINT64_MAX;
+            static unsigned written;
+            if (last_epoch != g_set_epoch) { last_epoch = g_set_epoch; written = 0; }
+            if (g_pass_draws <= 3 && written < 72) {
+                ++written;
+                VKLOG("[depthtrace] present %llu sub %llu pass %d draw %llu VS=%016llx FS=%016llx colors=%u depthfmt=%u test=%u write=%u compare=%u stencil=%u cull=%u front=%u discard=%u clipNeg1=%u depthRange=(%.7g,%.7g) viewport=(%.1f,%.1f,%.1f,%.1f) scissor=(%d,%d,%u,%u)",
+                      (unsigned long long)g_tex_frame, (unsigned long long)g_set_epoch,
+                      g_sub_pass - 1, (unsigned long long)g_pass_draws,
+                      (unsigned long long)k.key[0], (unsigned long long)k.key[1],
+                      k.ncol, k.dfmt, k.dt, k.dw, k.df, k.st, k.cull,
+                      k.front, k.raster_discard, k.clip_neg1, S.dnear, S.dfar,
+                      S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3],
+                      S.sc.x, S.sc.y, (unsigned)S.sc.w, (unsigned)S.sc.h);
+            }
+        }
+    }
     texbind(&k);
     if (g_ubolog_key && g_ubolog_n > 0 && S.sh[0] && S.sh[0]->key == g_ubolog_key) {   // DM_VK_UBO_LOG: the pipeline the draw got, and its key's hash
         uint64_t kh = fnv(1469598103934665603ull, &k, sizeof k); VKLOG("ubo: present %llu pipeline %p key %016llx um %llx/%llx im %llx/%llx", (unsigned long long)g_tex_frame, (void *)p, (unsigned long long)kh,

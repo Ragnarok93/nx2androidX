@@ -229,3 +229,66 @@ Next acceptance test: capture the *battle frame where combatants are absent*,
 then compare pass/depth/stencil and GPU-produced vertex/indirect buffer bytes
 against a known-good Adreno frame at the equivalent scene. Do not ship a
 claim of zero graphical glitches without this confirmation.
+
+
+## 2026-11-19 19:42 player report: every 3D gameplay element affected
+
+Examined exact uploaded `nx2android-render-diagnostics-20261119-194209.zip`.
+The user reports that **only UI is rendered correctly; 3D is broadly corrupt**.
+The active driver is custom RADV MAGELLAN CARL, Vulkan 1.4 on SM-S731U
+Android 17. The game runs 1384×780 internally. The new synchronous-pipeline
+policy is visibly active at startup. At presents 3600, 4800 and 5400,
+replay logs report **zero no-program, no-target and no-pipeline skips**.
+It is now demonstrated that compilation omissions do NOT explain the remaining
+3D failures; do not keep proposing them as a full fix.
+
+The one-shot GPU transfer at present **3665** produced 24 entries from scene
+passes 3, 4, 5: each has six MRTs + D24S8 depth + S8 stencil. Color MRTs
+clearly contain 3D world imagery and material/normal data (the depth buffer
+is not the *only* source of scene data). However, **every one of the three
+D24S8 raw depth planes (4,318,080 bytes each) and every S8 stencil plane
+(1,079,520 bytes each) is entirely zero**, as are their visual previews.
+The D24 depth is indeed a reversed-Z buffer, initially cleared to 0.
+The two traced submissions just before MRT rendering show **three early
+91-draw depth-only passes**, all uncaptured by the earlier multi-color-only
+selection. Whether those passes write depth, and whether the RADV D24S8
+transfer correctly exposes those writes, must be determined, NOT inferred.
+
+Surgical diagnostic change: the Capture action now also copies the **first
+eligible depth-only prepass** (at least 10 draws, no color targets) with its
+own pass number, before it is reused by any G-buffer pass. The optional
+Trace Details mode logs the *actual* Vulkan depth test/write/compare,
+stencil, culling, winding, rasterizer discard, depth range and viewport of
+up to the first three pipelines of each depth-using pass, capped to 72
+entries per submission. These are diagnostics only and are off except for
+explicit player-armed captures; there is **no depth mode or shader override**.
+On 8-GB phones, the existing 24-target/128-MB total GPU readback cap remains.
+
+This is a device-specific lead, not a proven device-driver bug. A readback
+adds ordering and cache operations that may affect a broken driver. If the
+first depth-only readback is zero despite a valid write-enabled pipeline,
+then investigate clip-space position output, culling, guest/GPU vertex
+inputs, and RADV depth implementation. If the early depth contains values
+but later snapshots are zero, investigate depth load/store transitions and
+D24S8 readback. Compare matching scenes with Snapdragon before choosing a
+renderer or driver patch. The user's already-tested subgroup workarounds,
+DCC, DLC, render pass modes and threaded replay overrides were not
+successful; do not silently re-enable them.
+
+
+**Raw-depth readback control (independent of any scene draw):** on manual
+capture only, `DM_VK_PASSDUMP_DEPTH_CONTROL=1` makes a separate 8×8 D24S8
+image, clears it to depth **0.625** and stencil **0x5a**, and transfers the
+depth aspect to a readback buffer through the exact Vulkan copy command
+used for the scene. Manifest pass **-200**, target **-1**, has an ordinary
+`pass_NN.raw` record, and the log prints `[depthcontrol]`. The recorded
+D24 low 24 bits should approximate `round(0.625*16777215)`, allowing
+normal UNORM quantization. Its **constant-depth preview looks black** due
+to per-image min/max normalization: inspect the `raw` bytes or the logged
+min/max, *not* its preview. This control does not modify the game depth
+image, its pipelines or draw commands; it only adds opt-in transfer work.
+An all-zero control means the main scene depth capture cannot be relied
+upon until the depth-copy failure is independently investigated. A valid
+control and all-zero depth after a write-enabled depth prepass implicates
+the actual rendering or depth-load/store path. Either way the next step is
+evidence, not a guessed rendering override.

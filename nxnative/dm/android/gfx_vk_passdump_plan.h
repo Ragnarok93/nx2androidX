@@ -29,6 +29,26 @@ static inline unsigned vk_pd_select_colors(const uint8_t bound[8], unsigned ncol
 static inline int vk_pd_pass_has_draws(uint64_t submitted_draws, unsigned minimum) {
     return submitted_draws >= minimum;
 }
+// Depth prepasses have no color attachments. Capturing just their first
+// qualifying depth target establishes whether it was already empty.
+static inline int vk_pd_depth_prepass_eligible(unsigned ncolor,
+                                             int has_depth, uint64_t draws,
+                                             unsigned min_draws, int already_done) {
+    return !ncolor && has_depth && !already_done && draws >= min_draws;
+}
+// In VK_FORMAT_D24_UNORM_S8_UINT depth-aspect transfers the 24-bit UNORM
+// value occupies the low 24 bits of each 32-bit word. High bits undefined.
+// Allow +/- 1 ULP for conversion/rounding to the expected known-depth clear.
+static inline unsigned vk_pd_d24_matches(const uint32_t *data, unsigned count,
+                                          uint32_t expected, uint32_t tolerance) {
+    unsigned hits = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        uint32_t value = data[i] & UINT32_C(0xffffff);
+        uint32_t diff = value > expected ? value - expected : expected - value;
+        if (diff <= tolerance) hits++;
+    }
+    return hits;
+}
 static inline int vk_pd_budget_allows(uint64_t used, uint64_t requested, uint64_t budget) {
     return requested && used <= budget && requested <= budget - used;
 }

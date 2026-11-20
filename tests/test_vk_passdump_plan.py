@@ -33,6 +33,15 @@ int main(void) {
     assert(vk_pd_pass_has_draws(10,10));
     assert(vk_pd_pass_has_draws(107,10));
     assert(vk_pd_pass_has_draws(UINT64_MAX,10));
+    assert(vk_pd_depth_prepass_eligible(0,1,91,10,0));
+    assert(!vk_pd_depth_prepass_eligible(0,1,0,10,0));
+    assert(!vk_pd_depth_prepass_eligible(2,1,91,10,0));
+    assert(!vk_pd_depth_prepass_eligible(0,0,91,10,0));
+    assert(!vk_pd_depth_prepass_eligible(0,1,91,10,1));
+    uint32_t ctrl[] = {0x009fffffu,0xab9ffffeu,0x009fffffu,0x00a00000u,0x00000000u};
+    assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,1)==4);
+    assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,0)==2);
+    assert(vk_pd_d24_matches(ctrl+4,1,0x9fffffu,1)==0);
     assert(vk_pd_budget_allows(0,64,64));
     assert(!vk_pd_budget_allows(0,65,64));
     assert(!vk_pd_budget_allows(UINT64_MAX,1,64));

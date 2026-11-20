@@ -708,6 +708,11 @@ static void diag_capture_arm(void) {
     // Do not spend GPU readbacks on the frame's first clear-only passes.
     setenv("DM_VK_PASSDUMP_MIN_DRAWS", "10", 1);
     setenv("DM_VK_PASSDUMP_DEPTH", "1", 1);
+    setenv("DM_VK_PASSDUMP_DEPTH_PREPASS", "1", 1);
+    // Standalone D24S8 transfer control: a separate 8x8 scratch image with
+    // known depth 0.625 tests that raw depth readback itself is reliable.
+    setenv("DM_VK_PASSDUMP_DEPTH_CONTROL", "1", 1);
+    setenv("DM_VK_PASSDUMP_DEPTH_STATE", atomic_load(&g_diag_trace) ? "1" : "0", 1);
     setenv("DM_VK_PASSDUMP_STENCIL", "1", 1);
     setenv("DM_VK_PASSDUMP_LIMIT", "24", 1);
     setenv("DM_VK_PASSDUMP_MAX_MB", "128", 1);
@@ -730,7 +735,9 @@ static void diag_capture_arm(void) {
     if (f) {
         fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=one-shot\n"
                    "max_targets=24\nmax_gpu_readback_mb=128\n"
-                   "min_pass_draws=10\n"
+                   "min_pass_draws=10\nfirst_depth_prepass=1\n"
+                   "isolated_depth_transfer_control=0.625\n"
+                   "depth_pipeline_trace=player_opt_in\n"
                    "all_mrt=1\ndepth=1\nstencil=1\nraw_bytes=1\n"
                    "trace_details=%d\nvulkan_driver=%s\n"
                    "indirect_arguments=guest_and_cached_shadows_only_not_gpu_authoritative\n",
