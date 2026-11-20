@@ -1,18 +1,24 @@
-# APK signing and update compatibility (alpha16 onwards)
+# APK signing and update compatibility
 
 ## Stable signing identity
 
-Local release builds and publishing workflows require the original signing certificate pinned in
+Local release builds and publishing workflows require the permanent signing certificate pinned in
 [`packaging/android-apk/signing-cert.sha256`](../packaging/android-apk/signing-cert.sha256).
 The application ID remains `com.nx.android`. Use a non-decreasing Android version code for updates.
 
+The permanent signer was replaced on November 20, 2026 because no copy of the
+previous private key was available. Existing installations with a different
+certificate need a one-time migration before they can receive releases signed
+with the new key. Once migrated, preserve this signing key for subsequent updates.
+The builder APK and player-generated game APKs have independent signing identities.
+
 Set these repository secrets under **Settings → Secrets and variables → Actions**:
 
-- `NX2A_KEYSTORE_B64` holds the base64 encoding of the original keystore.
+- `NX2A_KEYSTORE_B64` holds the base64 encoding of the permanent keystore.
 - `NX2A_KEYSTORE_PASSWORD` unlocks the keystore.
 - `NX2A_KEY_PASSWORD` is optional when the private key has a different password.
 
-GitHub Actions expects the alias `nx2android`. On a trusted machine with the original keystore and an
+GitHub Actions expects the alias `nx2android`. On a trusted machine with the permanent keystore and an
 authenticated GitHub CLI, enter the two required secrets directly:
 
 ```bash
@@ -22,7 +28,7 @@ gh secret set NX2A_KEYSTORE_PASSWORD --repo Ragnarok93/nx2androidX
 
 Then rerun the failed trusted branch build. CI checks the certificate before building and checks the final
 APK before publishing. PR verification uses a runner-only debug signer. Its APK stays inside the verification
-job. For a local release, set `NX2A_KEYSTORE` to the original keystore path or place it at
+job. For a local release, set `NX2A_KEYSTORE` to the permanent keystore path or place it at
 `~/.android/nx2android.keystore`. The same password variables apply. Keep a private offline backup of the
 keystore and password.
 
