@@ -190,7 +190,7 @@ def refresh_in_place(dst, staging, payload, generated_files, manifest, progress=
     if current.is_file():
         current.replace(previous)
     desired = set(payload)
-    metadata = {p.relative_to(staging).as_posix(): p for p in staging.rglob('*') if p.is_file()}
+    metadata = {p.relative_to(staging).as_posix(): p for p in staging.rglob('*') if p.is_file() and p.name != MANIFEST}
     desired.update(metadata)
     desired.add(MANIFEST)
 
