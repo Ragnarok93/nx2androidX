@@ -25,11 +25,12 @@ class SelfContainedPipelineTests(unittest.TestCase):
         self.assertLess(calls.index("data"), calls.index("apk"))
         self.assertLess(calls.index("apk"), calls.index("install"))
 
-    def test_storage_budget_includes_embedded_archive_and_apk(self):
+    def test_storage_budget_is_deferred_until_apk_assembly(self):
         source = (ROOT / "porter/pipeline.py").read_text(encoding="utf-8")
         self.assertIn("if self.o.self_contained:", source)
-        self.assertIn("export = 2 * min(game + (64 << 20), 0xffffffff)", source)
-        self.assertIn("shares_disk_budget(where, pack)", source)
+        self.assertIn("APK output storage will be checked at export", source)
+        self.assertIn("required = 2 * min(pack_bytes + (64 << 20), 0xffffffff)", source)
+        self.assertIn("remaining = shutil.disk_usage(self.o.out).free", source)
         self.assertIn("require_links=self.o.self_contained", source)
 
     def test_phone_payload_bundles_the_compiled_activity_dex(self):

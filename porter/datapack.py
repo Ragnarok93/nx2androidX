@@ -308,6 +308,12 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
         shutil.rmtree(tmp)
         if progress: progress('reused the previous companion data')
         return read_manifest(dst)
+    # Try the existing pack BEFORE copying payload assets into staging.
+    # Otherwise a 20 GiB RomFS is duplicated before the in-place fast path.
+    (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
+    if not require_links and refresh_in_place(dst, tmp, payload, set(files or {}), man, progress):
+        shutil.rmtree(tmp)
+        return man
     for name, src in payload.items():
         if name in (files or {}):
             dest = tmp / name
@@ -315,10 +321,6 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
             shutil.copyfile(src, dest)
         else:
             link_or_copy(src, tmp / name, require_links=require_links)
-    (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
-    if not require_links and refresh_in_place(dst, tmp, payload, set(files or {}), man, progress):
-        shutil.rmtree(tmp)
-        return man
     # the exported saves (the player's backups) are not the build's own: the pack is rebuilt whole, so they are put aside and put back
     keep = dst.with_name(dst.name + '.saves-keep')
     shutil.rmtree(keep, ignore_errors=True)
