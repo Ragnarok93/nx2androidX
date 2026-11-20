@@ -682,6 +682,120 @@ class Misc(unittest.TestCase):
     def test_app_stem(self):
         self.assertEqual(pipeline.app_stem(game.load(NEO), 'NEO'), 'NeoTheWorldEndsWithYou')
 
+    def test_previous_companion_skips_full_game_storage_reservation(self):
+        from types import SimpleNamespace as NS
+        d = Path(tempfile.mkdtemp(prefix='nx2a_previous_data_'))
+        try:
+            profile = game.load(NEO)
+            stem = pipeline.app_stem(profile, 'NEO')
+            dst = d / (stem + '-data')
+            marker = profile.get('romfs_marker')
+            (dst / 'RomFS' / marker).parent.mkdir(parents=True)
+            (dst / 'RomFS' / marker).write_bytes(b'previous verified data')
+            (dst / datapack.MANIFEST).write_text(json.dumps({
+                'title_id': profile.id, 'package': 'org.nx2a.neo', 'version': 'v196608',
+            }), encoding='utf-8')
+            work = d / 'work' / (profile.id + '_build')    # absent after a prior build was cleaned
+            o = NS(app=False, self_contained=False, app_name='NEO',
+                   folder=d, out=d)
+            p = NS(o=o, work=work, work_root=d / 'work', g=profile,
+                   package='org.nx2a.neo', pkg_ver='v196608',
+                   fam={'base': d / 'game.nsp', 'updates': [], 'dlc': []})
+            p.fam['base'].write_bytes(b'NSP')
+            p.previous_companion = pipeline.Port.find_previous_companion(p)
+            self.assertEqual(p.previous_companion, dst)
+            with mock.patch.object(pipeline.shutil, 'disk_usage',
+                                   return_value=NS(free=128 << 20)):
+                pipeline.Port.check_space(p)
+            self.assertFalse(work.exists())
+            self.assertTrue((dst / 'RomFS' / marker).is_file())
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_prior_data_must_match_game_version(self):
+        from types import SimpleNamespace as NS
+        d = Path(tempfile.mkdtemp(prefix='nx2a_prior_mismatch_'))
+        try:
+            profile = game.load(NEO)
+            dst = d / (pipeline.app_stem(profile, 'NEO') + '-data')
+            marker = profile.get('romfs_marker')
+            (dst / 'RomFS' / marker).parent.mkdir(parents=True)
+            (dst / 'RomFS' / marker).write_bytes(b'old version')
+            (dst / datapack.MANIFEST).write_text(json.dumps({
+                'title_id': profile.id, 'package': 'org.nx2a.neo', 'version': 'v0',
+            }), encoding='utf-8')
+            p = NS(o=NS(app=False, self_contained=False, app_name='NEO', folder=d, out=d),
+                   work=d / 'work/build', work_root=d / 'work', g=profile,
+                   package='org.nx2a.neo', pkg_ver='v196608')
+            self.assertIsNone(pipeline.Port.find_previous_companion(p))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_companion_romfs_recovers_exefs_without_copying_romfs(self):
+        from types import SimpleNamespace as NS
+        d = Path(tempfile.mkdtemp(prefix='nx2a_recover_romfs_'))
+        try:
+            profile = game.load(NEO)
+            marker = profile.get('romfs_marker')
+            pack = d / 'Prior-data'
+            (pack / 'RomFS' / marker).parent.mkdir(parents=True)
+            (pack / 'RomFS' / marker).write_bytes(b'LARGE-PREVIOUS-ASSET')
+            ex = d / 'work/extract'
+            ex.mkdir(parents=True)
+            logs = d / 'logs'
+            logs.mkdir()
+            game_file = d / 'game.nsp'
+            game_file.write_bytes(b'NSP')
+            key_file = d / 'prod.keys'
+            key_file.write_text('placeholder', encoding='ascii')
+            p = NS(previous_companion=pack, pkg_ver='v196608',
+                   g=profile, o=NS(keys=key_file), logs=logs, env={})
+            calls = []
+            def mock_extract(args, _log, **kwargs):
+                calls.append(args)
+                self.assertIn('--verify-romfs', args)
+                self.assertEqual(args[-1], pack / 'RomFS')
+                tmp = Path(args[4])
+                (tmp / 'ExeFS').mkdir(parents=True)
+                (tmp / 'ExeFS/main').write_bytes(b'NSO0')
+            with mock.patch.object(pipeline.nsp, 'run', side_effect=mock_extract):
+                pipeline.Port.restore_companion_romfs(
+                    p, d / 'nx_extract', ex, 'v196608', game_file, None)
+            self.assertEqual(len(calls), 1)
+            recovered = ex / 'v196608'
+            self.assertTrue((recovered / 'RomFS').is_symlink())
+            self.assertEqual((recovered / 'RomFS' / marker).read_bytes(),
+                             b'LARGE-PREVIOUS-ASSET')
+            self.assertEqual((recovered / 'ExeFS/main').read_bytes(), b'NSO0')
+            self.assertEqual((pack / 'RomFS' / marker).read_bytes(),
+                             b'LARGE-PREVIOUS-ASSET')
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_failed_companion_validation_preserves_original_folder(self):
+        from types import SimpleNamespace as NS
+        d = Path(tempfile.mkdtemp(prefix='nx2a_bad_prior_romfs_'))
+        try:
+            profile = game.load(NEO)
+            pack = d / 'Prior-data'
+            (pack / 'RomFS').mkdir(parents=True)
+            (pack / 'RomFS/prior.bin').write_bytes(b'keep')
+            ex = d / 'work/extract'
+            ex.mkdir(parents=True)
+            logs = d / 'logs'
+            logs.mkdir()
+            p = NS(previous_companion=pack, pkg_ver='v196608',
+                   g=profile, o=NS(keys=d / 'keys'), logs=logs, env={})
+            with mock.patch.object(pipeline.nsp, 'run',
+                                   side_effect=pipeline.BuildError('byte mismatch')):
+                with self.assertRaisesRegex(pipeline.BuildError, 'safely reuse'):
+                    pipeline.Port.restore_companion_romfs(
+                        p, d / 'nx_extract', ex, 'v196608', d / 'game.nsp', None)
+            self.assertEqual((pack / 'RomFS/prior.bin').read_bytes(), b'keep')
+            self.assertFalse((ex / 'v196608').exists())
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_disk_space(self):   # twice the game files, less what the build folder holds, plus 1 GB
         from types import SimpleNamespace as NS
         d = Path(tempfile.mkdtemp(prefix='nx2a_test_game_')); (d / 'g.nsp').write_bytes(b'\0' * 2**20); work = d / 'build'

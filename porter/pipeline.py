@@ -542,7 +542,6 @@ class Port:
                 # Keep a completed -data folder. The installed game may
                 # still use it, or a split fallback can reuse it.
                 self.cleanup_interrupted_archive(stem)
-        self.check_space()      # a cached rebuild defers bulk-space checks to the stages that actually write data
         if not (g and ap):
             what = f'no game profile for {tid}' if not g else f'{g.get("name", g.id)} ({g.id}) has a game profile but is not ported to Android yet (no android.tsv in {g.dir})'
             if not o.experimental: raise BuildError(f'{what}: --experimental tries it anyway (profiles: `porter profiles`)')
@@ -565,10 +564,81 @@ class Port:
             if self.derived: say(f'{self.derived}: packing {self.pkg_ver} from a profile derived from it')
         self.versions = [self.pkg_ver] if self.derived else need + ([self.pkg_ver] if self.pkg_ver not in need else [])
         self.have = have
+        # Resolve the final split-export destination before looking for earlier data.
+        if not o.app and not o.self_contained:
+            safe_out = public_split_export_dir(o.out)
+            if safe_out != o.out:
+                say(f'game APK and data must be exported to public storage: {safe_out}')
+                o.out = safe_out
+        self.previous_companion = self.find_previous_companion()
+        self.check_space()
         self.aw = self.work / 'android'; self.logs = self.work / 'logs'
         for d in (self.aw, self.logs, self.work / 'tmp'): d.mkdir(parents=True, exist_ok=True)
         # DM_GAME picks the profile for every tool; WORK keeps their temporary folders inside the build folder (the shader translator writes thousands of files)
         self.env.update(DM_GAME=g.id, DM_ROOT=str(self.work), WORK=str(self.work / 'tmp'))
+
+
+    def find_previous_companion(self):
+        """Recognize a completed companion of the exact title/package/version.
+
+        The old data pack may outlive the app-private build workspace. It is a
+        read-only source until the extractor has verified the RomFS bytes.
+        """
+        if self.o.app or self.o.self_contained: return None
+        filename = f'{app_stem(self.g, self.o.app_name or self.g.get("name", ""))}-data'
+        roots = [self.o.out, public_split_export_dir(self.o.out),
+                 self.o.folder, self.work_root.parent / 'ports',
+                 self.o.folder / 'nx2android-ports',
+                 Path('/storage/emulated/0/Download/nx2android-ports')]
+        seen = set()
+        for root in roots:
+            path = Path(root) / filename
+            if str(path) in seen: continue
+            seen.add(str(path))
+            if path.is_symlink() or not path.is_dir(): continue
+            man = datapack.read_manifest(path)
+            if not isinstance(man, dict): continue
+            if (man.get('title_id') != self.g.id or
+                    man.get('package') != self.package or
+                    man.get('version') != self.pkg_ver):
+                say(f'previous data folder title/package/version differs; not reused: {path}')
+                continue
+            rom = path / 'RomFS'
+            marker = self.g.get('romfs_marker')
+            if (not marker or rom.is_symlink() or not rom.is_dir() or
+                    not (rom / marker).is_file()):
+                say(f'previous data folder lacks a readable uncompressed RomFS: {path}')
+                continue
+            say(f'previous companion data found for {self.pkg_ver}: {path} '
+                '(verifying RomFS before reusing)')
+            return path
+        return None
+
+    def restore_companion_romfs(self, nx, ex, version, base, update):
+        """Recover ExeFS only; preserve and reference the existing verified RomFS."""
+        pack = self.previous_companion
+        if pack is None or version != self.pkg_ver: return
+        dest, tmp = ex / version, ex / f'{version}.partial'
+        if ((dest / 'ExeFS/main').is_file() and
+                (dest / 'RomFS' / self.g.get('romfs_marker')).is_file()):
+            return
+        nsp.rmtree(tmp)
+        say(f'validating previous data and extracting only executable files for {version}')
+        try:
+            nsp.run([nx, self.o.keys, base, update or '-', tmp,
+                     '--verify-romfs', pack / 'RomFS'],
+                    self.logs / f'verify_romfs_{version}.log', env=self.env)
+            if not (tmp / 'ExeFS/main').is_file():
+                raise BuildError('input dump yielded no ExeFS/main')
+            (tmp / 'RomFS').symlink_to(pack / 'RomFS', target_is_directory=True)
+            if not (tmp / 'RomFS' / self.g.get('romfs_marker')).is_file():
+                raise BuildError('verified companion RomFS marker is inaccessible')
+            nsp.swap_in(tmp, dest)
+        except Exception as e:
+            nsp.rmtree(tmp)
+            raise BuildError(f'cannot safely reuse previous data without a new full extraction: {e}; '
+                             'old data was preserved (see verify_romfs log)') from e
+        say(f'verified previous RomFS, reused without a second game-sized copy: {pack / "RomFS"}')
 
     def cleanup_interrupted_archive(self, stem):
         (self.o.out / f'.{stem}.nx2a-data.zip.partial').unlink(missing_ok=True)
@@ -580,22 +650,27 @@ class Port:
         The pack is a copy of the game's files (Android's SELinux never lets an app link), so the port needs room for the build's files and for the pack.
         The app's mode copies no RomFS into the pack (the pack points at the build folder's own), so there the build's files are the only copy and the room is half.
         A self-contained export also stages a compressed data archive and the APK; their space is budgeted on the build and output volumes separately."""
-        # This estimate is only useful for a cold port. On a retry, extracted files,
-        # patched modules and shader products may already occupy almost all usable
-        # storage. Requiring space for another copy rejects valid incremental builds.
-        # The extractor and final APK exporter check their own remaining write needs.
-        cached = (self.work.is_dir() and (
+        # A verified prior data pack can replace the missing private extraction
+        # tree. Actual storage needs remain checked by individual write stages.
+        cached = bool(getattr(self, 'previous_companion', None)) or (self.work.is_dir() and (
             any((self.work / 'extract').glob('*/ExeFS/main')) or
             (self.work / 'android/shaders.dmsv').is_file() or
             any((self.work / 'android').glob('patched_*/*'))
         ))
         if cached:
-            free = shutil.disk_usage(self.work).free
+            where = self.work
+            while not where.exists() and where.parent != where:
+                where = where.parent
+            free = shutil.disk_usage(where).free
             if free < (64 << 20):
                 raise BuildError(f'less than 64 MiB free in the cached build workspace {self.work}; '
                                  'the prior compiled assets are preserved')
-            say(f'incremental build: using existing workspace {self.work}; '
-                'checking additional disk needs when a stage writes new assets')
+            if getattr(self, 'previous_companion', None):
+                say(f'incremental rebuild: prior companion {self.previous_companion}; '
+                    'no duplicate RomFS reservation')
+            else:
+                say(f'incremental build: using existing workspace {self.work}; '
+                    'checking additional disk needs when a stage writes new assets')
             return
         fam = self.fam
         files = [fam['base'], *[p for _, p in fam['updates']], *[p for _, _, p in fam['dlc']]]
@@ -684,8 +759,14 @@ class Port:
         # A previous successful extraction takes no new full-game allocation.
         fresh = lambda v: (ex / v / 'ExeFS/main').exists() and (ex / v / 'RomFS' / g.get('romfs_marker')).exists()   # nsp.extract's reuse test
         missing = [v for v in self.versions if not fresh(v)]
-        sources = {p for v in missing for p in picks[v] if p}
+        # A prior companion needs only its ExeFS and a streaming full-byte
+        # comparison of RomFS, not a second physical extraction of that tree.
+        full_missing = [v for v in missing if not (
+            v == self.pkg_ver and getattr(self, 'previous_companion', None))]
+        sources = {p for v in full_missing for p in picks[v] if p}
         additional = sum(dumps.size(p) * (2 if dumps.compressed(p) else 1) for p in sources)
+        if missing and not full_missing:
+            say('existing RomFS will be verified and reused in place; only ExeFS requires disk')
         if missing and nsp.free_gb(self.work) * (1 << 30) < additional + (256 << 20):
             raise BuildError(f'not enough space to extract missing version(s) {", ".join(missing)}: '
                              f'about {(additional + (256 << 20)) / 2**30:.1f} GiB needed; '
@@ -704,6 +785,10 @@ class Port:
                             bool(o.firmware and self.ap.sysdata))
         nx = nsp.build_nx_extract(NXNATIVE, self.work, self.logs, self.env) if needs_extraction else None
         PROG.end('skipped (existing extraction)' if nx is None else '')
+        if nx is not None and getattr(self, 'previous_companion', None):
+            for ver in self.versions:
+                if ver == self.pkg_ver and not fresh(ver):
+                    self.restore_companion_romfs(nx, ex, ver, *picks[ver])
         self.dirs = {ver: nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g) for ver in self.versions}
         for d in self.dirs.values(): nsp.require_64bit(d / 'ExeFS', f'{g.get("name", g.id)} ({g.id})')
         bad = [] if self.derived else [f'{v}: {x}' for v in self.versions for x in nsp.build_mismatch(self.dirs[v], v, g)]

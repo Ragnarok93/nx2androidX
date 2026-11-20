@@ -1,6 +1,7 @@
 // NSP extraction: nx_extract <prod.keys> <base NSP> <update NSP or -> <output dir> [base RomFS dir to compare against] [--manifest]
 // Writes <output dir>/ExeFS and <output dir>/RomFS (the merged RomFS when there is an update); with a base RomFS dir, files whose content matches it become APFS clones (no new space).
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB).
+// --verify-romfs <dir>: extract ExeFS only after verifying every byte of an existing RomFS against the input NSP, without making a second game-sized copy.
 // A damaged NSP (a file whose data fails the NCA's hash check, e.g. a copy cut short or a broken download) stops the extraction with exit code 3 after listing every damaged file;
 //   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies).
 // Integrity failures outside the individual-file handlers (e.g. RomFS metadata) stop immediately with exit code 3 and the LibHac reason, even with --allow-damaged.
@@ -54,6 +55,19 @@ static class P {
     static int Extract(string[] a) {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
+        string verifyRomfs = null;
+        int verifyIdx = Array.IndexOf(a, "--verify-romfs");
+        if (verifyIdx >= 0) {
+            if (verifyIdx + 1 >= a.Length || a[verifyIdx + 1].StartsWith("--") || manifest) {
+                Console.Error.WriteLine("usage: --verify-romfs <existing RomFS directory> (not with --manifest)");
+                return 2;
+            }
+            verifyRomfs = a[verifyIdx + 1];
+            var parsed = new List<string>(a);
+            parsed.RemoveAt(verifyIdx + 1);
+            parsed.RemoveAt(verifyIdx);
+            a = parsed.ToArray();
+        }
         if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir>\n       nx_extract <prod.keys> --sysdata <firmware dir> <title id> <out dir>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3]);
@@ -91,7 +105,9 @@ static class P {
         // A program can embed all assets in its code modules (ANIMAL WELL 1.0.10).
         // Preserve the extraction layout without asking LibHac to open an absent section.
         if (!baseProg.SectionExists(1) && (updProg == null || !updProg.SectionExists(1))) {
-            Directory.CreateDirectory(Path.Combine(outDir, "RomFS"));
+            if (verifyRomfs != null && Directory.EnumerateFiles(verifyRomfs, "*", System.IO.SearchOption.AllDirectories).GetEnumerator().MoveNext())
+                throw new InvalidDataException("cached RomFS is not empty, but the game has no data section");
+            if (verifyRomfs == null) Directory.CreateDirectory(Path.Combine(outDir, "RomFS"));
             if (manifest) File.WriteAllText(Path.Combine(outDir, "romfs_manifest.tsv"), "# path\tbytes\tfirst 32 bytes (hex)\n");
             Console.WriteLine("program has no data section: empty RomFS");
             return Damaged();
@@ -99,7 +115,8 @@ static class P {
         IStorage romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
         // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
         g_lenient = () => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
-        if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));
+        if (verifyRomfs != null) VerifyRomFS(new RomFsFileSystem(romfs), verifyRomfs);
+        else if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));
         else Copy(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS"), cmpDir);
         return Damaged();
     }
@@ -310,6 +327,43 @@ static class P {
         }
         Console.WriteLine($"{path}: RomFS {n} files {bytes / 1048576.0:F1} MB (manifest only)");
     }
+    // All files must match the input NSP; matching sizes and prefix bytes is not enough.
+    static void VerifyRomFS(IFileSystem fs, string prior) {
+        string root = Path.GetFullPath(prior).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!Directory.Exists(prior) || (File.GetAttributes(prior) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException($"previous RomFS is missing or a symlink: {prior}");
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        long bytes = 0;
+        var buf = new byte[4 << 20];
+        var cmp = new byte[4 << 20];
+        foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
+            if (e.Type == DirectoryEntryType.Directory) continue;
+            string rel = e.FullPath.TrimStart('/').Replace('\\', '/');
+            string existing = Path.GetFullPath(Path.Combine(prior, rel));
+            if (rel.Length == 0 || !existing.StartsWith(root, StringComparison.Ordinal)
+                || !File.Exists(existing) || new FileInfo(existing).Length != e.Size)
+                throw new InvalidDataException($"prior RomFS missing or different file: {rel}");
+            for (string p = Path.GetDirectoryName(existing); p != null && p.Length >= root.Length; p = Path.GetDirectoryName(p)) {
+                if ((File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException($"prior RomFS contains a symlink: {rel}");
+            }
+            if ((File.GetAttributes(existing) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException($"prior RomFS contains a symlink: {rel}");
+            using var f = new UniqueRef<IFile>();
+            fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            if (!Same(f.Get, existing, e.Size, buf, cmp))
+                throw new InvalidDataException($"prior RomFS bytes differ from NSP: {rel}");
+            found.Add(rel);
+            bytes += e.Size;
+        }
+        foreach (string file in Directory.EnumerateFiles(prior, "*", System.IO.SearchOption.AllDirectories)) {
+            string rel = Path.GetRelativePath(prior, file).Replace('\\', '/');
+            if (!found.Remove(rel)) throw new InvalidDataException($"unexpected file in prior RomFS: {rel}");
+        }
+        if (found.Count != 0) throw new InvalidDataException("prior RomFS inventory incomplete");
+        Console.WriteLine($"verified previous RomFS byte-for-byte: {bytes / 1048576.0:F1} MB, no copy");
+    }
+
     static bool Same(IFile f, string path, long size, byte[] buf, byte[] cb) {
         using var c = File.OpenRead(path);
         for (long off = 0; off < size;) {
