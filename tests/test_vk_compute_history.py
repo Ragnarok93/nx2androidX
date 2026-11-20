@@ -31,6 +31,18 @@ int main(int argc, char **argv) {
         n = vk_compute_history_add(written, n, &k);
     }
     assert(n == VK_COMPUTE_HISTORY_MAX);
+    vk_compute_key late = {{0x87a863fa726e88f1, 0x100, 0x420}};
+    vk_compute_key first_startup = written[0];
+    vk_compute_key last_startup = written[VK_COMPUTE_HISTORY_STARTUP - 1];
+    vk_compute_key next_oldest = written[VK_COMPUTE_HISTORY_STARTUP + 1];
+    assert(!vk_compute_history_observe(written, &n, &late, 0));
+    assert(vk_compute_history_observe(written, &n, &late, 1));
+    assert(n == VK_COMPUTE_HISTORY_MAX);
+    assert(written[0].word[0] == first_startup.word[0]);
+    assert(written[VK_COMPUTE_HISTORY_STARTUP - 1].word[0] == last_startup.word[0]);
+    assert(written[VK_COMPUTE_HISTORY_STARTUP].word[0] == next_oldest.word[0]);
+    assert(!memcmp(written + n - 1, &late, sizeof late));
+    assert(!vk_compute_history_observe(written, &n, &late, 1));
     assert(vk_compute_history_save(argv[1], written, n));
     assert(!vk_compute_history_save(argv[1], written, n + 1));
     FILE *f = fopen(argv[1], "rb");

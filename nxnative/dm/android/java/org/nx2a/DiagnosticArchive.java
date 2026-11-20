@@ -1,6 +1,5 @@
 package org.nx2a;
 
-import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.BufferedReader;
@@ -39,6 +38,14 @@ final class DiagnosticArchive {
     private static boolean logName(String name) {
         return name.startsWith("log") && name.endsWith(".txt");
     }
+    private static int exportPriority(File file) {
+        String name = file.getName();
+        if (name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
+                name.equals("gpu_draw_inputs.tsv")) return 0;
+        if (logName(name)) return 1;
+        if (name.endsWith(".raw")) return 2;
+        return 3;
+    }
     private static String entryName(String name) {
         return logName(name) ? "logs/" + name : name.equals("capture_meta.txt") ||
                name.equals("pass_dump_manifest.tsv") || name.equals("gpu_draw_inputs.tsv")
@@ -76,8 +83,9 @@ final class DiagnosticArchive {
         File manifest = new File(root, "pass_dump_manifest.tsv");
         File captureInfo = new File(root, "capture_meta.txt");
         boolean restrictPasses = manifest.isFile() || captureInfo.isFile();
-        if (manifest.isFile() && (!captureInfo.isFile() ||
-                manifest.lastModified() >= captureInfo.lastModified())) {
+        long captureTime = captureInfo.isFile() ? captureInfo.lastModified() : 0;
+        boolean manifestCurrent = manifest.isFile() && manifest.lastModified() >= captureTime;
+        if (manifestCurrent) {
             try (BufferedReader lines = Files.newBufferedReader(manifest.toPath(), StandardCharsets.UTF_8)) {
                 String line;
                 int seen = 0;
@@ -98,16 +106,20 @@ final class DiagnosticArchive {
         String prefix = root.getPath() + File.separator;
         for (File f : children) {
             if (!allowedName(f.getName()) || !f.isFile() || Files.isSymbolicLink(f.toPath())) continue;
-            if (restrictPasses && f.getName().startsWith("pass_") &&
-                    !f.getName().equals("pass_dump_manifest.tsv") &&
-                    !currentPasses.contains(f.getName().substring(0, 7))) continue;
+            String name = f.getName();
+            if (name.equals("pass_dump_manifest.tsv") && !manifestCurrent) continue;
+            if (restrictPasses && name.startsWith("pass_") &&
+                    !name.equals("pass_dump_manifest.tsv") &&
+                    (!currentPasses.contains(name.substring(0, 7)) || f.lastModified() < captureTime)) continue;
             if (f.getName().equals("gpu_draw_inputs.tsv") &&
-                    (!manifest.isFile() || (captureInfo.isFile() &&
-                    f.lastModified() < captureInfo.lastModified()))) continue;
+                    (!manifestCurrent || f.lastModified() < captureTime)) continue;
             if (!f.getCanonicalPath().startsWith(prefix)) continue;
             inputs.add(f);
         }
-        inputs.sort(Comparator.comparing(File::getName));
+        // Keep the manifest, logs and exact readbacks ahead of redundant
+        // previews so a cut-off transfer can still be matched to the capture.
+        inputs.sort(Comparator.comparingInt(DiagnosticArchive::exportPriority)
+                              .thenComparing(File::getName));
         if (inputs.size() > ENTRY_LIMIT) throw new IOException("Diagnostic file count exceeds safe limit");
         long total = 0;
         int collected = 0;

@@ -751,10 +751,6 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
         g_pd_prepass_written = 0; g_pd_control_written = 0;
         input_capture_arm();
         setenv("DM_VK_PASSDUMP", "0", 1);
-        { const char *root = getenv("DM_ROOT"); char path[1024];
-          snprintf(path, sizeof path, "%s/pass_dump_manifest.tsv", root ? root : ".");
-          FILE *mf = fopen(path, "w");
-          if (mf) { fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\tsubmission\n", mf); fclose(mf); } }
         VKLOG("pass dump: next submission from pass %d, limit %d images, %llu MB raw readback",
             g_pd_skip, pass_dump_limit(), (unsigned long long)(pass_dump_budget() / 1048576)); return; }
     if (g_pd_state == 1 && (g_npd || g_input_count) && --g_pd_frames > 0 && g_npd < pass_dump_limit() - 1) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
@@ -767,8 +763,18 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
     if (g_pd_state != 2 || done_fence < capture_fence) return;
     input_capture_write();
     const char *root = getenv("DM_ROOT");
+    char manifest[1024], manifest_tmp[1050];
+    snprintf(manifest, sizeof manifest, "%s/pass_dump_manifest.tsv", root ? root : ".");
+    snprintf(manifest_tmp, sizeof manifest_tmp, "%s.tmp", manifest);
+    FILE *mf = g_npd ? fopen(manifest_tmp, "w") : NULL;
+    if (mf) fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\tsubmission\n", mf);
     for (int i = 0; i < g_npd; i++) {
         pdump_t *d = &g_pd[i]; char path[1024]; snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
+        char sidecar[1050];
+        snprintf(sidecar, sizeof sidecar, "%s.f32", path);
+        unlink(sidecar); // the same slot may have previously contained depth or velocity
+        snprintf(sidecar, sizeof sidecar, "%s/pass_%02d.raw", root ? root : ".", i);
+        unlink(sidecar);
         // done_fence covers this buffer's transfer write; HOST_CACHED does not imply HOST_COHERENT.
         VkMappedMemoryRange inv = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, NULL, d->m, 0, VK_WHOLE_SIZE};
         VKCHK(vkInvalidateMappedMemoryRanges(V.dev, 1, &inv));
@@ -788,12 +794,10 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
             i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
             d->f, d->view_fmt, (unsigned long long)d->pool, (long long)d->off,
             (unsigned long long)d->bytes, (unsigned long long)raw_hash);
-        { char mfpath[1024]; snprintf(mfpath, sizeof mfpath, "%s/pass_dump_manifest.tsv", root ? root : ".");
-          FILE *mf = fopen(mfpath, "a");
-          if (mf) { fprintf(mf, "%d\t%llu\t%d\t%d\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llx\t%lld\t%016llx\tpass_%02d.ppm\t%llu\n",
+        if (mf) fprintf(mf, "%d\t%llu\t%d\t%d\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llx\t%lld\t%016llx\tpass_%02d.ppm\t%llu\n",
               i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
               d->f, d->view_fmt, (unsigned long long)d->bytes, (unsigned long long)d->pool,
-              (long long)d->off, (unsigned long long)raw_hash, i, (unsigned long long)d->submission); fclose(mf); } }
+              (long long)d->off, (unsigned long long)raw_hash, i, (unsigned long long)d->submission);
         { const char *raw = getenv("DM_VK_PASSDUMP_RAW");
           if (raw && atoi(raw)) { char rp[1100]; snprintf(rp, sizeof rp, "%s/pass_%02d.raw", root ? root : ".", i);
               FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(d->p, 1, (size_t)d->bytes, rf); fclose(rf); } } }
@@ -848,6 +852,8 @@ void vk_pass_dump_poll(uint64_t done_fence) {   // gfx_vk_present.c, every prese
             VKLOG("   texels:%s", t); }
         vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL);
     }
+    if (mf && (fclose(mf) != 0 || rename(manifest_tmp, manifest) != 0))
+        unlink(manifest_tmp);
     g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;
 }
 // DM_VK_CRUMBS=1 (start-up), for a device lost (a GPU hang): every pass end and dispatch writes {submission, pass} into host-visible memory after a full barrier, and the host
@@ -2812,15 +2818,20 @@ static VkPipeline compute_build(vkshader_t *cs, uint64_t um, uint64_t im) {   //
 #include "gfx_vk_compute_history.h"
 static pthread_mutex_t g_ch_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_ch_cv = PTHREAD_COND_INITIALIZER;
-static vk_compute_key g_ch_pending[VK_COMPUTE_HISTORY_MAX];
-static unsigned g_ch_pending_count, g_ch_queued;
+typedef struct { vk_compute_key key; int slow; } compute_observation;
+static compute_observation g_ch_pending[VK_COMPUTE_HISTORY_MAX];
+static unsigned g_ch_pending_count;
+static int g_ch_full;
 static int g_ch_enabled;
-static void compute_record(const uint64_t ck[3]) {
-    if (!g_ch_enabled || g_ch_queued >= VK_COMPUTE_HISTORY_MAX) return;
+static void compute_record(const uint64_t ck[3], int slow) {
+    if (!g_ch_enabled) return;
     pthread_mutex_lock(&g_ch_mu);
-    memcpy(g_ch_pending[g_ch_pending_count++].word, ck, sizeof(vk_compute_key));
-    g_ch_queued++;
-    pthread_cond_signal(&g_ch_cv);
+    if (g_ch_pending_count < VK_COMPUTE_HISTORY_MAX && (!g_ch_full || slow)) {
+        compute_observation *entry = &g_ch_pending[g_ch_pending_count++];
+        memcpy(entry->key.word, ck, sizeof(entry->key.word));
+        entry->slow = slow;
+        pthread_cond_signal(&g_ch_cv);
+    }
     pthread_mutex_unlock(&g_ch_mu);
 }
 static int compute_warm_key(const uint64_t ck[3]) {
@@ -2838,7 +2849,8 @@ static int compute_warm_key(const uint64_t ck[3]) {
     return 1;
 }
 static void compute_history(const char *path) {
-    vk_compute_key known[VK_COMPUTE_HISTORY_MAX], pending[VK_COMPUTE_HISTORY_MAX];
+    vk_compute_key known[VK_COMPUTE_HISTORY_MAX];
+    compute_observation pending[VK_COMPUTE_HISTORY_MAX];
     FILE *f = fopen(path, "rb");
     unsigned n = f ? vk_compute_history_read(f, known) : 0;
     if (f) fclose(f);
@@ -2846,17 +2858,22 @@ static void compute_history(const char *path) {
     uint64_t t0 = tick();
     for (unsigned i = 0; i < n; i++) made += compute_warm_key(known[i].word);
     VKLOG("compute prewarm from history: %u of %u observed variants in %.0f ms", made, n, (tick() - t0) / 1e6);
-    while (n < VK_COMPUTE_HISTORY_MAX) {
+    for (;;) {
         pthread_mutex_lock(&g_ch_mu);
+        g_ch_full = n == VK_COMPUTE_HISTORY_MAX;
         while (!g_ch_pending_count) pthread_cond_wait(&g_ch_cv, &g_ch_mu);
         unsigned count = g_ch_pending_count;
         memcpy(pending, g_ch_pending, count * sizeof(*pending));
         g_ch_pending_count = 0;
         pthread_mutex_unlock(&g_ch_mu);
-        unsigned before = n;
-        for (unsigned i = 0; i < count; i++) n = vk_compute_history_add(known, n, &pending[i]);
-        if (n != before && !vk_compute_history_save(path, known, n))
-            VKLOG("compute prewarm history could not be saved");
+        unsigned changed = 0;
+        for (unsigned i = 0; i < count; i++)
+            changed += vk_compute_history_observe(known, &n, &pending[i].key, pending[i].slow);
+        if (changed) {
+            if (vk_compute_history_save(path, known, n))
+                VKLOG("compute prewarm history: saved %u variants (%u new)", n, changed);
+            else VKLOG("compute prewarm history could not be saved");
+        }
     }
 }
 static void *compute_warm(void *arg) {
@@ -2932,7 +2949,8 @@ static void dispatch(const p_dispatch *d) {
         p = compute_build(cs, ck[1], ck[2]);
         uint64_t elapsed = tick() - tb;
         if (g_prof_on) g_prof_ns[7] += elapsed;
-        if (g_ch_enabled && elapsed >= 8000000) {
+        int slow = elapsed >= 8000000;
+        if (g_ch_enabled && slow) {
             static unsigned reported;
             if (reported < 32) {
                 reported++;
@@ -2944,7 +2962,7 @@ static void dispatch(const p_dispatch *d) {
         pthread_mutex_lock(&g_cpipe_mu); VkPipeline had = nvn_hm_get(&g_cpipes, ck);
         if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; } else nvn_hm_put(&g_cpipes, ck, p);   // (compute_warm made it meanwhile)
         pthread_mutex_unlock(&g_cpipe_mu);
-        if (p != (void *)1) compute_record(ck);
+        if (p != (void *)1) compute_record(ck, slow);
     }
     if (p == (void *)1) return;
     vk_img_barrier_all(cb);

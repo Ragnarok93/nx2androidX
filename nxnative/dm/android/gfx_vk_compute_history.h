@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { VK_COMPUTE_HISTORY_MAX = 96 };
+enum { VK_COMPUTE_HISTORY_MAX = 96, VK_COMPUTE_HISTORY_STARTUP = 16 };
 typedef struct { uint64_t word[3]; } vk_compute_key;
 static const char vk_compute_history_magic[] = "DMVKCH1";
 
@@ -16,6 +16,25 @@ static inline unsigned vk_compute_history_add(vk_compute_key *keys, unsigned cou
         if (!memcmp(keys[i].word, key->word, sizeof(key->word))) return count;
     keys[count] = *key;
     return count + 1;
+}
+
+// Leave the earliest startup variants in place. A slow miss can displace
+// the oldest other record after the bounded history reaches capacity.
+static inline int vk_compute_history_observe(vk_compute_key *keys, unsigned *count,
+                                             const vk_compute_key *key, int slow) {
+    if (!key->word[0] || (key->word[1] & key->word[2])) return 0;
+    if (*count < VK_COMPUTE_HISTORY_MAX) {
+        unsigned old = *count;
+        *count = vk_compute_history_add(keys, old, key);
+        return *count != old;
+    }
+    if (!slow) return 0;
+    for (unsigned i = 0; i < *count; i++)
+        if (!memcmp(keys[i].word, key->word, sizeof(key->word))) return 0;
+    memmove(keys + VK_COMPUTE_HISTORY_STARTUP, keys + VK_COMPUTE_HISTORY_STARTUP + 1,
+            (*count - VK_COMPUTE_HISTORY_STARTUP - 1) * sizeof(*keys));
+    keys[*count - 1] = *key;
+    return 1;
 }
 
 static inline unsigned vk_compute_history_read(FILE *f, vk_compute_key *keys) {

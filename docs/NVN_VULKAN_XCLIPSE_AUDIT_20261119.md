@@ -380,3 +380,34 @@ The reference profile reports that the first-battle background flames
 are absent on Adreno as well, while haze, fog and the fire lighting are
 present. That observation does not identify the opening flames described
 by the player. A matched capture of that location is still needed.
+
+### Effects capture at present 14905 and compute-history follow-up
+
+The FG-off warm run loaded 3,954,896 pipeline-cache bytes and prewarmed
+96 of 96 compute variants in 258 ms. The windows ending at frames 900
+and 1200 reported 78.79 and 59.66 ms p99, versus 185.23 and 137.32 ms
+in the earlier FG-off capture. These are different traversals, so the
+figures do not isolate the prewarm effect. At present 17414, a first use
+of shader `87a863fa726e88f1` with masks `0x100/0x420` still cost
+78.42 ms. A full history previously stopped admitting observations. It
+now admits slow misses after reaching 96 records, preserving the first
+16 startup keys and replacing the oldest remaining key. This preserves
+the existing cache format and memory bound.
+
+The effects ZIP ends partway through a raw attachment and lacks its
+central directory. The completed ZIP entries supplied two logs and 14
+complete raw attachments. CRC and logged GPU hashes verified all 14.
+Recovered outputs include nonempty scene and character depth, HDR
+lighting, and finite values for the first attachment in the 32x32
+fog-volume passes. Pass 13's first output was zero and passes 14–16
+were nonzero. The second output was outside the capture selection, and
+these values alone cannot establish the correct fog or flame output.
+The four recorded sampled overlaps were CPU-uploaded compressed
+textures over differently formatted attachment ranges. The evidence
+does not justify copying those attachment bytes into the textures.
+
+The partial archive also contained a stale float sidecar for slot 07,
+which had changed from depth to HDR color. The native capture now
+removes stale sidecars and publishes the manifest after readback files
+are closed. The exporter prioritizes metadata, logs and exact readbacks
+ahead of previews and ignores files older than the armed capture.

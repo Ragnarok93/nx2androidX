@@ -27,7 +27,7 @@ public final class DiagnosticArchiveFixture {
     }
     static byte[] bytes(String s) { return s.getBytes(StandardCharsets.UTF_8); }
     static Map<String, byte[]> unpack(byte[] data) throws Exception {
-        Map<String, byte[]> result = new HashMap<>();
+        Map<String, byte[]> result = new LinkedHashMap<>();
         try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(data))) {
             ZipEntry entry;
             byte[] b = new byte[4096];
@@ -62,13 +62,17 @@ public final class DiagnosticArchiveFixture {
         put(root, "log.prev.3.txt", bytes("oldest retained run"));
         put(root, "capture_meta.txt", bytes("capture=player-armed\n"));
         put(root, "pass_dump_manifest.tsv", bytes(
-            "dump\tpresent\tpass\ttarget\n0\t1500\t18\t0\n"));
+            "dump\tpresent\tpass\ttarget\n0\t1500\t18\t0\n2\t1500\t18\t-1\n"));
         put(root, "gpu_draw_inputs.tsv", bytes("present\traw_hex\n1500\t02000000\n"));
         put(root, "gpu_draw_inputs.tsv.tmp", bytes("incomplete input report"));
         put(root, "pass_00.ppm", bytes("new MRT 0"));
         put(root, "pass_00.raw", new byte[] {0, (byte)255, 31, 42});
         put(root, "pass_00.ppm.f32", new byte[] {1, 2, 3, 4});
         put(root, "pass_01.ppm", bytes("stale previous capture"));
+        put(root, "pass_02.ppm.f32", new byte[] {5, 6, 7, 8});
+        put(root, "pass_00.ppm.f32", bytes("stale sidecar from the same slot"));
+        Files.setLastModifiedTime(root.resolve("pass_00.ppm.f32"),
+            java.nio.file.attribute.FileTime.fromMillis(1000L));
         put(root, "shaders.dmsv", bytes("SECRET SHADERS"));
         put(root, "Lossless.dll", bytes("PRIVATE DLL"));
         put(root, "saves.dat", bytes("PRIVATE SAVE"));
@@ -87,7 +91,13 @@ public final class DiagnosticArchiveFixture {
                             bytes("present\traw_hex\n1500\t02000000\n")), "completed GPU samples");
         check(!zip.containsKey("metadata/gpu_draw_inputs.tsv.tmp"), "temporary sample report excluded");
         check(Arrays.equals(zip.get("captures/pass_00.raw"), new byte[]{0,(byte)255,31,42}), "exact GPU bytes");
-        check(zip.containsKey("captures/pass_00.ppm.f32"), "float depth");
+        check(zip.containsKey("captures/pass_02.ppm.f32"), "current float sidecar retained");
+        check(!zip.containsKey("captures/pass_00.ppm.f32"), "stale sidecar suppressed on reused slot");
+        List<String> names = new ArrayList<>(zip.keySet());
+        check(names.indexOf("metadata/pass_dump_manifest.tsv") < names.indexOf("captures/pass_00.raw"),
+              "manifest comes before the transfer bytes");
+        check(names.indexOf("captures/pass_00.raw") < names.indexOf("captures/pass_00.ppm"),
+              "exact readback comes before the preview");
         check(!zip.containsKey("captures/pass_01.ppm"), "stale pass suppressed by manifest");
         check(!zip.containsKey("captures/pass_02.ppm"), "symlink excluded");
         for (String key : zip.keySet())
@@ -103,10 +113,12 @@ public final class DiagnosticArchiveFixture {
 
         // When a new one-shot capture is armed but its GPU fence has not
         // retired, never mislabel stale files as belonging to the new run.
-        Files.delete(root.resolve("pass_dump_manifest.tsv"));
+        Files.setLastModifiedTime(root.resolve("pass_dump_manifest.tsv"),
+            java.nio.file.attribute.FileTime.fromMillis(1000L));
         ByteArrayOutputStream second = new ByteArrayOutputStream();
         DiagnosticArchive.write(root.toFile(), second, "driver=RADV\n");
         Map<String, byte[]> pending = unpack(second.toByteArray());
+        check(!pending.containsKey("metadata/pass_dump_manifest.tsv"), "pending capture excludes stale manifest");
         check(!pending.containsKey("captures/pass_00.ppm"), "pending capture excludes stale target");
         check(!pending.containsKey("metadata/gpu_draw_inputs.tsv"), "pending capture excludes stale samples");
         boolean badFolder = false;
