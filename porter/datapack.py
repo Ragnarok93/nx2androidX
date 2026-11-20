@@ -146,6 +146,112 @@ def reusable_companion(dst, expected, metadata, payload):
     return True
 
 
+
+def _same_payload_file(source, existing):
+    """Verify bytes before reusing a prior export; never trust size alone."""
+    source, existing = Path(source), Path(existing)
+    if existing.is_symlink() or not existing.is_file():
+        return False
+    if source.samefile(existing):
+        return True
+    if source.stat().st_size != existing.stat().st_size:
+        return False
+    with source.open('rb') as new, existing.open('rb') as old:
+        while block := new.read(1 << 20):
+            if old.read(len(block)) != block:
+                return False
+        return not old.read(1)
+
+
+def refresh_in_place(dst, staging, payload, generated_files, manifest, progress=None):
+    """Update only modified assets in a previous pack, without a second full RomFS.
+
+    A moved-aside manifest makes an interrupted refresh unimportable; the next
+    build can resume from its saved identity and verify each file again. Saves
+    and unrelated player files are never touched.
+    """
+    dst = Path(dst)
+    current = dst / MANIFEST
+    previous = dst / ('.' + MANIFEST + '.previous')
+    if dst.is_symlink() or not dst.is_dir() or current.is_symlink() or previous.is_symlink():
+        return False
+    receipt = current if current.is_file() else previous
+    try:
+        old = json.loads(receipt.read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(old, dict) or any(old.get(k) != manifest[k] for k in ('title_id', 'package')):
+        return False
+    if progress:
+        progress('reusing prior companion assets in place')
+
+    # Move the published receipt aside first: an interrupted build must not
+    # present a mixed-version pack as complete, and retries can still resume.
+    if current.is_file():
+        current.replace(previous)
+    desired = set(payload)
+    metadata = {p.relative_to(staging).as_posix(): p for p in staging.rglob('*') if p.is_file()}
+    desired.update(metadata)
+    desired.add(MANIFEST)
+
+    def publish(name, source, direct_copy):
+        rel = Path(name)
+        if rel.is_absolute() or '..' in rel.parts or not rel.parts:
+            raise ValueError(f'unsafe data pack asset name: {name}')
+        target = dst / rel
+        parent = dst
+        for part in rel.parts[:-1]:
+            parent = parent / part
+            if parent.is_symlink():
+                raise OSError(f'unsafe symlink directory in data pack: {parent}')
+        if _same_payload_file(source, target):
+            return
+        parent.mkdir(parents=True, exist_ok=True)
+        pending = target.with_name(target.name + '.nx2a.partial')
+        pending.unlink(missing_ok=True)
+        try:
+            if direct_copy:
+                shutil.copy2(source, pending)
+            else:
+                link_or_copy(source, pending)
+            os.replace(pending, target)
+        finally:
+            pending.unlink(missing_ok=True)
+
+    for name, source in payload.items():
+        publish(name, source, name in generated_files)
+    for name, source in metadata.items():
+        publish(name, source, True)
+
+    # Remove obsolete generated assets, not saves or unknown player files.
+    owned_dirs = set(OWNED) | {'drivers', 'host', 'overlay'}
+    owned_root = {'shaders.dmsv', 'nintendo_ext.ttf', 'standard.ttf',
+                  'fpslock.tsv', 'icon.png', 'languages.txt', 'drivers.txt',
+                  'settings.txt', 'env.txt'}
+    for root, dirs, files in os.walk(dst, topdown=False, followlinks=False):
+        for filename in files:
+            path = Path(root) / filename
+            rel = path.relative_to(dst).as_posix()
+            if rel in desired or rel == previous.name or rel.startswith('saves/'):
+                continue
+            if rel.split('/', 1)[0] in owned_dirs or rel in owned_root:
+                path.unlink()
+        for dirname in dirs:
+            folder = Path(root) / dirname
+            if folder.is_symlink():
+                continue
+            if folder.relative_to(dst).parts[0] in owned_dirs:
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
+
+    # Only a fully published pack gets a valid manifest.
+    os.replace(staging / MANIFEST, current)
+    previous.unlink(missing_ok=True)
+    return True
+
+
 def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, text=None,
           host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None, require_links=False):
     """Write the pack to dst (replacing it). profile: the AndroidProfile; package: the app's, when not the profile's; env: more env.txt rows, after the profile's; settings: settings.txt values over the profile's;
@@ -210,6 +316,9 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
         else:
             link_or_copy(src, tmp / name, require_links=require_links)
     (tmp / MANIFEST).write_text(json.dumps(man, indent=2), encoding='utf-8')
+    if not require_links and refresh_in_place(dst, tmp, payload, set(files or {}), man, progress):
+        shutil.rmtree(tmp)
+        return man
     # the exported saves (the player's backups) are not the build's own: the pack is rebuilt whole, so they are put aside and put back
     keep = dst.with_name(dst.name + '.saves-keep')
     shutil.rmtree(keep, ignore_errors=True)
