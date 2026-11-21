@@ -38,6 +38,7 @@ public class GameActivity extends NativeActivity {
 
     private static final int REQUEST_LOSSLESS_DLL = 0x6e33;
     private String diagnosticsRoot;
+    static native boolean diagnosticsExportStarted();
     static native void diagnosticsExported(int result); // 0 failed, 1 saved, 2 cancelled
     private final GameKeyboard keyboard = new GameKeyboard(this);
 

@@ -25,9 +25,9 @@ final class DiagnosticArchive {
     static final long LOG_HEAD = 64L << 10;    // retain device/driver startup lines too
     static final long FILE_LIMIT = 128L << 20;
     static final long TOTAL_LIMIT = 384L << 20;
-    static final int ENTRY_LIMIT = 310;        // 96 x (preview, raw, floats) + metadata
+    static final int ENTRY_LIMIT = 1240;       // legacy files plus three completed rolling captures
     private static boolean metadataName(String name) {
-        return name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
+        return name.equals("capture_timeline.tsv") || name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
                name.equals("gpu_draw_inputs.tsv") || name.equals("surface_usage.tsv") ||
                name.equals("surface_samples.tsv");
     }
@@ -78,9 +78,12 @@ final class DiagnosticArchive {
         return f.isFile() && !Files.isSymbolicLink(f.toPath()) && f.length() > 0 &&
                f.lastModified() >= captureTime;
     }
-    static void write(File directory, OutputStream out, String systemInfo) throws IOException {
-        File root = directory.getCanonicalFile();
-        if (!root.isDirectory()) throw new IOException("Game diagnostic folder is unavailable");
+    private static final class ArchiveInput {
+        final File file;
+        final String prefix;
+        ArchiveInput(File file, String prefix) { this.file = file; this.prefix = prefix; }
+    }
+    private static void collect(File root, String archivePrefix, List<ArchiveInput> inputs) throws IOException {
         File[] children = root.listFiles();
         if (children == null) throw new IOException("Cannot list diagnostic folder");
         // The manifest, not a stale pass_%02d file left by an earlier
@@ -88,7 +91,7 @@ final class DiagnosticArchive {
         Set<String> currentPasses = new HashSet<>();
         File manifest = new File(root, "pass_dump_manifest.tsv");
         File captureInfo = new File(root, "capture_meta.txt");
-        boolean restrictPasses = manifest.isFile() || captureInfo.isFile();
+        boolean restrictPasses = !archivePrefix.isEmpty() || manifest.isFile() || captureInfo.isFile();
         long captureTime = captureInfo.isFile() ? captureInfo.lastModified() : 0;
         boolean manifestCurrent = manifest.isFile() && manifest.lastModified() >= captureTime;
         File catalog = new File(root, "surface_usage.tsv");
@@ -114,7 +117,6 @@ final class DiagnosticArchive {
                 }
             }
         }
-        List<File> inputs = new ArrayList<>();
         String prefix = root.getPath() + File.separator;
         for (File f : children) {
             if (!allowedName(f.getName()) || !f.isFile() || Files.isSymbolicLink(f.toPath())) continue;
@@ -128,13 +130,27 @@ final class DiagnosticArchive {
             if (name.equals("surface_usage.tsv") && !catalogCurrent) continue;
             if ((name.equals("surface_samples.tsv") || name.equals("surface_samples.raw")) &&
                     !surfacesCompleted) continue;
+            if (!archivePrefix.isEmpty() && (logName(name) || name.startsWith("frame_"))) continue;
             if (!f.getCanonicalPath().startsWith(prefix)) continue;
-            inputs.add(f);
+            inputs.add(new ArchiveInput(f, archivePrefix));
+        }
+    }
+    static void write(File directory, OutputStream out, String systemInfo) throws IOException {
+        File root = directory.getCanonicalFile();
+        if (!root.isDirectory()) throw new IOException("Game diagnostic folder is unavailable");
+        List<ArchiveInput> inputs = new ArrayList<>();
+        collect(root, "", inputs);
+        for (int slot = 0; slot < 3; slot++) {
+            File path = new File(root, "diagnostic-capture-" + slot);
+            if (!path.isDirectory() || Files.isSymbolicLink(path.toPath())) continue;
+            File complete = new File(path, "complete");
+            if (!complete.isFile() || Files.isSymbolicLink(complete.toPath())) continue;
+            collect(path, "history/slot-" + slot + "/", inputs);
         }
         // Keep the manifest, logs and exact readbacks ahead of redundant
         // previews so a cut-off transfer can still be matched to the capture.
-        inputs.sort(Comparator.comparingInt(DiagnosticArchive::exportPriority)
-                              .thenComparing(File::getName));
+        inputs.sort(Comparator.comparingInt((ArchiveInput input) -> exportPriority(input.file))
+                              .thenComparing(input -> input.prefix + input.file.getName()));
         if (inputs.size() > ENTRY_LIMIT) throw new IOException("Diagnostic file count exceeds safe limit");
         long total = 0;
         int collected = 0;
@@ -145,7 +161,9 @@ final class DiagnosticArchive {
                     "gpu_draw_inputs.tsv contains completed GPU buffer copies taken after read-only passes.\n" +
                     "Index and vertex rows are binding prefixes. Rasterization requires separate evidence.\n" +
                     "CPU/shadow indirect diagnostics are explicitly non-authoritative.\n" +
-                    "High-overhead full MRT/depth/stencil readback is OFF unless Capture graphics is pressed.\n" +
+                    "High-overhead full MRT/depth readback starts when Capture graphics is pressed.\n" +
+                    "capture_timeline.tsv records every present after Capture graphics is pressed.\n" +
+                    "history contains up to three completed full-frame snapshots with present numbers in their manifests.\n" +
                     "surface_usage.tsv lists attachment, shader image, transfer and presentation bindings.\n" +
                     "Alias rows pair the sampled view with a candidate producer's base subresource.\n" +
                     "pass_dump_manifest.tsv identifies full images, including presentation source target -4 and its crop.\n" +
@@ -157,17 +175,18 @@ final class DiagnosticArchive {
                     "Logs may contain device identifiers, filesystem paths, shader keys and GPU addresses.\n" +
                     "Review the report before sharing it.\n\n" + systemInfo + "\n")
                     .getBytes(StandardCharsets.UTF_8));
-            for (File file : inputs) {
+            for (ArchiveInput input : inputs) {
+                File file = input.file;
                 long length = file.length();
                 if (length <= 0) continue;
                 boolean log = logName(file.getName());
                 long count = log ? Math.min(length, LOG_TAIL) : length;
                 if (count > FILE_LIMIT || count > TOTAL_LIMIT - total) {
-                    skipped.append(file.getName()).append(": exceeded export byte budget\n");
+                    skipped.append(input.prefix).append(file.getName()).append(": exceeded export byte budget\n");
                     continue;
                 }
                 long start = log ? length - count : 0;
-                copy(zip, entryName(file.getName()), file, start, count);
+                copy(zip, input.prefix + entryName(file.getName()), file, start, count);
                 total += count;
                 collected++;
                 if (log && length > count && LOG_HEAD <= TOTAL_LIMIT - total) {

@@ -30,7 +30,7 @@ static struct {
 } g_sc;
 
 static int surface_capture_arm(void) {
-    const char *root = getenv("DM_ROOT");
+    const char *root = vk_pass_dump_root();
     memset(&g_sc, 0, sizeof g_sc);
     snprintf(g_sc.path, sizeof g_sc.path, "%s/surface_usage.tsv", root ? root : ".");
     snprintf(g_sc.temp, sizeof g_sc.temp, "%s/surface_usage.tsv.tmp", root ? root : ".");
@@ -326,7 +326,7 @@ static void surface_pass(void) {
 
 static void surface_capture_write(void) {
     if (!g_sc.usage) return;
-    const char *root = getenv("DM_ROOT");
+    const char *root = vk_pass_dump_root();
     char raw[1024], raw_tmp[1024], index[1024], index_tmp[1024];
     snprintf(raw, sizeof raw, "%s/surface_samples.raw", root ? root : ".");
     snprintf(raw_tmp, sizeof raw_tmp, "%s/surface_samples.raw.tmp", root ? root : ".");

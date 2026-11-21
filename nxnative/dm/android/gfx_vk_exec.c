@@ -12,6 +12,8 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <unistd.h>
 
 VkPipelineLayout vk_pipeline_layout(VkDescriptorSetLayout sets[5], int nsets);
@@ -426,7 +428,7 @@ static atomic_int g_pd_user_pending;
 static int g_pd_frame_has_scene;
 static unsigned g_pd_scene_waited;
 enum { PD_SCENE_WAIT_LIMIT = 120 };
-int vk_pass_dump_user_begin(void) { return !atomic_exchange(&g_pd_user_pending, 1); }
+#include "gfx_vk_capture_session.inc"
 static uint32_t g_pd_scene_w, g_pd_scene_h;
 static uint64_t g_pd_capture_id;
 static int g_pd_control_written; // bit per isolated format, never a scene attachment
@@ -845,26 +847,40 @@ static void pass_dump_depth(void) {
 static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31, e = (h >> 10) & 31, m = h & 1023, f;
     if (!e) { if (!m) f = s; else { e = 1; while (!(m & 1024)) { m <<= 1; e--; } m &= 1023; f = s | ((e + 112) << 23) | (m << 13); } } else if (e == 31) f = s | 0x7f800000 | (m << 13); else f = s | ((e + 112) << 23) | (m << 13);
     float r; memcpy(&r, &f, 4); return r; }
-void vk_pass_dump_poll(uint64_t done_fence, vkimg_t *present, const int crop[4]) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
+static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const int crop[4]) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
     int had_scene = g_pd_frame_has_scene;
     g_pd_frame_has_scene = 0;
+    int recording = atomic_load(&g_pd_user_pending);
+    if (recording && g_capture_timeline)
+        fprintf(g_capture_timeline, "%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
+                (unsigned long long)g_tex_frame, (unsigned long long)g_set_epoch,
+                (unsigned long long)g_vkst.draws, (unsigned long long)g_vkst.passes,
+                (unsigned long long)g_vkst.dispatches, had_scene);
+    if (g_capture_exporting) return;
     const char *e = getenv("DM_VK_PASSDUMP");
-    if (g_pd_state == 0 && e && atoi(e) > 1) {
-        g_pd_scene_waited = 0;
+    if (g_pd_state == 0 && !recording && e && atoi(e) > 1) {
         char n[16];
         snprintf(n, sizeof n, "%d", atoi(e) - 1);
         setenv("DM_VK_PASSDUMP", n, 1);
         return;
     }
-    if (g_pd_state == 0 && e && atoi(e)) {
-        if (atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed)) {
-            if (vk_pd_wait_for_scene(&g_pd_scene_waited, PD_SCENE_WAIT_LIMIT, had_scene)) return;
-            char start[32];
-            snprintf(start, sizeof start, "%llu", (unsigned long long)(g_tex_frame + 1));
-            setenv("DM_VK_LIST_AT", start, 1);
-            setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
-            VKLOG("[diagnostics] capturing after %u presents: %s", g_pd_scene_waited,
-                  had_scene ? "geometry observed in preceding frame" : "scene wait limit reached");
+    if (g_pd_state == 0 && (recording || (e && atoi(e)))) {
+        if (recording) {
+            if (g_capture_delay > 0) { g_capture_delay--; return; }
+            if (g_tex_frame < g_capture_next_present) return;
+            if (!g_capture_next_present &&
+                vk_pd_wait_for_scene(&g_pd_scene_waited, PD_SCENE_WAIT_LIMIT, had_scene)) return;
+            if (!g_capture_next_present) {
+                char start[32];
+                snprintf(start, sizeof start, "%llu", (unsigned long long)(g_tex_frame + 1));
+                setenv("DM_VK_LIST_AT", start, 1);
+                setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
+            }
+            g_capture_next_present = g_tex_frame + CAPTURE_INTERVAL;
+            if (!capture_start_slot()) {
+                VKLOG("[diagnostics] could not open rolling capture slot");
+                return;
+            }
         }
         const char *sk = getenv("DM_VK_PASSDUMP_SKIP");
         g_pd_skip = sk && !strchr(sk, 'x') ? atoi(sk) : 0;
@@ -874,7 +890,7 @@ void vk_pass_dump_poll(uint64_t done_fence, vkimg_t *present, const int crop[4])
         const char *fr = getenv("DM_VK_PASSDUMP_FRAMES"); g_pd_frames = fr && atoi(fr) > 1 ? atoi(fr) : 1;
         g_pd_state = 1; g_npd = 0; g_pd_bytes = 0;
         const char *full = getenv("DM_VK_PASSDUMP_FULL");
-        g_pd_full = full && atoi(full);
+        g_pd_full = recording || (full && atoi(full));
         if (g_pd_full) { g_pd_frames = 1; surface_capture_arm(); }
         const char *effects = getenv("DM_VK_PASSDUMP_EFFECTS");
         g_pd_effects = effects && atoi(effects);
@@ -919,7 +935,7 @@ void vk_pass_dump_poll(uint64_t done_fence, vkimg_t *present, const int crop[4])
     if (g_pd_state != 2 || done_fence < capture_fence) return;
     input_capture_write();
 
-    const char *root = getenv("DM_ROOT");
+    const char *root = vk_pass_dump_root();
     char manifest[1024], manifest_tmp[1050];
     snprintf(manifest, sizeof manifest, "%s/pass_dump_manifest.tsv", root ? root : ".");
     snprintf(manifest_tmp, sizeof manifest_tmp, "%s.tmp", manifest);
@@ -928,6 +944,7 @@ void vk_pass_dump_poll(uint64_t done_fence, vkimg_t *present, const int crop[4])
     for (int i = 0; i < g_npd; i++) {
         pdump_t *d = &g_pd[i]; char path[1024]; snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
         char sidecar[1050];
+        unlink(path);
         snprintf(sidecar, sizeof sidecar, "%s.f32", path);
         unlink(sidecar); // the same slot may have previously contained depth or velocity
         snprintf(sidecar, sizeof sidecar, "%s/pass_%02d.raw", root ? root : ".", i);
@@ -1032,10 +1049,15 @@ release_dump:
         unlink(manifest_tmp);
     if (g_pd_full) {
         surface_capture_write();
-        atomic_store(&g_pd_user_pending, 0);
+        if (g_capture_rolling_dump) capture_finish_slot();
     }
     g_pd_full = 0;
     g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;
+}
+void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4]) {
+    pthread_mutex_lock(&g_capture_lock);
+    pass_dump_poll_locked(done, present, crop);
+    pthread_mutex_unlock(&g_capture_lock);
 }
 // DM_VK_CRUMBS=1 (start-up), for a device lost (a GPU hang): every pass end and dispatch writes {submission, pass} into host-visible memory after a full barrier, and the host
 // keeps the shaders each pass drew with; when the device is lost (vk_crumbs_report), the last work the GPU finished and the passes after it are logged

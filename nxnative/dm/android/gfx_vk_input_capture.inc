@@ -22,7 +22,7 @@ static VkDeviceMemory g_input_memory;
 static void *g_input_map;
 
 static void input_capture_path(char path[1024], const char *suffix) {
-    const char *root = getenv("DM_ROOT");
+    const char *root = vk_pass_dump_root();
     snprintf(path, 1024, "%s/gpu_draw_inputs.tsv%s", root ? root : ".", suffix);
 }
 

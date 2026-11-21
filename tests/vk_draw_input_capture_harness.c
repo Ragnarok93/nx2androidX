@@ -94,6 +94,7 @@ static VkResult vkInvalidateMappedMemoryRanges(VkDevice dev, uint32_t count, con
     return VK_SUCCESS;
 }
 
+static const char *vk_pass_dump_root(void) { return getenv("DM_ROOT"); }
 #include "gfx_vk_input_capture.inc"
 
 int main(void) {

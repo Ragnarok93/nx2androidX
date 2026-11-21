@@ -96,6 +96,7 @@ static void vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage im, VkImageLayout
     captured[copies++] = *r;
     memset(memory + r->bufferOffset, 0x50 + copies, 4);
 }
+static const char *vk_pass_dump_root(void) { return getenv("DM_ROOT"); }
 #include "gfx_vk_surface_capture.inc"
 ''' + dump_type + r'''
 static pdump_t g_pd[96];

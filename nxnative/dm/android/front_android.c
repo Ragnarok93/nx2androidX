@@ -620,14 +620,15 @@ void dm_menu_radv_note(int index, char *out, int cap) {
         active ? "Test active" : "Use defaults";
     snprintf(out, (size_t)cap, "%s", value);
 }
+int vk_pass_dump_user_active(void);
 void dm_menu_diag_note(char *out, int cap) {
     if (cap <= 0) return;
     int status = atomic_load(&g_diag_status);
-    const char *name = status == DIAG_ARMED ? "Capture armed" :
+    const char *name = status == DIAG_ARMED ? "Recording until export" :
                        status == DIAG_EXPORTING ? "Saving ZIP..." :
                        status == DIAG_EXPORTED ? "ZIP saved" :
                        status == DIAG_FAILED ? "Export failed" : "Logs available";
-    if (status == DIAG_ARMED || status == DIAG_IDLE) {
+    if (status == DIAG_IDLE) {
         // The report manifest is written after the GPU fence completes; the
         // older pass_00.ppm could belong to a previous run.
         char path[620], row[256];
@@ -725,14 +726,16 @@ static void fg_flow_step(int direction) {
     atomic_store(&g_set_fg_flow, n);
     fg_apply();
 }
-int vk_pass_dump_user_begin(void);
+int vk_pass_dump_user_begin(int delay);
+int vk_pass_dump_export_begin(void);
+void vk_pass_dump_export_end(int saved);
 static int diag_capture_arm(int delay) {
-    if (!vk_pass_dump_user_begin()) return 0;
+    if (atomic_load(&g_diag_status) == DIAG_EXPORTING || !vk_pass_dump_user_begin(delay)) return 0;
     static const char *const settings[][2] = {
         {"DM_VK_PASSDUMP_FULL", "1"}, {"DM_VK_PASSDUMP_EFFECTS", "0"},
         {"DM_VK_PASSDUMP_DEPTH_STATE", "1"}, {"DM_VK_PASSDUMP_INPUTS", "1"},
         {"DM_VK_PASSDUMP_INPUT_VS", ""}, {"DM_VK_PASSDUMP_LIMIT", "96"},
-        {"DM_VK_PASSDUMP_MAX_MB", "128"}, {"DM_VK_PASSDUMP_RAW", "1"},
+        {"DM_VK_PASSDUMP_MAX_MB", "64"}, {"DM_VK_PASSDUMP_RAW", "1"},
         {"DM_VK_PASSDUMP_FRAMES", "1"}, {"DM_VK_PASSDUMP_SKIP", "0"},
         {"DM_VK_PASSDUMP_SIZE", "0"},
     };
@@ -754,8 +757,8 @@ static int diag_capture_arm(int delay) {
     FILE *f = fopen(path, "w");
     if (f) {
         const char *driver = dm_vk_driver_status();
-        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=full-frame\n"
-                   "max_gpu_readback_mb=128\nsurface_tile=16x16\n"
+        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=continuous-rolling\nsnapshot_interval_presents=30\nsnapshot_slots=3\n"
+                   "max_gpu_readback_mb=64\nsurface_tile=16x16\n"
                    "isolated_depth_transfer_control=0.625\n"
                    "vulkan_driver=%s\nframe_generation_at_arm=%d\ncapture_delay_presents=%d\n",
                 (unsigned long long)frame, driver ? driver : "(unknown)", atomic_load(&g_set_fg), delay);
@@ -764,16 +767,13 @@ static int diag_capture_arm(int delay) {
             fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
         fclose(f);
     }
-    // Wait out the first post-menu present before looking for scene geometry.
-    char countdown[16];
-    snprintf(countdown, sizeof countdown, "%d", delay + 2);
-    setenv("DM_VK_PASSDUMP", countdown, 1);
     atomic_store(&g_diag_status, DIAG_ARMED);
-    LOG("[diagnostics] full graphics capture armed for the next gameplay frame");
+    LOG("[diagnostics] continuous graphics capture started");
     diag_changed();
     return 1;
 }
 static void diag_export_request(void) {
+    if (atomic_load(&g_diag_status) == DIAG_EXPORTING) return;
     ANativeActivity *a = g_act;
     if (!a || !a->vm || !a->clazz) {
         atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return;
@@ -783,23 +783,36 @@ static void diag_export_request(void) {
     if (!E) { atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return; }
     jclass cls = (*E)->GetObjectClass(E, a->clazz);
     jmethodID call = cls ? (*E)->GetMethodID(E, cls, "exportDiagnostics", "(Ljava/lang/String;)V") : NULL;
+    atomic_store(&g_diag_status, DIAG_EXPORTING);
+    int dispatched = 0;
     if (call) {
         jstring path = (*E)->NewStringUTF(E, g_root);
-        if (path) { (*E)->CallVoidMethod(E, a->clazz, call, path); (*E)->DeleteLocalRef(E, path); }
+        if (path) {
+            (*E)->CallVoidMethod(E, a->clazz, call, path);
+            (*E)->DeleteLocalRef(E, path);
+            dispatched = 1;
+        }
     }
-    if ((*E)->ExceptionCheck(E) || !call) {
+    if ((*E)->ExceptionCheck(E) || !dispatched) {
         (*E)->ExceptionClear(E);
         LOG("[RED] [diagnostics] standalone Activity lacks the exportDiagnostics bridge");
         atomic_store(&g_diag_status, DIAG_FAILED);
-    } else atomic_store(&g_diag_status, DIAG_EXPORTING);
+    }
     if (cls) (*E)->DeleteLocalRef(E, cls);
     (*a->vm)->DetachCurrentThread(a->vm);
     diag_changed();
 }
+__attribute__((visibility("default"))) JNIEXPORT jboolean JNICALL
+Java_org_nx2a_GameActivity_diagnosticsExportStarted(JNIEnv *E, jclass cls) {
+    (void)E; (void)cls;
+    return vk_pass_dump_export_begin() ? JNI_TRUE : JNI_FALSE;
+}
 __attribute__((visibility("default"))) JNIEXPORT void JNICALL
 Java_org_nx2a_GameActivity_diagnosticsExported(JNIEnv *E, jclass cls, jint result) {
     (void)E; (void)cls;
-    atomic_store(&g_diag_status, result == 1 ? DIAG_EXPORTED : result == 2 ? DIAG_IDLE : DIAG_FAILED);
+    vk_pass_dump_export_end(result == 1);
+    atomic_store(&g_diag_status, result == 1 ? DIAG_EXPORTED :
+                 vk_pass_dump_user_active() ? DIAG_ARMED : result == 2 ? DIAG_IDLE : DIAG_FAILED);
     LOG("[diagnostics] report export %s", result == 1 ? "completed" : result == 2 ? "cancelled" : "failed");
     diag_changed();
 }

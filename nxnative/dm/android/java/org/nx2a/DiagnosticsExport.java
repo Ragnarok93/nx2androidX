@@ -45,6 +45,7 @@ final class DiagnosticsExport {
         }
         Uri target = data.getData();
         new Thread(() -> {
+            if (!GameActivity.diagnosticsExportStarted()) return;
             int result = 1;
             try {
                 String info = "package=" + activity.getPackageName() + "\n" +

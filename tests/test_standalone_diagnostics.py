@@ -85,11 +85,33 @@ public final class DiagnosticArchiveFixture {
         try {
             Files.createSymbolicLink(root.resolve("pass_02.ppm"), root.resolve("shaders.dmsv"));
         } catch (UnsupportedOperationException | SecurityException | IOException ignored) { }
+        put(root, "capture_timeline.tsv", bytes("present\n1500\n1501\n"));
+        Path completed = Files.createDirectory(root.resolve("diagnostic-capture-0"));
+        put(completed, "complete", new byte[0]);
+        put(completed, "pass_dump_manifest.tsv", bytes("dump\tpresent\n0\t1399\n"));
+        put(completed, "pass_00.raw", bytes("first rolling frame"));
+        put(completed, "pass_01.ppm", bytes("stale rolling frame"));
+        put(completed, "saves.dat", bytes("PRIVATE SAVE"));
+        Path pendingSlot = Files.createDirectory(root.resolve("diagnostic-capture-1"));
+        put(pendingSlot, "pass_dump_manifest.tsv", bytes("dump\tpresent\n0\t1488\n"));
+        put(pendingSlot, "pass_00.raw", bytes("pending GPU"));
+        Path later = Files.createDirectory(root.resolve("diagnostic-capture-2"));
+        put(later, "complete", new byte[0]);
+        put(later, "surface_usage.tsv", bytes("completed without images"));
+        put(later, "pass_00.raw", bytes("stale image in cleared slot"));
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         DiagnosticArchive.write(root.toFile(), output, "driver=RADV Xclipse\n");
         Map<String, byte[]> zip = unpack(output.toByteArray());
         check(zip.containsKey("README.txt") && zip.containsKey("archive-status.txt"), "report metadata");
         check(zip.containsKey("metadata/capture_meta.txt"), "capture settings metadata");
+        check(zip.containsKey("metadata/capture_timeline.tsv"), "continuous timeline");
+        check(Arrays.equals(zip.get("history/slot-0/captures/pass_00.raw"),
+                            bytes("first rolling frame")), "completed frame");
+        check(!zip.containsKey("history/slot-0/captures/pass_01.ppm"), "stale rolling image");
+        check(!zip.containsKey("history/slot-0/captures/saves.dat"), "slot allowlist");
+        check(!zip.containsKey("history/slot-1/metadata/pass_dump_manifest.tsv"), "unfinished slot");
+        check(zip.containsKey("history/slot-2/metadata/surface_usage.tsv"), "later slot");
+        check(!zip.containsKey("history/slot-2/captures/pass_00.raw"), "no stale raw without manifest");
         check(zip.containsKey("metadata/pass_dump_manifest.tsv"), "manifest");
         check(zip.containsKey("metadata/surface_usage.tsv"), "surface catalog");
         check(zip.containsKey("metadata/surface_samples.tsv"), "sample index");
