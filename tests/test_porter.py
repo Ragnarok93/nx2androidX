@@ -1130,6 +1130,24 @@ class Saves(unittest.TestCase):   # porter/saves.py: the save folders on the dev
 class UnrealShaders(unittest.TestCase):
     """porter/pipeline.py device_ue: the Unreal shader code archives decoded with the game's own Oodle decoder, in rounds"""
 
+    def test_cached_shader_archives_skip_decoder_requirement(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp); (d / 'RomFS').mkdir(); (d / 'ue_shaders').mkdir()
+            pak = d / 'RomFS' / 'game.pak'; pak.write_bytes(b'pak')
+            (d / 'ue_shaders' / 'stamp').write_text(pipeline.nsp.ue_stamp(d))
+            p = SimpleNamespace(game=d, g=mock.Mock(), dirs={'v1': d}, versions=['v1'],
+                                tools={}, app_name='test', lost=[], cfg={}, o=SimpleNamespace(device=None))
+            kinds = {k: (False, '') for k in ('oodle_packs', 'glslc_capture', 'ue_legacy')}
+            kinds.update(graphics=('nvn', ''), ue_decode=(True, 'Unreal shader archive'))
+            with mock.patch.object(pipeline.profile_guess, 'build_sources', return_value=kinds), \
+                 mock.patch.object(pipeline, 'on_android', return_value=False), \
+                 mock.patch.object(pipeline, 'Adb') as adb:
+                pipeline.Port.check_graphics(p)
+                adb.assert_not_called()
+                self.assertFalse(p.oodle_local)
+                pak.write_bytes(b'changed archive')
+                with self.assertRaises(pipeline.BuildError): pipeline.Port.check_graphics(p)
     class FakePort:
         """the parts of Port.device_ue it uses"""
         UE_ROUNDS = 4

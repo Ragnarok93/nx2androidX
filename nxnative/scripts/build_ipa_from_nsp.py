@@ -981,15 +981,18 @@ def collect_nros(py, repo, romfs, dst, env, logs):
 def rewrite_workers(env, cpu_count=None):
     """Maximum live patch_nso.py processes; Android's memory budget is a hard limit."""
     cores = max(2, cpu_count if cpu_count is not None else (os.cpu_count() or 4))
-    limit = env.get('DM_REWRITE_JOBS')
-    if limit is None:  # keep the desktop rewriter's existing parallelism
+    # Upstream #485: honor a caller's J setting as well as the Android
+    # memory governor's stricter DM_REWRITE_JOBS override.
+    key = 'DM_REWRITE_JOBS' if 'DM_REWRITE_JOBS' in env else 'J'
+    limit = env.get(key)
+    if limit is None:
         return cores
     try:
         requested = int(limit)
     except (ValueError, TypeError) as e:
-        raise BuildError('DM_REWRITE_JOBS must be a positive integer') from e
+        raise BuildError(f'{key} must be a positive integer') from e
     if requested < 1:
-        raise BuildError('DM_REWRITE_JOBS must be a positive integer')
+        raise BuildError(f'{key} must be a positive integer')
     return min(cores, requested)
 
 
@@ -998,6 +1001,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
     The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those). Reused when the modules, patch_nso.py (with nso_code.py, nso_asm.py
     and the patch files of their builds), its switch and capstone are as at the last successful rewrite (Monster Hunter Rise's main alone takes 5.5 min)"""
     import capstone
+    cores = rewrite_workers(env)   # reject invalid concurrency before touching reusable rewrite outputs
     mods = g.words('modules')
     PROG.stage('rewrite', step='checking the inputs')
     nro_dir = out.with_name('nro_' + out.name.removeprefix('patched_'))
@@ -1014,7 +1018,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True); logs.mkdir(parents=True, exist_ok=True)
     if manifest.is_file(): shutil.copyfile(manifest, tmp / 'nro.tsv')   # refused-only manifests preserve the game's offline registration path too
     PROG.set(step=', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''), done=0, total=len(names), unit='modules')
-    procs, logf, todo, cores = {}, {}, list(names), rewrite_workers(env)
+    procs, logf, todo = {}, {}, list(names)
     notes = {}   # the last progress line of each module: the tools print them (patch_nso.py), and the stage's note follows them
     try:
         while todo or procs:
@@ -1026,7 +1030,8 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
                 if p.returncode:
                     log = logs / f'rewrite_{m}.log'
                     PROG.end(ok=False)
-                    PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=40)).rstrip('\n'))
+                    with open(log, errors='replace') as f:
+                        PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(f, maxlen=40)).rstrip('\n'))
                     raise BuildError(f'patch_nso.py exit code {p.returncode} on {m} (full output: {log})')
             for m in procs:   # a rewrite of hours is not a silence: the tool's own progress lines are passed on
                 text = tail_line(logs / f'rewrite_{m}.log')

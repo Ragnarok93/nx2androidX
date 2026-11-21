@@ -910,10 +910,14 @@ class Port:
         self.oodle_why = src['oodle_packs'][1] if src['oodle_packs'][0] and ('GFPAK' in src['oodle_packs'][1] or 'Trinity' in src['oodle_packs'][1]) else ''
         # Unreal paks (version 11) and IoStore containers: their shader code archives are decoded with the game's own Oodle too (device_ue)
         self.ue_why = src['ue_decode'][1] if src['ue_decode'][0] else ''
-        why = self.oodle_why or self.ue_why
+        # Upstream #480: a matching on-disk Unreal shader decode stamp makes
+        # repeated FFRS exports independent of another Oodle decoder launch.
+        ue_cached = bool(self.ue_why) and all((self.dirs[v] / 'ue_shaders/stamp').is_file() and
+                                               (self.dirs[v] / 'ue_shaders/stamp').read_text() == nsp.ue_stamp(self.dirs[v]) for v in self.versions)
+        why = self.oodle_why or ('' if ue_cached else self.ue_why)
         # The game's own decoder runs the game's own code (it boots the game's modules): the patches the profile registers for the tested build are needed there, and the rewriter applies
         # them by build ID only. A dump of another build runs without them and the decoder crashes in the game's initialization, so the port stops here, before it starts.
-        if why and self.lost:
+        if (self.oodle_why or self.ue_why) and self.lost:
             vers = ', '.join(b.get('display', v) for v, b in self.g.builds().items() if 'main' in b)
             raise BuildError(f"{self.app_name}: this dump is not the build the game profile registers, and the game's own decoder (its shaders are Oodle-compressed) needs the patches of "
                              f"the tested build: {'; '.join(self.lost)}. Port the version the profile registers ({vers}), or register the patches for this build "

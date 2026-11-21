@@ -921,7 +921,9 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
         if (poll) {
             VkRefreshCycleDurationGOOGLE rc; uint64_t was = g_refresh_ns;
             if (vkGetRefreshCycleDurationGOOGLE(V.dev, g_swap, &rc) == VK_SUCCESS && rc.refreshDuration > 1000000) g_refresh_ns = rc.refreshDuration;
-            if (g_refresh_ns && g_refresh_ns != was) { VKLOG("[perf] display timing: refresh %.3f ms", g_refresh_ns / 1e6); g_pace_target = 0; }
+            // Ignore sub-1% reporting jitter in VK_GOOGLE_display_timing; a genuine panel-rate change still reanchors the cadence.
+            uint64_t dif = g_refresh_ns > was ? g_refresh_ns - was : was - g_refresh_ns;
+            if (g_refresh_ns && g_refresh_ns != was && (!was || dif * 100 >= was)) { VKLOG("[perf] display timing: refresh %.3f ms", g_refresh_ns / 1e6); g_pace_target = 0; }
         }
     }
     VkPastPresentationTimingGOOGLE pt[16]; uint32_t np = 16;

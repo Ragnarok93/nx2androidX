@@ -1033,6 +1033,10 @@ def spin_quick(T, hi):
 class SpinNo(Exception): pass
 def spin_region(T, bes):
     """the spin wait region with head T (bes: the backward branches to T found by the scan) → dict, or None"""
+    # Upstream #488: heads ascend and the decode window is 512 bytes. Retire
+    # Capstone instructions before this head, retaining overlap for later regions.
+    for a in list(spin_dec):
+        if a < T: del spin_dec[a]
     hi = max(bes)
     if any(s < hi + 4 and T < e for s, e in DATA_BLOCKS) or not spin_quick(T, hi): return None
     nodes, back, bad, inner = {}, set(), set(), set()

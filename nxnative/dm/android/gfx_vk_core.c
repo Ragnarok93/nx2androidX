@@ -893,7 +893,10 @@ static void pool_add_one(const void *mem, uint64_t size, uint64_t base, uint64_t
     // g_lazy_mu, so not while pool_back maps that pool around the pools inside it (lock order: g_lazy_mu, g_nest_mu, g_pool_mu)
     int near = 0;   // 1: it overlaps another pool; 3: one of them is lazy, with no buffer yet
     pthread_rwlock_rdlock(&g_pool_mu);
-    for (int j = 0; j < g_npool; j++) if (g_pool[j].base != base && g_pool[j].lo < p->hi && g_pool[j].hi > p->lo) near |= __atomic_load_n(&g_pool[j].lazy, __ATOMIC_ACQUIRE) == 1 ? 3 : 1;
+    for (int j = 0; j < g_npool; j++) if (g_pool[j].base != base && g_pool[j].lo < p->hi && g_pool[j].hi > p->lo) {
+        near |= __atomic_load_n(&g_pool[j].lazy, __ATOMIC_ACQUIRE) == 1 ? 3 : 1;
+        if (g_pool[j].end - g_pool[j].base > end - base) __atomic_store_n(&g_pool[j].has_inner, 1, __ATOMIC_RELEASE);   // nested guest pool: cached outer ranges are stale
+    }
     pthread_rwlock_unlock(&g_pool_mu);
     if (near && lazy) { lazy = 0; static int said; if (said++ < 8) VKLOG("memory pool %p +%#llx overlaps another pool: zero-copy now, not lazy", mem, (unsigned long long)size); }
     if (near & 2) pthread_mutex_lock(&g_lazy_mu);
@@ -1024,11 +1027,12 @@ static vkpool_t *pool_find(uint64_t addr, uint64_t len, int back) {
     // one slot evict each other, so a slot miss tries the last four pools found, as before the slots, before it takes the lock: a game with a few hot pools and
     // more than 512 pages bound a frame loses nothing to them. DM_VK_POOL_SLOTS=0 (live): the last four alone, for A/B runs against `replay per frame`.
     // A pool in the slots or the last four has its buffer: a lazy one found without back is not kept, and giving a lazy pool its buffer bumps g_pool_gen
+    // A pool with any smaller nested pool cannot be returned from these caches: its range covers bytes owned by the nested buffer. Force a locked lookup instead.
     enum { PC = 512 }; static __thread struct { uint32_t gen; vkpool_t *p[PC], *last[4]; } c;   // gen: g_pool_gen + 1 (0: empty)
     uint32_t g = __atomic_load_n(&g_pool_gen, __ATOMIC_ACQUIRE) + 1; unsigned ck = (unsigned)(((addr >> 12) * 0x9E3779B97F4A7C15ull) >> 55);   // (9 bits)
     if (c.gen == g) {
-        if (g_pool_slots) { vkpool_t *p = c.p[ck]; if (p && addr >= p->lo && addr + len <= p->hi) return p; }
-        for (int i = 0; i < 4; i++) { vkpool_t *p = c.last[i]; if (p && addr >= p->lo && addr + len <= p->hi) { c.p[ck] = p; return p; } }
+        if (g_pool_slots) { vkpool_t *p = c.p[ck]; if (p && addr >= p->lo && addr + len <= p->hi && !__atomic_load_n(&p->has_inner, __ATOMIC_ACQUIRE)) return p; }
+        for (int i = 0; i < 4; i++) { vkpool_t *p = c.last[i]; if (p && addr >= p->lo && addr + len <= p->hi && !__atomic_load_n(&p->has_inner, __ATOMIC_ACQUIRE)) { c.p[ck] = p; return p; } }
     }
     vkpool_t *r; int across, lazy; uint64_t serial;
 again:   // (pool_back found another pool in the entry: the one looked up was removed meanwhile)
