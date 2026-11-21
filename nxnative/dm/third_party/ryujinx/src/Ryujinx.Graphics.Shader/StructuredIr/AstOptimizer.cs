@@ -36,7 +36,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                         // exclusive prefix over the counts they read, then read the last count back from the word just stored: the 32nd lane's prefix came out
                         // twice the 31st's, keys of the same digit took one slot and others none, and the fog boxes drawn from the sorted list blinked
                         // (both Adreno drivers; the Apple chain translates with DebugMode, which propagates nothing)
-                        if (propVar.Defs.Count == 1 && isWorthPropagating && !UsedByCall(propVar) && !HasSideEffects(assignment.Source) && !ReadsWritableMemory(assignment.Source))
+                        if (propVar.Defs.Count == 1 && isWorthPropagating && !UsedByCall(propVar) && !HasSideEffects(assignment.Source) && !RequiresOriginalExecutionPoint(assignment.Source))
                         {
                             PropagateExpression(propVar, assignment.Source);
                         }
@@ -67,13 +67,38 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             };
         }
 
-        private static bool ReadsWritableMemory(IAstNode source)
+        // Moving a single-use value into a divergent branch changes the
+        // active lanes seen by subgroup operations and implicit derivatives.
+        // Keep their evaluation in the block where Maxwell executed it.
+        private static bool RequiresOriginalExecutionPoint(IAstNode source)
         {
             if (source is not AstOperation operation)
             {
                 return false;
             }
 
+            Instruction inst = operation.Inst & Instruction.Mask;
+            if (ReadsWritableMemory(operation) || inst is Instruction.Ballot or Instruction.Shuffle or
+                Instruction.ShuffleDown or Instruction.ShuffleUp or Instruction.ShuffleXor or
+                Instruction.VoteAll or Instruction.VoteAllEqual or Instruction.VoteAny or Instruction.SwizzleAdd or
+                Instruction.Ddx or Instruction.Ddy or Instruction.Lod or Instruction.TextureSample)
+            {
+                return true;
+            }
+
+            for (int i = 0; i < operation.SourcesCount; i++)
+            {
+                if (RequiresOriginalExecutionPoint(operation.GetSource(i)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ReadsWritableMemory(AstOperation operation)
+        {
             Instruction inst = operation.Inst & Instruction.Mask;
 
             if (inst == Instruction.ImageLoad)

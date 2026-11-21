@@ -98,6 +98,9 @@ class IndirectCompute(unittest.TestCase):
     def test_deferred_uniform_update_precedes_argument_copy(self):
         self.run_case('deferred')
 
+    def test_storage_texel_format_key_and_write_tracking(self):
+        self.run_case('storage-texel')
+
     def test_scratch_remains_live_until_submission_completion(self):
         self.run_case('lifetime')
 

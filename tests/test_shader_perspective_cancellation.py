@@ -69,6 +69,45 @@ static class Check
             }
         }
     }
+    static void ExecutionPoint(string instruction, bool canMove, bool nested = false)
+    {
+        Type Ast(string name) => Shader.GetType("Ryujinx.Graphics.Shader.StructuredIr." + name, true);
+        Type Translation(string name) => Shader.GetType("Ryujinx.Graphics.Shader.Translation." + name, true);
+        Type blockType = Ast("AstBlock"), operandType = Ast("AstOperand"), operationType = Ast("AstOperation");
+        object Block(string kind, object condition) =>
+            Activator.CreateInstance(blockType, Enum.Parse(Ast("AstBlockType"), kind), condition);
+        object AstOperand(string kind, int index = 0) => Activator.CreateInstance(operandType, E("OperandType", kind), index);
+        object Op(string name, params object[] args)
+        {
+            Array sources = Array.CreateInstance(Ast("IAstNode"), args.Length);
+            for (int i = 0; i < args.Length; i++) sources.SetValue(args[i], i);
+            return Activator.CreateInstance(operationType, E("Instruction", name), sources);
+        }
+        void Add(object block, object node) => blockType.GetMethod("Add").Invoke(block, new[] { node });
+
+        object parent = Block("Main", null), branch = Block("If", AstOperand("Argument"));
+        object value = AstOperand("LocalVariable");
+        object expression = Op(instruction, AstOperand("Argument"));
+        if (nested) expression = Op("Copy", expression);
+        Add(parent, Activator.CreateInstance(Ast("AstAssignment"), value, expression));
+        Add(parent, branch);
+        object consume = Op("Store", value);
+        Add(branch, consume);
+
+        Type aggregate = Translation("AggregateType");
+        object function = Activator.CreateInstance(Ast("StructuredFunction"), parent, "main",
+            Enum.ToObject(aggregate, 0), Array.CreateInstance(aggregate, 0), Array.CreateInstance(aggregate, 0));
+        Type contextType = Ast("StructuredProgramContext");
+        object context = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(contextType);
+        contextType.GetProperty("CurrentFunction").SetValue(context, function);
+        Ast("AstOptimizer").GetMethod("Optimize").Invoke(null,
+            new[] { context, Enum.Parse(Translation("TargetLanguage"), "Spirv") });
+        object operand = operationType.GetMethod("GetSource").Invoke(consume, new object[] { 0 });
+        Require(ReferenceEquals(operand, canMove ? expression : value),
+            instruction + " moved across divergent control flow");
+        Require((int)blockType.GetProperty("Count").GetValue(parent) == (canMove ? 1 : 2),
+            instruction + " lost its evaluation block");
+    }
     public static void Main()
     {
         int cases = 0;
@@ -84,6 +123,13 @@ static class Check
             Case(swapped, extraFactor:true); cases++;
             Case(swapped, innerSwapped:true); cases++;
         }
+        foreach (string instruction in new[] { "Ballot", "Shuffle", "VoteAny", "Ddx", "Ddy", "Lod", "TextureSample" })
+        {
+            ExecutionPoint(instruction, canMove: false);
+            ExecutionPoint(instruction, canMove: false, nested: true);
+        }
+        ExecutionPoint("Copy", canMove: true);
+        Console.WriteLine("execution point: PASS (15 AST cases)");
         Console.WriteLine("perspective cancellation: PASS (" + cases + " SSA cases)");
     }
 }
@@ -173,3 +219,4 @@ class PerspectiveCancellationTests(unittest.TestCase):
             result = subprocess.run([dotnet, str(dll)], capture_output=True, text=True, errors='replace', timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('perspective cancellation: PASS (30 SSA cases)', result.stdout)
+            self.assertIn('execution point: PASS (15 AST cases)', result.stdout)

@@ -390,13 +390,28 @@ static uint32_t spvi_decl(spvi *c, uint32_t op, const uint32_t *ops, uint32_t no
     id = c->bound++; c->nt[c->nnt++] = (nops + 2) << 16 | op; c->nt[c->nnt++] = id; memcpy(&c->nt[c->nnt], ops, nops * 4); c->nnt += nops; return id;
 }
 static uint32_t spvi_scalar(spvi *c, uint32_t k) { uint32_t o[2] = {32, k - 1}; return spvi_decl(c, 21, o, 2, 1); }   // OpTypeInt 32, unsigned (kind 1) / signed (2)
-static uint32_t spvi_vec4(spvi *c, uint32_t k) { uint32_t o[2] = {spvi_scalar(c, k), 4}; return spvi_decl(c, 23, o, 2, 1); }
+enum { SPVI_R32 = 4 };
+static uint32_t spvi_component(spvi *c, uint32_t kind) {
+    uint32_t k = kind & 3, width = 32;
+    return k ? spvi_scalar(c, k) : spvi_decl(c, 22, &width, 1, 1);
+}
+static uint32_t spvi_vec4(spvi *c, uint32_t k) { uint32_t o[2] = {spvi_component(c, k), 4}; return spvi_decl(c, 23, o, 2, 1); }
 // the type for old with its image's sampled type made uint / int: images, sampled images, arrays of them, pointers to those
 static uint32_t spvi_type(spvi *c, uint32_t old, uint32_t k) {
     for (int j = 0; j < c->nmap; j++) if (c->map[j].old == old && c->map[j].kind == k) return c->map[j].id;
     uint32_t i = old < c->bound ? c->at[old] : 0; if (!i) return 0;
     uint32_t n = c->w[i] >> 16, op = c->w[i] & 0xffff, d[12]; if (n > 12 || n < 3) return 0; memcpy(d, &c->w[i + 2], (n - 2) * 4);
-    if (op == 25) d[0] = spvi_scalar(c, k);                                                                          // OpTypeImage: the sampled type
+    if (op == 25 && n >= 9) {
+        d[0] = spvi_component(c, k);
+        // A formatted buffer image needs the exact format of its view as
+        // well as the scalar class. Particle table shaders can bind the
+        // same slot to R32_UINT or R32_SINT across dispatches.
+        if (k & SPVI_R32) {
+            if (d[1] != 5 || d[5] != 2) return 0;  // DimBuffer, storage
+            const uint32_t format[] = {3, 33, 24}; // R32f, R32ui, R32i
+            d[6] = format[k & 3];
+        }
+    }
     else if (op == 27 || op == 28 || op == 29) { if (!(d[0] = spvi_type(c, d[0], k))) return 0; }                  // OpTypeSampledImage, OpTypeArray, OpTypeRuntimeArray
     else if (op == 32 && n == 4) { if (!(d[1] = spvi_type(c, d[1], k))) return 0; }                                // OpTypePointer
     else return 0;
@@ -421,13 +436,22 @@ static uint32_t *spv_int_images(const uint32_t *w, uint32_t nw, const uint16_t *
     for (uint32_t i = c.fn; i < nw && ok;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n) { ok = 0; break; }
         uint32_t *x = &fb[nf]; memcpy(x, &w[i], n * 4); nf += n;
         uint32_t src = n >= 4 ? w[i + 3] : 0, k = src && src < base ? taint[src] : 0;
-        if (op == 99 && n >= 4 && w[i + 1] < base && taint[w[i + 1]]) {   // ImageWrite image coord texel: the texel (a vec4 of floats) bitcast to the integer vec4
+        if (op == 99 && n >= 4 && w[i + 1] < base && taint[w[i + 1]]) {   // ImageWrite: keep the original 32-bit components across a type change
             uint32_t kk = taint[w[i + 1]], tx = w[i + 3], tt = 0;
-            for (uint32_t j = c.fn; j < nw;) { uint32_t m = w[j] >> 16; if (!m) break; if (m >= 3 && w[j + 2] == tx && (w[j] & 0xffff) != 71 && (w[j] & 0xffff) != 72) { tt = w[j + 1]; break; } j += m; }
-            uint32_t ti = tt && tt < base ? c.at[tt] : 0, ci = ti && (w[ti] & 0xffff) == 23 && w[ti] >> 16 == 4 && w[ti + 3] == 4 && w[ti + 2] < base ? c.at[w[ti + 2]] : 0;
-            if (ci && (w[ci] & 0xffff) == 21) { i += n; continue; }   // integer texels already (an image the translator typed uint): as it is
-            if (!ci || (w[ci] & 0xffff) != 22 || w[ci + 2] != 32) { ok = 0; break; }   // not a vec4 of 32-bit floats: no variant
-            uint32_t r2 = c.bound++; nf -= n; fb[nf++] = 4u << 16 | 124; fb[nf++] = spvi_vec4(&c, kk); fb[nf++] = r2; fb[nf++] = tx;   // OpBitcast
+            for (uint32_t j = 5; j < nw;) {
+                uint32_t m = w[j] >> 16, jo = w[j] & 0xffff;
+                if (!m) break;
+                if ((j >= c.fn || (jo >= 41 && jo <= 52)) && m >= 3 &&
+                    w[j + 1] < base && c.at[w[j + 1]] && w[j + 2] == tx) {
+                    tt = w[j + 1]; break;
+                }
+                j += m;
+            }
+            uint32_t ti = tt ? c.at[tt] : 0, ci = ti && (w[ti] & 0xffff) == 23 && w[ti] >> 16 == 4 && w[ti + 3] == 4 && w[ti + 2] < base ? c.at[w[ti + 2]] : 0;
+            uint32_t vector = spvi_vec4(&c, kk);
+            if (!ci || !vector || ((w[ci] & 0xffff) != 21 && (w[ci] & 0xffff) != 22) || w[ci + 2] != 32) { ok = 0; break; }
+            if (tt == vector) { i += n; continue; }
+            uint32_t r2 = c.bound++; nf -= n; fb[nf++] = 4u << 16 | 124; fb[nf++] = vector; fb[nf++] = r2; fb[nf++] = tx;   // OpBitcast
             x = &fb[nf]; memcpy(x, &w[i], n * 4); x[3] = r2; nf += n;
         } else if (k && (op == 61 || op == 65 || op == 66 || op == 83 || op == 100 || op == 86)) {   // Load, AccessChain, InBoundsAccessChain, CopyObject, Image, SampledImage
             uint32_t t = spvi_type(&c, x[1], k); if (!t) { ok = 0; break; } x[1] = t; if (x[2] < base) taint[x[2]] = (uint8_t)k;
@@ -515,22 +539,25 @@ static uint32_t *spv_dual(const uint32_t *w, uint32_t nw, uint32_t *onw) {
     memcpy(&o[at + 8], &w[at + 4], (size_t)(nw - at - 4) * 4); *onw = nw + 4;
     return o;
 }
-static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd);
-VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
-    VkShaderModule m = vk_shader_module_(s, um, im, xo, fd); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[3] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return m; }
-static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint32_t xo, int fd) {
+static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint64_t r32, uint32_t xo, int fd);
+VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint64_t r32, uint32_t xo, int fd) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
+    VkShaderModule m = vk_shader_module_(s, um, im, r32, xo, fd); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[3] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return m; }
+static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im, uint64_t r32, uint32_t xo, int fd) {
     int dual = fd >> 1 & 1; fd &= 1;   // fd bit 1: the dual-source variant
     if (fd && (s->stage != 1 || s->depth_repl)) fd = 0;
     if (dual && s->stage != 1) dual = 0;
-    if (!(um | im | xo | (uint32_t)fd | (uint32_t)dual) || !s->spv) return s->mod;
+    if (!(um | im | r32 | xo | (uint32_t)fd | (uint32_t)dual) || !s->spv) return s->mod;
     if (xo == 1u << 31) {   // DM_VK_SPV_ALT
-        pthread_mutex_lock(&g_sh_mu); for (int i = 0; i < s->nvar; i++) if (s->var[i].um == 0 && s->var[i].im == 0 && s->var[i].xo == xo) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
-        VkShaderModule m = alt_module(s); if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){0, 0, xo, 0, m}; pthread_mutex_unlock(&g_sh_mu); return m; }
+        pthread_mutex_lock(&g_sh_mu); for (int i = 0; i < s->nvar; i++) if (s->var[i].um == 0 && s->var[i].im == 0 && s->var[i].r32 == 0 && s->var[i].xo == xo) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
+        VkShaderModule m = alt_module(s); if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){0, 0, 0, xo, 0, m}; pthread_mutex_unlock(&g_sh_mu); return m; }
     xo &= ~(1u << 31);
     pthread_mutex_lock(&g_sh_mu);
-    for (int i = 0; i < s->nvar; i++) if (s->var[i].um == um && s->var[i].im == im && s->var[i].xo == xo && s->var[i].fd == (fd | dual << 1)) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
+    for (int i = 0; i < s->nvar; i++) if (s->var[i].um == um && s->var[i].im == im && s->var[i].r32 == r32 && s->var[i].xo == xo && s->var[i].fd == (fd | dual << 1)) { VkShaderModule m = s->var[i].mod; pthread_mutex_unlock(&g_sh_mu); return m; }
     uint16_t bind[64]; uint8_t kind[64]; int nb = 0;
-    for (int i = 0; i < s->nbind && i < 64; i++) if ((um | im) >> i & 1) { bind[nb] = s->b[i].binding; kind[nb++] = um >> i & 1 ? 1 : 2; }
+    for (int i = 0; i < s->nbind && i < 64; i++) if ((um | im | r32) >> i & 1) {
+        bind[nb] = s->b[i].binding;
+        kind[nb++] = (um >> i & 1 ? 1 : im >> i & 1 ? 2 : 0) | (r32 >> i & 1 ? SPVI_R32 : 0);
+    }
     uint32_t nw = s->nspv, *w = nb ? spv_int_images(s->spv, s->nspv, bind, kind, nb, &nw) : NULL; VkShaderModule m = s->mod;
     if (xo && (w || !nb)) { uint32_t n2 = 0, *w2 = spv_add_outputs(w ? w : s->spv, nw, xo, &n2); free(w); w = w2; nw = n2;
         if (w && s->stage == 0) { uint32_t n3 = 0, *w3 = spv_vs_init(w, nw, &n3); if (w3) { free(w); w = w3; nw = n3; } } }   // the added outputs start as (0, 0, 0, 1) too
@@ -538,10 +565,10 @@ static VkShaderModule vk_shader_module_(vkshader_t *s, uint64_t um, uint64_t im,
     if (dual && (w || !(nb || xo || fd))) { uint32_t n2 = 0, *w2 = spv_dual(w ? w : s->spv, nw, &n2); free(w); w = w2; nw = n2; }
     if (w) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, (size_t)nw * 4, w};
         if (vkCreateShaderModule(V.dev, &ci, NULL, &m)) { m = s->mod; VKLOG("[RED] shader %016llx: its variant was refused (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual); }
-        else VKLOG("shader %016llx: variant for bindings %#llx (uint texels) %#llx (int texels), outputs added %#x, fragment depth written %d, dual source %d", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual);
+        else VKLOG("shader %016llx: variant for bindings %#llx (uint texels) %#llx (int texels), R32 storage %#llx, outputs added %#x, fragment depth written %d, dual source %d", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, (unsigned long long)r32, xo, fd, dual);
         free(w); }
     else VKLOG("[RED] shader %016llx: no variant could be made (bindings %#llx / %#llx, outputs %#x, fragment depth %d, dual source %d)", (unsigned long long)s->key, (unsigned long long)um, (unsigned long long)im, xo, fd, dual);
-    if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){um, im, xo, fd | dual << 1, m};
+    if (s->nvar < 8) s->var[s->nvar++] = (typeof(s->var[0])){um, im, r32, xo, fd | dual << 1, m};
     pthread_mutex_unlock(&g_sh_mu);
     return m;
 }

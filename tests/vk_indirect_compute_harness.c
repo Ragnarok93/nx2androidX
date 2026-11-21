@@ -20,7 +20,7 @@ VK_FNS(DEFINE) VK_DEV_FNS(DEFINE)
 /* SLOTS */
 static vkpool_t g_pool[MAXPOOL]; static int g_npool, g_pool_ord[MAXPOOL]; static uint32_t g_pool_gen;
 static pthread_rwlock_t g_pool_mu = PTHREAD_RWLOCK_INITIALIZER;
-static uint64_t g_set_epoch = 1, g_tex_gen, g_samp_gen, g_num_um, g_num_im, g_ubolog_key, g_tex_sseq;
+static uint64_t g_set_epoch = 1, g_tex_gen, g_samp_gen, g_num_um, g_num_im, g_num_r32, g_ubolog_key, g_tex_sseq;
 static int g_x_nosetmemo, g_tracing, g_var_now, g_x_nosetc, g_x_nodrvc, g_x_setverify, g_x_nodispbar;
 int g_x_inflkeep;   // gfx_vk_exec.c's (vk_ubd_land reads it)
 int g_ubd_heap = 1;   // gfx_vk_exec.c's (vk_sub_update reads it)
@@ -34,17 +34,23 @@ static void compute_images_written(void) {}
 static void surface_dispatch(void) { abort(); }
 static void pass_dump_aliases(void) { abort(); }
 static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage, int snapshot) { abort(); }
-static void compute_record(const uint64_t key[3], int slow) { (void)key; (void)slow; }
+static void compute_record(const uint64_t key[4], int slow) { (void)key; (void)slow; }
 static long long g_td_off = -1;
 static struct { uint64_t dispatches; } g_vkst;
-static nvn_hmap g_cpipes = {.klen = 24};
+static nvn_hmap g_cpipes = {.klen = 32};
 static pthread_cond_t g_cpipe_ready = PTHREAD_COND_INITIALIZER;
-static uint64_t g_cpipe_warm_key[3], g_cpipe_demand_key[3];
+static uint64_t g_cpipe_warm_key[4], g_cpipe_demand_key[4];
 static int g_cpipe_warming, g_cpipe_demand;
 static uint64_t g_compute_attempts, g_compute_failed, g_compute_compile_ns, g_compute_wait_ns;
 static pthread_mutex_t g_cpipe_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t tick(void) { return 0; }
-static VkPipeline compute_build(vkshader_t *s, uint64_t u, uint64_t i) { return (VkPipeline)2; }
+static unsigned builds;
+static uint64_t last_format_mask;
+static VkPipeline compute_build(vkshader_t *s, uint64_t u, uint64_t i, uint64_t r32) {
+    builds++;
+    last_format_mask = r32;
+    return (VkPipeline)2;
+}
 VkPipelineLayout vk_pipeline_layout(VkDescriptorSetLayout a[5], int n) { return (VkPipelineLayout)2; }
 static int mdi_log_now(void) { return 0; }
 typedef struct { int n; uint64_t k[8][3]; } crumb_t;
@@ -54,7 +60,9 @@ static void crumb_mark(int n) { abort(); }
 void vk_pass_ts(int a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {}
 int vk_readback_ranges(void) { return 0; }
 void vk_readback_unknown(void) { abort(); }
-void vk_gpu_wrote(uint64_t a, uint64_t n) {}
+static unsigned writes;
+static uint64_t write_addr, write_bytes;
+void vk_gpu_wrote(uint64_t a, uint64_t n) { writes++; write_addr = a; write_bytes = n; }
 static void sub_gpu_wrote(uint64_t a, uint64_t n) {}
 uint64_t vk_fence_done(void) { return 0; }
 static uint64_t mem_handle(uint64_t h) { abort(); }
@@ -70,10 +78,24 @@ static void vk_cross(int k, uint64_t a, uint64_t n, const vkpool_t *p) { abort()
 static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *i, unsigned element, int storage) { abort(); }
 VkSampler vk_samp_by_id(int id) { abort(); }
 VkSampler vk_dummy_sampler(void) { abort(); }
-vkimg_t *vk_tex_by_id(int id, const view_t **v, const tex_t **t) { abort(); }
-static int view_num(const tex_t *t, const view_t *v) { abort(); }
+static tex_t storage_texel;
+vkimg_t *vk_tex_by_id(int id, const view_t **v, const tex_t **t) {
+    assert(id == 1);
+    *v = NULL;
+    *t = &storage_texel;
+    return (vkimg_t *)1;
+}
+const vkfmt_t *vk_fmt(int format) {
+    static const vkfmt_t r32 = {.vk = VK_FORMAT_R32_UINT, .bpb = 4, .is_int = 1};
+    static const vkfmt_t rgba8 = {.vk = VK_FORMAT_R8G8B8A8_UINT, .bpb = 4, .is_int = 1};
+    return format == 1 ? &r32 : &rgba8;
+}
+static int view_num(const tex_t *t, const view_t *v) { return 1; }
 VkBufferView vk_tbuf_snapshot(const tex_t *t, int *direct) { abort(); }
-VkBufferView vk_tbuf_view(const tex_t *t, int storage) { abort(); }
+VkBufferView vk_tbuf_view(const tex_t *t, int storage) {
+    assert(t == &storage_texel && storage);
+    return (VkBufferView)1;
+}
 VkBufferView vk_dummy_tbuf(int storage) { abort(); }
 VkImageView vk_dummy_view(int a, int b, int c, int d, int e) { abort(); }
 void vk_end_pass(void) { S.pass_open = 0; }
@@ -107,8 +129,11 @@ static unsigned nset;
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) { assert(++nset < 256); return (VkDescriptorSet)(uintptr_t)nset; }
 static void update_sets(VkDevice d, uint32_t n, const VkWriteDescriptorSet *w, uint32_t nc, const VkCopyDescriptorSet *c) {
     for (unsigned i = 0; i < n; i++) { unsigned s = (unsigned)(uintptr_t)w[i].dstSet, b = w[i].dstBinding;
-        assert(s && s <= nset && b < 96 && w[i].descriptorCount == 1 && w[i].pBufferInfo);
-        descriptors[s].bi[b] = *w[i].pBufferInfo; descriptors[s].type[b] = w[i].descriptorType; }
+        assert(s && s <= nset && b < 96 && w[i].descriptorCount == 1);
+        if (w[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
+            assert(w[i].pTexelBufferView && *w[i].pTexelBufferView == (VkBufferView)1);
+        else { assert(w[i].pBufferInfo); descriptors[s].bi[b] = *w[i].pBufferInfo; }
+        descriptors[s].type[b] = w[i].descriptorType; }
 }
 enum { PRODUCE, COPY, BARRIER, DISPATCH };
 enum { READ_TRANSFER = 1, READ_UNIFORM = 2, READ_INDIRECT = 4 };
@@ -266,6 +291,25 @@ int main(int argc, char **argv) {
         g_pool[1].boff=UINT64_MAX-3; g_pool_gen++; invoke(addr); assert(!ndispatch && !ncopies);
         g_pool[1].boff=128; g_pool[1].end=addr+8; g_pool_gen++; invoke(addr); assert(!ndispatch && !ncopies);
         assert(g_compute_attempts==8 && g_compute_failed==8 && g_vkst.dispatches==0);
+    } else if (!strcmp(argv[1], "storage-texel")) {
+        const dmsv_bind binding = {.binding = 1, .kind = RK_IMG_TBUF, .reg = 0};
+        vkshader_t storage = {.key = 9, .nbind = 1, .dsl = (VkDescriptorSetLayout)1, .b = &binding};
+        storage_texel.d.target = NVN_TEXTURE_TARGET_BUFFER;
+        storage_texel.d.width = 16;
+        storage_texel.d.format = 1;
+        storage_texel.mem = (void *)(uintptr_t)addr;
+        S.img[5][0] = 1;
+        S.sh[5] = &storage;
+        p_dispatch direct = {.x = 1, .y = 1, .z = 1};
+        dispatch(&direct);
+        assert(builds == 1 && last_format_mask == 1);
+        assert(writes == 1 && write_addr == addr && write_bytes == 64);
+        storage_texel.d.format = 2;
+        dispatch(&direct);
+        assert(builds == 2 && last_format_mask == 0);
+        storage_texel.d.format = 1;
+        dispatch(&direct);
+        assert(builds == 2 && writes == 3 && ndispatch == 3);
     } else if (!strcmp(argv[1],"deferred")) {
         make_pool(addr,addr+sizeof cpu_args,addr,addr+sizeof cpu_args,64); S.pass_open=1;
         vk_sub_update(addr,a,12); assert(!ncopies); invoke(addr); assert(!S.pass_open && ndispatch==1); run_gpu();

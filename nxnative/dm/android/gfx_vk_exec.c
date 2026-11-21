@@ -1518,7 +1518,7 @@ typedef struct {
     uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en, logic_op, wmask[8];
     struct { uint32_t src, dst, srca, dsta, eq, eqa; } bl[8];
     uint32_t clip_neg1, alt, fdz, dual;   // fdz: the fragment shader's variant that writes gl_FragDepth = gl_FragCoord.z (fdz below); dual: its dual-source variant (below)
-    uint64_t um[3], im[3];   // each stage's sampled bindings given integer views (vk_shader_module)
+    uint64_t um[3], im[3], r32[3];   // each stage's sampled bindings given integer views (vk_shader_module)
 } pkey;
 static nvn_hmap g_pipes = {.klen = sizeof(pkey)}; static pthread_mutex_t g_pipe_mu = PTHREAD_MUTEX_INITIALIZER;   // the replay thread and the prewarm threads
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg[3]);
@@ -1706,7 +1706,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     const vkshader_t *fs = stg[1] && !k->raster_discard ? stg[1] : NULL; uint32_t xo[3] = {0};
     if (stg[0]) xo[0] = (stg[2] ? stg[2]->in_locs : fs ? fs->in_locs : 0) & ~stg[0]->out_locs;
     if (stg[2]) xo[2] = (fs ? fs->in_locs : 0) & ~stg[2]->out_locs;
-    for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(fl[i], NULL), 0, fl[i], vk_shader_module(stg[i], k->um[i], k->im[i], k->alt && !k->um[i] && !k->im[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) : 0), "main", NULL};   // (pNext: DM_VK_SUBGROUP_PIN)
+    for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(fl[i], NULL), 0, fl[i], vk_shader_module(stg[i], k->um[i], k->im[i], k->r32[i], k->alt && !k->um[i] && !k->im[i] && !k->r32[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) : 0), "main", NULL};   // (pNext: DM_VK_SUBGROUP_PIN)
     int flat = (int)k->debug_mode;
     if (!fs) flat = 0;
     if (flat & 1) {   // DM_VK_X_FLAT_VS: the fragment stage becomes flatdbg.frag
@@ -1947,7 +1947,9 @@ static void note_storage_image(int stage, vkimg_t *im) {
 static void compute_images_written(void) {
     for (unsigned i = 0; i < g_compute_image_count; i++) vk_tex_mark_written(g_compute_images[i]);
 }
-static uint64_t g_num_um, g_num_im;   // stage_set: the sampled bindings of the stage being built that got uint / int views (bit = binding index)
+// stage_set: integer views (uint/sint) and R32 storage format overrides.
+// Each bit is an index in the shader binding table.
+static uint64_t g_num_um, g_num_im, g_num_r32;
 extern uint64_t g_tex_gen;
 static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *ii, unsigned element, int storage) {   // the view's view_num
     int tid = (int)(h & 0xfffff); const view_t *v = NULL; const tex_t *t = NULL;
@@ -2134,7 +2136,7 @@ extern uint64_t g_ubd_gen; uint32_t vk_pool_gen(void);
 static int set_memo_ok(vkshader_t *s) {
     if (!s->setmemo) { int ok = 1, ncb = 0;
         for (int i = 0; i < s->nbind; i++) { const dmsv_bind *b = &s->b[i]; ncb += b->kind == RK_CBUF;
-            ok &= b->kind != RK_TEXD && b->kind != RK_SAMPD && b->kind != RK_SBUF_UBO && b->kind != RK_UBO_PTR && b->kind != RK_TEX_UBO && b->kind != RK_IMG_UBO && b->kind != RK_TBUF_UBO && b->samp != RS_UBO && i < 256; }
+            ok &= b->kind != RK_IMG_TBUF && b->kind != RK_TEXD && b->kind != RK_SAMPD && b->kind != RK_SBUF_UBO && b->kind != RK_UBO_PTR && b->kind != RK_TEX_UBO && b->kind != RK_IMG_UBO && b->kind != RK_TBUF_UBO && b->samp != RS_UBO && i < 256; }
         s->setmemo = ok && ncb <= MEMO_CB ? 1 : 2; }
     return s->setmemo == 1;
 }
@@ -2146,7 +2148,7 @@ static int set_memo_get(int st, vkshader_t *s, uint32_t *dofs) {
             if (d.buffer != m->cd[c].buffer || d.range != m->cd[c].range || (m->cpos[c] == 0xff && d.offset != m->cd[c].offset)) return 0;
             if (m->cpos[c] != 0xff) m->dofs[m->cpos[c]] = (uint32_t)d.offset; }
         m->ubo = g_ubo_gen[st]; m->ubd = g_ubd_gen; }
-    memcpy(dofs, m->dofs, sizeof *dofs * (size_t)s->ndyn); g_num_um = m->um; g_num_im = m->im;
+    memcpy(dofs, m->dofs, sizeof *dofs * (size_t)s->ndyn); g_num_um = m->um; g_num_im = m->im; g_num_r32 = 0;
     return 1;
 }
 // dofs (at least s->ndyn entries): the dynamic offsets of the set's dynamic uniform buffers, in binding order as vkCmdBindDescriptorSets takes them
@@ -2167,7 +2169,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
     VkDescriptorSet set = VK_NULL_HANDLE; struct { uint32_t b, o; int i; } dp[96]; int nd = 0; uint64_t tb0 = tick();
     VkWriteDescriptorSet w[96]; VkDescriptorBufferInfo bi[96]; VkDescriptorImageInfo ii[96 * 4]; VkBufferView bv[96]; uint32_t nw = 0, nii = 0;
     int ncb = 0; uint8_t mci[MEMO_CB]; VkDescriptorBufferInfo mcd[MEMO_CB];   // the constant buffers, for the memo
-    g_num_um = g_num_im = 0;
+    g_num_um = g_num_im = g_num_r32 = 0;
     int dynslots = 0;
     if (DM_GAME_TEX_DYN_SLOTS) for (int j = 0; j < s->nbind; j++)
         if (s->b[j].kind == RK_TEXD || s->b[j].kind == RK_SAMPD) dynslots = 1;
@@ -2263,7 +2265,28 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
             if (g_pd_state == 1 && g_pd_full)
                 surface_texel_buffer(t, bv[nw], st, b->binding, b->kind == RK_IMG_TBUF, snapshot != VK_NULL_HANDLE);
             if (!bv[nw]) bv[nw] = vk_dummy_tbuf(b->kind == RK_IMG_TBUF);
-            else if (i < 64) { int num = view_num(t, NULL); if (num == 1) g_num_um |= 1ull << i; else if (num == 2) g_num_im |= 1ull << i; }   // texel buffers read and write their words alike (storage ones too: gfx_vk_shader.c spv_int_images)
+            else {
+                const vkfmt_t *f = vk_fmt(t->d.format);
+                int num = view_num(t, NULL);
+                if (i < 64) {
+                    if (num == 1) g_num_um |= 1ull << i;
+                    if (num == 2) g_num_im |= 1ull << i;
+                    if (b->kind == RK_IMG_TBUF && f) {
+                        // SPIR-V ImageFormat R32f/R32ui/R32i.
+                        unsigned expected = f->vk == VK_FORMAT_R32_SFLOAT ? 3 :
+                                            f->vk == VK_FORMAT_R32_UINT ? 33 :
+                                            f->vk == VK_FORMAT_R32_SINT ? 24 : 0;
+                        if (expected && b->fmt != expected) g_num_r32 |= 1ull << i;
+                    }
+                }
+                if (b->kind == RK_IMG_TBUF && f) {
+                    // Particle tables are storage texel buffers. Track the
+                    // actual view range so copied CPU_UNCACHED pools merge it
+                    // and CPU-side uniform reads wait for GPU producers.
+                    void vk_gpu_wrote(uint64_t a, uint64_t n);
+                    vk_gpu_wrote((uint64_t)(uintptr_t)t->mem, (uint64_t)t->d.width * f->bpb);
+                }
+            }
             wr->pTexelBufferView = &bv[nw]; wr->descriptorType = b->kind == RK_IMG_TBUF ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER; nw++;
             continue; }
         default: {   // unknown: the descriptor type it was declared with, filled with what reads zero
@@ -2613,7 +2636,7 @@ static int prepare_draw(int prim, int indexed) {
     uint64_t t1d = tick();
     for (int st = 0; st < 3; st++) if (S.sh[st] && !(st == 1 && k.raster_discard)) {
         uint64_t m0 = g_set_memo; int n0 = g_stn[st]; g_stn[st] = 0; g_coll_st = st;   // the images it is collected with (vk_watch); a memoized set keeps the last ones
-        sets[S.sh[st]->set] = stage_set(st, S.sh[st], dofs[S.sh[st]->set], NULL); k.um[st] = g_num_um; k.im[st] = g_num_im;
+        sets[S.sh[st]->set] = stage_set(st, S.sh[st], dofs[S.sh[st]->set], NULL); k.um[st] = g_num_um; k.im[st] = g_num_im; k.r32[st] = g_num_r32;
         g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0; }
     if (g_order_check) {   // the order-only barrier before this draw (see g_order_keep): kept, or the pass ends here with it
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
@@ -3119,21 +3142,21 @@ static void draw_idx(const p_draw_idx *d) {
     bc_index(cb, ib, io, it);
     if (!(dbg_draw() & 1) && g_ok) { int xf = xfb_begin(cb); vkCmdDrawIndexed(cb, (uint32_t)d->count, inst, 0, d->base_vertex, (uint32_t)d->base_instance); if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf); }
 }
-static nvn_hmap g_cpipes = {.klen = 24};   // {shader, its integer-texel bindings}
+static nvn_hmap g_cpipes = {.klen = 32};   // {shader, integer texel masks, R32 storage texel mask}
 static pthread_mutex_t g_cpipe_mu = PTHREAD_MUTEX_INITIALIZER;   // the replay thread and compute_warm
 static int g_compute_alt;
 // The recorder and prewarm worker each compile at most one key at a time.
 // A key claimed by either must not be compiled by both concurrently.
 static pthread_cond_t g_cpipe_ready = PTHREAD_COND_INITIALIZER;
-static uint64_t g_cpipe_warm_key[3], g_cpipe_demand_key[3];
+static uint64_t g_cpipe_warm_key[4], g_cpipe_demand_key[4];
 static int g_cpipe_warming, g_cpipe_demand;
 uint64_t g_compute_attempts, g_compute_failed, g_compute_compile_ns, g_compute_wait_ns;
-static VkPipeline compute_build(vkshader_t *cs, uint64_t um, uint64_t im) {   // (VkPipeline)1 when it fails
+static VkPipeline compute_build(vkshader_t *cs, uint64_t um, uint64_t im, uint64_t r32) {   // (VkPipeline)1 when it fails
     VkDescriptorSetLayout dsl[5] = {cs->dsl}; VkPipeline p;
     int bs = build_begin();   // (the crash dump's note: build_pipeline)
     if (bs >= 0) { snprintf(g_build[bs].what, sizeof g_build[bs].what, "compute pipeline, shader %016llx, integer-texel views %#llx/%#llx", (unsigned long long)cs->key, (unsigned long long)um, (unsigned long long)im); g_build[bs].phase = 1; }
     // DM_VK_SPV_ALT=1 in env.txt (with DM_VK_SPV_DIR): compute shaders take the alternative code too, from the start (compute_warm builds them all then, and they are kept)
-    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_COMPUTE_BIT, cs->local), 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, um, im, g_compute_alt && !um && !im ? 1u << 31 : 0, 0), "main", NULL}, vk_pipeline_layout(dsl, 1), VK_NULL_HANDLE, -1};   // (pNext: DM_VK_SUBGROUP_PIN)
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(VK_SHADER_STAGE_COMPUTE_BIT, cs->local), 0, VK_SHADER_STAGE_COMPUTE_BIT, vk_shader_module(cs, um, im, r32, g_compute_alt && !um && !im && !r32 ? 1u << 31 : 0, 0), "main", NULL}, vk_pipeline_layout(dsl, 1), VK_NULL_HANDLE, -1};   // (pNext: DM_VK_SUBGROUP_PIN)
     if (bs >= 0) g_build[bs].phase = 2;
     VkResult r = vkCreateComputePipelines(V.dev, V.pcache, 1, &ci, NULL, &p); build_end(bs);
     if (!r) vk_pipeline_cache_changed();
@@ -3150,7 +3173,7 @@ static compute_observation g_ch_pending[VK_COMPUTE_HISTORY_MAX];
 static unsigned g_ch_pending_count;
 static int g_ch_full;
 static int g_ch_enabled;
-static void compute_record(const uint64_t ck[3], int slow) {
+static void compute_record(const uint64_t ck[4], int slow) {
     if (!g_ch_enabled) return;
     pthread_mutex_lock(&g_ch_mu);
     if (g_ch_pending_count < VK_COMPUTE_HISTORY_MAX && (!g_ch_full || slow)) {
@@ -3161,7 +3184,7 @@ static void compute_record(const uint64_t ck[3], int slow) {
     }
     pthread_mutex_unlock(&g_ch_mu);
 }
-static int compute_warm_key(const uint64_t ck[3]) {
+static int compute_warm_key(const uint64_t ck[4]) {
     pthread_mutex_lock(&g_cpipe_mu);
     int have = nvn_hm_get(&g_cpipes, ck) != NULL ||
         (g_cpipe_demand && !memcmp(g_cpipe_demand_key, ck, sizeof g_cpipe_demand_key));
@@ -3172,7 +3195,7 @@ static int compute_warm_key(const uint64_t ck[3]) {
     pthread_mutex_unlock(&g_cpipe_mu);
     if (have) return 0;
     vkshader_t *cs = vk_shader(ck[0], 5);
-    VkPipeline p = cs ? compute_build(cs, ck[1], ck[2]) : (VkPipeline)1;
+    VkPipeline p = cs ? compute_build(cs, ck[1], ck[2], ck[3]) : (VkPipeline)1;
     pthread_mutex_lock(&g_cpipe_mu);
     // A speculative failure leaves the key available for demand.
     if (p != (VkPipeline)1) nvn_hm_put(&g_cpipes, ck, p);
@@ -3232,7 +3255,7 @@ static void *compute_warm(void *arg) {
     { const char *e = getenv("DM_VK_COMPUTE_WARM_MAX"); int cap = e ? atoi(e) : 256;
       if (n > cap) { VKLOG("compute pipelines made ahead: none, the bundle has %d%s compute shaders (more than %d, DM_VK_COMPUTE_WARM_MAX)", n, n == 4096 ? " or more" : "", cap); return NULL; } }
     for (int i = 0; i < n; i++) {
-        uint64_t ck[3] = {keys[i], 0, 0};
+        uint64_t ck[4] = {keys[i], 0, 0};
         made += compute_warm_key(ck);
     }
     VKLOG("compute pipelines made ahead: %d of %d compute shaders in %.0f ms", made, n, (tick() - t0) / 1e6);
@@ -3286,7 +3309,7 @@ static void dispatch(const p_dispatch *d) {
     if (g_pd_state == 1 && g_pd_full) g_sc.storage_count = 0;
     g_compute_image_count = 0;
     uint32_t dofs[96]; VkDescriptorSet set = stage_set(5, cs, dofs, d->ind ? &indirect_c0 : NULL);
-    uint64_t ck[3] = {cs->key, g_num_um, g_num_im};
+    uint64_t ck[4] = {cs->key, g_num_um, g_num_im, g_num_r32};
     pthread_mutex_lock(&g_cpipe_mu);
     if (g_cpipe_warming && !memcmp(g_cpipe_warm_key, ck, sizeof ck)) {
         uint64_t start = tick();
@@ -3302,7 +3325,7 @@ static void dispatch(const p_dispatch *d) {
     pthread_mutex_unlock(&g_cpipe_mu);
     if (!p) {
         uint64_t tb = tick();
-        p = compute_build(cs, ck[1], ck[2]);
+        p = compute_build(cs, ck[1], ck[2], ck[3]);
         uint64_t elapsed = tick() - tb;
         g_compute_compile_ns += elapsed;
         if (g_prof_on) g_prof_ns[7] += elapsed;

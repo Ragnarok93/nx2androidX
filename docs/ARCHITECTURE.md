@@ -105,6 +105,16 @@ Zero-copy pools can be lazy (`DM_VK_ZEROCOPY_LAZY`: `0` none; `1` also the 256 M
 
 `DM_VK_POOL_READBACK_RANGES=1` independently opts cached guest pools into range-limited completion merges for submissions containing only known transfer writes and read-only shader descriptors. Writable/unknown shader descriptors (checked before descriptor memo returns), transform feedback and texture-to-guest-buffer writes disable the mode for the whole submission. Uncertain submissions keep full cached-pool merging and whole-mapping invalidation. Eligible ranges keep the baseline complete for both cached and NVN CPU_UNCACHED guest pools because all device writes are covered. Outside the covered writes the GPU copy and baseline stay unchanged; their next tracked sync overwrites whole dirty blocks from guest memory before refreshing those baseline blocks. Uncertain CPU_UNCACHED submissions merge their tracked ranges, as with the switch off, and initialization/untracked pools still copy whole. Both switches are off by default. New GPU buffer-write paths must either register their full destination or force the conservative fallback.
 
+R32 storage texel-buffer variants specialize both the SPIR-V image format
+and the scalar type to the bound Vulkan view. The format mask participates
+in graphics, compute and compute-history keys. Stores preserve the original
+register bits when their type changes. Replay registers the bound writable
+buffer range for GPU-to-CPU readiness and copied-pool completion.
+
+The shader optimizer keeps subgroup operations, derivatives and texture
+samples at their original execution point. Inlining one into a divergent
+consumer can change the participating lanes or the derivative calculation.
+
 For texel-buffer views Vulkan 1.3 can use the per-format alignments of both
 buffer usages. A sampled binding that still needs realignment is copied on the
 GPU in replay order before descriptor assembly. The scratch view belongs to that

@@ -6,8 +6,8 @@
 #include <unistd.h>
 
 enum { VK_COMPUTE_HISTORY_MAX = 96, VK_COMPUTE_HISTORY_STARTUP = 16 };
-typedef struct { uint64_t word[3]; } vk_compute_key;
-static const char vk_compute_history_magic[] = "DMVKCH1";
+typedef struct { uint64_t word[4]; } vk_compute_key;
+static const char vk_compute_history_magic[] = "DMVKCH2";
 
 static inline unsigned vk_compute_history_add(vk_compute_key *keys, unsigned count,
                                                const vk_compute_key *key) {
