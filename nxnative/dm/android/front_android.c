@@ -735,7 +735,8 @@ static int diag_capture_arm(int delay) {
         {"DM_VK_PASSDUMP_FULL", "1"}, {"DM_VK_PASSDUMP_EFFECTS", "0"},
         {"DM_VK_PASSDUMP_DEPTH_STATE", "1"}, {"DM_VK_PASSDUMP_INPUTS", "1"},
         {"DM_VK_PASSDUMP_INPUT_VS", ""}, {"DM_VK_PASSDUMP_LIMIT", "96"},
-        {"DM_VK_PASSDUMP_MAX_MB", "64"}, {"DM_VK_PASSDUMP_RAW", "1"},
+        // Allow the MRT and the later float effects to fit in the same sample.
+        {"DM_VK_PASSDUMP_MAX_MB", "80"}, {"DM_VK_PASSDUMP_RAW", "1"},
         {"DM_VK_PASSDUMP_FRAMES", "1"}, {"DM_VK_PASSDUMP_SKIP", "0"},
         {"DM_VK_PASSDUMP_SIZE", "0"},
     };
@@ -837,7 +838,7 @@ static void menu_do(int item) {
     } else if (item == OVM_DIAG_FLAGS || item == OVM_FLAGS_BACK) {
         atomic_store(&g_diag_flags_page, item == OVM_DIAG_FLAGS);
         atomic_store(&g_menu_hi, -1);
-    } else if (item >= OVM_FLAG_DLC && item <= OVM_FLAG_BC) {
+    } else if (item >= OVM_FLAG_DLC && item <= OVM_FLAG_HIZ) {
         if (!radv_test_driver(dm_vk_driver_status())) return;
         unsigned next = atomic_load(&g_radv_pending) ^ (1u << (item - OVM_FLAG_DLC));
         if (radv_test_save(g_root, next)) atomic_store(&g_radv_pending, next);

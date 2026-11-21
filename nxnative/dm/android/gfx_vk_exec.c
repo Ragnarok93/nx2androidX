@@ -423,7 +423,7 @@ enum { PD_MAX = 96 };
 static pdump_t g_pd[PD_MAX]; static int g_npd, g_pd_state, g_pd_skip, g_pd_frames; static char g_pd_size[128], g_pd_from[32];
 static int g_pd_prepass_written; // only the first eligible depth-only pass of a one-shot capture
 static int g_pd_full, g_pd_effects, g_pd_shadow_reads;
-static int g_pd_mrt_written, g_pd_effect_images, g_pd_alias_images;
+static int g_pd_mrt_written, g_pd_effect_passes, g_pd_small_effect_passes, g_pd_alias_images;
 static atomic_int g_pd_user_pending;
 static int g_pd_frame_has_scene;
 static unsigned g_pd_scene_waited;
@@ -655,10 +655,10 @@ static int pass_dump_bound_depth(VkImageAspectFlags aspect) {
 
 static void pass_dump_full_attachments(void) {
     unsigned colors = 0;
-    int first = -1;
+    uint8_t bound[8] = {0};
     for (int i = 0; i < S.ncol && i < 8; i++) {
         if (!P_ca[i].imageView || !P_att[i].im || P_alias[i] != i) continue;
-        if (first < 0) first = i;
+        bound[i] = 1;
         colors++;
     }
     if (!colors && !g_pd_prepass_written && g_pass_draws >= 8) {
@@ -670,9 +670,16 @@ static void pass_dump_full_attachments(void) {
             g_pd_scene_w = S.pass_w;
             g_pd_scene_h = S.pass_h;
         }
-    } else if (colors && colors < 3 && g_pd_scene_w && g_pass_draws && g_pd_effect_images < 8 &&
-               vk_pd_effect_color(colors, S.pass_w, S.pass_h, g_pd_scene_w, g_pd_scene_h)) {
-        g_pd_effect_images += pass_dump_color(first);
+    } else if (g_pass_draws && vk_pd_effect_color(colors, S.pass_w, S.pass_h, g_pd_scene_w, g_pd_scene_h)) {
+        // The 32x32 fog passes used up the full-image quota before the
+        // scene composite and translucency passes in the battle capture.
+        int small = !vk_pd_effect_color(1, S.pass_w, S.pass_h, g_pd_scene_w, g_pd_scene_h);
+        int *passes = small ? &g_pd_small_effect_passes : &g_pd_effect_passes;
+        if (*passes >= (small ? 2 : 8)) return;
+        int copied = 0;
+        for (int i = 0; i < S.ncol && i < 8; i++)
+            if (bound[i]) copied |= pass_dump_color(i);
+        *passes += copied;
     }
 }
 
@@ -897,7 +904,7 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
         g_pd_scene_w = g_pd_scene_h = 0;
         g_pd_capture_id++;
         g_pd_shadow_reads = 0;
-        g_pd_mrt_written = g_pd_effect_images = g_pd_alias_images = 0;
+        g_pd_mrt_written = g_pd_effect_passes = g_pd_small_effect_passes = g_pd_alias_images = 0;
         g_pd_prepass_written = 0; g_pd_control_written = 0;
         input_capture_arm();
         setenv("DM_VK_PASSDUMP", "0", 1);

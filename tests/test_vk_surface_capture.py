@@ -100,7 +100,8 @@ static const char *vk_pass_dump_root(void) { return getenv("DM_ROOT"); }
 #include "gfx_vk_surface_capture.inc"
 ''' + dump_type + r'''
 static pdump_t g_pd[96];
-static int g_npd, g_pd_full=1, g_pd_prepass_written, g_pd_mrt_written, g_pd_effect_images;
+static int g_npd, g_pd_full=1, g_pd_prepass_written, g_pd_mrt_written;
+static int g_pd_effect_passes, g_pd_small_effect_passes;
 static uint32_t g_pd_scene_w, g_pd_scene_h;
 static uint64_t g_pass_draws=12;
 static char g_pd_size[128];
@@ -155,17 +156,31 @@ int main(int argc, char **argv) {
     }
     pass_dump_full_attachments();
     assert(g_npd == 5 && g_pd[2].target == 0 && g_pd[4].target == 2);
-    S.ncol = 1;
+    // A run of small dual-output fog passes must leave capacity for
+    // subsequent scene-resolution composition and translucency.
+    vkimg_t fog = color;
+    fog.w = fog.h = 16;
+    S.ncol = 2; S.pass_w = S.pass_h = 16;
+    P_att[0].im = P_att[1].im = &fog;
+    for (int i=0;i<8;i++) pass_dump_full_attachments();
+    assert(g_npd == 9 && g_pd_small_effect_passes == 2);
+    assert(g_pd[5].target == 0 && g_pd[6].target == 1);
+    assert(g_pd[5].w == 16 && g_pd[6].h == 16);
+
+    S.pass_w = 96; S.pass_h = 48;
+    P_att[0].im = P_att[1].im = &color;
     pass_dump_full_attachments();
-    assert(g_npd == 6 && g_pd_effect_images == 1);
+    assert(g_npd == 11 && g_pd_effect_passes == 1);
+    assert(g_pd[9].target == 0 && g_pd[10].target == 1);
+    assert(g_pd[9].w == 96 && g_pd[10].h == 48);
 
     // Scene images must leave space for a source image and its reported crop.
     g_pd_bytes = pass_dump_budget() - 16u*1024u*1024u;
     assert(!pass_dump_color(0));
     const int crop[4] = {2, 4, 90, 40};
     assert(pass_dump_image(&color,color.fmt,color.aspect,0,0,-202,-4,crop));
-    assert(g_npd == 7 && captured[copies-1].imageExtent.width == 96);
-    assert(g_pd[6].target == -4 && g_pd[6].crop[0] == 2 && g_pd[6].crop[3] == 40);
+    assert(g_npd == 12 && captured[copies-1].imageExtent.width == 96);
+    assert(g_pd[11].target == -4 && g_pd[11].crop[0] == 2 && g_pd[11].crop[3] == 40);
 }
 '''
         with tempfile.TemporaryDirectory(prefix="nx2a-surfaces-") as tmp:

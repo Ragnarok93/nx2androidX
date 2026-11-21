@@ -33,6 +33,13 @@ int main(int argc, char **argv) {
     assert(!strcmp(getenv("RADV_XCLIPSE_DLC"), "1"));
     assert(!strcmp(getenv("RADV_XCLIPSE_NO_BC_EMU"), "1"));
     assert(!strcmp(getenv("RADV_XCLIPSE_DCC"), "0"));
+    assert(!getenv("RADV_DEBUG"));
+    mask |= 1u << RADV_TEST_HIZ;
+    assert(radv_test_save(root, mask));
+    assert(radv_test_apply(root) == mask && !strcmp(getenv("RADV_DEBUG"), "nohiz"));
+    assert(!setenv("RADV_DEBUG", "nodcc,~nohiz", 1));
+    assert(radv_test_apply(root) == mask && radv_test_apply(root) == mask);
+    assert(!strcmp(getenv("RADV_DEBUG"), "nodcc,~nohiz,nohiz"));
     assert(radv_test_save(root, 0) && !radv_test_load(root));
     char path[620];
     assert(radv_test_path(path, sizeof path, root));
@@ -49,5 +56,5 @@ int main(int argc, char **argv) {
             exe = path / "flags"
             subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
                             "-I", str(ROOT), str(path / "flags.c"), "-o", str(exe)], check=True)
-            env = {key: value for key, value in os.environ.items() if not key.startswith("RADV_XCLIPSE_")}
+            env = {key: value for key, value in os.environ.items() if not key.startswith("RADV_XCLIPSE_") and key != "RADV_DEBUG"}
             subprocess.run([str(exe), tmp], check=True, env=env)

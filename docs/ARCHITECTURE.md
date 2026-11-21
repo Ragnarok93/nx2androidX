@@ -113,11 +113,16 @@ descriptor memo. A writable binding still requires a legal direct view.
 
 The standalone Capture graphics action includes bounded full images for one
 geometry depth/stencil pass, one MRT pass, subsequent effect outputs and the
-source before Android composition. The source has a reserved image slot and
-readback capacity. The manifest names the source crop and records exact raw
-bytes when a color preview is unavailable. Surface rows pair alias consumers and
-candidate producers and link small consumer images to their full dump. An
-overlapping guest range by itself leaves the contents of separate images alone.
+source before Android composition. Small effect passes have a separate limit
+so a run of fog passes leaves room for the scene-resolution outputs. The source
+has a reserved image slot and readback capacity. The manifest names the source
+crop and records exact raw bytes when a color preview is unavailable. Surface
+rows pair alias consumers and candidate producers and link small consumer
+images to their full dump. An overlapping guest range by itself leaves the
+contents of separate images alone.
+The RADV test menu can stage `nohiz` in `RADV_DEBUG` for the next launch to
+isolate depth/stencil compression in the affected passes. The flag preserves
+the other debug options and is recorded in the exported diagnostics.
 
 Vulkan indirect compute dispatches copy their three GPU-written group counts into submission scratch memory in command order. A shader that reads c0 gets a private driver segment, outside the immutable segment cache, with the counts at `c0 + 0x200`; the dispatch reads that same record. Without c0, only a 12-byte record is allocated. Argument records may cross chunks of the same pool, with each chunk's buffer offset preserved. All words are validated before any argument copy, and a transfer barrier makes the record visible to both uniform reads and indirect dispatch. Scratch storage is retained until the submission completes. Direct compute dispatches and other driver segments retain their existing content caching.
 
