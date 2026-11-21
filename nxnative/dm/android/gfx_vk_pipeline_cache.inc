@@ -72,19 +72,30 @@ static int pcache_driver_header(const void *data,size_t bytes) {
     return bytes>=32 && pcache_u32(p)==32 && pcache_u32(p+4)==VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
         pcache_u32(p+8)==V.props.vendorID && pcache_u32(p+12)==V.props.deviceID && !memcmp(p+16,V.props.pipelineCacheUUID,VK_UUID_SIZE);
 }
-static void pcache_path(void) {
-    const char *root=getenv("DM_ROOT");g_pcache_path[0]=0;
-    if (!root || !*root) return;
-    int n=snprintf(g_pcache_path,sizeof g_pcache_path,"%s/vk_pipeline_cache.bin",root);
-    if (n<0 || (size_t)n>=sizeof g_pcache_path) g_pcache_path[0]=0;
+static int pcache_path(char *out, size_t size, const char *dir) {
+    int n = dir && *dir ? snprintf(out,size,"%s/vk_pipeline_cache.bin",dir) : -1;
+    if (n>=0 && (size_t)n<size) return 1;
+    out[0]=0;
+    return 0;
 }
 static size_t pcache_load(void) {
     VkPhysicalDeviceProperties2 props={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,&g_pcache_ids};
     vkGetPhysicalDeviceProperties2(V.pd,&props);
-    pcache_path();pcache_header identity=pcache_identity(),header;size_t bytes=0;void *data=NULL;
+    const char *root=getenv("DM_ROOT");
+    int persistent=pcache_path(g_pcache_path,sizeof g_pcache_path,getenv("DM_VK_PCACHE_DIR"));
+    if (!persistent) pcache_path(g_pcache_path,sizeof g_pcache_path,root);
+    pcache_header identity=pcache_identity(),header;size_t bytes=0;void *data=NULL;
     int legacy=0;uint8_t digest[32];
     g_pcache_digest_valid=0;g_pcache_migrate=0;
     FILE *file=g_pcache_path[0] && !getenv("DM_VK_NOPCACHE") ? fopen(g_pcache_path,"rb") : NULL;
+    int migrate_path=0;
+    if (persistent && !file && !getenv("DM_VK_NOPCACHE")) {
+        char old[sizeof g_pcache_path];
+        if (pcache_path(old,sizeof old,root) && strcmp(old,g_pcache_path)) {
+            file=fopen(old,"rb");
+            migrate_path=file!=NULL;
+        }
+    }
     if (file) {
         struct stat st;uint8_t prefix[32];size_t payload=0;
         int valid=!fstat(fileno(file),&st) && S_ISREG(st.st_mode) &&
@@ -125,7 +136,7 @@ static size_t pcache_load(void) {
         bytes=0;
     }
     if (bytes) {
-        memcpy(g_pcache_digest,digest,sizeof digest);g_pcache_bytes=bytes;g_pcache_digest_valid=1;g_pcache_migrate=legacy;
+        memcpy(g_pcache_digest,digest,sizeof digest);g_pcache_bytes=bytes;g_pcache_digest_valid=1;g_pcache_migrate=legacy || migrate_path;
         atomic_store_explicit(&g_pcache_size,bytes,memory_order_relaxed);
     }
     if (bytes) VKLOG("vk: loaded %zu pipeline-cache bytes for this device, driver and shader chain",bytes);
@@ -162,6 +173,8 @@ void vk_pipeline_cache_save(void) {
     if (ok && !rename(temporary,g_pcache_path)) {
         temporary[0]=0;g_pcache_saved=generation;g_pcache_bytes=bytes;atomic_store_explicit(&g_pcache_size,bytes,memory_order_relaxed);
         memcpy(g_pcache_digest,header.digest,sizeof header.digest);g_pcache_digest_valid=1;g_pcache_migrate=0;
+        static int reported;
+        if (!reported++) VKLOG("vk: published %zu pipeline-cache bytes",bytes);
     }
     else VKLOG("vk: pipeline-cache write was not published: %s",strerror(errno));
 done:

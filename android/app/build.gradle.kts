@@ -1,3 +1,8 @@
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.PrivateKey
+import java.util.HexFormat
+
 // The phone app: nx2android's porter, running on the phone itself.
 //
 // The app is a shell: it unpacks the environment (the rootfs from the nixport payload, the toolchain and the
@@ -20,15 +25,46 @@ val assetsDir = rootProject.layout.projectDirectory.dir("../packaging/android-ap
 // default library paths — the app's native library folder is the only one of those the app controls.
 val jniLibsDir = rootProject.layout.projectDirectory.dir("../packaging/android-apk/.cache/jniLibs")
 
-// The app's own signing key: a keystore of the project's, so that every build of the app (this machine, CI, the
-// release) carries the same signature and installs over the one before it. Android refuses an update whose
-// signature differs (INSTALL_FAILED_UPDATE_INCOMPATIBLE), and the debug keystore of a machine is that machine's:
-// two builds from two machines can never replace each other. The keystore is not in the repository: it lives in
-// ~/.android/nx2android.keystore (or wherever NX2A_KEYSTORE points), and CI gets it from the secret
-// NX2A_KEYSTORE_B64. Without it the build falls back to the machine's debug key, which is good enough for a
-// build nobody installs over another.
+// Release builds keep the signing identity of the installed app. Only the
+// explicit verification build uses the runner's debug certificate.
 fun envOf(name: String) = System.getenv(name)?.takeIf { it.isNotBlank() }
 val nx2aKeystore = File(envOf("NX2A_KEYSTORE") ?: "${System.getProperty("user.home")}/.android/nx2android.keystore")
+val nx2aStorePassword = envOf("NX2A_KEYSTORE_PASSWORD") ?: "nx2android"
+val nx2aKeyAlias = envOf("NX2A_KEYSTORE_ALIAS") ?: "nx2android"
+val nx2aKeyPassword = envOf("NX2A_KEY_PASSWORD") ?: nx2aStorePassword
+val verificationSigning = providers.gradleProperty("nxVerificationSigning").map { it == "true" }.orElse(false).get()
+val releaseFingerprint = rootProject.file("../packaging/android-apk/signing-cert.sha256").readText().trim()
+val verifyReleaseSigningIdentity by tasks.registering {
+    doLast {
+        if (!verificationSigning) {
+            check(nx2aKeystore.isFile) {
+                "Release signing needs the original nx2android keystore. Set NX2A_KEYSTORE to its path."
+            }
+            val keystore = try {
+                KeyStore.getInstance(nx2aKeystore, nx2aStorePassword.toCharArray())
+            } catch (e: Exception) {
+                throw GradleException("Cannot open the release keystore. Check NX2A_KEYSTORE_PASSWORD.", e)
+            }
+            val certificate = keystore.getCertificate(nx2aKeyAlias)
+            check(certificate != null && keystore.isKeyEntry(nx2aKeyAlias)) {
+                "Release keystore has no signing key under alias $nx2aKeyAlias."
+            }
+            val digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(certificate.encoded))
+            check(digest == releaseFingerprint) {
+                "Release keystore certificate SHA-256 $digest does not match $releaseFingerprint."
+            }
+            val key = try {
+                keystore.getKey(nx2aKeyAlias, nx2aKeyPassword.toCharArray())
+            } catch (e: Exception) {
+                throw GradleException("Cannot unlock the release signing key. Check NX2A_KEY_PASSWORD.", e)
+            }
+            check(key is PrivateKey) { "Release signing requires a private key." }
+        }
+    }
+}
+tasks.matching { it.name == "preReleaseBuild" || it.name == "validateSigningRelease" }.configureEach {
+    dependsOn(verifyReleaseSigningIdentity)
+}
 
 // -PnxLsfg=false: the host the app builds on the device is built without the frame generation (the lsfg/ folder):
 // the host is then smaller and the frame generation reports that it is not in this build. The default is the current
@@ -64,9 +100,9 @@ android {
         if (nx2aKeystore.isFile) {
             create("nx2android") {
                 storeFile = nx2aKeystore
-                storePassword = envOf("NX2A_KEYSTORE_PASSWORD") ?: "nx2android"
-                keyAlias = envOf("NX2A_KEYSTORE_ALIAS") ?: "nx2android"
-                keyPassword = envOf("NX2A_KEY_PASSWORD") ?: envOf("NX2A_KEYSTORE_PASSWORD") ?: "nx2android"
+                storePassword = nx2aStorePassword
+                keyAlias = nx2aKeyAlias
+                keyPassword = nx2aKeyPassword
             }
         }
     }
@@ -130,13 +166,10 @@ android {
     }
 
     buildTypes {
-        // The project's own key when it is there (the machine's, or the one CI restores from the secret), the
-        // machine's debug key otherwise: the app is not on Google Play, and a build nobody installs over another
-        // needs no key of its own.
         getByName("debug") { signingConfig = signingConfigs.findByName("nx2android") ?: signingConfigs.getByName("debug") }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("nx2android") ?: signingConfigs.getByName("debug")
+            signingConfig = if (verificationSigning) signingConfigs.getByName("debug") else signingConfigs.findByName("nx2android")
         }
     }
 

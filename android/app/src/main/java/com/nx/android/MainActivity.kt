@@ -157,7 +157,7 @@ class MainActivity : ComponentActivity() {
     private val actions = AppActions(
         onAskStorage = { askStorage() },
         onAskBattery = { askBattery() },
-        storageOk = { onboarding.storageOk },
+        storageOk = { storageGranted() },
         onSetKeys = { prefs.writeKeys(it); envCheck.refresh() },
         onStartPort = { file, cfg ->
             // 没有「所有文件访问」权限就读不到游戏文件（重装 App 后会掉）：移植会死在半个 Python 栈里，先说清楚

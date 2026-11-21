@@ -4,8 +4,8 @@
 #   build.py --game <title ID> [--ndk <NDK dir>] [--out <dir>] [--jobs N] [--exe] [--lib] [--only-compile] [--release]
 # --release: no debug information, the library stripped, DM_RELEASE defined (the app ignores DM_CTL), outputs in dm/android/out/<title ID>-release.
 # Outputs in <out> (default dm/android/out/<title ID>): dmhost (an executable for adb shell runs: headless, no window) and libdmhost.so (the app's NativeActivity).
-# Objects are rebuilt when a source or a header it includes changed (clang -MMD dependency files).
-import argparse, concurrent.futures as cf, os, platform, re, subprocess, sys
+# Objects are rebuilt when a source or a header it includes changed (content hashes of clang dependency files).
+import argparse, concurrent.futures as cf, functools, hashlib, os, platform, re, subprocess, sys
 from pathlib import Path
 
 DM = Path(__file__).resolve().parent.parent          # dm/
@@ -97,31 +97,72 @@ CFLAGS = [TARGET, f'-O{a.O}'] + DBG + ['-fPIC', '-fno-omit-frame-pointer', '-ffi
 VPX_FLAGS = [TARGET, '-O2'] + DBG + ['-fPIC', f'-I{DM / "third_party/libvpx"}', f'-I{DM / "third_party/libvpx/config"}', '-w']
 ZSTD_FLAGS = [TARGET, '-O2'] + DBG + ['-fPIC', '-fvisibility=hidden', '-DZSTDLIB_VISIBLE=', '-DZSTDERRORLIB_VISIBLE=', '-w']   # its API stays inside libdmhost.so
 
-import hashlib, shutil
-_stamp = obj / 'flags.stamp'; _flags = hashlib.sha256(repr((CFLAGS, INC, VPX_FLAGS, ZSTD_FLAGS, CC)).encode()).hexdigest()
-if not _stamp.exists() or _stamp.read_text() != _flags:   # compiler flags changed: every object is rebuilt
-    shutil.rmtree(obj, ignore_errors=True); obj.mkdir(parents=True, exist_ok=True); _stamp.write_text(_flags)
+@functools.lru_cache(maxsize=None)
+def content_hash(path, state):
+    with path.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
 
-def dep_stale(o, d, s):
-    if not o.exists() or o.stat().st_mtime < s.stat().st_mtime: return True
-    if not d.exists(): return True
-    t = o.stat().st_mtime
-    txt = d.read_text(errors='replace').replace('\\\n', ' ')
-    for f in re.split(r'(?<!\\)\s+', txt.split(':', 1)[1] if ':' in txt else ''):
-        f = f.replace('\\ ', ' ').strip()
-        if f and Path(f).exists() and Path(f).stat().st_mtime > t: return True
-    return False
+
+def digest(path):
+    st = path.stat()
+    return content_hash(path, (st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+
+
+def dependency_key(depfile, source, flags):
+    # -MT keeps the target independent of the temporary object name. A
+    # Windows drive colon isn't followed by whitespace, unlike the Make rule.
+    raw = depfile.read_text(errors='replace').replace('\\\n', ' ')
+    target, deps = re.split(r':\s+', raw, maxsplit=1)
+    if not target or not deps.strip():
+        raise ValueError('missing compiler dependencies')
+    paths = {source, *(Path(word.replace('\\ ', ' ')) for word in re.findall(r'(?:\\ |[^\s])+', deps))}
+    return hashlib.sha256(repr((flags, [(str(path), digest(path)) for path in sorted(paths)])).encode()).hexdigest()
+
+
+def refresh_generated(path, command):
+    temporary = path.with_suffix(path.suffix + '.partial')
+    try:
+        subprocess.run([*command, str(temporary)], check=True)
+        if not path.is_file() or path.read_bytes() != temporary.read_bytes():
+            temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+compiler_key = digest(Path(CC))
+rebuilt = set()
 
 def compile_one(s):
-    rel = s.relative_to(DM); o = obj / (str(rel).replace(os.sep, '_').replace('/', '_') + '.o'); d = o.with_suffix('.d')
+    rel = s.relative_to(DM)
+    o = obj / (str(rel).replace(os.sep, '_').replace('/', '_') + '.o')
+    d = o.with_suffix('.d')
+    receipt = o.with_suffix('.inputs')
     src = s
     if s.suffix == '.S':   # Mach-O assembly → ELF
         src = gen / (s.stem + '.elf.S')
-        if not src.exists() or src.stat().st_mtime < s.stat().st_mtime:
-            subprocess.run([sys.executable, str(DM / 'android/tools/darwin2elf.py'), str(s), str(src)], check=True)
-    if not dep_stale(o, d, src): return s, o, 0, ''
+        refresh_generated(src, [sys.executable, str(DM / 'android/tools/darwin2elf.py'), str(s)])
     flags = VPX_FLAGS if 'third_party/libvpx' in str(rel).replace(os.sep, '/') else ZSTD_FLAGS if 'third_party/zstd' in str(rel).replace(os.sep, '/') else [TARGET] + DBG if s.suffix == '.S' else CFLAGS + INC
-    r = subprocess.run([CC] + CC_EXTRA + flags + ['-MMD', '-MF', str(d), '-c', str(src), '-o', str(o)], capture_output=True, text=True, errors='replace')
+    identity = (CC, compiler_key, CC_EXTRA, flags)
+    try:
+        if o.is_file() and o.stat().st_size and receipt.read_text() == dependency_key(d, src, identity):
+            return s, o, 0, ''
+    except (OSError, ValueError):
+        pass
+    staged_o = o.with_suffix('.o.partial')
+    staged_d = d.with_suffix('.d.partial')
+    r = subprocess.run([CC] + CC_EXTRA + flags + ['-MD', '-MF', str(staged_d), '-MT', str(o),
+                        '-c', str(src), '-o', str(staged_o)], capture_output=True, text=True, errors='replace')
+    try:
+        if not r.returncode:
+            key = dependency_key(staged_d, src, identity)
+            receipt.unlink(missing_ok=True)
+            staged_o.replace(o)
+            staged_d.replace(d)
+            receipt.write_text(key)
+            rebuilt.add(s)
+    finally:
+        staged_o.unlink(missing_ok=True)
+        staged_d.unlink(missing_ok=True)
     return s, o, r.returncode, r.stderr
 
 def build(files):
@@ -148,6 +189,7 @@ if a.play:
     play_jni, jfailed = build(srcs('android/jni_android.c'))
     failed += pfailed + jfailed
 compiled = len(common_files) + len(VPX) + len(ZSTD) + len(exe_front) + len(lib_front) + len(play_front) + len(play_jni)
+print(f'native objects: {len(rebuilt)} rebuilt, {compiled - len(rebuilt) - len(failed)} reused')
 print(f'compiled {compiled} source units, {len(failed)} failed' + (': ' + ', '.join(str(f.relative_to(DM)) for f in failed) if failed else ''))
 if failed and not a.keep_going: sys.exit(1)
 if a.only_compile: sys.exit(1 if failed else 0)

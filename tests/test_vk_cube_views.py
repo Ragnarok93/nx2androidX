@@ -40,12 +40,29 @@ static void capture_red(const char *fmt, ...) {
 '''
         code += next(line for line in header.splitlines() if line.startswith('#define VKRED_ONCE(')) + '\n'
         code += between(header, 'typedef struct { VkFormat vk;', 'const vkfmt_t *vk_fmt')
+        code += between(header, 'static inline int vk_view_selects_stencil', 'void vk_bc_decode')
         code += between(header, 'typedef struct vkimg vkimg_t;', 'vkimg_t *vk_tex(')
         code += between(header, 'typedef struct __attribute__((packed)) { uint8_t kind, desc, dim, flags;', '_Static_assert(sizeof(dmsv_bind)')
         code += r'''
 static struct { VkDevice dev; VkPhysicalDevice pd; } V;
 static uint64_t g_wseq, g_tex_gen=1, g_set_epoch=1, g_x_logfs;
-static int g_var_now, g_tracing;
+static int g_var_now, g_tracing, g_pd_state, g_pd_effects, g_pd_full, g_sub_pass;
+static uint64_t g_pd_capture_id;
+static void surface_descriptor(const vkimg_t *im, VkImageView view, int stage, int binding, unsigned element, int storage) {
+    (void)im; (void)view; (void)stage; (void)binding; (void)element; (void)storage;
+    abort();
+}
+static int vk_tex_trace_alias(vkimg_t *im, uint64_t shader, unsigned stage, unsigned binding,
+                               uint64_t submission, int pass, uint64_t capture, vkimg_t *producer) {
+    (void)im; (void)shader; (void)stage; (void)binding; (void)submission; (void)pass; (void)capture; (void)producer;
+    abort();
+}
+static void vk_tex_mark_written(vkimg_t *im) { im->wseq = ++g_wseq; im->gpu_w = 1; }
+static void surface_alias_add(const char *role, const vkimg_t *im, VkImageView v, VkFormat fmt,
+                              VkImageSubresourceRange range, int stage, int binding, uint64_t shader) {
+    (void)role; (void)im; (void)v; (void)fmt; (void)range; (void)stage; (void)binding; (void)shader;
+    abort();
+}
 static struct { struct { uint64_t key; } *sh[2]; } S;
 static vkimg_t image;
 static tex_t texture;
@@ -54,9 +71,9 @@ static int has_subview, view_calls, dummy_calls, lookup_calls;
 static VkImageViewCreateInfo last_view;
 static VkImageView dummy;
 static int dummy_dim, dummy_arr, dummy_ms, dummy_storage, dummy_int;
-static const vkfmt_t format = {.vk=VK_FORMAT_R8G8B8A8_UNORM, .kind=1, .bpb=4};
+static vkfmt_t format = {.vk=VK_FORMAT_R8G8B8A8_UNORM, .kind=1, .bpb=4};
 static const vkfmt_t *vk_fmt(int f) { (void)f; return &format; }
-static vkimg_t *vk_tex(const tex_t *t) { (void)t; return &image; }
+static vkimg_t *vk_tex_get(const tex_t *t, int sampled) { (void)t; (void)sampled; return &image; }
 static void alias_check(vkimg_t *im) { (void)im; }
 // gfx_vk.h declares this; vk_tex_view calls it before its definition
 VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arrayed, int as_attachment, vkimg_t **img_out, VkFormat vfmt);
@@ -104,23 +121,23 @@ static void rejected(int arr) {
     if(v) fprintf(stderr,"cube rejection returned non-null type=%d layers=%u flags=%u\n",last_view.viewType,last_view.subresourceRange.layerCount,image.cflags);
     assert(!v); assert(view_calls==calls);
     dmsv_bind b={.dim=3,.flags=arr}; VkDescriptorImageInfo ii;
-    assert(tex_desc_for(1,&b,1,&ii,0)==0);
+    assert(tex_desc_for(1,&b,1,&ii,0,0)==0);
     assert(ii.imageView==dummy && dummy_dim==3 && dummy_arr==arr && !dummy_ms && !dummy_storage && !dummy_int);
     assert(ii.sampler==(VkSampler)(uintptr_t)99 && ii.imageLayout==VK_IMAGE_LAYOUT_GENERAL);
     assert(dummy_calls==1 && view_calls==calls);
     // Rejection never caches the incompatible real view (or a dummy as real).
-    tex_desc_for(1,&b,1,&ii,0); assert(dummy_calls==2 && lookup_calls==2 && view_calls==calls);
-    tex_desc_for(1,&b,1,&ii,1); assert(ii.imageView==dummy && dummy_storage==1 && dummy_dim==3 && dummy_arr==arr);
+    tex_desc_for(1,&b,1,&ii,0,0); assert(dummy_calls==2 && lookup_calls==2 && view_calls==calls);
+    tex_desc_for(1,&b,1,&ii,0,1); assert(ii.imageView==dummy && dummy_storage==1 && dummy_dim==3 && dummy_arr==arr);
 }
 static void accepted(int arr, unsigned base, unsigned count) {
     dmsv_bind b={.dim=3,.flags=arr}; VkDescriptorImageInfo ii;
-    tex_desc_for(1,&b,1,&ii,0);
+    tex_desc_for(1,&b,1,&ii,0,0);
     assert(ii.imageView && ii.imageView!=dummy && !dummy_calls);
     assert(last_view.viewType==(arr?VK_IMAGE_VIEW_TYPE_CUBE_ARRAY:VK_IMAGE_VIEW_TYPE_CUBE));
     assert(last_view.subresourceRange.baseArrayLayer==base && last_view.subresourceRange.layerCount==count);
     assert(last_view.image==image.img && (image.cflags&VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT));
     int calls=view_calls,lookups=lookup_calls; VkImageView saved=ii.imageView;
-    tex_desc_for(1,&b,1,&ii,0); assert(ii.imageView==saved && view_calls==calls && lookup_calls==lookups);
+    tex_desc_for(1,&b,1,&ii,0,0); assert(ii.imageView==saved && view_calls==calls && lookup_calls==lookups);
     assert(vk_tex_view(&texture,has_subview?&subview:NULL,3,arr,0,NULL)==saved && view_calls==calls);
 }
 int main(int argc, char **argv) {
@@ -131,6 +148,28 @@ int main(int argc, char **argv) {
         reset(4,16,16,14,1); has_subview=1; subview=(view_t){.set_layers=1,.min_layer=2,.nlayers=12}; accepted(1,2,12);
         vk_tex_view_drop_all(&image); free(g_views.keys); free(g_views.vals); return 0;
     }
+    reset(1,32,32,1,1);
+    texture.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+    dmsv_bind float_image = {.dim=1};
+    VkDescriptorImageInfo info;
+    assert(tex_desc_for(0,&float_image,1,&info,0,0) == 0 && info.imageView && !image.gpu_w);
+    assert(lookup_calls == 1);
+    assert(tex_desc_for(0,&float_image,1,&info,0,1) == 0 && info.imageView && image.gpu_w);
+    assert(lookup_calls == 2);
+    assert(tex_desc_for(0,&float_image,1,&info,0,1) == 0 && lookup_calls == 2);
+    reset(1,32,32,1,1);
+    texture.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+    g_compute_image_count = 0;
+    assert(tex_desc_for(5,&float_image,1,&info,0,1) == 0 && info.imageView);
+    assert(g_compute_image_count == 1 && image.wseq == 0);
+    compute_images_written();
+    assert(image.gpu_w && image.wseq != 0);
+    uint64_t first_write = image.wseq;
+    g_compute_image_count = 0;
+    assert(tex_desc_for(5,&float_image,1,&info,0,1) == 0 && lookup_calls == 1);
+    assert(g_compute_image_count == 1 && image.wseq == first_write);
+    compute_images_written();
+    assert(image.wseq > first_write);
     // The reported failure: an ordinary 2D view already exists in the cache.
     reset(1,16,16,1,1); assert(vk_tex_view(&texture,NULL,1,0,0,NULL)); rejected(0);
     assert(red_calls==1 && strstr(last_red,"[RED]") && strstr(last_red,"image 16x16x1") && strstr(last_red,"layers 1") && strstr(last_red,"cflags 0x"));
@@ -166,6 +205,27 @@ int main(int argc, char **argv) {
     reset(8,16,16,1,1); subview=(view_t){.set_layers=1,.min_layer=2,.nlayers=1};
     assert(vk_tex_view(&texture,&subview,1,0,0,NULL)); assert(last_view.viewType==VK_IMAGE_VIEW_TYPE_2D && last_view.subresourceRange.baseArrayLayer==2);
     assert(vk_tex_view(&texture,&subview,3,0,1,NULL)); assert(last_view.viewType==VK_IMAGE_VIEW_TYPE_2D && last_view.subresourceRange.layerCount==1);
+    reset(4,16,16,1,1);
+    format = (vkfmt_t){.vk=VK_FORMAT_D24_UNORM_S8_UINT, .depth=1, .stencil=1};
+    image.fmt = format.vk;
+    image.aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    texture.stencil = 1;
+    assert(view_num(&texture, NULL) == 1);
+    subview = (view_t){.set_dsmode=1, .dsmode=NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH};
+    assert(view_num(&texture, &subview) == 0);
+    assert(vk_tex_view(&texture, &subview, 1, 0, 0, NULL));
+    assert(last_view.subresourceRange.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
+    assert(vk_view_range.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
+    assert(vk_tex_view(&texture, NULL, 1, 0, 0, NULL));
+    assert(last_view.subresourceRange.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT);
+    // Cache hit must hand the sampler the original view range as well.
+    assert(vk_tex_view(&texture, &subview, 1, 0, 0, NULL));
+    assert(vk_view_range.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
+    texture.stencil = 0;
+    subview.dsmode = NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL;
+    assert(view_num(&texture, &subview) == 1);
+    assert(vk_tex_view(&texture, &subview, 1, 0, 0, NULL));
+    assert(vk_view_range.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT);
     assert(red_calls==1); // the production VKRED_ONCE keeps repeated refusals quiet
     vk_tex_view_drop_all(&image); free(g_views.keys); free(g_views.vals);
 }

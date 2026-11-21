@@ -1,23 +1,36 @@
-# APK signing and update compatibility (alpha16 onwards)
+# APK signing and update compatibility
 
 ## Stable signing identity
 
-Release and manually dispatched Android APK builds must use the same persistent, privately held signing certificate. A random GitHub runner debug keystore cannot update the APK produced by a different runner. The workflow now refuses release/dispatch builds when either signing secret is absent, verifies the APK signature, and checks its certificate against the keystore.
+Local release builds and publishing workflows require the permanent signing certificate pinned in
+[`packaging/android-apk/signing-cert.sha256`](../packaging/android-apk/signing-cert.sha256).
+The application ID remains `com.nx.android`. Use a non-decreasing Android version code for updates.
 
-For the owner's alpha16 migration, the permanent signing certificate's SHA-256 fingerprint is:
+The permanent signer was replaced on November 20, 2026 because no copy of the
+previous private key was available. Existing installations with a different
+certificate need a one-time migration before they can receive releases signed
+with the new key. Once migrated, preserve this signing key for subsequent updates.
+The builder APK and player-generated game APKs have independent signing identities.
 
-`24c2fde0b7e75d5a8325ad21079fccbc5cd0929fe26e0a3e6dda7b4235026953`
+Set these repository secrets under **Settings → Secrets and variables → Actions**:
 
-This is public certificate metadata **not** the private key. Keep the private keystore out of source control and GitHub Actions artifacts.
+- `NX2A_KEYSTORE_B64` holds the base64 encoding of the permanent keystore.
+- `NX2A_KEYSTORE_PASSWORD` unlocks the keystore.
+- `NX2A_KEY_PASSWORD` is optional when the private key has a different password.
 
-Set two repository secrets under **Settings > Secrets and variables > Actions**:
+GitHub Actions expects the alias `nx2android`. On a trusted machine with the permanent keystore and an
+authenticated GitHub CLI, enter the two required secrets directly:
 
-- `NX2A_KEYSTORE_B64`: the complete base64 encoding of the persistent PKCS12 keystore
-- `NX2A_KEYSTORE_PASSWORD`: the corresponding keystore password
+```bash
+base64 < /path/to/original/nx2android.keystore | tr -d '\n' | gh secret set NX2A_KEYSTORE_B64 --repo Ragnarok93/nx2androidX
+gh secret set NX2A_KEYSTORE_PASSWORD --repo Ragnarok93/nx2androidX
+```
 
-Keep the keystore and password backed up offline. Never regenerate the signing key for ordinary updates. The keystore alias must be `nx2android`; the key password defaults to the store password, consistent with `android/app/build.gradle.kts`. Future updateable APKs must preserve the application ID `com.nx.android`, the signer and a non-decreasing Android versionCode (increment for each release).
-
-PR verification builds deliberately use a throwaway key even if the secrets are configured. Their artifact is labeled `nx2android-PR-EPHEMERAL-NOT-UPDATABLE` and must not be distributed as an update.
+Then rerun the failed trusted branch build. CI checks the certificate before building and checks the final
+APK before publishing. PR verification uses a runner-only debug signer. Its APK stays inside the verification
+job. For a local release, set `NX2A_KEYSTORE` to the permanent keystore path or place it at
+`~/.android/nx2android.keystore`. The same password variables apply. Keep a private offline backup of the
+keystore and password.
 
 ## Recovering installations signed by an ephemeral key
 
@@ -36,3 +49,21 @@ For a rooted Android device, a one-time **data-preserving migration** is possibl
 **WARNING:** This sequence requires root and reliable rollback/backup handling. Never simply uninstall or clear app data to fix a signature mismatch when work in `files/work` must be preserved. If the signed APK is obtained from an untrusted source or data cannot be backed up, stop before uninstalling.
 
 Once migrated to the permanent key, normal `pm install -r` updates work as long as the same keystore signs every subsequent version.
+
+
+## Reusing a prior build
+
+For a normal builder upgrade, keep the existing app data. For a one-time signing
+migration, preserve the builder's private `files/work` and the standalone signing
+key before replacing the builder, then restore them under the new app's ownership.
+Select the same game source and version to pick up `files/work/<TITLE_ID>_build`.
+The porter reuses matching extractions, rewrites and shader bundles. Native object
+receipts use compiler inputs and dependency contents, so a tools refresh with the
+same file bytes does not force recompilation. Native objects from a builder that
+predates these receipts are compiled once to establish the receipts.
+
+A split APK export also checks the previous `-data` folder in its output location.
+If the metadata and tracked files match, it keeps the original manifest so the
+standalone app can reuse its imported copy. Keep the private workspace for
+recompilation. The exported companion contains runtime files and cannot supply
+all the inputs and receipts used by the compiler.

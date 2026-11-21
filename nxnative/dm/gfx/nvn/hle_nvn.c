@@ -713,7 +713,7 @@ static uint64_t g_frame;
 // (how Xenoblade Chronicles 3's render thread was found waiting in SyncWait on the acquire sync for its whole frame's GPU work)
 static int seq_on(void) { static uint64_t until; const char *e = getenv("DM_NVN_SEQ"); if (e && atoi(e)) { until = g_frame + (uint64_t)atoi(e); setenv("DM_NVN_SEQ", "0", 1); } return g_frame < until; }
 #define SEQ(...) do { if (seq_on()) { char sb_[256]; snprintf(sb_, sizeof sb_, __VA_ARGS__); LOG("[seq] f%llu t%lx %.3f %s", (unsigned long long)g_frame, (unsigned long)(uintptr_t)pthread_self(), now_ns() / 1e6, sb_); } } while (0)
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = nvn_fence_now(); SEQ("fence %p", (void *)s); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = nvn_fence_now(); SEQ("queue fence queue=%p sync=%p fence=%llu", (void *)q, (void *)s, (unsigned long long)((const sync_t *)s)->fence); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
 NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
@@ -951,6 +951,8 @@ NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, N
 NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *c, NVNsync *s, NVNsyncCondition cond, int flags) {
     (void)cond; (void)flags;
     uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_FENCE_SYNC, 16); memcpy(p + 8, &s, 8);
+    SEQ("record command fence cmd=%p handle=%p sync=%p condition=%u flags=%#x",
+        (void *)c, (void *)CB(c)->begin, (void *)s, (unsigned)cond, (unsigned)flags);
 }
 NVN(nvnCommandBufferResetCounter, void, NVNcommandBuffer *c, NVNcounterType t) {
     uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_RESET_COUNTER, 16); uint64_t tt = t; memcpy(p + 8, &tt, 8);
@@ -1035,6 +1037,11 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
+#ifdef __ANDROID__
+NVN(nvnCommandBufferSetDepthBounds, void, NVNcommandBuffer *c, uint32_t enable, float n, float f) {
+    *REC(c, OP_DEPTH_BOUNDS, p_depth_bounds) = (p_depth_bounds){enable & 0xff, n, f};
+}
+#endif
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
@@ -1388,7 +1395,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     submit_now(q, n, h);
 }
 static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h) {
-    SEQ("submit %d handles", n);
+    SEQ("submit queue=%p count=%d first_handle=%#llx", (void *)q, n, n > 0 ? (unsigned long long)h[0] : 0ull);
     gfx_enter();
     pthread_mutex_lock(&g_sub_mu);
     uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
@@ -1411,9 +1418,23 @@ static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h) {
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
 static void nvn_nop(void) {}
+#ifndef __ANDROID__
+static void trace_depth_bounds(NVNcommandBuffer *c, uint32_t enable, float near, float far) {
+    SEQ("ignored depth bounds cmd=%p enabled=%u min=%.9g max=%.9g",
+        (void *)c, enable, (double)near, (double)far);
+}
+#endif
+static void trace_cmd_wait(NVNcommandBuffer *c, const NVNsync *sync) {
+    // Capture identity at record time. A producer may fence later or on
+    // another thread, so the recording's observation alone cannot order it.
+    SEQ("ignored command wait cmd=%p sync=%p", (void *)c, (const void *)sync);
+}
+static const NVNT_nvnCommandBufferWaitSync g_check_wait __attribute__((unused)) = trace_cmd_wait;
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
+#ifndef __ANDROID__
     "nvnCommandBufferSetDepthBounds",
+#endif
     "nvnCommandBufferWaitSync",
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferPushDebugGroupDynamic",
@@ -1435,7 +1456,12 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
         while (i < NVN_NFUNC && strcmp(nvn_names[i], g_nops[k])) i++;
         if (i == NVN_NFUNC) die("NVN empty implementation %s is not in main's name table", g_nops[k]);
         if (nvn_slot[i].fn != (void *)nvn_unimpl_entry) die("NVN %s has an implementation and is also listed as an empty implementation", g_nops[k]);
-        nvn_slot[i].fn = (void *)nvn_nop;
+#ifndef __ANDROID__
+        if (!strcmp(g_nops[k], "nvnCommandBufferSetDepthBounds")) nvn_slot[i].fn = (void *)trace_depth_bounds;
+        else
+#endif
+        if (!strcmp(g_nops[k], "nvnCommandBufferWaitSync")) nvn_slot[i].fn = (void *)trace_cmd_wait;
+        else nvn_slot[i].fn = (void *)nvn_nop;
     }
     unsigned nnop = sizeof g_nops / sizeof *g_nops;
     // Implemented functions other than command recording (nvnCommandBuffer*, tens of thousands per frame, where the host only appends records) run on the big host stack: submit / present / object creation do Metal work, and a game thread's stack may be too small (see nvn_entry.S nvn_big_entry)

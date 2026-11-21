@@ -345,6 +345,41 @@ def oodle_job(roms, tmp):
     return recs, job
 
 
+def save_ue_streams(path, streams):
+    """Read a DMOR reply in request order and publish complete streams to the retry cache."""
+    got = 0
+    with path.open('rb') as result:
+        size = os.fstat(result.fileno()).st_size
+        if result.read(8) != b'DMOR' + struct.pack('<I', len(streams)):
+            raise BuildError("the game's Oodle decoder answered for other streams than it was given")
+        for (_, expected), destination in streams.items():
+            word = result.read(4)
+            if len(word) != 4:
+                raise BuildError("the game's Oodle decoder returned a truncated Unreal stream header")
+            length = struct.unpack('<I', word)[0]
+            if length in (0, 0xffffffff):
+                continue
+            if length > size - result.tell():
+                raise BuildError("the game's Oodle decoder returned a truncated Unreal stream")
+            if length != expected:
+                result.seek(length, os.SEEK_CUR)
+                continue
+            pending = destination.with_suffix('.partial')
+            with pending.open('wb') as saved:
+                remaining = length
+                while remaining:
+                    chunk = result.read(min(remaining, 1 << 20))
+                    if not chunk:
+                        raise BuildError("the game's Oodle decoder returned a truncated Unreal stream")
+                    saved.write(chunk)
+                    remaining -= len(chunk)
+            pending.replace(destination)
+            got += 1
+        if result.read(1):
+            raise BuildError("the game's Oodle decoder returned trailing Unreal stream data")
+    return got
+
+
 def oodle_result(tmp, recs, why='', where=''):
     """The decoder's answer (DMOR: u32 count, then per record u32 decoded length — 0 failed, 0xffffffff left out, no BNSH in it — and the decoded bytes): the entries that hold a
     BNSH shader, written back as the split's decoded folders (shader_split.py gfpak_decoded, trpfs_decoded) → the folder. The answer is read in ranges, not as one buffer: a
@@ -492,6 +527,8 @@ class Port:
         root = Path(os.environ.get('NX2A_WORK', '')).expanduser() if os.environ.get('NX2A_WORK') else o.folder
         self.work_root = root
         self.work = root / f'{tid}_build'
+        if self.work.is_dir():
+            say(f'checking cached build products in {self.work}')
         g, ap = profiles.by_title(self.app)
         self.provisional = False
         if o.self_contained:
@@ -502,9 +539,9 @@ class Port:
                 (old / name).unlink(missing_ok=True)
             if g and ap:
                 stem = app_stem(g, o.app_name or g.get('name', ''))
-                self.cleanup_legacy_self_contained_pack(stem, g.id, o.package or ap.package)
-                (o.out / f'.{stem}.nx2a-data.zip.partial').unlink(missing_ok=True)
-        self.check_space()      # before the survey, which unpacks the game
+                # Keep a completed -data folder. The installed game may
+                # still use it, or a split fallback can reuse it.
+                self.cleanup_interrupted_archive(stem)
         if not (g and ap):
             what = f'no game profile for {tid}' if not g else f'{g.get("name", g.id)} ({g.id}) has a game profile but is not ported to Android yet (no android.tsv in {g.dir})'
             if not o.experimental: raise BuildError(f'{what}: --experimental tries it anyway (profiles: `porter profiles`)')
@@ -527,20 +564,92 @@ class Port:
             if self.derived: say(f'{self.derived}: packing {self.pkg_ver} from a profile derived from it')
         self.versions = [self.pkg_ver] if self.derived else need + ([self.pkg_ver] if self.pkg_ver not in need else [])
         self.have = have
+        # Resolve the final split-export destination before looking for earlier data.
+        if not o.app and not o.self_contained:
+            safe_out = public_split_export_dir(o.out)
+            if safe_out != o.out:
+                say(f'game APK and data must be exported to public storage: {safe_out}')
+                o.out = safe_out
+        self.previous_companion = self.find_previous_companion()
+        self.check_space()
         self.aw = self.work / 'android'; self.logs = self.work / 'logs'
         for d in (self.aw, self.logs, self.work / 'tmp'): d.mkdir(parents=True, exist_ok=True)
         # DM_GAME picks the profile for every tool; WORK keeps their temporary folders inside the build folder (the shader translator writes thousands of files)
         self.env.update(DM_GAME=g.id, DM_ROOT=str(self.work), WORK=str(self.work / 'tmp'))
 
-    def cleanup_legacy_self_contained_pack(self, stem, title_id, package):
-        """Reclaim an old export-only copy in Downloads, but never touch foreign packs or saved games."""
-        old = self.o.out / f'{stem}-data'
-        if not old.is_dir() or old.is_symlink() or (old / 'saves').exists(): return
-        try: manifest = json.loads((old / 'nx2a-data.json').read_text(encoding='utf-8'))
-        except (OSError, ValueError): return
-        if manifest.get('title_id') != title_id or manifest.get('package') != package: return
-        shutil.rmtree(old)
-        say(f'reclaimed old standalone export staging pack: {old}')
+
+    def find_previous_companion(self):
+        """Recognize a completed companion of the exact title/package/version.
+
+        The old data pack may outlive the app-private build workspace. It is a
+        read-only source until the extractor has verified the RomFS bytes.
+        """
+        if self.o.app or self.o.self_contained: return None
+        filename = f'{app_stem(self.g, self.o.app_name or self.g.get("name", ""))}-data'
+        roots = [self.o.out, public_split_export_dir(self.o.out),
+                 self.o.folder, self.work_root.parent / 'ports',
+                 self.o.folder / 'nx2android-ports',
+                 Path('/storage/emulated/0/Download/nx2android-ports')]
+        seen = set()
+        for root in roots:
+            root = Path(root)
+            # Legacy exporter names can change with the application label;
+            # manifest title/package/version, not the directory name, is authority.
+            candidates = [root / filename]
+            if root.is_dir():
+                candidates += sorted(root.glob('*-data'))
+            for path in candidates:
+                if str(path) in seen: continue
+                seen.add(str(path))
+                if path.is_symlink() or not path.is_dir(): continue
+                man = datapack.read_manifest(path)
+                if not isinstance(man, dict): continue
+                if (man.get('title_id') != self.g.id or
+                        man.get('package') != self.package or
+                        man.get('version') != self.pkg_ver):
+                    say(f'previous data folder title/package/version differs; not reused: {path}')
+                    continue
+                rom = path / 'RomFS'
+                marker = self.g.get('romfs_marker')
+                if (not marker or rom.is_symlink() or not rom.is_dir() or
+                        not (rom / marker).is_file()):
+                    say(f'previous data folder lacks a readable uncompressed RomFS: {path}')
+                    continue
+                say(f'previous companion data found for {self.pkg_ver}: {path} '
+                    '(verifying RomFS before reusing)')
+                return path
+        say(f'no reusable companion data found for {self.g.id} {self.pkg_ver}; '
+            f'searched: {", ".join(str(x) for x in roots)}')
+        return None
+
+    def restore_companion_romfs(self, nx, ex, version, base, update):
+        """Recover ExeFS only; preserve and reference the existing verified RomFS."""
+        pack = self.previous_companion
+        if pack is None or version != self.pkg_ver: return
+        dest, tmp = ex / version, ex / f'{version}.partial'
+        if ((dest / 'ExeFS/main').is_file() and
+                (dest / 'RomFS' / self.g.get('romfs_marker')).is_file()):
+            return
+        nsp.rmtree(tmp)
+        say(f'validating previous data and extracting only executable files for {version}')
+        try:
+            nsp.run([nx, self.o.keys, base, update or '-', tmp,
+                     '--verify-romfs', pack / 'RomFS'],
+                    self.logs / f'verify_romfs_{version}.log', env=self.env)
+            if not (tmp / 'ExeFS/main').is_file():
+                raise BuildError('input dump yielded no ExeFS/main')
+            (tmp / 'RomFS').symlink_to(pack / 'RomFS', target_is_directory=True)
+            if not (tmp / 'RomFS' / self.g.get('romfs_marker')).is_file():
+                raise BuildError('verified companion RomFS marker is inaccessible')
+            nsp.swap_in(tmp, dest)
+        except Exception as e:
+            nsp.rmtree(tmp)
+            raise BuildError(f'cannot safely reuse previous data without a new full extraction: {e}; '
+                             'old data was preserved (see verify_romfs log)') from e
+        say(f'verified previous RomFS, reused without a second game-sized copy: {pack / "RomFS"}')
+
+    def cleanup_interrupted_archive(self, stem):
+        (self.o.out / f'.{stem}.nx2a-data.zip.partial').unlink(missing_ok=True)
 
     def check_space(self):
         """Stop before extracting when the game folder's drive cannot hold the port: a build folder takes about 1 to 2 times the game files (NEO 7.0 GB of 6.8,
@@ -549,6 +658,28 @@ class Port:
         The pack is a copy of the game's files (Android's SELinux never lets an app link), so the port needs room for the build's files and for the pack.
         The app's mode copies no RomFS into the pack (the pack points at the build folder's own), so there the build's files are the only copy and the room is half.
         A self-contained export also stages a compressed data archive and the APK; their space is budgeted on the build and output volumes separately."""
+        # A verified prior data pack can replace the missing private extraction
+        # tree. Actual storage needs remain checked by individual write stages.
+        cached = bool(getattr(self, 'previous_companion', None)) or (self.work.is_dir() and (
+            any((self.work / 'extract').glob('*/ExeFS/main')) or
+            (self.work / 'android/shaders.dmsv').is_file() or
+            any((self.work / 'android').glob('patched_*/*'))
+        ))
+        if cached:
+            where = self.work
+            while not where.exists() and where.parent != where:
+                where = where.parent
+            free = shutil.disk_usage(where).free
+            if free < (64 << 20):
+                raise BuildError(f'less than 64 MiB free in the cached build workspace {self.work}; '
+                                 'the prior compiled assets are preserved')
+            if getattr(self, 'previous_companion', None):
+                say(f'incremental rebuild: prior companion {self.previous_companion}; '
+                    'no duplicate RomFS reservation')
+            else:
+                say(f'incremental build: using existing workspace {self.work}; '
+                    'checking additional disk needs when a stage writes new assets')
+            return
         fam = self.fam
         files = [fam['base'], *[p for _, p in fam['updates']], *[p for _, _, p in fam['dlc']]]
         game, temp = sum(dumps.size(f) for f in files), sum(dumps.size(f) for f in files if dumps.compressed(f))
@@ -571,24 +702,15 @@ class Port:
         while pack_where is not None and not pack_where.exists() and pack_where.parent != pack_where:
             pack_where = pack_where.parent
         if self.o.self_contained:
-            # The pack uses hard links or symlinks inside private workspace. The compressed archive and
-            # signed APK are the only additional full-size files, both in the output directory.
-            # APKs use classic ZIP offsets, so each of these is at most 4 GiB.
-            export = 2 * min(game + (64 << 20), 0xffffffff)
-            work_need = max(0, game + temp - built)
-            if shares_disk_budget(where, pack):
-                need, free = work_need + export + margin, shutil.disk_usage(where).free
-                if free < need:
-                    raise BuildError(f'not enough storage for the self-contained APK: need about {need / 2**30:.1f} GiB, '
-                                     f'only {free / 2**30:.1f} GiB free; work and emulated Downloads share the same storage')
-            else:
-                need, free = work_need + margin, shutil.disk_usage(where).free
-                if free < need:
-                    raise BuildError(f'not enough private work storage: need about {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free')
-                need, free = export + margin, shutil.disk_usage(pack_where).free
-                if free < need:
-                    raise BuildError(f'not enough APK output storage at {pack}: need about {need / 2**30:.1f} GiB, '
-                                     f'{free / 2**30:.1f} GiB free')
+            # Only extracted/compiled products need to fit at this stage. The
+            # archive and final APK are streamed later on the export volume;
+            # reserving both before recompilation makes an otherwise reusable
+            # cached build impossible on a nearly full phone.
+            need, free = max(0, game + temp - built) + margin, shutil.disk_usage(where).free
+            if free < need:
+                raise BuildError(f'not enough private work storage for a fresh port: '
+                                 f'need about {need / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free')
+            say('APK output storage will be checked at export, after cached products have been reused')
             return
         if pack is not None and not shares_disk_budget(pack, where):
             # the pack goes to another volume (the removable card): the build's files stay here, the pack's copy goes there
@@ -641,10 +763,22 @@ class Port:
         o, g = self.o, self.g
         picks = nsp.pick_nsps(self.fam, self.have, self.versions)
         ex = self.work / 'extract'; ex.mkdir(parents=True, exist_ok=True)
-        need = sum(dumps.size(p) * (2 if dumps.compressed(p) else 1) for p in {p for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 6
-        if nsp.free_gb(self.work) < need and not all((ex / v).exists() for v in self.versions): raise BuildError(f'less than {need:.0f} GB free on the volume of {self.work}')
-        # NSZ / XCZ: only what a stage will read is decompressed, all in one stage before nx_extract runs (a version nsp.extract reuses reads nothing)
+        # NSZ / XCZ: only what a missing version will read is decompressed.
+        # A previous successful extraction takes no new full-game allocation.
         fresh = lambda v: (ex / v / 'ExeFS/main').exists() and (ex / v / 'RomFS' / g.get('romfs_marker')).exists()   # nsp.extract's reuse test
+        missing = [v for v in self.versions if not fresh(v)]
+        # A prior companion needs only its ExeFS and a streaming full-byte
+        # comparison of RomFS, not a second physical extraction of that tree.
+        full_missing = [v for v in missing if not (
+            v == self.pkg_ver and getattr(self, 'previous_companion', None))]
+        sources = {p for v in full_missing for p in picks[v] if p}
+        additional = sum(dumps.size(p) * (2 if dumps.compressed(p) else 1) for p in sources)
+        if missing and not full_missing:
+            say('existing RomFS will be verified and reused in place; only ExeFS requires disk')
+        if missing and nsp.free_gb(self.work) * (1 << 30) < additional + (256 << 20):
+            raise BuildError(f'not enough space to extract missing version(s) {", ".join(missing)}: '
+                             f'about {(additional + (256 << 20)) / 2**30:.1f} GiB needed; '
+                             'already extracted versions remain available for reuse')
         zdlc = [p for _, _, p in self.fam['dlc'] if dumps.compressed(p)]
         # extract_aoc keys its reuse on the names, sizes and times of the NSPs it reads, decompressed ones here: with NSZ / XCZ DLC, porter keys it on those files instead
         dkey = nsp.fingerprint(sorted((t, p.name, p.stat().st_size, p.stat().st_mtime_ns) for t, _, p in self.fam['dlc']),
@@ -654,8 +788,15 @@ class Port:
         m = self.unpack([p for v in self.versions if not fresh(v) for p in picks[v] if p] + ([] if dlc_reused else zdlc))
         picks = {v: tuple(m.get(p, p) if p else None for p in bu) for v, bu in picks.items()}
         PROG.stage('build nx_extract')
-        nx = nsp.build_nx_extract(NXNATIVE, self.work, self.logs, self.env)
-        PROG.end()
+        needs_extraction = (not all(fresh(v) for v in self.versions) or
+                            (bool(self.fam['dlc']) and not dlc_reused) or
+                            bool(o.firmware and self.ap.sysdata))
+        nx = nsp.build_nx_extract(NXNATIVE, self.work, self.logs, self.env) if needs_extraction else None
+        PROG.end('skipped (existing extraction)' if nx is None else '')
+        if nx is not None and getattr(self, 'previous_companion', None):
+            for ver in self.versions:
+                if ver == self.pkg_ver and not fresh(ver):
+                    self.restore_companion_romfs(nx, ex, ver, *picks[ver])
         self.dirs = {ver: nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g) for ver in self.versions}
         for d in self.dirs.values(): nsp.require_64bit(d / 'ExeFS', f'{g.get("name", g.id)} ({g.id})')
         bad = [] if self.derived else [f'{v}: {x}' for v in self.versions for x in nsp.build_mismatch(self.dirs[v], v, g)]
@@ -886,7 +1027,7 @@ class Port:
         todo = {v: self.dirs[v] for v in self.versions if not ((self.dirs[v] / 'ue_shaders/stamp').exists() and (self.dirs[v] / 'ue_shaders/stamp').read_text() == nsp.ue_stamp(self.dirs[v]))}
         if not todo: return
         PROG.add(1); PROG.stage('UE shader decode', step='the shader code archives')
-        tmp = self.work / 'tmp/ue'; total = 0
+        tmp = self.work / 'tmp/ue'; tmp.mkdir(parents=True, exist_ok=True); total = 0
         for v, d in todo.items():
             jd = tmp / f'job_{v}'
             sdir = d / 'ue_streams' / hashlib.sha1(nsp.ue_stamp(d).encode()).hexdigest()[:16]   # the streams decoded so far, on disk
@@ -895,31 +1036,36 @@ class Port:
                 if old != sdir: nsp.rmtree(old)   # another pak set's streams are of no use
             for rnd in range(self.UE_ROUNDS):
                 want = {}
-                def dec(comp, n):
-                    k = (hashlib.sha1(comp).digest(), n)
-                    f = sdir / f'{k[0].hex()}-{k[1]}'
-                    if f.is_file():
-                        b = f.read_bytes()
-                        if len(b) == n: return b   # decoded in an earlier run
-                    want.setdefault(k, bytes(comp)); return bytes(n)
-                nsp.rmtree(jd); PROG.set(step=f'{v}: the shader code archives (round {rnd + 1})')
-                try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
-                except (ValueError, struct.error, IndexError) as e:
-                    if not want: raise BuildError(f'{v}: the Unreal shader code archives do not read: {e}') from e
-                if not want: break
                 job, out = tmp / 'round.job', tmp / 'round.out'
-                with open(job, 'wb') as f:
-                    f.write(b'DMOJ' + struct.pack('<I', len(want)))
-                    for (_, raw), comp in want.items(): f.write(struct.pack('<II', len(comp), raw) + comp)
+                nsp.rmtree(jd)
+                PROG.set(step=f'{v}: the shader code archives (round {rnd + 1})')
+                with job.open('wb') as requests:
+                    requests.write(b'DMOJ' + bytes(4))
+                    def dec(comp, n):
+                        k = (hashlib.sha1(comp).digest(), n)
+                        f = sdir / f'{k[0].hex()}-{n}'
+                        if f.is_file() and f.stat().st_size == n:
+                            return f.read_bytes()
+                        if k not in want:
+                            requests.write(struct.pack('<II', len(comp), n))
+                            requests.write(comp)
+                            want[k] = f
+                        return bytes(n)
+                    try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
+                    except (ValueError, struct.error, IndexError) as e:
+                        if not want: raise BuildError(f'{v}: the Unreal shader code archives do not read: {e}') from e
+                    requests.seek(4)
+                    requests.write(struct.pack('<I', len(want)))
+                if not want:
+                    job.unlink()
+                    break
                 PROG.set(step=f"{v}: {len(want):,} Oodle streams with the game's decoder {self.oodle_where} (round {rnd + 1})")
-                self.oodle_job(job, out)
-                b = out.read_bytes(); nsp.rmtree(out)
-                if b[:4] != b'DMOR' or struct.unpack_from('<I', b, 4)[0] != len(want): raise BuildError("the game's Oodle decoder answered for other streams than it was given")
-                o, got = 8, 0
-                for k in want:
-                    ln = struct.unpack_from('<I', b, o)[0]; o += 4
-                    if ln == k[1]: (sdir / f'{k[0].hex()}-{k[1]}').write_bytes(b[o:o + ln]); got += 1   # a stream decoded from zeros fails (0) and is asked for again with its real bytes
-                    o += ln if ln != 0xffffffff else 0
+                try:
+                    self.oodle_job(job, out)
+                    got = save_ue_streams(out, want)
+                finally:
+                    out.unlink(missing_ok=True)
+                    job.unlink(missing_ok=True)
                 say(f'{v}: round {rnd + 1}: {got:,} of {len(want):,} Oodle streams decoded {self.oodle_where}')
                 if not got: raise BuildError(f"{v}: the game's Oodle decoder decoded none of {len(want):,} streams (see {self.logs / 'android_oodle_job.log'})")
             else: raise BuildError(f'{v}: the Unreal shader code archives still need Oodle streams after {self.UE_ROUNDS} rounds')
@@ -1013,30 +1159,37 @@ class Port:
         PROG.stage('Vulkan shaders', step='building the translator')
         xlate, xkey = self.translator()
         PROG.set(step='checking the inputs')
-        def input_key():
+        def input_key(translator_key):
             # The translator's own inputs, found by following its imports (the bundle's readers are none of
             # them): a change to the split's readers must not cost a port the whole translation again.
             # The three helpers the export runs are named as well, so the key follows the tree this build
             # reads from (a checkout of another tree is a change of the tree).
             helpers = [DM / 'android/tools' / name for name in ('shader_vk.py', 'dmsv.py', 'shader_products.py')]
             return nsp.fingerprint(nsp.package_key(pkg), ('files', nsp.vulkan_files(NXNATIVE) + helpers),
-                                   ('files', nsp.profile_files(self.g)), xkey, product_cache.inventory(Path(xlate).parent),
+                                   ('files', nsp.profile_files(self.g)), translator_key, product_cache.inventory(Path(xlate).parent),
                                    ('files', sorted(cap.glob('*.bin'))))
-        key = input_key()
+        key = input_key(xkey)
         published_report = Path(str(self.dmsv) + '.report.json')
-        if (note := product_cache.reused(kf, key, self.dmsv, companions=(published_report,))) is not None:
+        previous = getattr(self, 'prebuilt_translator_previous_key', None)
+        legacy_key = (lambda: input_key(previous)) if previous else None
+        if (note := product_cache.reused(kf, key, self.dmsv, companions=(published_report,),
+                                         legacy_key=legacy_key)) is not None:
             PROG.end(f'{note}, reused (inputs unchanged)'); return
         tmp = self.dmsv.with_name('shaders.dmsv.partial'); nsp.rmtree(tmp)
         report = Path(str(tmp) + '.report.json'); nsp.rmtree(report)
         def line(s):
             if m := re.match(r'(translating|compressing) (\d+) shaders', s): PROG.set(step=f'{m.group(1)} {int(m.group(2)):,} shaders')   # compressing: the bundle's SPIR-V (dmsv.py)
+            elif s.startswith('Vulkan translation: '): PROG.set(step=s)
             elif s.startswith('[RED] '): say(s)
-        nsp.run([PY, DM / 'android/tools/shader_vk.py', pkg, tmp, '--jobs', str(self.o.jobs), '--dotnet', self.tools['dotnet'], '--xlate', xlate, '--capture', cap, '--report', report],
-                self.logs / 'android_shaders.log', env=self.env, on_line=line)
+        command = [PY, DM / 'android/tools/shader_vk.py', pkg, tmp, '--jobs', str(self.o.jobs),
+                   '--dotnet', self.tools['dotnet'], '--xlate', xlate, '--capture', cap, '--report', report]
+        if resources.is_android():
+            command.extend(['--batch-size', '512'])
+        nsp.run(command, self.logs / 'android_shaders.log', env=self.env, on_line=line)
         import shader_products
         try:
             count, expected, complete = shader_products.check_bundle(tmp, json.loads(report.read_text(encoding='utf-8')))
-            if input_key() != key: raise ValueError('shader inputs changed during export; port again')
+            if input_key(xkey) != key: raise ValueError('shader inputs changed during export; port again')
         except (OSError, ValueError, TypeError, KeyError) as e:
             raise BuildError(f'invalid shader export: {e} (see {self.logs / "android_shaders.log"})') from e
         if count == 0: raise BuildError(f'no shader translated (see {self.logs / "android_shaders.log"})')
@@ -1068,6 +1221,7 @@ class Port:
         (its lock fingerprints Apple's Metal compiler): Android takes a translator fix as soon as it is in the source.
         A build made for the phone (NX2A_DMSH_XLATE) is used as it is: the phone has no SDK to restore the packages with (no network) and its NuGet settings
         read never ends, so the phone does not build the translator but runs one that was built for it"""
+        self.prebuilt_translator_previous_key = None
         pre = os.environ.get('NX2A_DMSH_XLATE') or (NXNATIVE.parent / 'tools' / 'dmsh_xlate')   # the build shipped with the phone
         if not Path(pre).is_dir() and not _has_network() and not _packages_cached():
             # without the prebuilt the translator has to be built here, and the restore needs the network: on the
@@ -1078,9 +1232,23 @@ class Port:
         if Path(pre).is_dir():
             src = Path(pre)
             if not (src / 'dmsh_xlate.dll').is_file(): raise BuildError(f'NX2A_DMSH_XLATE has no dmsh_xlate.dll: {src}')
-            out = paths.user_dir() / 'tools/dmsh_xlate'; nsp.rmtree(out); shutil.copytree(src, out)
-            key = nsp.fingerprint(('stat', out), ('cmd', ['dmsh_xlate', 'prebuilt']), env=self.env)
-            return out / 'dmsh_xlate.dll', key
+            out = paths.user_dir() / 'tools/dmsh_xlate'
+            inventory = product_cache.inventory(src)
+            try:
+                identical = product_cache.inventory(out) == inventory
+            except (OSError, ValueError):
+                identical = False
+            if identical:
+                # Old phone builds keyed receipts on timestamps of the installed
+                # translator copy. Recover that key only after matching its bytes.
+                self.prebuilt_translator_previous_key = nsp.fingerprint(
+                    ('stat', out), ('cmd', ['dmsh_xlate', 'prebuilt']), env=self.env)
+            else:
+                tmp = out.with_name('dmsh_xlate.partial')
+                nsp.rmtree(tmp)
+                shutil.copytree(src, tmp)
+                nsp.swap_in(tmp, out)
+            return out / 'dmsh_xlate.dll', nsp.fingerprint('prebuilt-translator-v2', inventory)
         src = DM / 'gfx/tools/dmsh_xlate'; ryu = DM / 'third_party/ryujinx'
         def source_key():
             files = sorted([p for root in (src, ryu) for p in root.rglob('*') if p.is_file() and
@@ -1215,7 +1383,7 @@ class Port:
         # exist, aborting an otherwise successful Xclipse port in build_zip_file().
         vulkan_libs = self.apk_vulkan_libraries()
         cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
-               '--version-code', str(code), '--version-name', self.display]
+               '--version-code', str(code), '--preserve-version-floor', '--version-name', self.display]
         if self.o.self_contained:
             cmd += data_assets
         else:

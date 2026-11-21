@@ -6,8 +6,6 @@ import subprocess
 import tempfile
 import unittest
 
-from porter.toolchain import find_ndk
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -21,16 +19,15 @@ class TextureTransfers(unittest.TestCase):
         cls.cc = os.environ.get('CC') or shutil.which('cc') or shutil.which('clang')
         if not cls.cc:
             raise unittest.SkipTest('host C compiler required')
-        ndk, _ = find_ndk()
-        headers = next(ndk.glob('toolchains/llvm/prebuilt/*/sysroot/usr/include'), None) if ndk else None
-        if not headers:
-            raise unittest.SkipTest('NDK Vulkan headers required')
+        headers = ROOT / 'nxnative/dm/third_party/vulkan-headers/include'
         exe = (ROOT / 'nxnative/dm/android/gfx_vk_exec.c').read_text(encoding='utf-8')
         header = (ROOT / 'nxnative/dm/android/gfx_vk.h').read_text(encoding='utf-8')
         harness = (ROOT / 'tests/texture_transfers_harness.c').read_text(encoding='utf-8')
         types = between(header, 'typedef struct { VkFormat vk;', 'const vkfmt_t *vk_fmt')
         types += between(header, 'typedef struct vkimg vkimg_t;', 'vkimg_t *vk_tex(')
-        functions = between(exe, 'static VkImageSubresourceLayers sub_of(', 'static void copy_b2t(')
+        tex = (ROOT / 'nxnative/dm/android/gfx_vk_tex.c').read_text(encoding='utf-8')
+        functions = between(tex, 'static uint64_t g_wseq;', 'static void alias_link(')
+        functions += between(exe, 'static VkImageSubresourceLayers sub_of(', 'static void copy_b2t(')
         functions += between(exe, 'enum { CF_MIRROR_X', '// ---------------- the record walker')
         cls.tmp = tempfile.TemporaryDirectory(prefix='nx2a-transfers-')
         cls.addClassCleanup(cls.tmp.cleanup)
@@ -45,6 +42,9 @@ class TextureTransfers(unittest.TestCase):
 
     def test_raw_copy_between_srgb_backings(self):
         self.check_case('copy')
+
+    def test_d24s8_fallback_copies_both_aspects(self):
+        self.check_case('depth_stencil_copy')
 
     def test_resolve_uses_equal_image_formats(self):
         self.check_case('resolve')

@@ -95,6 +95,7 @@ final class CompanionImporter {
             if (!root.exists() && backup.isDirectory() && !backup.renameTo(root))
                 throw new IOException("Cannot recover the previous game data");
             if (cached(root, info.getString("manifest_sha256"))) {
+                GameActivity.preserveVulkanCache(activity.getFilesDir(), backup);
                 if (bootstrap) ((BootstrapActivity) activity).launchGame(null);
                 else GameActivity.embeddedPackReady();
                 return true;
@@ -394,6 +395,7 @@ final class CompanionImporter {
                 if (backup.exists()) backup.renameTo(target);
                 throw new IOException("Cannot activate imported game data");
             }
+            GameActivity.preserveVulkanCache(base, backup);
             GameActivity.deleteTree(backup);
         } finally {
             GameActivity.deleteTree(partial);

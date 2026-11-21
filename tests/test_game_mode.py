@@ -104,7 +104,7 @@ class GameMode(unittest.TestCase):
                 captured = {}
                 class Captured(Exception): pass
                 def capture(entries, path): captured.update({name: data for name, data, _ in entries}); raise Captured
-                with patch.object(module, 'gen_key', return_value={}), patch.object(module, 'cert', return_value=b''), patch.object(module, 'build_zip_file', side_effect=capture):
+                with patch.object(module, 'persistent_signer', return_value=({}, b'')), patch.object(module, 'build_zip_file', side_effect=capture):
                     with self.assertRaises(Captured): module.main()
                 nodes = elements(captured['AndroidManifest.xml'])
                 app = next(attrs for tag, attrs in nodes if tag == 'application')

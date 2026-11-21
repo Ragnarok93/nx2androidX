@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from porter import datapack
 
@@ -25,6 +26,33 @@ class StandaloneLinkRecoveryTests(unittest.TestCase):
             self.assertEqual((count, byte_count), (1, original.stat().st_size))
             (root / 'work' / 'embed-pack.partial').rename(root / 'work' / 'embed-pack')
             self.assertEqual((root / 'work' / 'embed-pack' / 'mods' / original.name).read_bytes(), original.read_bytes())
+
+    def test_matching_prior_companion_keeps_manifest_and_skips_copy(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            romfs = root / 'RomFS'
+            romfs.mkdir()
+            (romfs / 'game.bin').write_bytes(b'game')
+            profile = SimpleNamespace(package='org.game', id='0000000000000001', name='Game',
+                                      env=[], settings={}, requires=[], status='playable', graphics='nvn', lan=False)
+            destination = root / 'Game-data'
+            params = dict(profile=profile, version='v0', display='1.0', patched=None,
+                          romfs=romfs, shaders=None, pack_base='.')
+            with mock.patch.object(datapack.os, 'link', side_effect=PermissionError):
+                datapack.build(destination, **params)
+            manifest = destination / datapack.MANIFEST
+            original = manifest.read_bytes()
+            saves = destination / 'saves'
+            saves.mkdir()
+            (saves / 'backup').write_text('save')
+            with mock.patch.object(datapack, 'link_or_copy', side_effect=AssertionError('recopied')):
+                datapack.build(destination, **params)
+            self.assertEqual(manifest.read_bytes(), original)
+            self.assertEqual((saves / 'backup').read_text(), 'save')
+            (destination / 'RomFS/game.bin').write_bytes(b'bad!')
+            datapack.build(destination, **params)
+            self.assertEqual((destination / 'RomFS/game.bin').read_bytes(), b'game')
+            self.assertEqual((saves / 'backup').read_text(), 'save')
 
     def test_embedded_archive_contains_resolved_file_contents_not_symlink(self):
         with tempfile.TemporaryDirectory() as work:

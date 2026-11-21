@@ -374,18 +374,25 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 }
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
-static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Resume", ""};
-static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
+static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Capture graphics", "Export diagnostics", "Capture status", "Delayed capture", "RADV test flags", "Shader cache coherency", "Color compression off", "CPU BC decode", "Depth compression off", "Diagnostics", "Resume", ""};
+static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select", [OVM_DIAG_CAPTURE] = "Capture", [OVM_DIAG_EXPORT] = "Save ZIP", [OVM_DIAG_DELAY] = "120 frames", [OVM_DIAG_FLAGS] = "Open", [OVM_FLAGS_BACK] = "Back"};   // the rows that are a button: its word
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
 static const char *const OVM_PADS[2] = {"Position", "Label"};
 int dm_menu_fg_mult(void);
 int dm_menu_fg_flow(void);
 int dm_menu_fg_has_dll(void);
 const char *dm_vk_driver_status(void);   // a controller's face buttons (front_android.c pad_labels)
+__attribute__((weak)) void dm_menu_diag_note(char *out, int cap) { if (cap > 0) snprintf(out, (size_t)cap, "Logs only"); }
+__attribute__((weak)) void dm_menu_radv_note(int index, char *out, int cap) {
+    (void)index;
+    snprintf(out, (size_t)cap, "RADV only");
+}
+static int ov_flag_item(int item) { return item >= OVM_FLAG_DLC && item <= OVM_FLAG_HIZ; }
 static void ov_menu_panel(const ov_canvas *cv, int st) {
     float p[4] = {0, 0, (float)cv->w, (float)cv->h}, r[4]; ov_menu_rowrect(p, 0, r);
     float rh = r[3], rw = r[2], gap = rh * 0.35f, sh = rh * 0.40f, sw = sh * 1.85f;
     int tab = st >> 29 & 3, sel = (st >> 4 & 15) - 1, op = st >> 9 & 127;
+    int page = (st & OVM_FLAGS_STATE) ? OVM_FLAGS_PAGE : tab;
     int is = (int)fmaxf(1, roundf(rh * 0.30f / PF_CAP));
     for (; is > 1; is--) {   // the widest row: its label, a gap and its control
         float need = 0;
@@ -393,15 +400,16 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             float lw = cv_text_w(OVM_LABELS[i], is),
                 cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) :
                      i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) :
-                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER) ? cv_text_w("System (fallback)", is) :
+                     ov_flag_item(i) ? cv_text_w("Default on restart", is) :
+                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_DIAG_STATUS) ? cv_text_w("System (fallback)", is) :
                      OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
             need = fmaxf(need, i == OVM_OPACITY ? fmaxf(lw / 0.38f, cv_text_w("80%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
         }
-        if (need <= rw && cv_text_w(OVM_TAB_NAMES[2], is) < rw / OVM_TABS - sh) break;
+        if (need <= rw && cv_text_w(OVM_TAB_NAMES[3], is) < rw / OVM_TABS - sh) break;
     }
     cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.18f, C_BG);
     for (int row = 0; row < OVM_ROWS; row++) {
-        int it = ov_menu_item(tab, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
+        int it = ov_menu_item(page, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
         if (it < 0) continue;
         if (row == sel) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
         if (it == OVM_TAB) {   // the tabs: a segmented bar, the open one filled
@@ -426,14 +434,16 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
-        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER) {
+        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
             char value[128];
             if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
             else if (it == OVM_FG_FLOW) {
                 int scale = dm_menu_fg_flow();
                 if (!scale) snprintf(value, sizeof value, "Auto");
                 else snprintf(value, sizeof value, "%d%%", scale);
-            } else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
+            } else if (it == OVM_DIAG_STATUS) dm_menu_diag_note(value, sizeof value);
+            else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
+            else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
             while (vs > 1 && cv_text_w(value, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(value, vs), cy, value, vs, C_WHITE);
@@ -1187,20 +1197,24 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         VKLOG("replay per frame (last 600): %.0f draws, replay %.2f ms (descriptor sets %.2f, pipeline keys %.2f), queue submit %.2f ms, uniform shadows %.0f KB; GPU busy %.2f ms; texture uploads %.1f (%.2f MB, %.2f ms); descriptor sets reused %llu, new %llu, key arena bypasses %llu (collecting %.2f ms, hashing %.2f, new ones %.2f), kept per stage %.0f a frame (memo differences %llu)",
               nd, (g_vkst.ns_exec - pe) / 6e8, (g_vkst.ns_desc - pd) / 6e8, (g_vkst.ns_pipe - pp) / 6e8, (g_ns_submit - ps) / 6e8, (g_ubd_bytes - pb) / 600.0 / 1024, (g_gpu_ns - pg) / 6e8, (g_pkg_n - pkn) / 600.0, (g_pkg_bytes - pkb) / 600.0 / 1048576, (g_pkg_ns - pkt) / 6e8, (unsigned long long)g_set_hits, (unsigned long long)g_set_new, (unsigned long long)g_set_key_bypass, (g_ns_set_build - psb) / 6e8, (g_ns_set_hash - psh) / 6e8, (g_ns_set_new - psn) / 6e8,
               (g_set_memo - psm) / 600.0, (unsigned long long)g_set_memo_bad);
+        { extern uint64_t g_graphics_demand_builds, g_graphics_demand_ns;
+          static uint64_t builds, ns;
+          VKLOG("graphics pipelines (last 600): %llu built on demand, %.2f ms creating",
+                (unsigned long long)(g_graphics_demand_builds - builds),
+                (g_graphics_demand_ns - ns) / 1e6);
+          builds = g_graphics_demand_builds; ns = g_graphics_demand_ns; }
+        { extern uint64_t g_compute_attempts, g_compute_failed, g_compute_compile_ns, g_compute_wait_ns;
+          static uint64_t attempts, failed, compile, wait;
+          VKLOG("compute (last 600): %llu attempted, %llu skipped, %.2f ms compiling, %.2f ms waiting for same-key prewarm",
+                (unsigned long long)(g_compute_attempts - attempts), (unsigned long long)(g_compute_failed - failed),
+                (g_compute_compile_ns - compile) / 1e6, (g_compute_wait_ns - wait) / 1e6);
+          attempts = g_compute_attempts; failed = g_compute_failed;
+          compile = g_compute_compile_ns; wait = g_compute_wait_ns; }
         { extern uint64_t g_order_kept, g_order_ended; static uint64_t pk, pn;   // gfx_vk_exec.c g_order_keep
           if (g_order_kept + g_order_ended > pk + pn) VKLOG("order-only barriers per frame (last 600): %.1f kept inside their pass, %.1f ended it", (g_order_kept - pk) / 600.0, (g_order_ended - pn) / 600.0);
           pk = g_order_kept; pn = g_order_ended; }
         void vk_pass_report(void); vk_pass_report();
         pe = g_vkst.ns_exec; pd = g_vkst.ns_desc; pp = g_vkst.ns_pipe; ps = g_ns_submit; pb = g_ubd_bytes; pdr = g_vkst.draws; pg = g_gpu_ns; pkn = g_pkg_n; pkb = g_pkg_bytes; pkt = g_pkg_ns; psb = g_ns_set_build; psh = g_ns_set_hash; psn = g_ns_set_new; psm = g_set_memo;
-    }
-    if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period); }
-    if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period); }   // never drawn into: nothing to show yet
-    shown++;
-    if (shot_wanted(n)) shot(im, n);
-    { void vk_pass_dump_poll(uint64_t done); uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done()); void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
-    if (n % 1800 == 0) {   // every ~30 s: the pipeline cache to disk on a thread of its own (an Android app can be killed without any exit path)
-        void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-        pthread_create(&th, &a, (void *(*)(void *))(void *)vk_pipeline_cache_save, NULL); pthread_attr_destroy(&a);
     }
     // A game that crops its layer through vi (hle_vi.c) and not through its NVN window: The Legend of Zelda: Link's Awakening in handheld mode keeps a 1920x1080
     // window texture, draws into its 1280x720 corner and calls vi::SetLayerCrop 0,0 1280x720. Without the window's own crop the whole texture was shown and the picture
@@ -1209,6 +1223,17 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     if (im && !(crop && crop[2] > 0 && crop[3] > 0)) {
         void dm_vi_layer_crop(int c[4]); dm_vi_layer_crop(vcrop);
         if (vcrop[2] > 0 && vcrop[3] > 0 && vcrop[0] + vcrop[2] <= (int)im->w && vcrop[1] + vcrop[3] <= (int)im->h) crop = vcrop;
+    }
+    { void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4]);
+      uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done(), im, crop); }
+    if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period); }
+    if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period); }   // never drawn into: nothing to show yet
+    shown++;
+    if (shot_wanted(n)) shot(im, n);
+    { void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
+    if (n % 1800 == 0) {   // every ~30 s: the pipeline cache to disk on a thread of its own (an Android app can be killed without any exit path)
+        void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        pthread_create(&th, &a, (void *(*)(void *))(void *)vk_pipeline_cache_save, NULL); pthread_attr_destroy(&a);
     }
     return present_enqueue(im, crop, n, period);
 }

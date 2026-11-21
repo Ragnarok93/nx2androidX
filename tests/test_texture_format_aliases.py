@@ -11,10 +11,13 @@ class TextureFormatAliases(unittest.TestCase):
         def part(start,end):
             return src[src.index(start):src.index(end,src.index(start))]
         code=code.replace('/* CACHE KEYS */',part('static NVNformat texture_backing_format(', '// The sRGB / UNORM twin'))
-        code=code.replace('/* CACHE LIFETIME */',part('enum { EVICT_KEEP', 'static vkimg_t *vk_tex_(const tex_t *t);'))
-        code=code.replace('/* LOOKUP */',part('static vkimg_t *vk_tex_(const tex_t *t) {', '// Packaged textures give up'))
+        code=code.replace('/* CACHE LIFETIME */',part('enum { EVICT_KEEP', 'static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled);'))
+        code=code.replace('/* LOOKUP */',part('static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {', '// Packaged textures give up'))
+        code=code.replace('/* MATERIAL STORAGE */',part('static int mem_any(const uint8_t *p, uint64_t n) {', 'static int packaged_tex(const tex_t *t) {'))
         code=code.replace('/* DROP POOL */',part('void vk_tex_drop_pool(', '// CPU-written textures'))
-        self.run_c(code)
+        for enabled in ('0', '1'):
+            with self.subTest(uncached_materials=enabled):
+                self.run_c(code, env={**os.environ, 'DM_VK_UNCACHED_MIP_INIT': enabled})
 
     def test_packaged_metadata_initialization_and_reinitialization(self):
         src=(W/'nxnative/dm/gfx/nvn/hle_nvn.c').read_text(encoding='utf-8')
@@ -54,7 +57,7 @@ int main(void) {
 '''
         self.run_c(code, str(W/'nxnative/dm/gfx/nvn/nvn_tex.c'))
 
-    def run_c(self, code, *extra_sources):
+    def run_c(self, code, *extra_sources, env=None):
         cc=os.environ.get('CC') or shutil.which('cc') or shutil.which('clang')
         if not cc:self.skipTest('host C compiler unavailable')
         if not host_cc.asan_ubsan(cc):self.skipTest('selected compiler cannot link ASan/UBSan')
@@ -64,6 +67,6 @@ int main(void) {
             args=[cc,'-std=c11','-fsanitize=address,undefined','-I'+str(W/'nxnative/dm/gfx/nvn'),'-I'+str(W/'nxnative/dm/gfx/nvn/include'),'-I'+str(W/'nxnative/dm/gfx/tex'),str(p/'test.c'),*extra_sources,'-o',str(exe)]
             build=subprocess.run(args,capture_output=True,text=True)
             self.assertEqual(build.returncode,0,build.stdout+build.stderr)
-            result=subprocess.run([str(exe)],capture_output=True,text=True)
+            result=subprocess.run([str(exe)],capture_output=True,text=True,env=env)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 if __name__=='__main__':unittest.main()

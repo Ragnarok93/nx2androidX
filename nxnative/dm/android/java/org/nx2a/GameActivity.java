@@ -37,7 +37,27 @@ public class GameActivity extends NativeActivity {
     }
 
     private static final int REQUEST_LOSSLESS_DLL = 0x6e33;
+    private String diagnosticsRoot;
+    static native boolean diagnosticsExportStarted();
+    static native void diagnosticsExported(int result); // 0 failed, 1 saved, 2 cancelled
     private final GameKeyboard keyboard = new GameKeyboard(this);
+
+    /** Called by the native pause-menu Diagnostics tab, never from gameplay. */
+    public void exportDiagnostics(String root) {
+        diagnosticsRoot = root;
+        DiagnosticsExport.request(this);
+    }
+
+    /** Called only by the Java archive worker, after the Android document picker. */
+    static void notifyDiagnosticsExport(int result) {
+        try { diagnosticsExported(result); }
+        catch (UnsatisfiedLinkError error) { Log.e("nx2a-diag", "Native export status unavailable", error); }
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        if (diagnosticsRoot != null) state.putString("nx2a.diagnosticsRoot", diagnosticsRoot);
+        super.onSaveInstanceState(state);
+    }
 
     /** Called by the standalone performance menu when shader DLL is missing. */
     public void chooseLosslessDll() {
@@ -114,11 +134,16 @@ public class GameActivity extends NativeActivity {
         // NativeActivity loads libdmhost here. Its native data setup defers game startup for embedded APKs;
         // extraction then runs off the UI thread so multi-gigabyte packs cannot ANR the launcher.
         super.onCreate(state);
+        if (state != null) diagnosticsRoot = state.getString("nx2a.diagnosticsRoot");
         prepareEmbeddedPack(this);
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == DiagnosticsExport.REQUEST) {
+            DiagnosticsExport.onResult(this, diagnosticsRoot, resultCode, data);
+            return;
+        }
         if (requestCode == REQUEST_LOSSLESS_DLL) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null)
                 importLosslessDll(data.getData());
@@ -199,6 +224,7 @@ public class GameActivity extends NativeActivity {
         File backup = new File(base, "nx2a-data.backup");
         File marker = new File(target, "nx2a-export.sha256");
         if (target.isDirectory() && marker.isFile() && expected.equals(readText(marker).trim())) {
+            preserveVulkanCache(base, backup);
             deleteTree(backup);  // a prior process may have died after activating the new directory
             return;
         }
@@ -263,7 +289,20 @@ public class GameActivity extends NativeActivity {
             deleteTree(partial);
             throw new IOException("cannot activate extracted game data");
         }
+        preserveVulkanCache(base, backup);
         deleteTree(backup);
+    }
+
+    // Migrate a pre-update cache left inside the old data pack. The native
+    // loader still validates the driver identity and contents before use.
+    static void preserveVulkanCache(File files, File previousPack) {
+        File oldCache = new File(previousPack, "vk_pipeline_cache.bin");
+        if (!oldCache.isFile()) return;
+        File directory = new File(files, "vulkan-cache");
+        if (!directory.isDirectory() && !directory.mkdir()) return;
+        File cache = new File(directory, oldCache.getName());
+        if (!cache.exists() && !oldCache.renameTo(cache))
+            android.util.Log.w("nx2a-game", "Could not move the previous Vulkan pipeline cache");
     }
 
     private static boolean safeEntry(String name) {

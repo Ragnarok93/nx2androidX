@@ -6,12 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #define VKLOG(...) ((void)0)
+#define DM_GAME_TEX_CPU_UNCACHED 0
 #define VKRED_ONCE(...) ((void)0)
 typedef int pthread_mutex_t;
 #define PTHREAD_MUTEX_INITIALIZER 0
 #define pthread_mutex_lock(p) ((void)(p))
 #define pthread_mutex_unlock(p) ((void)(p))
-typedef struct { int depth,stencil,vk; } vkfmt_t;
+typedef struct { int depth,stencil,vk,compressed,dec; } vkfmt_t;
 typedef struct vkimg {
     uint64_t pool,used,pkg_used,pkg_vgen,pkg_stamp,pkg_seen,pkg_hash;
     int64_t off,size; int flags,looked,packaged,pkg_sparse,pkg_released,gpu_w;
@@ -22,9 +23,10 @@ typedef struct vkimg {
     int format,content;
 } vkimg_t;
 static unsigned written,uploads,created,dropped;
+static uint64_t dirty_now=1;
 static unsigned char retired[4096];
 static uint64_t g_tex_frame;
-static const vkfmt_t *vk_fmt(int format) {static vkfmt_t f;f=(vkfmt_t){.vk=format};return &f;}
+static const vkfmt_t *vk_fmt(int format) {static vkfmt_t f;f=(vkfmt_t){.vk=format,.compressed=format==0x44,.dec=format==0x4d};return &f;}
 static vkimg_t *img_new(const tex_t *t,const vkfmt_t *f) {(void)t;vkimg_t *im=calloc(1,sizeof *im);assert(im);im->format=f->vk;im->img=(void*)(uintptr_t)++created;assert(created<sizeof retired);return im;}
 static void alias_link(vkimg_t *im) {(void)im;}
 static void alias_unlink(vkimg_t *im) {(void)im;}
@@ -39,19 +41,21 @@ static void vk_tex_prepare(int cb,vkimg_t *im) {(void)cb;im->content=0;}
 static int lin_copy(vkimg_t *im,const tex_t *t,const vkfmt_t *f) {(void)im;(void)t;(void)f;return 0;}
 static int packaged_tex(const tex_t *t) {return t->has_pkg_data || t->has_layout || (written&(1u<<(t->serial-1)));}
 int nvn_ft_written(const tex_t *t) {(void)t;return 0;}
-static int cpu_content_tex(const tex_t *t,const vkfmt_t *f) {(void)t;(void)f;return 0;}
-static uint64_t nvn_dirty_now(void) {return 1;}
+void mtl_tex_cpu_written(const tex_t *t) { written |= 1u << (t->serial - 1); }
+static uint64_t nvn_dirty_now(void) {return dirty_now;}
 static uint64_t pkg_hash(const uint8_t *mem,size_t size) {(void)size;return mem[0];}
 static void pkg_upload(vkimg_t *im,const tex_t *t,const vkfmt_t *f) {
-    (void)f;uploads++;im->content=t->mem[0];im->pkg_seen=im->pkg_stamp=1;
+    (void)f;uploads++;im->packaged++;im->content=t->mem[0];im->pkg_seen=im->pkg_stamp=dirty_now;
     im->pkg_hash=pkg_hash(t->mem,t->L.size);im->pkg_mem=t->mem;im->pkg_span=t->mem;im->pkg_len=t->L.size;
 }
 static int nvn_sparse_since(const void *pool,uint64_t addr,size_t size,uint64_t gen,uint64_t stamp) {(void)pool;(void)addr;(void)size;(void)gen;(void)stamp;return 0;}
-static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uint64_t stamp) {(void)span;(void)mem;(void)size;(void)stamp;return 0;}
+static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uint64_t stamp) {(void)span;(void)mem;(void)size;return stamp<dirty_now;}
 static void nvn_dirty_protect(const void *mem,size_t size) {(void)mem;(void)size;}
 /* CACHE KEYS */
 /* CACHE LIFETIME */
+/* MATERIAL STORAGE */
 /* LOOKUP */
+static vkimg_t *vk_tex_(const tex_t *t) { return vk_tex_lookup(t, 1); }
 /* DROP POOL */
 static uint8_t storage[4096]={0x83};
 static pool_t pool={.mem=storage};
@@ -130,6 +134,57 @@ int main(void) {
     a.d.samples=b.d.samples=4;assert(!same(a,b));a.d.samples=b.d.samples=0;
     a.d.target=b.d.target=NVN_TEXTURE_TARGET_3D;assert(!same(a,b));
     a.d.target=b.d.target=NVN_TEXTURE_TARGET_CUBEMAP;assert(!same(a,b));
+    // An IMAGE-backed GPU producer is visible through an identical sampled wrapper.
+    reset(); a=base_tex(NVN_FORMAT_RGBA8,1); b=base_tex(NVN_FORMAT_RGBA8,2);
+    a.d.flags=NVN_TEXTURE_FLAGS_IMAGE;
+    image=vk_tex_(&a); image->gpu_w=1; image->content=0x65;
+    assert(vk_tex_(&b)==image && image->content==0x65 && g_by_key.n==1);
+    b.d.format=NVN_FORMAT_RGBA8_SRGB;
+    assert(vk_tex_(&b)!=image);
+    // Streaming may rewrite the same BC storage and register a new object.
+    // Only the old serial has a CPU-written mark. The image is still shared.
+    reset(); a=base_tex(0x44,1); b=base_tex(0x44,2);
+    written=1; image=vk_tex_(&a);
+    assert(image->content==0x83 && vk_tex_(&b)==image);
+    before=uploads;
+    storage[0]=0x53; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x53 && uploads==before+1);
+    assert(vk_tex_(&b)==image && uploads==before+1);
+    image->gpu_w=1; image->content=0x79; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x79 && uploads==before+1);
+    // Another CPU write to the recycled BC allocation wins over the old GPU copy.
+    storage[0]=0x68; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x68 && uploads==before+2);
+
+    // CPU BC decode still reads the guest's compressed bytes without a
+    // packaged layout. The cached image also refreshes on new registrations.
+    reset();a=base_tex(0x4d,1);b=base_tex(0x4d,2);
+    image=vk_tex_(&a);
+    assert(image->content==0x68 && image->packaged);
+    storage[0]=0x73; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x73);
+    storage[0]=0x68;
+
+    int material_enabled = atoi(getenv("DM_VK_UNCACHED_MIP_INIT"));
+    pool.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED;
+    reset();a=base_tex(NVN_FORMAT_R8,1);a.d.levels=4;
+    image=vk_tex_(&a);
+    assert(image->content==(material_enabled ? 0x68 : 0));
+    b=a;b.serial=2;storage[0]=0x12;dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==(material_enabled ? 0x12 : 0));
+    // The first texture lookup as an attachment/copy destination never
+    // classifies stale bytes as a material upload.
+    reset();image=vk_tex_lookup(&a,0);image->gpu_w=1;image->content=0x65;
+    assert(vk_tex_(&a)==image && image->content==0x65);
+    reset();a.d.flags=NVN_TEXTURE_FLAGS_IMAGE;assert(vk_tex_(&a)->content==0);
+    reset();a.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE;assert(vk_tex_(&a)->content==0);
+    reset();a.d.flags=0;a.d.levels=1;assert(vk_tex_(&a)->content==0);
+    reset();a.d.levels=4;pool.flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED;
+    assert(vk_tex_(&a)->content==0);
+    reset();pool.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED;storage[0]=0;
+    assert(vk_tex_(&a)->content==0 && !!vk_tex_(&a)->packaged==material_enabled);
+    storage[0]=0x83;dirty_now++;
+    assert(vk_tex_(&a)->content==(material_enabled ? 0x83 : 0));
     reset();free(g_by_key.keys);free(g_by_key.vals);free(g_by_serial.keys);free(g_by_serial.vals);
     assert(created==dropped);puts("family pairs, metadata peers, upload visibility, closure and unique retirement passed");
 }

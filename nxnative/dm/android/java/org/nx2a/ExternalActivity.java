@@ -5,6 +5,7 @@ import android.app.Dialog;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.Intent;
 import android.os.Bundle;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -39,6 +40,16 @@ import java.io.IOException;
 /** Experimental dual-screen wrapper. NativeActivity remains the phone's input owner. */
 public class ExternalActivity extends NativeActivity implements ExternalDisplay.Listener {
     static { System.loadLibrary("dmhost"); }
+    private String diagnosticsRoot;
+
+    public void exportDiagnostics(String root) {
+        diagnosticsRoot = root;
+        DiagnosticsExport.request(this);
+    }
+    @Override protected void onSaveInstanceState(Bundle state) {
+        if (diagnosticsRoot != null) state.putString("nx2a.diagnosticsRoot", diagnosticsRoot);
+        super.onSaveInstanceState(state);
+    }
     private static native void externalSurface(Surface surface);
     private static native void externalInput(long buttons, int lx, int ly, int rx, int ry, boolean menu);
     private static native void externalAudio(int deviceId);
@@ -59,6 +70,7 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        if (state != null) diagnosticsRoot = state.getString("nx2a.diagnosticsRoot");
         GameActivity.prepareEmbeddedPack(this);
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             try { pad = new OriginalPad(); } catch (IOException e) { android.util.Log.w("nx2a-dual", "original overlay unavailable", e); }
@@ -85,6 +97,10 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == DiagnosticsExport.REQUEST) {
+            DiagnosticsExport.onResult(this, diagnosticsRoot, resultCode, data);
+            return;
+        }
         CompanionImporter.onActivityResult(this, requestCode, resultCode, data);
     }
     @Override protected void onResume() { super.onResume(); }

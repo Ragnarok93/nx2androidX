@@ -19,7 +19,7 @@ static uint64_t g_tex_frame;
 static tex_t src, dst;
 static vkimg_t images[16];
 static int nimages, copies, blits, resolves, retired, barriers, same_image;
-static VkImageCopy last_copy;
+static VkImageCopy last_copy, last_stencil_copy;
 static VkImageResolve last_resolve;
 static VkImageBlit last_blit;
 static VkClearColorValue last_clear;
@@ -27,7 +27,7 @@ static VkImage last_copy_src, last_copy_dst, last_resolve_src, last_resolve_dst;
 static VkFormat blit_src_fmt, blit_dst_fmt;
 static vkimg_t *by_handle(VkImage h) { uintptr_t n=(uintptr_t)h; assert(n>0 && n<=(uintptr_t)nimages); return &images[n-1]; }
 static const vkfmt_t *vk_fmt(int n) {
-    static const vkfmt_t f[]={{.vk=VK_FORMAT_R8G8B8A8_UNORM},{.vk=VK_FORMAT_R8G8B8A8_SRGB}, {.vk=VK_FORMAT_B8G8R8A8_UNORM},{.vk=VK_FORMAT_B8G8R8A8_SRGB},{.vk=VK_FORMAT_D32_SFLOAT},{.vk=VK_FORMAT_D16_UNORM}};
+    static const vkfmt_t f[]={{.vk=VK_FORMAT_R8G8B8A8_UNORM},{.vk=VK_FORMAT_R8G8B8A8_SRGB}, {.vk=VK_FORMAT_B8G8R8A8_UNORM},{.vk=VK_FORMAT_B8G8R8A8_SRGB},{.vk=VK_FORMAT_D32_SFLOAT},{.vk=VK_FORMAT_D16_UNORM}, {.vk=VK_FORMAT_D32_SFLOAT_S8_UINT}};
     switch(n) {
     case NVN_FORMAT_RGBA8: case NVN_FORMAT_RGBX8:return &f[0];
     case NVN_FORMAT_RGBA8_SRGB:case NVN_FORMAT_RGBX8_SRGB:return &f[1];
@@ -35,6 +35,7 @@ static const vkfmt_t *vk_fmt(int n) {
     case NVN_FORMAT_BGRA8_SRGB:case NVN_FORMAT_BGRX8_SRGB:return &f[3];
     case NVN_FORMAT_DEPTH32F:return &f[4];
     case NVN_FORMAT_DEPTH16:return &f[5];
+    case NVN_FORMAT_DEPTH24_STENCIL8:return &f[6];
     default:abort();
     }
 }
@@ -69,7 +70,7 @@ static void vk_defer_free_image(VkImage im,VkDeviceMemory m) {assert((uintptr_t)
 static void vk_defer_free_image_sub(VkImage im,void *sub) {assert((uintptr_t)im>2 && sub==&slot_cookie);retired++;pooled_retired++;}
 static int depth_scale(VkCommandBuffer cb,vkimg_t *s,vkimg_t *d,VkImageSubresourceLayers ss,VkImageSubresourceLayers ds,const p_copy_t2t *c) {(void)cb;(void)s;(void)d;(void)ss;(void)ds;(void)c;abort();}
 static void vkCmdCopyImage(VkCommandBuffer cb,VkImage s,VkImageLayout sl,VkImage d,VkImageLayout dl,uint32_t n,const VkImageCopy *r) {
-    (void)cb;(void)sl;(void)dl;assert(n==1);copies++;last_copy=*r;last_copy_src=s;last_copy_dst=d;
+    (void)cb;(void)sl;(void)dl;assert(n==1 || n==2);copies+=(int)n;last_copy=*r;if(n==2) last_stencil_copy=r[1];last_copy_src=s;last_copy_dst=d;
 }
 static void vkCmdResolveImage(VkCommandBuffer cb,VkImage s,VkImageLayout sl,VkImage d,VkImageLayout dl,uint32_t n,const VkImageResolve *r) {
     (void)cb;(void)sl;(void)dl;assert(n==1);assert(by_handle(s)->fmt==by_handle(d)->fmt);assert(by_handle(s)->samples>1 && by_handle(d)->samples==1);
@@ -80,6 +81,15 @@ static void vkCmdBlitImage(VkCommandBuffer cb,VkImage s,VkImageLayout sl,VkImage
 }
 static void vkCmdClearColorImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearColorValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)r;assert(n==1);last_clear=*v;}
 static void vkCmdClearDepthStencilImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearDepthStencilValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)v;(void)n;(void)r;abort();}
+static int g_pd_state, g_pd_full;
+static void surface_transfer(const vkimg_t *im, VkImageSubresourceLayers sub, const char *role) {
+    (void)im; (void)sub; (void)role;
+    abort();
+}
+static void surface_clear(const vkimg_t *im, VkImageSubresourceRange range, const VkClearValue *clear) {
+    (void)im; (void)range; (void)clear;
+    abort();
+}
 /* FUNCTIONS */
 static p_copy_t2t setup(int fmt,VkFormat sf,VkFormat df) {
     src=(tex_t){.d={.format=fmt}};dst=src;nimages=2;copies=blits=resolves=retired=barriers=same_image=red_calls=0;fail_alloc=dedicated=direct_allocs=pool_calls=pooled_retired=direct_retired=destroyed=0;bound_offset=0;create_calls=0;fail_n=1;
@@ -89,6 +99,20 @@ static p_copy_t2t setup(int fmt,VkFormat sf,VkFormat df) {
 }
 int main(int argc,char **argv) {
     assert(argc==2);
+    if (!strcmp(argv[1], "depth_stencil_copy")) {
+        p_copy_t2t c = setup(NVN_FORMAT_DEPTH24_STENCIL8, VK_FORMAT_D32_SFLOAT_S8_UINT,
+                            VK_FORMAT_D32_SFLOAT_S8_UINT);
+        images[0].nvn_format = images[1].nvn_format = NVN_FORMAT_DEPTH24_STENCIL8;
+        images[0].aspect = images[1].aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        copy_t2t(&c);
+        assert(copies == 2 && blits == 0);
+        assert(last_copy.srcSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
+        assert(last_copy.dstSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
+        assert(last_stencil_copy.srcSubresource.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT);
+        assert(last_stencil_copy.dstSubresource.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT);
+        assert(last_stencil_copy.srcSubresource.baseArrayLayer == last_copy.srcSubresource.baseArrayLayer);
+        assert(last_stencil_copy.dstSubresource.baseArrayLayer == last_copy.dstSubresource.baseArrayLayer);
+    }
     if(!strcmp(argv[1],"memory")) for(int own=0;own<2;own++) {
         setup(NVN_FORMAT_RGBA8_SRGB,VK_FORMAT_R8G8B8A8_SRGB,VK_FORMAT_R8G8B8A8_UNORM);dedicated=own;
         assert(transfer_image(vk_cmd(),VK_FORMAT_R8G8B8A8_SRGB,8,8));

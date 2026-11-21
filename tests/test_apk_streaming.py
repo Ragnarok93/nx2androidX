@@ -1,5 +1,7 @@
 import hashlib
 import importlib.util
+import json
+import sys
 import os
 import shutil
 import struct
@@ -54,6 +56,28 @@ def _assert_v2_digest(test, apk):
     test.assertEqual(expected_digest, actual_digest)
 
 class StreamingApkTests(unittest.TestCase):
+    def test_standalone_update_preserves_package_version_and_certificate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            library = root / "fixture.so"
+            library.write_bytes(b"fixture native host")
+            key = root / "game-key.json"
+            package = "org.nx2a.upgrade.fixture"
+            first, second = root / "first.apk", root / "second.apk"
+            tool = ROOT / "nxnative/dm/android/apk/mkapk.py"
+            for apk, version in ((first, 42), (second, 7)):
+                subprocess.run([sys.executable, str(tool), str(library), str(apk), str(key),
+                                "--package", package, "--version-code", str(version),
+                                "--preserve-version-floor"], capture_output=True, check=True)
+                _assert_v2_digest(self, apk.read_bytes())
+                cert = bytes.fromhex(json.loads(key.read_text())["cert"])
+                self.assertIn(cert, apk.read_bytes())
+            with zipfile.ZipFile(first) as before, zipfile.ZipFile(second) as after:
+                self.assertEqual(before.read("AndroidManifest.xml"), after.read("AndroidManifest.xml"))
+                self.assertIn(package.encode("utf-16le"), after.read("AndroidManifest.xml"))
+            with apksign.upgrade_version(key, "org.nx2a.other", 7) as version:
+                self.assertEqual(version, 7)
+
     def test_v2_signed_apk_keeps_zip_entries_readable(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

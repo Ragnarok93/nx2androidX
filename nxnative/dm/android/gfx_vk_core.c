@@ -8,6 +8,7 @@
 //   (event writes, counter reports), as nvn_mtl.m does in its completion handler.
 #define _GNU_SOURCE
 #include "gfx_vk.h"
+#include "gfx_vk_img_alloc_plan.h"
 #include "nvn_hmap.h"
 #include "nvn_dirty.h"
 #include <android/hardware_buffer.h>
@@ -228,11 +229,34 @@ void vk_init(void) {
     VkQueueFamilyProperties qp[16]; if (qn > 16) qn = 16; vkGetPhysicalDeviceQueueFamilyProperties(V.pd, &qn, qp);
     V.qf = 0; while (V.qf < qn && (qp[V.qf].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) V.qf++;
     if (V.qf == qn) die("[vk] no graphics + compute queue");
+    for (uint32_t i = 0; i < qn; i++)
+        VKLOG("queue family %u: %u queues, flags %#x, %u timestamp bits%s",
+              i, qp[i].queueCount, qp[i].queueFlags, qp[i].timestampValidBits,
+              i == V.qf ? " (using one graphics + compute queue)" : "");
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(V.pd, NULL, &ne, NULL);
     VkExtensionProperties *ex = calloc(ne, sizeof *ex); vkEnumerateDeviceExtensionProperties(V.pd, NULL, &ne, ex);
     const char *want[] = {"VK_KHR_swapchain", "VK_ANDROID_external_memory_android_hardware_buffer", "VK_EXT_queue_family_foreign", "VK_EXT_custom_border_color",
                           "VK_EXT_robustness2", "VK_EXT_depth_clip_control", "VK_EXT_provoking_vertex", "VK_EXT_index_type_uint8", "VK_EXT_transform_feedback",
                           "VK_GOOGLE_display_timing"};
+    // Identify the physical device used by the replay, including when a custom
+    // loader falls back. The custom-loader discovery probe enumerates separately.
+    if (vkGetPhysicalDeviceProperties2 && V.props.apiVersion >= VK_API_VERSION_1_1) {
+        VkPhysicalDeviceDriverProperties driver = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+        int has_driver = V.props.apiVersion >= VK_API_VERSION_1_2 ||
+                         has_ext(ex, ne, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+        VkPhysicalDeviceIDProperties id = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+                                          .pNext = has_driver ? &driver : NULL };
+        VkPhysicalDeviceProperties2 props = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &id };
+        vkGetPhysicalDeviceProperties2(V.pd, &props);
+        char uuid[VK_UUID_SIZE * 2 + 1];
+        for (unsigned i = 0; i < VK_UUID_SIZE; ++i) snprintf(uuid + i * 2, 3, "%02x", id.driverUUID[i]);
+        Dl_info loader = {0};
+        dladdr((void *)p_vkGetInstanceProcAddr, &loader);
+        VKLOG("[driver] selected Vulkan device: driver ID %d, name '%s', info '%s', version %#x, UUID %s, %s; loader '%s'",
+              has_driver ? (int)driver.driverID : -1, has_driver ? driver.driverName : "unavailable",
+              has_driver ? driver.driverInfo : "unavailable", V.props.driverVersion, uuid,
+              g_vk_driver_status, loader.dli_fname ? loader.dli_fname : "unavailable");
+    }
     const char *on[64]; uint32_t non = 0;
     for (unsigned i = 0; i < sizeof want / sizeof *want; i++) if (has_ext(ex, ne, want[i])) on[non++] = want[i]; else VKLOG("device has no %s", want[i]);
     // NVN vertex streams step per N instances (gfx_vk_exec.c build_pipeline's divisor state): VK_EXT_vertex_attribute_divisor, or the KHR one (core in Vulkan 1.4, the same
@@ -253,6 +277,11 @@ void vk_init(void) {
         "VK_EXT_texel_buffer_alignment", "VK_EXT_4444_formats", "VK_KHR_shader_integer_dot_product", "VK_EXT_private_data"};
     for (unsigned i = 0; !v12 && i < sizeof promo12 / sizeof *promo12 && non < 64; i++) if (has_ext(ex, ne, promo12[i])) { on[non++] = promo12[i]; npromo++; }
     for (unsigned i = 0; !v13 && i < sizeof promo13 / sizeof *promo13 && non < 64; i++) if (has_ext(ex, ne, promo13[i])) { on[non++] = promo13[i]; npromo++; }
+    if (v13) {
+        V.texel_alignment.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES;
+        VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &V.texel_alignment};
+        vkGetPhysicalDeviceProperties2(V.pd, &p2);
+    }
     // features: what the replay uses when the device has it. VkPhysicalDeviceVulkan11/12/13Features are valid only on a 1.2 / 1.3 device (a 1.1 driver ignores
     // them and nothing would be enabled); below that, the same features come through Vulkan 1.1's own structs and those of the extensions enabled above (xf)
     static const struct { const char *ext; VkStructureType s; } XF[] = {   // ext NULL: Vulkan 1.1 core, VkPhysicalDeviceVulkan11Features's members
@@ -315,6 +344,7 @@ void vk_init(void) {
     V.has_robust2 = fr2.nullDescriptor && has_ext(ex, ne, "VK_EXT_robustness2");
     V.has_depth_clip_ctl = fdc.depthClipControl && has_ext(ex, ne, "VK_EXT_depth_clip_control");
     V.has_dtiming = has_ext(ex, ne, "VK_GOOGLE_display_timing");   // frame pacing on the display (gfx_vk_present.c pace_*)
+    V.has_depth_bounds = ff.features.depthBounds;
     V.has_bc = ff.features.textureCompressionBC; V.has_astc = ff.features.textureCompressionASTC_LDR; V.has_gs = ff.features.geometryShader;
     { const char *e = getenv("DM_VK_X_BC_CPU"); if (e && atoi(e)) V.has_bc = 0; }   // (start-up) BC textures decoded on the CPU as on a device without them (gfx_vk_tex.c bc_decode)
     V.max_aniso = ff.features.samplerAnisotropy ? fminf(16, V.props.limits.maxSamplerAnisotropy) : 1;
@@ -1036,7 +1066,9 @@ void mtl_alias_drop_pool(const void *pool) { void vk_tex_drop_pool(const void *)
 // The NVN flags of the pool at mem (hle_nvn.c, after mtl_pool_add): a copied pool the CPU maps uncached (CPU_UNCACHED, 0x2) is one the game writes and the GPU reads;
 // the game reads GPU results from cached memory, so such a pool is not copied back after each submission
 void vk_pool_set_flags(const void *mem, int flags) {
-    pthread_rwlock_rdlock(&g_pool_mu);
+    // Writes to pool flags must exclude concurrent readers (vk_pools_sync,
+    // guest buffer and texture lookups). A read lock did not do so.
+    pthread_rwlock_wrlock(&g_pool_mu);
     for (int i = 0; i < g_npool; i++) if (g_pool[i].base == (uint64_t)(uintptr_t)mem) g_pool[i].flags = flags;   // (every chunk of it)
     pthread_rwlock_unlock(&g_pool_mu);
 }
@@ -1368,7 +1400,7 @@ static void df_add(int kind, void *a, void *b) {
 // ones that need more than 4 KB alignment, get memory of their own
 enum { IMG_CLASSES = 18, IMG_BLOCK = 32 << 20 };
 #define IMG_SLOT_MAX ((VkDeviceSize)2 << 20)
-typedef struct imgblk { VkDeviceMemory m; uint32_t type, cls, nslot, nfree; uint64_t bits[128]; struct imgblk *next; } imgblk;   // bits: 1 = slot free
+typedef struct imgblk { VkDeviceMemory m; VkDeviceSize stride; uint32_t type, cls, nslot, nfree; uint64_t bits[128]; struct imgblk *next; } imgblk;   // bits: 1 = slot free
 typedef struct { imgblk *b; uint32_t slot; } imgsub;
 static imgblk *g_imgblk[IMG_CLASSES]; static pthread_mutex_t g_imgblk_mu = PTHREAD_MUTEX_INITIALIZER;
 static VkDeviceSize img_class_size(int c) { return (c & 1 ? 6144ull : 4096ull) << (c >> 1); }   // 4K, 6K, 8K, 12K, 16K, 24K, ... 2M
@@ -1379,11 +1411,22 @@ VkDeviceMemory vk_image_memory(const VkMemoryRequirements *req, uint32_t type, V
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req->size, type}; VkDeviceMemory m;
         return vkAllocateMemory(V.dev, &ai, NULL, &m) ? VK_NULL_HANDLE : m;
     }
+    // VkBindImageMemory requires an offset divisible by this image's
+    // VkMemoryRequirements::alignment. The original 6144-byte class is
+    // not divisible by 4096: its second slot could be bound illegally.
+    // Blocks of the same size class but different strides may not share
+    // offsets, even if their memory type matches.
+    VkDeviceSize stride = vk_img_aligned_stride(img_class_size(c), req->alignment);
     pthread_mutex_lock(&g_imgblk_mu);
-    imgblk *b = g_imgblk[c]; while (b && (b->type != type || !b->nfree)) b = b->next;
+    imgblk *b = g_imgblk[c];
+    while (b && (b->type != type || b->stride != stride || !b->nfree)) b = b->next;
     if (!b) {
-        b = calloc(1, sizeof *b); b->type = type; b->cls = (uint32_t)c; VkDeviceSize bs = img_class_size(c) * 64; if (bs < (2 << 20)) bs = 2 << 20; if (bs > IMG_BLOCK) bs = IMG_BLOCK; b->nslot = (uint32_t)(bs / img_class_size(c));   // 64 slots, 2 MB to 32 MB
-        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, (VkDeviceSize)b->nslot * img_class_size(c), type};
+        b = calloc(1, sizeof *b); b->type = type; b->cls = (uint32_t)c; b->stride = stride;
+        VkDeviceSize bs = stride * 64;
+        if (bs < (2 << 20)) bs = 2 << 20;
+        if (bs > IMG_BLOCK) bs = IMG_BLOCK;
+        b->nslot = (uint32_t)(bs / stride);
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, (VkDeviceSize)b->nslot * stride, type};
         if (vkAllocateMemory(V.dev, &ai, NULL, &b->m)) { pthread_mutex_unlock(&g_imgblk_mu); free(b); return VK_NULL_HANDLE; }
         for (uint32_t i = 0; i < b->nslot; i++) b->bits[i >> 6] |= 1ull << (i & 63);
         b->nfree = b->nslot; b->next = g_imgblk[c]; g_imgblk[c] = b;
@@ -1391,7 +1434,7 @@ VkDeviceMemory vk_image_memory(const VkMemoryRequirements *req, uint32_t type, V
     uint32_t i = 0; while (!b->bits[i >> 6]) i += 64; i += (uint32_t)__builtin_ctzll(b->bits[i >> 6]);
     b->bits[i >> 6] &= ~(1ull << (i & 63)); b->nfree--;
     pthread_mutex_unlock(&g_imgblk_mu);
-    imgsub *s = malloc(sizeof *s); s->b = b; s->slot = i; *sub = s; *off = (VkDeviceSize)i * img_class_size(c);
+    imgsub *s = malloc(sizeof *s); s->b = b; s->slot = i; *sub = s; *off = (VkDeviceSize)i * b->stride;
     return b->m;
 }
 static void img_sub_free(imgsub *s) {   // the slot is free again; blocks are kept (the next images of the class take them)
@@ -1419,7 +1462,11 @@ void vk_dsl_register(VkDescriptorSetLayout l, const VkDescriptorSetLayoutBinding
 }
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout l) {
     vksub_t *s = cur();
-    pthread_mutex_lock(&g_dsl_mu); const uint32_t *need = nvn_hm_get(&g_dsl_need, &l); pthread_mutex_unlock(&g_dsl_mu);
+    uint32_t counts[9] = {0};
+    pthread_mutex_lock(&g_dsl_mu);
+    const uint32_t *registered = nvn_hm_get(&g_dsl_need, &l);
+    if (registered) memcpy(counts, registered, sizeof counts);
+    pthread_mutex_unlock(&g_dsl_mu);
     for (;;) {
         if (s->dp_cur == s->ndp) {
             VkDescriptorPoolSize sz[9]; uint32_t nz = 0;
@@ -1430,11 +1477,11 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout l) {
         }
         if (s->dp_cur != s->dp_counted) { memset(s->dp_used, 0, sizeof s->dp_used); s->dp_sets = 0; s->dp_counted = s->dp_cur; }
         int fits = s->dp_sets < DP_SETS;
-        if (need) for (int t = 0; t < 9 && fits; t++) if (need[t] && s->dp_used[t] + need[t] > DP_CAP[t]) fits = 0;
+        for (int t = 0; t < 9 && fits; t++) if (counts[t] && s->dp_used[t] + counts[t] > DP_CAP[t]) fits = 0;
         if (!fits) { s->dp_cur++; continue; }
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, s->dp[s->dp_cur], 1, &l};
         VkDescriptorSet set; VkResult r = vkAllocateDescriptorSets(V.dev, &ai, &set);
-        if (r == VK_SUCCESS) { s->dp_sets++; if (need) for (int t = 0; t < 9; t++) s->dp_used[t] += need[t]; return set; }
+        if (r == VK_SUCCESS) { s->dp_sets++; for (int t = 0; t < 9; t++) s->dp_used[t] += counts[t]; return set; }
         if (r != VK_ERROR_OUT_OF_POOL_MEMORY && r != VK_ERROR_FRAGMENTED_POOL) die("[vk] vkAllocateDescriptorSets: %d", r);
         s->dp_cur++;
     }

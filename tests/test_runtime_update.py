@@ -96,6 +96,16 @@ for name in ('libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', '
         self.assertTrue(all((host.parent / name).is_file() for name in runtime_update.HOOKS))
         self.assert_preserved(manifest=False)
 
+    def test_android_update_caps_native_workers_even_with_explicit_jobs(self):
+        self.record(self.profile(self.dm / 'games'))
+        with self.build.open('a') as f:
+            f.write("\nassert args[args.index('--jobs')+1] == '1'\n")
+        with patch.object(runtime_update.resources, 'is_android', return_value=True), \
+             patch.object(runtime_update.resources, 'memory_mb', return_value=(7800, 5000)), \
+             patch.object(runtime_update.resources.os, 'cpu_count', return_value=8):
+            runtime_update.rebuild(self.pack, jobs=8, emit=lambda _: None)
+        self.assert_preserved(manifest=False)
+
     def test_the_workspace_profile_is_the_one_that_made_the_pack(self):
         fingerprint = self.profile(self.root / 'work' / f'{self.title}_build' / 'profile-derived')
         self.record(fingerprint)
