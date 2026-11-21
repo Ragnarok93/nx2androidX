@@ -645,7 +645,8 @@ static int pass_dump_color(int ci) {
 static int pass_dump_bound_depth(VkImageAspectFlags aspect) {
     const VkRenderingAttachmentInfo *att = aspect == VK_IMAGE_ASPECT_DEPTH_BIT ?
         P_ri.pDepthAttachment : P_ri.pStencilAttachment;
-    if (!att || att->storeOp != VK_ATTACHMENT_STORE_OP_STORE) return 0;
+    if (!att || (att->storeOp != VK_ATTACHMENT_STORE_OP_STORE &&
+                  att->storeOp != VK_ATTACHMENT_STORE_OP_NONE)) return 0;
     const view_t *view = S.rt_has_dview ? &S.rt_dview : NULL;
     uint32_t level = g_pd_full ? P_att[8].range.baseMipLevel : view && view->set_levels ? view->base_level : 0;
     uint32_t layer = g_pd_full ? P_att[8].range.baseArrayLayer : view && view->set_layers ? view->min_layer : 0;
@@ -1327,6 +1328,40 @@ static int begin_pass(void) {
     S.pass_open = 2; S.pass_w = w; S.pass_h = h; S.samples = samples; S.ncol = ncol; S.bound_pipe = VK_NULL_HANDLE;
     return 1;
 }
+// A STORE can race shader sampling even when the draw disables depth
+// writes. The captured fog and effects passes sample their bound depth.
+// Vulkan 1.3 STORE_OP_NONE keeps a LOAD-only pass free of attachment stores.
+static int depth_stencil_read_only(void) {
+    if (V.props.apiVersion < VK_API_VERSION_1_3 || !S.daspect || g_x_depth ||
+        !(P_att[8].im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return 0;
+    if ((S.daspect & VK_IMAGE_ASPECT_DEPTH_BIT) && S.ds.dt && S.ds.dw) return 0;
+    if (!(S.daspect & VK_IMAGE_ASPECT_STENCIL_BIT) || !S.ds.st) return 1;
+    if ((S.swmask[0] & 0xff) && (S.ds.fail_f > NVN_STENCIL_OP_KEEP ||
+        S.ds.zfail_f > NVN_STENCIL_OP_KEEP || S.ds.zpass_f > NVN_STENCIL_OP_KEEP)) return 0;
+    if ((S.swmask[1] & 0xff) && (S.ds.fail_b > NVN_STENCIL_OP_KEEP ||
+        S.ds.zfail_b > NVN_STENCIL_OP_KEEP || S.ds.zpass_b > NVN_STENCIL_OP_KEEP)) return 0;
+    return 1;
+}
+
+static int begin_draw_pass(void) {
+    if (!begin_pass()) return 0;
+    int read_only = depth_stencil_read_only();
+    if ((S.pass_open == 1 && read_only != (P_da.storeOp == VK_ATTACHMENT_STORE_OP_NONE ||
+                                           P_sa.storeOp == VK_ATTACHMENT_STORE_OP_NONE)) ||
+        (S.pass_open == 2 && read_only && (P_da.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ||
+                                          P_sa.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR))) {
+        // In the pending case this commits the clear, so a read-only
+        // draw still sees that clear via the next pass's LOAD.
+        vk_end_pass();
+        if (!begin_pass()) return 0;
+    }
+    if (S.pass_open == 2 && read_only) {
+        if (P_da.imageView) P_da.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+        if (P_sa.imageView) P_sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+    }
+    return pass_commit();
+}
+
 static VkRect2D scissor_rect(void) {
     int32_t x = 0, y = 0; int64_t x1 = S.pass_w, y1 = S.pass_h;
     if (S.sc_set) {
@@ -1420,6 +1455,11 @@ static void clear_ds(const p_clear_ds *c) {
     if (!begin_pass() || !S.daspect) return;
     VkImageAspectFlags as = (c->depth_mask ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (c->stencil_mask && (S.daspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     as &= S.daspect; if (!as) return;
+    if (S.pass_open == 1 && (P_da.storeOp == VK_ATTACHMENT_STORE_OP_NONE ||
+                              P_sa.storeOp == VK_ATTACHMENT_STORE_OP_NONE)) {
+        vk_end_pass();
+        if (!begin_pass()) return;
+    }
     VkClearAttachment a = {as, 0, {.depthStencil = {c->depth, (uint32_t)c->stencil}}};
     VkClearRect r = {scissor_rect(), 0, P_ri.layerCount ? P_ri.layerCount : 1};   // every layer (clear_color)
     if (g_x_tracepass == -2) VKLOG("--- depth-stencil clear: depth %g (mask %d), stencil %d (mask %#x), %ux%u at %d,%d, in pass %d%s", c->depth, (int)c->depth_mask, (int)c->stencil, (unsigned)c->stencil_mask,
@@ -2538,7 +2578,7 @@ static int prepare_draw(int prim, int indexed) {
             vk_end_pass(); g_psplit_now = 1; } }
     else if (g_psplit > 0 && S.pass_open == 1 && g_pass_draws == (uint64_t)g_psplit && S.daspect && !g_psplit_depth) { static int n; if (n++ < 3) VKLOG("pass split: pass %d (%ux%u) has depth (format %d): not split", g_sub_pass - 1, S.pass_w, S.pass_h, S.dfmt); }
     if (g_order_pending) { g_order_pending = 0; g_order_check = S.pass_open == 1; }   // an order-only barrier kept the pass open: decided below, once the draw's images are known
-    if (!begin_pass() || !pass_commit()) { g_vkst.skip_rt++; return 0; }
+    if (!begin_draw_pass()) { g_vkst.skip_rt++; return 0; }
     if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) g_tracing = 1;
     uint64_t t0 = tick();
     VkCommandBuffer cb = vk_cmd();
@@ -2642,7 +2682,7 @@ static int prepare_draw(int prim, int indexed) {
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
         if (g_pass_wmem || shader_wmem(S.sh[0]) || shader_wmem(fs) || shader_wmem(S.sh[2]) || order_feedback(3)) {
             g_order_ended++; vk_end_pass(); vk_img_barrier_all(vk_cmd());
-            if (!begin_pass() || !pass_commit()) { g_vkst.skip_rt++; return 0; }
+            if (!begin_draw_pass()) { g_vkst.skip_rt++; return 0; }
             cb = vk_cmd();
         } else g_order_kept++;
     }

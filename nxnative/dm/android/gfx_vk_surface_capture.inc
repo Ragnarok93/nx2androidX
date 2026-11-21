@@ -184,7 +184,8 @@ static void surface_read(const char *role, const vkimg_t *im, surface_binding_t 
     const VkClearValue *clear = att && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? &att->clearValue : NULL;
     unsigned bw = 1, bh = 1, bpb = 0;
     if (!reason && !im) reason = "unresolved";
-    if (!reason && att && att->storeOp != VK_ATTACHMENT_STORE_OP_STORE) reason = "discarded";
+    if (!reason && att && att->storeOp != VK_ATTACHMENT_STORE_OP_STORE &&
+        att->storeOp != VK_ATTACHMENT_STORE_OP_NONE) reason = "discarded";
     if (!reason && im->samples != 1) reason = "multisampled";
     if (!reason && (!(im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
                      im->layout != VK_IMAGE_LAYOUT_GENERAL)) reason = "transfer-ineligible";

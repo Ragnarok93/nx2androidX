@@ -121,6 +121,11 @@ GPU in replay order before descriptor assembly. The scratch view belongs to that
 command, so a later draw or dispatch cannot reuse stale bytes through the
 descriptor memo. A writable binding still requires a legal direct view.
 
+On Vulkan 1.3, draws without depth or stencil writes load sampled
+depth/stencil attachments with `STORE_OP_NONE`. A separate writable pass
+handles clears and any later depth or stencil writes. This avoids attachment
+store operations racing shader reads of neighboring depth samples.
+
 The standalone Capture graphics action includes bounded full images for one
 geometry depth/stencil pass, one MRT pass, subsequent effect outputs and the
 source before Android composition. Small effect passes have a separate limit
