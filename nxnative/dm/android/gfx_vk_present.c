@@ -374,8 +374,8 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 }
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
-static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Capture graphics", "Export diagnostics", "Capture status", "Resume", ""};
-static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select", [OVM_DIAG_CAPTURE] = "Capture", [OVM_DIAG_EXPORT] = "Save ZIP"};   // the rows that are a button: its word
+static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "Capture graphics", "Export diagnostics", "Capture status", "Delayed capture", "RADV test flags", "Shader cache coherency", "Color compression off", "CPU BC decode", "Diagnostics", "Resume", ""};
+static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select", [OVM_DIAG_CAPTURE] = "Capture", [OVM_DIAG_EXPORT] = "Save ZIP", [OVM_DIAG_DELAY] = "120 frames", [OVM_DIAG_FLAGS] = "Open", [OVM_FLAGS_BACK] = "Back"};   // the rows that are a button: its word
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
 static const char *const OVM_PADS[2] = {"Position", "Label"};
 int dm_menu_fg_mult(void);
@@ -383,10 +383,16 @@ int dm_menu_fg_flow(void);
 int dm_menu_fg_has_dll(void);
 const char *dm_vk_driver_status(void);   // a controller's face buttons (front_android.c pad_labels)
 __attribute__((weak)) void dm_menu_diag_note(char *out, int cap) { if (cap > 0) snprintf(out, (size_t)cap, "Logs only"); }
+__attribute__((weak)) void dm_menu_radv_note(int index, char *out, int cap) {
+    (void)index;
+    snprintf(out, (size_t)cap, "RADV only");
+}
+static int ov_flag_item(int item) { return item >= OVM_FLAG_DLC && item <= OVM_FLAG_BC; }
 static void ov_menu_panel(const ov_canvas *cv, int st) {
     float p[4] = {0, 0, (float)cv->w, (float)cv->h}, r[4]; ov_menu_rowrect(p, 0, r);
     float rh = r[3], rw = r[2], gap = rh * 0.35f, sh = rh * 0.40f, sw = sh * 1.85f;
     int tab = st >> 29 & 3, sel = (st >> 4 & 15) - 1, op = st >> 9 & 127;
+    int page = (st & OVM_FLAGS_STATE) ? OVM_FLAGS_PAGE : tab;
     int is = (int)fmaxf(1, roundf(rh * 0.30f / PF_CAP));
     for (; is > 1; is--) {   // the widest row: its label, a gap and its control
         float need = 0;
@@ -394,6 +400,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             float lw = cv_text_w(OVM_LABELS[i], is),
                 cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) :
                      i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) :
+                     ov_flag_item(i) ? cv_text_w("Default on restart", is) :
                      (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_DIAG_STATUS) ? cv_text_w("System (fallback)", is) :
                      OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
             need = fmaxf(need, i == OVM_OPACITY ? fmaxf(lw / 0.38f, cv_text_w("80%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
@@ -402,7 +409,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
     }
     cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.18f, C_BG);
     for (int row = 0; row < OVM_ROWS; row++) {
-        int it = ov_menu_item(tab, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
+        int it = ov_menu_item(page, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
         if (it < 0) continue;
         if (row == sel) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
         if (it == OVM_TAB) {   // the tabs: a segmented bar, the open one filled
@@ -427,7 +434,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
-        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_DIAG_STATUS) {
+        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
             char value[128];
             if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
             else if (it == OVM_FG_FLOW) {
@@ -435,6 +442,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                 if (!scale) snprintf(value, sizeof value, "Auto");
                 else snprintf(value, sizeof value, "%d%%", scale);
             } else if (it == OVM_DIAG_STATUS) dm_menu_diag_note(value, sizeof value);
+            else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
             while (vs > 1 && cv_text_w(value, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;

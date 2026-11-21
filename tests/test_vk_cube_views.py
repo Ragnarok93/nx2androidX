@@ -157,6 +157,19 @@ int main(int argc, char **argv) {
     assert(tex_desc_for(0,&float_image,1,&info,0,1) == 0 && info.imageView && image.gpu_w);
     assert(lookup_calls == 2);
     assert(tex_desc_for(0,&float_image,1,&info,0,1) == 0 && lookup_calls == 2);
+    reset(1,32,32,1,1);
+    texture.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+    g_compute_image_count = 0;
+    assert(tex_desc_for(5,&float_image,1,&info,0,1) == 0 && info.imageView);
+    assert(g_compute_image_count == 1 && image.wseq == 0);
+    compute_images_written();
+    assert(image.gpu_w && image.wseq != 0);
+    uint64_t first_write = image.wseq;
+    g_compute_image_count = 0;
+    assert(tex_desc_for(5,&float_image,1,&info,0,1) == 0 && lookup_calls == 1);
+    assert(g_compute_image_count == 1 && image.wseq == first_write);
+    compute_images_written();
+    assert(image.wseq > first_write);
     // The reported failure: an ordinary 2D view already exists in the cache.
     reset(1,16,16,1,1); assert(vk_tex_view(&texture,NULL,1,0,0,NULL)); rejected(0);
     assert(red_calls==1 && strstr(last_red,"[RED]") && strstr(last_red,"image 16x16x1") && strstr(last_red,"layers 1") && strstr(last_red,"cflags 0x"));

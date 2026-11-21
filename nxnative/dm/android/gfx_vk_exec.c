@@ -1905,6 +1905,19 @@ static int img_fmt_cls(uint8_t f) {
     }
     return 0;
 }
+// Compute stores need the same writer sequence as attachment and copy
+// writes. A previously written image may be sampled in this dispatch's set.
+static vkimg_t *g_compute_images[96];
+static unsigned g_compute_image_count;
+static void note_storage_image(int stage, vkimg_t *im) {
+    if (!im) return;
+    if (stage != 5) im->gpu_w = 1;
+    else if (g_compute_image_count < sizeof g_compute_images / sizeof g_compute_images[0])
+        g_compute_images[g_compute_image_count++] = im;
+}
+static void compute_images_written(void) {
+    for (unsigned i = 0; i < g_compute_image_count; i++) vk_tex_mark_written(g_compute_images[i]);
+}
 static uint64_t g_num_um, g_num_im;   // stage_set: the sampled bindings of the stage being built that got uint / int views (bit = binding index)
 extern uint64_t g_tex_gen;
 static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *ii, unsigned element, int storage) {   // the view's view_num
@@ -1921,6 +1934,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
     int logfs = g_x_logfs && S.sh[1] && S.sh[1]->key == g_x_logfs && st == 1; static int nlogfs; if (logfs && nlogfs >= 60) logfs = 0;
     if (tid && g_var_now != 3 && !g_tracing && !logfs && !trace_alias && !trace_surface && g_tvc[ck].epoch == g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == cache_class) {
         ii->imageView = g_tvc[ck].v; if (g_tvc[ck].im) g_tvc[ck].im->last_use = mtl_last_fence() + 1; vk_texdump_note(g_tvc[ck].im);
+        if (storage) note_storage_image(st, g_tvc[ck].im);
         if (!storage) ii->sampler = samp_for(st, b, h, g_tvc[ck].num != 0);
         return g_tvc[ck].num;
     }
@@ -1933,7 +1947,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         extern __thread VkFormat vk_view_fmt;
         VkFormat vf = 0; const vkfmt_t *tf = sc && !view_num(t, v) ? vk_fmt(v && v->set_format ? v->format : t->d.format) : NULL;
         if (tf && !tf->compressed && !tf->dec && !tf->depth && !tf->stencil) vf = vk_int_fmt(tf->bpb, sc == 2);
-        ii->imageView = vf ? vk_tex_view_as(t, v, b->dim, b->flags & 1, 0, &im, vf) : vk_tex_view(t, v, b->dim, b->flags & 1, 0, &im); if (storage && im && ii->imageView) im->gpu_w = 1;
+        ii->imageView = vf ? vk_tex_view_as(t, v, b->dim, b->flags & 1, 0, &im, vf) : vk_tex_view(t, v, b->dim, b->flags & 1, 0, &im); if (storage && ii->imageView) note_storage_image(st, im);
         if (trace_alias && ii->imageView && im && S.sh[st]) {
             vkimg_t producer;
             uint64_t key = S.sh[st]->key;
@@ -3241,6 +3255,7 @@ static void dispatch(const p_dispatch *d) {
     g_dispatch[0] = (uint32_t)d->x; g_dispatch[1] = (uint32_t)d->y; g_dispatch[2] = (uint32_t)d->z;
     VkDescriptorBufferInfo indirect_c0 = {0};
     if (g_pd_state == 1 && g_pd_full) g_sc.storage_count = 0;
+    g_compute_image_count = 0;
     uint32_t dofs[96]; VkDescriptorSet set = stage_set(5, cs, dofs, d->ind ? &indirect_c0 : NULL);
     uint64_t ck[3] = {cs->key, g_num_um, g_num_im};
     pthread_mutex_lock(&g_cpipe_mu);
@@ -3297,6 +3312,7 @@ static void dispatch(const p_dispatch *d) {
         vkCmdDispatchIndirect(cb, b, o);   // the same snapshot supplies both the dispatch and the shader's group counts
     }
     else vkCmdDispatch(cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
+    if (d->ind || (d->x && d->y && d->z)) compute_images_written();
     vk_pass_ts(1, (uint32_t)d->x, (uint32_t)d->y, PT_DISPATCH, (uint32_t)d->z);
     if (g_pd_state == 1 && g_pd_full) { surface_dispatch(); pass_dump_aliases(); }
     if (!g_x_nodispbar) vk_img_barrier_all(cb);   // DM_VK_X_NODISPBAR=1 (live, a cost measurement that may draw wrong): no barrier after the dispatch
@@ -3313,10 +3329,45 @@ static VkImageSubresourceLayers sub_of(vkimg_t *im, const view_t *v, int has_v, 
     int layered = im->layers > 1;
     return (VkImageSubresourceLayers){im->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : (im->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT), lv, ly + (layered ? (uint32_t)z : 0), 1};
 }
+int nvn_host_readable(uint64_t addr, uint64_t size);
 static void copy_b2t(const p_copy_b2t *c, int to_texture) {
     vk_end_pass_land();
-    vkimg_t *im = vk_tex(c->tex); const vkfmt_t *f = vk_fmt(c->tex->d.format);
-    if (!im || !f) return;
+    const vkfmt_t *f = vk_fmt(c->tex->d.format);
+    if (!f) return;
+    uint32_t width = (uint32_t)c->r.width, height = c->r.height ? (uint32_t)c->r.height : 1;
+    uint32_t depth = c->r.depth ? (uint32_t)c->r.depth : 1;
+    size_t pitch = 0, slice = 0, span = 0, packed = 0, decoded = 0;
+    if (f->dec) {
+        if (!to_texture) {
+            VKRED_ONCE(71, "copy of a BC texture decoded on the CPU into a buffer: skipped");
+            return;
+        }
+        if (c->r.width <= 0 || c->r.height < 0 || c->r.depth < 0) return;
+        // Use the last block of the last slice for validation, leaving any
+        // row and slice padding out of the actual CPU read.
+        size_t row_bytes = ((width + 3u) / 4) * (size_t)f->bpb;
+        size_t rows = (height + 3u) / 4;
+        pitch = S.row_stride > 0 ? (size_t)S.row_stride : row_bytes;
+        if (pitch < row_bytes || pitch > SIZE_MAX / rows) return;
+        packed = pitch * rows;
+        span = packed - pitch + row_bytes;
+        slice = S.image_stride > 0 ? (size_t)S.image_stride : packed;
+        if (slice < span || (depth - 1) > (SIZE_MAX - span) / slice ||
+            width > SIZE_MAX / f->dbpp / height / depth) return;
+        size_t source_bytes = slice * (depth - 1) + span;
+        vkpool_t *pool = vk_pool_of(c->src, 1);
+        if (!pool || c->src >= pool->end || source_bytes > pool->end - c->src ||
+            !nvn_host_readable(c->src, source_bytes)) {
+            VKRED_ONCE(178, "compressed buffer copy source is outside mapped pool storage");
+            return;
+        }
+        decoded = (size_t)width * height * f->dbpp;
+        // This may cut the current submission. Do it before keeping its
+        // command buffer or allocating transfer scratch from its arena.
+        cpu_ready(c->src, source_bytes);
+    }
+    vkimg_t *im = vk_tex(c->tex);
+    if (!im) return;
     // These commands address live guest GPU buffers, so CPU upload conversion
     // cannot be used. A direct transfer would interpret packed NVN words as float.
     if (c->tex->d.format == 0x35 && im->fmt == VK_FORMAT_D32_SFLOAT_S8_UINT) {
@@ -3329,19 +3380,23 @@ static void copy_b2t(const p_copy_b2t *c, int to_texture) {
     unsigned bw = f->bw ? f->bw : 1, bh = f->bh ? f->bh : 1;
     uint32_t rowlen = S.row_stride > 0 && f->bpb ? (uint32_t)(S.row_stride / f->bpb) * bw : 0;
     uint32_t imgh = S.image_stride > 0 && S.row_stride > 0 ? (uint32_t)(S.image_stride / S.row_stride) * bh : 0;
-    int layered = im->layers > 1, depth = c->r.depth ? c->r.depth : 1;
+    int layered = im->layers > 1;
     VkBufferImageCopy r = {o, rowlen, imgh, sub_of(im, &c->view, c->has_view, c->r.zoffset), {c->r.xoffset, c->r.yoffset, layered ? 0 : c->r.zoffset},
                            {(uint32_t)c->r.width, (uint32_t)(c->r.height ? c->r.height : 1), layered ? 1 : (uint32_t)depth}};
     if (g_pd_state == 1 && g_pd_full)
         surface_transfer(im, r.imageSubresource, to_texture ? "buffer-copy-destination" : "buffer-copy-source");
     if (layered) r.imageSubresource.layerCount = (uint32_t)depth;
-    if (f->dec) {   // a BC format the device lacks (gfx_vk_tex.c bc_decode): the blocks decoded on the CPU from the buffer's memory as the replay reaches the copy
-        if (!to_texture) { VKRED_ONCE(71, "copy of a BC texture decoded on the CPU into a buffer: skipped"); return; }
-        uint32_t w = (uint32_t)c->r.width, h = (uint32_t)(c->r.height ? c->r.height : 1), nz = (uint32_t)depth;
-        size_t pitch = S.row_stride > 0 ? (size_t)S.row_stride : (size_t)((w + 3) / 4) * f->bpb, slice = S.image_stride > 0 ? (size_t)S.image_stride : pitch * ((h + 3) / 4), out = (size_t)w * h * f->dbpp;
-        VkBuffer sb; VkDeviceSize so; uint8_t *p = vk_scratch(out * nz, 16, &sb, &so);
-        for (uint32_t z = 0; z < nz; z++) vk_bc_decode(f, (const uint8_t *)(uintptr_t)c->src + z * slice, pitch, w, h, 1, p + z * out);
-        b = sb; r.bufferOffset = so; r.bufferRowLength = 0; r.bufferImageHeight = 0;
+    if (f->dec) {
+        uint8_t *blocks = malloc(packed);
+        if (!blocks) { VKRED_ONCE(179, "cannot allocate compressed buffer copy staging"); return; }
+        uint8_t *pixels = vk_scratch(decoded * depth, 16, &b, &r.bufferOffset);
+        for (uint32_t z = 0; z < depth; z++) {
+            vk_ubd_read(c->src + z * slice, span, blocks);
+            vk_bc_decode(f, blocks, pitch, width, height, 1, pixels + z * decoded);
+        }
+        free(blocks);
+        r.bufferRowLength = 0;
+        r.bufferImageHeight = 0;
     }
     if (g_watch_off >= 0) { char w[96]; snprintf(w, sizeof w, "buffer copy %s (buffer %#llx, %dx%d)", to_texture ? "destination" : "source", (unsigned long long)c->src, c->r.width, c->r.height); vk_watch(im, w); }
     if (to_texture) { vkCmdCopyBufferToImage(cb, b, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r); vk_tex_mark_written(im); }

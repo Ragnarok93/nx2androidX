@@ -382,3 +382,30 @@ the public candidate RADV source explicitly rejects D24S8 attachments.
 If supported, compare the 64 words with the independent probe. See
 [D24 capability and driver provenance](NVN_VULKAN_XCLIPSE_AUDIT_20261119.md#d24-capability-and-driver-provenance)
 for the code path and the limits of the older capture.
+
+### Intro capture and RADV test controls
+
+The 21:04 export captured present 1219 on the intro road with frame generation
+off. The prepass wrote depth and the G-buffer and exposure inputs contained
+scene data. Both 87×49 RGBA16F images called out by the overlap checker
+contained nonzero, finite values. Their older 128×128 neighbors have different
+formats and extents. The overlap report alone does not establish that those
+neighbors produced the expected texels. Compute storage writes now advance
+the image writer sequence after replay records the dispatch.
+
+The captured RADV build is
+[`cc87fdf712`](https://github.com/JimVulkan/radv-xclipse/tree/cc87fdf71267dd0acc3b470920a6566a1a46f0be).
+Its application shader DLC option affects device-scope loads, DCC controls
+color-target compression, and the BC emulation option controls GPU decoding.
+The standalone pause menu exposes them under **Diagnostics → RADV test flags**.
+Each selection takes effect after fully restarting the game. The diagnostic ZIP
+records the startup values. Test one flag at a time on the same scene.
+**Delayed capture** waits 120 presents before looking for scene geometry.
+
+The CPU BC comparison requires the Vulkan fallback to recognize guest block
+compression even when it creates an uncompressed backing image. It now does,
+including when streamed data replaces the texture. The CPU buffer-copy path
+also waits for tracked GPU producers and reads the ordered update bytes before
+decoding. These are renderer fixes with host regression coverage for texture
+initialization and refresh. The 21:04 export predates Limit Break and does not
+identify the cause of its black textures or the missing intro flames.

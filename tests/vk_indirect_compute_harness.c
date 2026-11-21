@@ -29,6 +29,8 @@ static int g_x_tracepass = -1, g_sub_pass, g_prof_on, g_prereset = 1;
 static uint64_t g_prof_ns[8], g_fence, g_tex_frame;
 static int g_pd_state, g_pd_effects, g_pd_full, g_ch_enabled;
 static struct { unsigned storage_count; } g_sc;
+static unsigned g_compute_image_count;
+static void compute_images_written(void) {}
 static void surface_dispatch(void) { abort(); }
 static void pass_dump_aliases(void) { abort(); }
 static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage, int snapshot) { abort(); }

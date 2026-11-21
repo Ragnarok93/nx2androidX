@@ -6,12 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #define VKLOG(...) ((void)0)
+#define DM_GAME_TEX_CPU_UNCACHED 0
 #define VKRED_ONCE(...) ((void)0)
 typedef int pthread_mutex_t;
 #define PTHREAD_MUTEX_INITIALIZER 0
 #define pthread_mutex_lock(p) ((void)(p))
 #define pthread_mutex_unlock(p) ((void)(p))
-typedef struct { int depth,stencil,vk,compressed; } vkfmt_t;
+typedef struct { int depth,stencil,vk,compressed,dec; } vkfmt_t;
 typedef struct vkimg {
     uint64_t pool,used,pkg_used,pkg_vgen,pkg_stamp,pkg_seen,pkg_hash;
     int64_t off,size; int flags,looked,packaged,pkg_sparse,pkg_released,gpu_w;
@@ -25,7 +26,7 @@ static unsigned written,uploads,created,dropped;
 static uint64_t dirty_now=1;
 static unsigned char retired[4096];
 static uint64_t g_tex_frame;
-static const vkfmt_t *vk_fmt(int format) {static vkfmt_t f;f=(vkfmt_t){.vk=format,.compressed=format==0x44};return &f;}
+static const vkfmt_t *vk_fmt(int format) {static vkfmt_t f;f=(vkfmt_t){.vk=format,.compressed=format==0x44,.dec=format==0x4d};return &f;}
 static vkimg_t *img_new(const tex_t *t,const vkfmt_t *f) {(void)t;vkimg_t *im=calloc(1,sizeof *im);assert(im);im->format=f->vk;im->img=(void*)(uintptr_t)++created;assert(created<sizeof retired);return im;}
 static void alias_link(vkimg_t *im) {(void)im;}
 static void alias_unlink(vkimg_t *im) {(void)im;}
@@ -40,7 +41,7 @@ static void vk_tex_prepare(int cb,vkimg_t *im) {(void)cb;im->content=0;}
 static int lin_copy(vkimg_t *im,const tex_t *t,const vkfmt_t *f) {(void)im;(void)t;(void)f;return 0;}
 static int packaged_tex(const tex_t *t) {return t->has_pkg_data || t->has_layout || (written&(1u<<(t->serial-1)));}
 int nvn_ft_written(const tex_t *t) {(void)t;return 0;}
-static int cpu_content_tex(const tex_t *t,const vkfmt_t *f) {(void)t;(void)f;return 0;}
+void mtl_tex_cpu_written(const tex_t *t) { written |= 1u << (t->serial - 1); }
 static uint64_t nvn_dirty_now(void) {return dirty_now;}
 static uint64_t pkg_hash(const uint8_t *mem,size_t size) {(void)size;return mem[0];}
 static void pkg_upload(vkimg_t *im,const tex_t *t,const vkfmt_t *f) {
@@ -154,6 +155,15 @@ int main(void) {
     // Another CPU write to the recycled BC allocation wins over the old GPU copy.
     storage[0]=0x68; dirty_now++;
     assert(vk_tex_(&b)==image && image->content==0x68 && uploads==before+2);
+
+    // CPU BC decode still reads the guest's compressed bytes without a
+    // packaged layout. The cached image also refreshes on new registrations.
+    reset();a=base_tex(0x4d,1);b=base_tex(0x4d,2);
+    image=vk_tex_(&a);
+    assert(image->content==0x68 && image->packaged);
+    storage[0]=0x73; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x73);
+    storage[0]=0x68;
 
     int material_enabled = atoi(getenv("DM_VK_UNCACHED_MIP_INIT"));
     pool.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED;

@@ -550,7 +550,7 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     // guest bytes still preserve its GPU result in the hash check below.
     int material = sampled && keyed && uncached_material_storage(t);
     int tracked_cpu_storage = im->packaged && im->pkg_mem == t->mem &&
-        im->pkg_len == t->L.size && ((f->compressed && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) || material);
+        im->pkg_len == t->L.size && (((f->compressed || f->dec) && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) || material);
     if (t->mem && lin_copy(im, t, f)) {}
     else if (t->mem && (tracked_cpu_storage || packaged_tex(t) ||
                         (first && (material || nvn_ft_written(t) || cpu_content_tex(t, f))))) {
@@ -706,13 +706,16 @@ static int cpu_content_tex(const tex_t *t, const vkfmt_t *f) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
     if (!on || !t->pool || t->has_layout || t->d.samples > 1 ||
         (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;
-    if (!f->compressed && t->d.target != NVN_TEXTURE_TARGET_3D) return 0;
+    // f->compressed describes the Vulkan backing. A CPU-decoded texture
+    // still has BC blocks in guest storage and needs the same first upload.
+    int guest_compressed = f->compressed || f->dec;
+    if (!guest_compressed && t->d.target != NVN_TEXTURE_TARGET_3D) return 0;
     // COMPRESSIBLE leaves out what the GPU may render into, which a block-compressed format never is: there the flag says nothing about who wrote the storage. With the
     // profile's tex_cpu_uncached it does not leave such a texture out: Cardfight!! Vanguard Dear Days 2 sets the flag on every texture and copies its BC7 font arrays
     // (1024x1024, 4 to 18 layers) into CPU-uncached pools with no flush; left out, they were images of zeros and no text was drawn anywhere
-    if (t->d.flags & ((DM_GAME_TEX_CPU_UNCACHED && f->compressed ? 0 : NVN_TEXTURE_FLAGS_COMPRESSIBLE) | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
+    if (t->d.flags & ((DM_GAME_TEX_CPU_UNCACHED && guest_compressed ? 0 : NVN_TEXTURE_FLAGS_COMPRESSIBLE) | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
     // IMAGE (a render target or storage image) does not exclude a compressed texture: BC and ASTC are neither, so its bytes at first use are the CPU's.
-    if (!f->compressed && (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) return 0;
+    if (!guest_compressed && (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) return 0;
     if (!mem_any(t->mem, t->L.size)) return 0;
     static int n; if (n++ < 8) VKLOG("texture %ux%ux%u nvn format %#x at %p (pool flags %#x): the CPU filled it before its first use: uploaded from its storage", t->d.width, t->d.height, t->d.depth, t->d.format, (const void *)t->mem, t->pool->flags);
     mtl_tex_cpu_written(t);
