@@ -912,8 +912,10 @@ class Port:
         self.ue_why = src['ue_decode'][1] if src['ue_decode'][0] else ''
         # Upstream #480: a matching on-disk Unreal shader decode stamp makes
         # repeated FFRS exports independent of another Oodle decoder launch.
-        ue_cached = bool(self.ue_why) and all((self.dirs[v] / 'ue_shaders/stamp').is_file() and
-                                               (self.dirs[v] / 'ue_shaders/stamp').read_text() == nsp.ue_stamp(self.dirs[v]) for v in self.versions)
+        # Preflight also runs in minimal/survey contexts without extracted versions yet.
+        ue_cached = bool(self.ue_why) and bool(getattr(self, 'versions', ())) and all(
+            (self.dirs[v] / 'ue_shaders/stamp').is_file() and
+            (self.dirs[v] / 'ue_shaders/stamp').read_text() == nsp.ue_stamp(self.dirs[v]) for v in self.versions)
         why = self.oodle_why or ('' if ue_cached else self.ue_why)
         # The game's own decoder runs the game's own code (it boots the game's modules): the patches the profile registers for the tested build are needed there, and the rewriter applies
         # them by build ID only. A dump of another build runs without them and the decoder crashes in the game's initialization, so the port stops here, before it starts.
