@@ -66,6 +66,13 @@ static inline unsigned vk_pd_d24_float_matches(const uint32_t *words, unsigned n
 static inline int vk_pd_budget_allows(uint64_t used, uint64_t requested, uint64_t budget) {
     return requested && used <= budget && requested <= budget - used;
 }
+// A menu capture waits for depth-tested scene work before starting the
+// next frame. The bound also allows captures of 2D games and clear-only bugs.
+static inline int vk_pd_wait_for_scene(unsigned *waited, unsigned limit, int has_scene) {
+    if (has_scene || *waited >= limit) return 0;
+    ++*waited;
+    return 1;
+}
 // Hash the exact GPU readback bytes, not an 8-bit preview with clipped HDR.
 static inline uint64_t vk_pd_hash(const void *data, size_t size) {
     const uint8_t *p = (const uint8_t *)data;

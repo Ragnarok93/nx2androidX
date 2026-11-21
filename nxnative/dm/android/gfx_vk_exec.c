@@ -423,6 +423,9 @@ static int g_pd_prepass_written; // only the first eligible depth-only pass of a
 static int g_pd_full, g_pd_effects, g_pd_shadow_reads;
 static int g_pd_mrt_written, g_pd_effect_images, g_pd_alias_images;
 static atomic_int g_pd_user_pending;
+static int g_pd_frame_has_scene;
+static unsigned g_pd_scene_waited;
+enum { PD_SCENE_WAIT_LIMIT = 120 };
 int vk_pass_dump_user_begin(void) { return !atomic_exchange(&g_pd_user_pending, 1); }
 static uint32_t g_pd_scene_w, g_pd_scene_h;
 static uint64_t g_pd_capture_id;
@@ -843,9 +846,28 @@ static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31,
     if (!e) { if (!m) f = s; else { e = 1; while (!(m & 1024)) { m <<= 1; e--; } m &= 1023; f = s | ((e + 112) << 23) | (m << 13); } } else if (e == 31) f = s | 0x7f800000 | (m << 13); else f = s | ((e + 112) << 23) | (m << 13);
     float r; memcpy(&r, &f, 4); return r; }
 void vk_pass_dump_poll(uint64_t done_fence, vkimg_t *present, const int crop[4]) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
+    int had_scene = g_pd_frame_has_scene;
+    g_pd_frame_has_scene = 0;
     const char *e = getenv("DM_VK_PASSDUMP");
-    if (g_pd_state == 0 && e && atoi(e) > 1) { char n[16]; snprintf(n, sizeof n, "%d", atoi(e) - 1); setenv("DM_VK_PASSDUMP", n, 1); return; }   // =N: the frame after N - 1 more presents
-    if (g_pd_state == 0 && e && atoi(e)) { const char *sk = getenv("DM_VK_PASSDUMP_SKIP"); g_pd_skip = sk && !strchr(sk, 'x') ? atoi(sk) : 0;
+    if (g_pd_state == 0 && e && atoi(e) > 1) {
+        g_pd_scene_waited = 0;
+        char n[16];
+        snprintf(n, sizeof n, "%d", atoi(e) - 1);
+        setenv("DM_VK_PASSDUMP", n, 1);
+        return;
+    }
+    if (g_pd_state == 0 && e && atoi(e)) {
+        if (atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed)) {
+            if (vk_pd_wait_for_scene(&g_pd_scene_waited, PD_SCENE_WAIT_LIMIT, had_scene)) return;
+            char start[32];
+            snprintf(start, sizeof start, "%llu", (unsigned long long)(g_tex_frame + 1));
+            setenv("DM_VK_LIST_AT", start, 1);
+            setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
+            VKLOG("[diagnostics] capturing after %u presents: %s", g_pd_scene_waited,
+                  had_scene ? "geometry observed in preceding frame" : "scene wait limit reached");
+        }
+        const char *sk = getenv("DM_VK_PASSDUMP_SKIP");
+        g_pd_skip = sk && !strchr(sk, 'x') ? atoi(sk) : 0;
         snprintf(g_pd_from, sizeof g_pd_from, "%s", sk && strchr(sk, 'x') ? sk : "");
         const char *sz = getenv("DM_VK_PASSDUMP_SIZE"); snprintf(g_pd_size, sizeof g_pd_size, "%s", sz && strcmp(sz, "0") ? sz : "");
         { const char *td = getenv("DM_VK_TEXDUMP"); const char *pl = td ? strchr(td, '+') : NULL; g_td_pool = pl ? strtoull(td, NULL, 16) : 0; g_td_off = pl ? strtoll(pl + 1, NULL, 16) : -1; g_td_im = NULL; g_td_done = 0; }
@@ -870,6 +892,9 @@ void vk_pass_dump_poll(uint64_t done_fence, vkimg_t *present, const int crop[4])
     static uint64_t capture_fence;
     if (g_pd_state == 1 && (g_pd_full || g_npd || g_input_count)) {
         if (g_pd_full) {
+            VKLOG("[diagnostics] captured present %llu: depth geometry %d, full prepass %d, full MRT %d, indexed inputs %u",
+                  (unsigned long long)g_tex_frame, had_scene, g_pd_prepass_written,
+                  g_pd_mrt_written, (unsigned)g_input_count);
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             surface_binding_t binding = surface_binding(present, present ? present->full : VK_NULL_HANDLE,
                 present ? present->fmt : VK_FORMAT_UNDEFINED, range, -1, -1, 0);
@@ -1101,6 +1126,9 @@ static void bc_draw_back(void) {
 }
 void vk_end_pass(void) {
     if (g_x_listpasses && S.pass_open == 1) { Dl_info di; void *ra = __builtin_return_address(0); uintptr_t base = dladdr((void *)vk_end_pass, &di) ? (uintptr_t)di.dli_fbase : 0; VKLOG("    ended from %#llx (%llu draws)", (unsigned long long)((uintptr_t)ra - base), (unsigned long long)g_pass_draws); list_reads("it"); }   // (DM_VK_TRACE_PASS=-2: who ends each pass)
+    if (S.pass_open == 1 && g_pass_draws >= 8 && P_ri.pDepthAttachment &&
+        atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed))
+        g_pd_frame_has_scene = 1;
     if (S.pass_open == 2 && P_cleared) (void)pass_commit();   // only clears: the pass still runs, for its load ops
     if (S.pass_open == 1) { if (S.rp_pass) vkCmdEndRenderPass(vk_cmd()); else vkCmdEndRendering(vk_cmd()); if (g_input_pending) input_capture_end_pass(); bc_draw_back(); void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(1, S.pass_w, S.pass_h, (uint32_t)S.cfmt[0], (uint32_t)g_pass_draws | (g_pass_draws ? (uint32_t)((g_pass_bb[2] - g_pass_bb[0]) & 0xffff) << 16 : 0));  pass_dump(); if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) { setenv("DM_VK_TRACE_PASS", "-1", 1); g_x_tracepass = -1; } }
     if (S.pass_open == 1 && g_lin_back && g_pass_draws) lin_back();
@@ -1515,6 +1543,7 @@ static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); un
     if (ok) { pthread_mutex_lock(&g_pipe_mu); if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, PIPE_PENDING); pthread_mutex_unlock(&g_pipe_mu); }
     return ok;
 }
+uint64_t g_graphics_demand_builds, g_graphics_demand_ns;
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     if (g_last_p && !memcmp(k, &g_last_k, sizeof *k)) return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p;
     pthread_mutex_lock(&g_pipe_mu); VkPipeline p = nvn_hm_get(&g_pipes, k); pthread_mutex_unlock(&g_pipe_mu);
@@ -1522,7 +1551,19 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     if (p) { g_last_k = *k; g_last_p = p; return p == (void *)1 ? VK_NULL_HANDLE : p; }
     if (async_pipe(k)) return VK_NULL_HANDLE;
     vkshader_t *stg[3] = {S.sh[0], S.sh[1], S.sh[2]};
-    uint64_t tb = g_prof_on ? tick() : 0; p = build_pipeline(k, layout, stg); if (g_prof_on) g_prof_ns[0] += tick() - tb;
+    uint64_t start = tick();
+    p = build_pipeline(k, layout, stg);
+    uint64_t elapsed = tick() - start;
+    g_graphics_demand_builds++;
+    g_graphics_demand_ns += elapsed;
+    if (g_prof_on) g_prof_ns[0] += elapsed;
+    if (elapsed >= 8000000) {
+        static unsigned reported;
+        if (reported++ < 32)
+            VKLOG("graphics first use: present %llu VS %016llx FS %016llx GS %016llx %.2f ms",
+                  (unsigned long long)g_tex_frame, (unsigned long long)k->key[0],
+                  (unsigned long long)k->key[1], (unsigned long long)k->key[2], elapsed / 1e6);
+    }
     pthread_mutex_lock(&g_pipe_mu);
     VkPipeline had = nvn_hm_get(&g_pipes, k);
     if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; }   // a prewarm thread made it meanwhile
@@ -1898,6 +1939,9 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
             uint64_t key = S.sh[st]->key;
             if (vk_tex_trace_alias(im, key, st, b->binding, g_set_epoch, g_sub_pass - 1, g_pd_capture_id,
                                    trace_surface ? &producer : NULL) && trace_surface) {
+                VKLOG("[alias-registration] serial %llu %ux%u mips %u texture flags %#x pool flags %#x, layout %u packaged data %u",
+                      (unsigned long long)t->serial, t->d.width, t->d.height, t->d.levels, t->d.flags,
+                      t->pool ? t->pool->flags : 0u, t->has_layout, t->has_pkg_data);
                 surface_alias_add("alias-consumer", im, ii->imageView, vk_view_fmt,
                                   vk_view_range, st, b->binding, key);
                 VkImageAspectFlags aspect = producer.aspect & (~producer.aspect + 1);

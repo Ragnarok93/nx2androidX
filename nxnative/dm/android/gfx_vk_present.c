@@ -1189,6 +1189,12 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         VKLOG("replay per frame (last 600): %.0f draws, replay %.2f ms (descriptor sets %.2f, pipeline keys %.2f), queue submit %.2f ms, uniform shadows %.0f KB; GPU busy %.2f ms; texture uploads %.1f (%.2f MB, %.2f ms); descriptor sets reused %llu, new %llu, key arena bypasses %llu (collecting %.2f ms, hashing %.2f, new ones %.2f), kept per stage %.0f a frame (memo differences %llu)",
               nd, (g_vkst.ns_exec - pe) / 6e8, (g_vkst.ns_desc - pd) / 6e8, (g_vkst.ns_pipe - pp) / 6e8, (g_ns_submit - ps) / 6e8, (g_ubd_bytes - pb) / 600.0 / 1024, (g_gpu_ns - pg) / 6e8, (g_pkg_n - pkn) / 600.0, (g_pkg_bytes - pkb) / 600.0 / 1048576, (g_pkg_ns - pkt) / 6e8, (unsigned long long)g_set_hits, (unsigned long long)g_set_new, (unsigned long long)g_set_key_bypass, (g_ns_set_build - psb) / 6e8, (g_ns_set_hash - psh) / 6e8, (g_ns_set_new - psn) / 6e8,
               (g_set_memo - psm) / 600.0, (unsigned long long)g_set_memo_bad);
+        { extern uint64_t g_graphics_demand_builds, g_graphics_demand_ns;
+          static uint64_t builds, ns;
+          VKLOG("graphics pipelines (last 600): %llu built on demand, %.2f ms creating",
+                (unsigned long long)(g_graphics_demand_builds - builds),
+                (g_graphics_demand_ns - ns) / 1e6);
+          builds = g_graphics_demand_builds; ns = g_graphics_demand_ns; }
         { extern uint64_t g_compute_attempts, g_compute_failed, g_compute_compile_ns, g_compute_wait_ns;
           static uint64_t attempts, failed, compile, wait;
           VKLOG("compute (last 600): %llu attempted, %llu skipped, %.2f ms compiling, %.2f ms waiting for same-key prewarm",

@@ -73,7 +73,7 @@ static VkImageView dummy;
 static int dummy_dim, dummy_arr, dummy_ms, dummy_storage, dummy_int;
 static vkfmt_t format = {.vk=VK_FORMAT_R8G8B8A8_UNORM, .kind=1, .bpb=4};
 static const vkfmt_t *vk_fmt(int f) { (void)f; return &format; }
-static vkimg_t *vk_tex(const tex_t *t) { (void)t; return &image; }
+static vkimg_t *vk_tex_get(const tex_t *t, int sampled) { (void)t; (void)sampled; return &image; }
 static void alias_check(vkimg_t *im) { (void)im; }
 // gfx_vk.h declares this; vk_tex_view calls it before its definition
 VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arrayed, int as_attachment, vkimg_t **img_out, VkFormat vfmt);

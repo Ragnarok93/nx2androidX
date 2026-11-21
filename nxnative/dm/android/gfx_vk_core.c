@@ -229,6 +229,10 @@ void vk_init(void) {
     VkQueueFamilyProperties qp[16]; if (qn > 16) qn = 16; vkGetPhysicalDeviceQueueFamilyProperties(V.pd, &qn, qp);
     V.qf = 0; while (V.qf < qn && (qp[V.qf].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) V.qf++;
     if (V.qf == qn) die("[vk] no graphics + compute queue");
+    for (uint32_t i = 0; i < qn; i++)
+        VKLOG("queue family %u: %u queues, flags %#x, %u timestamp bits%s",
+              i, qp[i].queueCount, qp[i].queueFlags, qp[i].timestampValidBits,
+              i == V.qf ? " (using one graphics + compute queue)" : "");
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(V.pd, NULL, &ne, NULL);
     VkExtensionProperties *ex = calloc(ne, sizeof *ex); vkEnumerateDeviceExtensionProperties(V.pd, NULL, &ne, ex);
     const char *want[] = {"VK_KHR_swapchain", "VK_ANDROID_external_memory_android_hardware_buffer", "VK_EXT_queue_family_foreign", "VK_EXT_custom_border_color",

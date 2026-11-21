@@ -44,6 +44,11 @@ int main(void) {
     assert(vk_pd_effect_color(1,692,390,1384,780)); // translucency
     assert(!vk_pd_effect_color(1,346,195,1384,780)); // bloom pyramid
     assert(vk_pd_effect_color(1,1920,1080,1384,780)); // composition
+    unsigned waited = 0;
+    assert(vk_pd_wait_for_scene(&waited,2,0) && waited==1);
+    assert(!vk_pd_wait_for_scene(&waited,2,1) && waited==1);
+    assert(vk_pd_wait_for_scene(&waited,2,0) && waited==2);
+    assert(!vk_pd_wait_for_scene(&waited,2,0) && waited==2);
     uint32_t ctrl[] = {0x009fffffu,0xab9ffffeu,0x009fffffu,0x00a00000u,0x00000000u};
     assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,1)==4);
     assert(vk_pd_d24_matches(ctrl,5,0x9fffffu,0)==2);

@@ -361,6 +361,16 @@ static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
     if (im->packaged < 100) im->packaged++;
     VkCommandBuffer cb = vk_upload_cmd();
     if (im->layout != VK_IMAGE_LAYOUT_GENERAL) vk_tex_prepare(cb, im);
+    else {
+        // A streamed replacement must follow any GPU use of the old contents.
+        VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED,
+            VK_QUEUE_FAMILY_IGNORED, im->img,
+            {im->aspect, 0, im->levels, 0, im->layers}};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, NULL, 0, NULL, 1, &b);
+    }
     const uint8_t *mem = t->mem; uint8_t *copy = NULL;
     if ((im->pkg_sparse = sparse_tex(t))) {   // through the page table (see above); its physical pages stay protected, so no sweep releases them (pkg_mem NULL)
         im->pkg_vgen = nvn_sparse_gen(); nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); im->pkg_stamp = nvn_dirty_now(); im->pkg_seen = im->pkg_stamp;
@@ -406,6 +416,7 @@ static void pkg_upload_(vkimg_t *im, const tex_t *t, const vkfmt_t *f) {
 }
 static int packaged_tex(const tex_t *t);
 static int cpu_content_tex(const tex_t *t, const vkfmt_t *f);
+static int uncached_material_storage(const tex_t *t);
 static int lin_copy(vkimg_t *im, const tex_t *t, const vkfmt_t *f);
 static void vk_tex_view_drop_all(vkimg_t *im);
 // Images over the same memory with different descriptions (the storage key differs) are separate Vulkan images: on the Switch a texture sees what another
@@ -487,10 +498,11 @@ static void evict_overlaps(uint64_t pool, int64_t off, int64_t size) {
     }
     for (int j = 0; j < n; j++) { vkimg_t *o = nvn_hm_get(&g_by_key, &ks[j]); if (!o) continue; nvn_hm_del(&g_by_key, &ks[j]); img_drop(o); g_img_evicted++; }
 }
-static vkimg_t *vk_tex_(const tex_t *t);
-vkimg_t *vk_tex(const tex_t *t) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
-    vkimg_t *im = vk_tex_(t); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[1] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return im; }
-static vkimg_t *vk_tex_(const tex_t *t) {
+static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled);
+static vkimg_t *vk_tex_get(const tex_t *t, int sampled) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
+    vkimg_t *im = vk_tex_lookup(t, sampled); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[1] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return im; }
+vkimg_t *vk_tex(const tex_t *t) { return vk_tex_get(t, 0); }
+static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     if (!t || !t->serial || t->magic != MAGIC('T', 'E', 'X', 0)) return NULL;
     const vkfmt_t *f = vk_fmt(t->d.format);
     if (!f) { VKRED_ONCE(14, "texture format %#x has no Vulkan counterpart here (first case %ux%u target %d)", t->d.format, t->d.width, t->d.height, t->d.target); return NULL; }
@@ -534,12 +546,27 @@ static vkimg_t *vk_tex_(const tex_t *t) {
     // A streamed BC texture can be registered under a new serial while
     // keeping the same cached image. Its CPU-write mark belonged to the
     // old serial, but the image still tracks this exact CPU storage range.
-    int tracked_cpu_blocks = im->packaged && f->compressed && !im->gpu_w &&
-        !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && im->pkg_mem == t->mem && im->pkg_len == t->L.size;
+    // A prior CopyBufferToTexture does not end CPU tracking. Unchanged
+    // guest bytes still preserve its GPU result in the hash check below.
+    int material = sampled && keyed && uncached_material_storage(t);
+    int tracked_cpu_storage = im->packaged && im->pkg_mem == t->mem &&
+        im->pkg_len == t->L.size && ((f->compressed && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) || material);
     if (t->mem && lin_copy(im, t, f)) {}
-    else if (t->mem && (tracked_cpu_blocks || packaged_tex(t) || (first && (nvn_ft_written(t) || cpu_content_tex(t, f))))) {
+    else if (t->mem && (tracked_cpu_storage || packaged_tex(t) ||
+                        (first && (material || nvn_ft_written(t) || cpu_content_tex(t, f))))) {
         im->pkg_used = g_tex_frame;
-        if (!im->packaged) { im->packaged = 1; pkg_upload(im, t, f); }
+        if (!im->packaged) {
+            im->packaged = 1;
+            pkg_upload(im, t, f);
+            if (material) {
+                static unsigned reported;
+                if (reported++ < 24)
+                    VKLOG("uncached material upload: present %llu serial %llu %ux%u format %#x levels %u pool %p+%#llx bytes %llu CPU hash %016llx",
+                          (unsigned long long)g_tex_frame, (unsigned long long)t->serial, t->d.width, t->d.height,
+                          t->d.format, t->d.levels, (void *)t->pool, (unsigned long long)t->off,
+                          (unsigned long long)t->L.size, (unsigned long long)im->pkg_hash);
+            }
+        }
         else {
             uint64_t now = nvn_dirty_now();
             if (im->pkg_sparse) { if (nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, im->pkg_vgen, im->pkg_stamp)) pkg_upload(im, t, f); }   // mapped or written since
@@ -658,10 +685,28 @@ static int mem_any(const uint8_t *p, uint64_t n) {   // whether any byte is non-
     for (; i < n; i++) if (p[i]) return 1;
     return 0;
 }
+// Some CPU-uncached material textures are filled in place after creation
+// without packaged metadata. Recognize plain R8 mip chains in profiles
+// that opt in. Track an initially empty chain too so late streaming is visible.
+static int uncached_material_storage(const tex_t *t) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = getenv("DM_VK_UNCACHED_MIP_INIT");
+        enabled = value && atoi(value) != 0;
+    }
+    const unsigned excluded = NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE |
+        NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR |
+        NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE;
+    return enabled && t->d.format == NVN_FORMAT_R8 && !t->has_layout &&
+        t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels > 1 && t->d.samples <= 1 &&
+        !(t->d.flags & excluded) && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) &&
+        (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED);
+}
 static int cpu_content_tex(const tex_t *t, const vkfmt_t *f) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
-    if (!on || !t->pool || t->has_layout || !(f->compressed || t->d.target == 2) || t->d.samples > 1) return 0;
-    if (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) return 0;
+    if (!on || !t->pool || t->has_layout || t->d.samples > 1 ||
+        (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;
+    if (!f->compressed && t->d.target != NVN_TEXTURE_TARGET_3D) return 0;
     // COMPRESSIBLE leaves out what the GPU may render into, which a block-compressed format never is: there the flag says nothing about who wrote the storage. With the
     // profile's tex_cpu_uncached it does not leave such a texture out: Cardfight!! Vanguard Dear Days 2 sets the flag on every texture and copies its BC7 font arrays
     // (1024x1024, 4 to 18 layers) into CPU-uncached pools with no flush; left out, they were images of zeros and no text was drawn anywhere
@@ -764,7 +809,7 @@ static int bc_standin_ok(const vkimg_t *im, const vkfmt_t *cf, const vkfmt_t *vf
     *bw_out = bw; *bh_out = bh; return 1;
 }
 VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arrayed, int as_attachment, vkimg_t **img_out, VkFormat vfmt) {
-    vkimg_t *im = vk_tex(t); if (img_out) *img_out = im;
+    vkimg_t *im = vk_tex_get(t, !as_attachment && !vfmt); if (img_out) *img_out = im;
     if (!im) return VK_NULL_HANDLE;
     if (as_attachment) vk_tex_mark_written(im); else if (im->novl) alias_check(im);
     vk_watch(im, as_attachment ? "attachment" : "sampled or image");

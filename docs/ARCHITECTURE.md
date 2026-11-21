@@ -51,6 +51,12 @@ the transfer; device loss reported by image creation or binding remains fatal. F
 when a view supplies one: sRGB clears encode RGB before clearing UNORM backing;
 alpha remains linear. Unsupported resolve format mismatches are diagnosed and skipped.
 
+The Vulkan profile option `DM_VK_UNCACHED_MIP_INIT=1` initializes
+plain sampled R8 2D mip chains from CPU-uncached guest pools and watches their
+storage for later uploads, including chains that start empty. Attachment and
+transfer lookups do not trigger this heuristic. The dirty-page reload path
+preserves GPU writes when the guest bytes are unchanged.
+
 The Vulkan pipeline cache is a writable driver product under `DM_ROOT`, separate
 from portable shader assets. Its envelope validates renderer ABI, device/driver
 identity, length and digest before driver creation. Legacy raw files retain the

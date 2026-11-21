@@ -716,11 +716,6 @@ static int diag_capture_arm(void) {
 
     extern uint64_t g_tex_frame;
     uint64_t frame = __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED);
-    char start[32];
-    snprintf(start, sizeof start, "%llu", (unsigned long long)(frame + 2));
-    setenv("DM_VK_LIST_AT", start, 1);
-    setenv("DM_VK_INDIRECT_LOG_AT", start, 1);
-
     snprintf(path, sizeof path, "%s/capture_meta.txt", g_root);
     FILE *f = fopen(path, "w");
     if (f) {
@@ -734,7 +729,7 @@ static int diag_capture_arm(void) {
             fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
         fclose(f);
     }
-    // Wait out the first post-menu present, then record the next gameplay frame.
+    // Wait out the first post-menu present before looking for scene geometry.
     setenv("DM_VK_PASSDUMP", "2", 1);
     atomic_store(&g_diag_status, DIAG_ARMED);
     LOG("[diagnostics] full graphics capture armed for the next gameplay frame");
@@ -1539,6 +1534,9 @@ static void tune_ffrs_s25fe_radv(void) {
         LOG("[profile] FFRS S25 FE/RADV: require first-use pipelines; async draw omission disabled");
     }
     setenv("DM_VK_COMPUTE_WARM_HISTORY", "1", 0);
+    // The geometry capture shows material shaders reading an uninitialized
+    // R8 mip chain. Apply the CPU-uncached upload path to existing packs too.
+    setenv("DM_VK_UNCACHED_MIP_INIT", "1", 0);
     // Qualcomm's LRZ copy/writeback workaround targets Adreno. The
     // Xclipse depth attachment format is selected from advertised support.
     if (!getenv("DM_VK_LRZ_TOUCH")) {

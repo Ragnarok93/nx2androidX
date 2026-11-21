@@ -52,7 +52,9 @@ static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uin
 static void nvn_dirty_protect(const void *mem,size_t size) {(void)mem;(void)size;}
 /* CACHE KEYS */
 /* CACHE LIFETIME */
+/* MATERIAL STORAGE */
 /* LOOKUP */
+static vkimg_t *vk_tex_(const tex_t *t) { return vk_tex_lookup(t, 1); }
 /* DROP POOL */
 static uint8_t storage[4096]={0x83};
 static pool_t pool={.mem=storage};
@@ -149,7 +151,30 @@ int main(void) {
     assert(vk_tex_(&b)==image && uploads==before+1);
     image->gpu_w=1; image->content=0x79; dirty_now++;
     assert(vk_tex_(&b)==image && image->content==0x79 && uploads==before+1);
-    storage[0]=0x83;
+    // Another CPU write to the recycled BC allocation wins over the old GPU copy.
+    storage[0]=0x68; dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==0x68 && uploads==before+2);
+
+    int material_enabled = atoi(getenv("DM_VK_UNCACHED_MIP_INIT"));
+    pool.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED;
+    reset();a=base_tex(NVN_FORMAT_R8,1);a.d.levels=4;
+    image=vk_tex_(&a);
+    assert(image->content==(material_enabled ? 0x68 : 0));
+    b=a;b.serial=2;storage[0]=0x12;dirty_now++;
+    assert(vk_tex_(&b)==image && image->content==(material_enabled ? 0x12 : 0));
+    // The first texture lookup as an attachment/copy destination never
+    // classifies stale bytes as a material upload.
+    reset();image=vk_tex_lookup(&a,0);image->gpu_w=1;image->content=0x65;
+    assert(vk_tex_(&a)==image && image->content==0x65);
+    reset();a.d.flags=NVN_TEXTURE_FLAGS_IMAGE;assert(vk_tex_(&a)->content==0);
+    reset();a.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE;assert(vk_tex_(&a)->content==0);
+    reset();a.d.flags=0;a.d.levels=1;assert(vk_tex_(&a)->content==0);
+    reset();a.d.levels=4;pool.flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED;
+    assert(vk_tex_(&a)->content==0);
+    reset();pool.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED;storage[0]=0;
+    assert(vk_tex_(&a)->content==0 && !!vk_tex_(&a)->packaged==material_enabled);
+    storage[0]=0x83;dirty_now++;
+    assert(vk_tex_(&a)->content==(material_enabled ? 0x83 : 0));
     reset();free(g_by_key.keys);free(g_by_key.vals);free(g_by_serial.keys);free(g_by_serial.vals);
     assert(created==dropped);puts("family pairs, metadata peers, upload visibility, closure and unique retirement passed");
 }
