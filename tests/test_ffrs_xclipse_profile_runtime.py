@@ -6,14 +6,14 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-FRONT = ROOT / "nxnative/dm/android/front_android.c"
+PROFILE = ROOT / "nxnative/dm/android/front_profile.h"
 
 @unittest.skipUnless(shutil.which("cc"), "C compiler required")
 class FFRSXclipseProfileRuntime(unittest.TestCase):
     def test_no_speculative_defaults_and_preserves_explicit_overrides(self):
-        src = FRONT.read_text(encoding="utf-8")
-        fn = src[src.index("static void tune_ffrs_s25fe_radv(void) {"):
-                 src.index("static void host_start_common(")]
+        src = PROFILE.read_text(encoding="utf-8")
+        fn = src[src.index("static inline void tune_ffrs_s25fe_radv(void) {"):
+                 src.index("#endif")]
         code = r'''
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
@@ -32,7 +32,7 @@ static void clean(void) {
     const char *keys[] = {"DM_FFRS_S25FE_RADV_TUNE","DM_VK_DRIVER","DM_FPS_TARGET",
                           "DM_OPMODE","RADV_XCLIPSE_DCC_SMALL","DM_VK_RP",
                           "RADV_XCLIPSE_DLC","DM_VK_MT_REPLAY","DM_VK_ASYNC_PIPE",
-                          "DM_VK_LRZ_TOUCH","DM_VK_D24_FLOAT_COPY"};
+                          "DM_VK_LRZ_TOUCH","DM_VK_D24_FLOAT_COPY","DM_VK_UNCACHED_MIP_INIT"};
     for (unsigned i=0; i<sizeof keys/sizeof keys[0]; ++i) unsetenv(keys[i]);
 }
 int main(void) {
@@ -41,16 +41,19 @@ int main(void) {
     tune_ffrs_s25fe_radv();
     assert(getenv("DM_FPS_TARGET")==NULL); // opt-in needed
     assert(getenv("DM_VK_ASYNC_PIPE")==NULL);
+    assert(getenv("DM_VK_UNCACHED_MIP_INIT")==NULL);
     setenv("DM_FFRS_S25FE_RADV_TUNE","1",1);
     strcpy(phone,"SM-S938B");
     tune_ffrs_s25fe_radv();
     assert(getenv("DM_FPS_TARGET")==NULL); // other Samsung models unaffected
     assert(getenv("DM_VK_ASYNC_PIPE")==NULL);
+    assert(getenv("DM_VK_UNCACHED_MIP_INIT")==NULL);
     strcpy(phone,"SM-S731U");
     setenv("DM_VK_DRIVER","libvulkan_adreno.so",1);
     tune_ffrs_s25fe_radv();
     assert(getenv("DM_FPS_TARGET")==NULL); // Adreno path unaffected
     assert(getenv("DM_VK_ASYNC_PIPE")==NULL);
+    assert(getenv("DM_VK_UNCACHED_MIP_INIT")==NULL);
     setenv("DM_VK_DRIVER","libvulkan_radeon.so",1);
     assert(getenv("DM_VK_LRZ_TOUCH")==NULL);
     assert(getenv("DM_VK_D24_FLOAT_COPY")==NULL);
@@ -58,6 +61,7 @@ int main(void) {
     assert(!strcmp(getenv("DM_FPS_TARGET"),"30"));
     assert(!strcmp(getenv("DM_VK_ASYNC_PIPE"),"0"));
     assert(!strcmp(getenv("DM_VK_LRZ_TOUCH"),"0"));
+    assert(!strcmp(getenv("DM_VK_UNCACHED_MIP_INIT"),"1"));
     assert(getenv("DM_VK_D24_FLOAT_COPY")==NULL);
     assert(!getenv("DM_OPMODE") && !getenv("RADV_XCLIPSE_DCC_SMALL"));
     assert(!getenv("DM_VK_RP") && !getenv("RADV_XCLIPSE_DLC"));
@@ -65,6 +69,7 @@ int main(void) {
     setenv("DM_FPS_TARGET","60",1);
     setenv("DM_VK_ASYNC_PIPE","1",1);
     setenv("DM_VK_LRZ_TOUCH","14",1);
+    setenv("DM_VK_UNCACHED_MIP_INIT","0",1);
     setenv("DM_VK_D24_FLOAT_COPY","0",1);
     setenv("DM_OPMODE","1",1);
     setenv("RADV_XCLIPSE_DCC_SMALL","1",1);
@@ -75,6 +80,7 @@ int main(void) {
     assert(!strcmp(getenv("DM_FPS_TARGET"),"60"));
     assert(!strcmp(getenv("DM_VK_ASYNC_PIPE"),"1"));
     assert(!strcmp(getenv("DM_VK_LRZ_TOUCH"),"14"));
+    assert(!strcmp(getenv("DM_VK_UNCACHED_MIP_INIT"),"0"));
     assert(!strcmp(getenv("DM_VK_D24_FLOAT_COPY"),"0"));
     assert(!strcmp(getenv("DM_OPMODE"),"1"));
     assert(!strcmp(getenv("RADV_XCLIPSE_DCC_SMALL"),"1"));

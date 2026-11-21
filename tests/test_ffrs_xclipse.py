@@ -56,9 +56,7 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('entries++ >= 48', exec_src)
 
     def test_xclipse_tuning_is_device_scoped_without_unproven_driver_defaults(self):
-        src = FRONT.read_text(encoding="utf-8")
-        tune = src[src.index("static void tune_ffrs_s25fe_radv(void) {"):
-                   src.index("static void host_start_common(")]
+        tune = FRONT.with_name("front_profile.h").read_text(encoding="utf-8")
         self.assertIn('strncmp(model, "SM-S731", 7)', tune)
         self.assertIn('strstr(driver, "radeon")', tune)
         self.assertIn('strstr(driver, "radv")', tune)
@@ -72,10 +70,12 @@ class ResonanceXclipseTests(unittest.TestCase):
         for speculative in ("DM_OPMODE", "RADV_XCLIPSE_DCC_SMALL",
                             "DM_VK_RP", "RADV_XCLIPSE_DLC", "DM_VK_MT_REPLAY"):
             self.assertNotIn(f'setenv("{speculative}"', tune)
-        start = src.index("static void host_start_common(")
-        code = src[start:src.index("static void host_start(", start)]
-        self.assertLess(code.index("env_file(p);"), code.index("tune_ffrs_s25fe_radv();"))
-        self.assertLess(code.index("tune_ffrs_s25fe_radv();"), code.index("settings_load();"))
+        for front in (FRONT, FRONT.with_name("front_player.c")):
+            src = front.read_text(encoding="utf-8")
+            code = src[src.index("static void host_start_common("):]
+            self.assertIn('#include "front_profile.h"', src)
+            self.assertLess(code.index("env_file(p);"), code.index("tune_ffrs_s25fe_radv();"))
+            self.assertLess(code.index("tune_ffrs_s25fe_radv();"), code.index("settings_load();"))
 
 
 if __name__ == "__main__":
