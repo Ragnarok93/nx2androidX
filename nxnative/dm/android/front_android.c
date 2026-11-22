@@ -69,6 +69,7 @@ static char g_root[512];
 const char *dm_front_root(void) { return g_root; }   // overlay_theme.c: the player's path has no APK assets, the theme comes from the pack's overlay/
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // gamepad, rumble, frame rate
 static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalone FG preferences
+static _Atomic int g_set_fsr, g_set_fsr_sharp = 50;                 // FSR 1 spatial upscaling and RCAS 0..100
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid
@@ -87,6 +88,10 @@ static void settings_load(void) {
     if ((fg_env = getenv("DM_LSFG_FLOW"))) {
         int n = atoi(fg_env); atomic_store(&g_set_fg_flow, n <= 0 ? 0 : n < 25 ? 25 : n > 100 ? 100 : n);
     }
+    if ((fg_env = getenv("DM_FSR"))) atomic_store(&g_set_fsr, atoi(fg_env) != 0);
+    if ((fg_env = getenv("DM_FSR_SHARPNESS"))) {
+        int v = atoi(fg_env); atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
+    }
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
     if (!f) return;
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
@@ -97,6 +102,8 @@ static void settings_load(void) {
         else if (sscanf(line, "fg=%d", &v) == 1) atomic_store(&g_set_fg, v != 0);
         else if (sscanf(line, "fg_mult=%d", &v) == 1) atomic_store(&g_set_fg_mult, v < 2 ? 2 : v > 4 ? 4 : v);
         else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow, v <= 0 ? 0 : v < 25 ? 25 : v > 100 ? 100 : v);
+        else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_fsr, v != 0);
+        else if (sscanf(line, "fsr_sharp=%d", &v) == 1) atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
         else if (!strncmp(line, "ui=", 3)) {   // ui=<layout>,<control>,<x>,<y>,<size>: x, y in 1/10000 of the window (-1 the layout's place), size in 1/1000
             char lay[16], name[32]; int x, y, z, l, i;
             if (sscanf(line + 3, "%15[^,],%31[^,],%d,%d,%d", lay, name, &x, &y, &z) != 5 || (i = ctl_named(name)) < 0) continue;
@@ -112,8 +119,9 @@ static void settings_load(void) {
 static void settings_save(void) {
     char p[600], tmp[610]; snprintf(p, sizeof p, "%s/settings.txt", g_root); snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
-    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
-            atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow));
+    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\nfsr=%d\nfsr_sharp=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
+            atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow),
+            atomic_load(&g_set_fsr), atomic_load(&g_set_fsr_sharp));
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
         _Atomic int *c = g_cust[0][l][i]; int x = atomic_load(&c[0]), y = atomic_load(&c[1]), z = atomic_load(&c[2]);
         if ((x && y) || z) fprintf(f, "ui=%s,%s,%d,%d,%d\n", LAYOUT_NAMES[l], OV_LAYOUTS[0][i].name, x && y ? x - 1 : -1, x && y ? y - 1 : -1, z ? z : 1000);
@@ -592,8 +600,10 @@ int dm_menu_state(void) {
     if (atomic_load(&g_edit)) return OVE_ST | atomic_load(&g_ed_st);
     if (atomic_load(&g_sp_on)) return OVS_ST | (atomic_load(&g_sp_hi) + 1) << 4 | (atomic_load(&g_sp_ver) & 255) << 20;
     return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 | atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
-           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24;
+           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 | atomic_load(&g_set_fsr) << 8 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24;
 }
+int dm_fsr_enabled(void) { return atomic_load(&g_set_fsr); }
+int dm_fsr_sharpness(void) { return atomic_load(&g_set_fsr_sharp); }
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
 static void menu_open(int hi) {
     if (!atomic_load(&g_running) || atomic_exchange(&g_menu, 1)) return;
@@ -618,6 +628,10 @@ static void menu_close(void) {
     hold_sync(); dm_haptics_suspend(4, 0); dm_overlay_redraw();
     LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, frame rate %s, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
         atomic_load(&g_set_rumble) ? "on" : "off", atomic_load(&g_set_fps) ? "shown" : "hidden", dm_opmode() ? "docked" : "handheld");
+}
+static void menu_fsr_sharp(int v) {
+    v = v < 0 ? 0 : v > 100 ? 100 : v;
+    if (atomic_exchange(&g_set_fsr_sharp, v) != v) { dm_haptics_android_tap(); dm_overlay_redraw(); }
 }
 static void menu_opacity(int v) {   // the slider: a new value is drawn at once and saved when the finger lifts (menu_touch) or with each controller step
     v = v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v;
@@ -684,6 +698,8 @@ static void menu_do(int item) {
     if (item == OVM_OVERLAY) { atomic_store(&g_set_overlay, !atomic_load(&g_set_overlay)); atomic_store(&g_overlay, 1); settings_save(); }
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
+    else if (item == OVM_FSR) { atomic_store(&g_set_fsr, !atomic_load(&g_set_fsr)); settings_save(); }
+    else if (item == OVM_FSR_SHARP) return;
     else if (item == OVM_MODE) { dm_set_opmode(dm_opmode() ? 0 : 1); settings_save(); }   // the game takes it when it goes on
     else if (item == OVM_FG) {
         if (!atomic_load(&g_set_fg) && !dm_menu_fg_has_dll()) {
@@ -714,17 +730,19 @@ static void menu_touch(const dm_java_event *e, float W, float H) {   // a press 
         g_menu_ptr = id; g_menu_row = row;
         if (item == OVM_TAB) menu_tab(ov_menu_tab_at(x, p));   // a tab opens as the finger touches it
         else if (item == OVM_OPACITY) menu_opacity(ov_menu_track_value(x, p, row));
+        else if (item == OVM_FSR_SHARP) menu_fsr_sharp(ov_menu_sharp_value(x, p, row));
         if (row >= 0) { atomic_store(&g_menu_hi, item >= 0 ? row : -1); dm_overlay_redraw(); }
     } else if (act == AMOTION_EVENT_ACTION_MOVE && g_menu_ptr >= 0 && g_menu_row >= 0) {   // the slider follows the finger; another row's highlight follows it off the row and back
         for (int k = 0; k < e->pointers; k++) if ((e->ptr[k].id & 31) == g_menu_ptr) {
             float kx = e->ptr[k].x, ky = e->ptr[k].y;
             if (ov_menu_item(tab, g_menu_row) == OVM_OPACITY) { menu_opacity(ov_menu_track_value(kx, p, g_menu_row)); continue; }
+            if (ov_menu_item(tab, g_menu_row) == OVM_FSR_SHARP) { menu_fsr_sharp(ov_menu_sharp_value(kx, p, g_menu_row)); continue; }
             int r = ov_menu_row_at(kx, ky, W, H), hi = r == g_menu_row && ov_menu_item(tab, r) >= 0 ? r : -1;
             if (atomic_exchange(&g_menu_hi, hi) != hi) dm_overlay_redraw();
         }
     } else if ((act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) && id == g_menu_ptr) {
         int down = g_menu_row; g_menu_ptr = -1; atomic_store(&g_menu_hi, -1);
-        if (down >= 0 && ov_menu_item(tab, down) == OVM_OPACITY) { settings_save(); dm_overlay_redraw(); }
+        if (down >= 0 && (ov_menu_item(tab, down) == OVM_OPACITY || ov_menu_item(tab, down) == OVM_FSR_SHARP)) { settings_save(); dm_overlay_redraw(); }
         else if (row == down && item >= 0 && item != OVM_TAB) menu_do(item);
         else if (row == down && (row == -2 || row == -3)) { dm_haptics_android_tap(); menu_close(); }
         else dm_overlay_redraw();
@@ -739,6 +757,7 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
         for (int k = 0; k < OVM_ROWS; k++) { hi = hi < 0 ? (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1) : (hi + (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1)) % OVM_ROWS; if (ov_menu_item(tab, hi) >= 0) break; }
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
     } else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_OPACITY) { menu_opacity(atomic_load(&g_set_opacity) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FSR_SHARP) { menu_fsr_sharp(atomic_load(&g_set_fsr_sharp) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_MULT) { fg_mult_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_FLOW) { fg_flow_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(tab + (bit == DM_BTN_LEFT ? -1 : 1));

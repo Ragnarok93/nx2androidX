@@ -163,17 +163,17 @@ void dm_overlay_theme_done(const ov_theme *t);   // the pixels are on the GPU: t
 
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
-enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
+enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER, OVM_FSR, OVM_FSR_SHARP, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
             // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
             // OVM_PAD: a controller's face buttons by their position or by their label (front_player.c pad_labels)
 #define OVM_TABS 3
-#define OVM_PER_TAB 5
+#define OVM_PER_TAB 6
 static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {
-    {OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD},
-    {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO},
-    {OVM_FPS, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER}
+    {OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1},
+    {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO, -1},
+    {OVM_FSR, OVM_FSR_SHARP, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER}
 };
-static const char *const OVM_TAB_NAMES[OVM_TABS] = {"Gamepad", "Game", "Performance"};
+static const char *const OVM_TAB_NAMES[OVM_TABS] = {"Gamepad", "Game", "Graphics"};
 #define OVM_ROWS (OVM_PER_TAB + 2)   // the tabs, a tab's rows (as many for every tab: the panel keeps its size), Resume
 int dm_menu_audio_available(void);
 static inline int ov_menu_item(int tab, int row) {
@@ -213,6 +213,10 @@ static inline void ov_menu_track(const float p[4], int row, float t[3]) { float 
 static inline int ov_menu_track_value(float x, const float p[4], int row) {   // the opacity a finger at x sets, whole 5 percents
     float t[3]; ov_menu_track(p, row, t); float f = (x - t[0]) / t[2]; f = f < 0 ? 0 : f > 1 ? 1 : f;
     return OV_OPACITY_MIN + 5 * (int)lroundf(f * (OV_OPACITY_MAX - OV_OPACITY_MIN) / 5);
+}
+static inline int ov_menu_sharp_value(float x, const float p[4], int row) {
+    float t[3]; ov_menu_track(p, row, t); float f = (x - t[0]) / t[2]; f = f < 0 ? 0 : f > 1 ? 1 : f;
+    return 5 * (int)lroundf(f * 20);
 }
 
 // ---- the layout editor: the app's own now (it is drawn and driven there, over the game's frame; the host keeps the layout's data and the sizes below).

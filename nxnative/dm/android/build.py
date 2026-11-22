@@ -73,9 +73,9 @@ if NX2A_ARM_HOST and host_dir('shader-tools', 'glslc') != 'linux-aarch64':   # t
     GLSLC = Path(_glslc)
 for sh in sorted((DM / 'android/shaders').glob('*.*')):
     hdr = gen / a.game / f'{sh.stem}_{sh.suffix[1:]}.spv.h'
-    if hdr.exists() and hdr.stat().st_mtime >= sh.stat().st_mtime: continue
+    if hdr.exists() and hdr.stat().st_mtime >= max([sh.stat().st_mtime] + [h.stat().st_mtime for h in (DM / 'android/shaders/include').glob('*.h')]): continue
     spv = gen / f'{sh.name}.spv'
-    subprocess.run([str(GLSLC), '--target-env=vulkan1.1', '-O', str(sh), '-o', str(spv)], check=True)
+    subprocess.run([str(GLSLC), '--target-env=vulkan1.1', '-O', '-I' + str(DM / 'android/shaders/include'), str(sh), '-o', str(spv)], check=True)
     words = spv.read_bytes(); n = len(words) // 4
     import struct as _st
     body = ', '.join(f'{w:#010x}' for w in _st.unpack(f'<{n}I', words))
