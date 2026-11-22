@@ -1456,6 +1456,14 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("DM_OPMODE", "0", 0);
         LOG("[profile] FFRS S25 FE/RADV: handheld 720p rendering (change Docked in the game menu)");
     }
+    // Android repeatedly killed FFRS on the 8 GB S25 FE as eager NVN
+    // hardware pools were backed. Only eligible dirty-tracked and page-aligned
+    // pools are backed at first GPU use; ineligible pools keep the existing path.
+    // An explicit env.txt setting always takes precedence, including 0.
+    if (!getenv("DM_VK_ZEROCOPY_LAZY")) {
+        setenv("DM_VK_ZEROCOPY_LAZY", "2", 0);
+        LOG("[profile] FFRS S25 FE/RADV: lazy pool backing on (override with DM_VK_ZEROCOPY_LAZY=0)");
+    }
     // JimVulkan's DCC_SMALL=0 affects only <=512x512 targets used by UE
     // post-processing; it is a conservative correctness diagnostic and may
     // cost some bandwidth. The larger render targets retain compression.

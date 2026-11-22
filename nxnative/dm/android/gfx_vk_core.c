@@ -10,6 +10,7 @@
 #include "gfx_vk.h"
 #include "nvn_hmap.h"
 #include "nvn_dirty.h"
+#include "gfx_vk_pool_pressure.h"
 #include <android/hardware_buffer.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -113,6 +114,7 @@ static VkBool32 *featx(featx_t *x, uint32_t n, VkStructureType s) { static VkBoo
 
 static void completion_start(void);
 static void memlog_start(void);
+static void zcf_pressure_start(void);
 static void slots_init(void);
 static VKAPI_ATTR VkBool32 VKAPI_CALL vk_validation_msg(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type, const VkDebugUtilsMessengerCallbackDataEXT *d, void *u) {
     (void)type; (void)u;   // each distinct message ID logged its first 3 times
@@ -371,6 +373,7 @@ void vk_init(void) {
         en.shaderStorageImageExtendedFormats ? "yes" : "no", en.shaderStorageImageReadWithoutFormat ? "yes" : "no", en.shaderStorageImageWriteWithoutFormat ? "yes" : "no");
     slots_init();
     completion_start();
+    zcf_pressure_start();
     memlog_start();
     { void crash_handlers_check(const char *when); crash_handlers_check("after the Vulkan device was made"); }   // (again at present 600, gfx_vk_present.c: the shader compiler loads with the first pipelines)
 }
@@ -458,6 +461,7 @@ enum { ZCF_N = 128 };
 #define ZCF_BYTES (384ull << 20)
 static zcfree_t g_zcf[ZCF_N]; static int g_nzcf; static uint64_t g_zcf_bytes; static pthread_mutex_t g_zcf_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_zcf_hit, g_zcf_miss, g_zcf_kept;   // under g_zcf_mu (the pool line)
+static _Atomic uint64_t g_zcf_budget = ZCF_BYTES;   // reduced by the pressure monitor, never during a GPU submit
 uint64_t mtl_last_fence(void);
 static int zcf_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_POOL_REUSE"); v = !(e && !atoi(e)); } return v; }
 static void zcf_free_now(const zcfree_t *e) { vkDestroyBuffer(V.dev, e->buf, NULL); vkFreeMemory(V.dev, e->mem, NULL); AHardwareBuffer_release(e->ahb); }
@@ -472,20 +476,76 @@ static int zcf_take(uint64_t size, zcfree_t *out) {
     return r;
 }
 static int zcf_put(AHardwareBuffer *ahb, VkBuffer buf, VkDeviceMemory mem, uint64_t size) {   // 1: kept (the caller frees nothing)
-    if (!zcf_on() || size > ZCF_BYTES / 4) return 0;
+    uint64_t budget = atomic_load_explicit(&g_zcf_budget, memory_order_relaxed);
+    if (!zcf_on() || !budget || size > budget / 4) return 0;
     zcfree_t e = {ahb, buf, mem, size, mtl_last_fence() + 1}, old[ZCF_N]; int nold = 0;
     uint64_t done = vk_fence_done();
     pthread_mutex_lock(&g_zcf_mu);
-    while (g_nzcf == ZCF_N || g_zcf_bytes + size > ZCF_BYTES) {   // the oldest the GPU is done with go
+    while (g_nzcf == ZCF_N || g_zcf_bytes + size > budget) {   // the oldest the GPU is done with go
         int i = 0; while (i < g_nzcf && g_zcf[i].fence > done) i++;
         if (i == g_nzcf) break;
         old[nold++] = g_zcf[i]; g_zcf_bytes -= g_zcf[i].size; memmove(g_zcf + i, g_zcf + i + 1, (size_t)(g_nzcf - i - 1) * sizeof *g_zcf); g_nzcf--;
     }
-    int kept = g_nzcf < ZCF_N && g_zcf_bytes + size <= ZCF_BYTES;
+    int kept = g_nzcf < ZCF_N && g_zcf_bytes + size <= budget;
     if (kept) { g_zcf[g_nzcf++] = e; g_zcf_bytes += size; g_zcf_kept++; }
     pthread_mutex_unlock(&g_zcf_mu);
     for (int i = 0; i < nold; i++) zcf_free_now(&old[i]);
     return kept;
+}
+// Only idle buffers whose last GPU use has completed can leave the reuse
+// cache. Remove entries under the cache lock before destroying the objects
+// outside the lock so another pool cannot reuse a freed entry.
+static void zcf_trim_to(uint64_t budget) {
+    if (!zcf_on()) return;
+    zcfree_t old[ZCF_N]; int n = 0; uint64_t bytes = 0;
+    uint64_t done = vk_fence_done();
+    pthread_mutex_lock(&g_zcf_mu);
+    for (int i = 0; i < g_nzcf && g_zcf_bytes > budget;) {
+        if (g_zcf[i].fence > done) { i++; continue; }
+        old[n++] = g_zcf[i]; bytes += g_zcf[i].size;
+        g_zcf_bytes -= g_zcf[i].size;
+        memmove(g_zcf + i, g_zcf + i + 1, (size_t)(g_nzcf - i - 1) * sizeof *g_zcf);
+        g_nzcf--;
+    }
+    pthread_mutex_unlock(&g_zcf_mu);
+    for (int i = 0; i < n; i++) zcf_free_now(&old[i]);
+    if (n) VKLOG("[mem] Vulkan pool reuse cache: released %d completed buffers (%.1f MB) under pressure",
+                 n, bytes / 1048576.0);
+}
+// This monitor runs off the replay/present/allocator threads. Android may
+// terminate the process without vkAllocateMemory reporting OOM: MemAvailable
+// is a better system-wide pressure signal than MemFree. Never wait for fences
+// here; in-flight buffers remain until a later pass observes their completion.
+static void *zcf_pressure_main(void *unused) {
+    (void)unused; crash_thread_init();
+    for (;;) {
+        sleep(2);
+        FILE *f = fopen("/proc/meminfo", "r"); if (!f) continue;
+        char line[192]; uint64_t available = 0, total = 0;
+        while (fgets(line, sizeof line, f)) {
+            unsigned long long kb;
+            if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1) available = (uint64_t)kb;
+            else if (sscanf(line, "MemTotal: %llu kB", &kb) == 1) total = (uint64_t)kb;
+            if (available && total) break;
+        }
+        fclose(f);
+        if (!total || !available) continue;  // incomplete /proc data is not pressure
+        uint64_t budget = vk_pool_reuse_budget_bytes(available, total);
+        uint64_t prior = atomic_exchange_explicit(&g_zcf_budget, budget, memory_order_relaxed);
+        if (budget < ZCF_BYTES) zcf_trim_to(budget);
+        if (budget != prior)
+            VKLOG("[mem] Vulkan pool reuse budget: %.0f -> %.0f MB (available %.0f / physical %.0f MB)",
+                  prior / 1048576.0, budget / 1048576.0, available / 1024.0, total / 1024.0);
+    }
+    return NULL;
+}
+static void zcf_pressure_start(void) {
+    const char *e = getenv("DM_VK_POOL_PRESSURE_TRIM");
+    if (e && !atoi(e)) { VKLOG("[mem] Vulkan pool pressure trim explicitly disabled"); return; }
+    pthread_t t;
+    if (pthread_create(&t, NULL, zcf_pressure_main, NULL))
+        VKLOG("[RED] Vulkan pool pressure monitor could not start");
+    else pthread_detach(t);
 }
 // Small pools take a slot of a slab (DM_VK_POOL_SLABS=0 turns it off): one hardware buffer allocated and imported once, its slots mapped at the pools' addresses
 // (its dma-buf mmapped at the slot's offset) and bound at the slot's offset (vkpool_t.boff). A hardware buffer of its own cost a 48 KB pool ~170 us to allocate (a binder
@@ -1769,9 +1829,10 @@ static void *memlog_main(void *arg) {
         sleep(s);
         if (!slurp_small("/proc/self/status", st, sizeof st) || !slurp_small("/proc/meminfo", mi, sizeof mi)) continue;
         const char *some = slurp_small("/proc/pressure/memory", ps, sizeof ps) ? strstr(ps, "avg10=") : NULL;
-        VKLOG("[mem] process: anon %ld MB, file %ld MB, shared %ld MB, swapped %ld MB | system: available %ld MB, free %ld MB, swap free %ld MB, pressure %.*s | pools: zero-copy %.0f MB (%.0f MB of it backed when first used, %.0f MB not used yet), copied %.0f MB, used %.0f MB",
+        uint64_t retained; pthread_mutex_lock(&g_zcf_mu); retained = g_zcf_bytes; pthread_mutex_unlock(&g_zcf_mu);
+        VKLOG("[mem] process: anon %ld MB, file %ld MB, shared %ld MB, swapped %ld MB | system: available %ld MB, free %ld MB, swap free %ld MB, pressure %.*s | pools cumulative: zero-copy %.0f MB (%.0f MB of it backed when first used, %.0f MB not used yet), copied %.0f MB, used %.0f MB | reuse cache: %.0f MB retained (%.0f MB budget)",
               kb_of(st, "RssAnon:") >> 10, kb_of(st, "RssFile:") >> 10, kb_of(st, "RssShmem:") >> 10, kb_of(st, "VmSwap:") >> 10,
-              kb_of(mi, "MemAvailable:") >> 10, kb_of(mi, "MemFree:") >> 10, kb_of(mi, "SwapFree:") >> 10, some ? 11 : 1, some ? some : "?", (g_zc_bytes + g_lazy_bytes) / 1048576.0, g_lazy_bytes / 1048576.0, (g_lazy_total - g_lazy_bytes) / 1048576.0, g_cp_bytes / 1048576.0, g_used_bytes / 1048576.0);
+              kb_of(mi, "MemAvailable:") >> 10, kb_of(mi, "MemFree:") >> 10, kb_of(mi, "SwapFree:") >> 10, some ? 11 : 1, some ? some : "?", (g_zc_bytes + g_lazy_bytes) / 1048576.0, g_lazy_bytes / 1048576.0, (g_lazy_total - g_lazy_bytes) / 1048576.0, g_cp_bytes / 1048576.0, g_used_bytes / 1048576.0, retained / 1048576.0, atomic_load_explicit(&g_zcf_budget, memory_order_relaxed) / 1048576.0);
     }
     return NULL;
 }

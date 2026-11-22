@@ -39,4 +39,8 @@ setting	fps=1
 # incorrect UE post-processing. Other devices and drivers keep their defaults.
 # Remove this row or set it to 0 to opt out. Explicit DM_FPS_TARGET and
 # RADV_XCLIPSE_DCC_SMALL values in env.txt take priority over the defaults.
+# The S25 FE/RADV tuning above also defaults DM_VK_ZEROCOPY_LAZY=2 on
+# compatible NVN pools; DM_VK_ZEROCOPY_LAZY=0 in env.txt opts out.
+# Pool-cache pressure trimming applies device-wide (opt out with
+# DM_VK_POOL_PRESSURE_TRIM=0 in env.txt).
 env	DM_FFRS_S25FE_RADV_TUNE=1
