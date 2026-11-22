@@ -96,6 +96,27 @@ class ExtractIntegrity(unittest.TestCase):
                 self.assertIn(kind, r.stderr)
                 self.assertNotIn('[RED]', r.stderr)
 
+    def test_missing_update_key_returns_actionable_exit_code_without_abort(self):
+        r, _ = self.run_case('keys-required')
+        self.assertEqual(r.returncode, 6, r.stderr)
+        self.assertIn('[RED]', r.stderr)
+        self.assertIn('key_area_key_application_0f', r.stderr)
+        self.assertIn('16.0.0', r.stderr)
+        self.assertIn('prod.keys', r.stderr)
+        self.assertNotIn('UNHANDLED', r.stderr)
+        self.assertNotIn(' at P.', r.stderr)
+
+    def test_missing_ticket_does_not_claim_a_newer_master_key_is_needed(self):
+        r, _ = self.run_case('keys-ticket')
+        self.assertEqual(r.returncode, 6, r.stderr)
+        self.assertIn('no matching common ticket', r.stderr)
+        self.assertNotIn('firmware', r.stderr)
+        self.assertNotIn('UNHANDLED', r.stderr)
+
+    def test_key_preflight_allows_accessible_sections(self):
+        r, _ = self.run_case('keys-ready')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_success_and_usage_statuses_are_preserved(self):
         r, out = self.run_case('copy')
         self.assertEqual(r.returncode, 0, r.stderr)

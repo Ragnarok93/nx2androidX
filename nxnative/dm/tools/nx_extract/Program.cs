@@ -36,6 +36,55 @@ static class P {
             : base($"cannot open NCA entry '{entry}' in '{input}': {cause.Message}", cause) { }
     }
 
+    // A generic prod.keys check cannot know which master key generation a particular NSP requires.
+    // Probe LibHac's own section-access predicate before extracting any data, so newer games fail
+    // with a useful correction instead of a fatal MissingKeyException and an unusable partial build.
+    static readonly string[] Firmware = {
+        "1.0.0", "3.0.0", "3.0.1", "4.0.0", "5.0.0", "6.0.0", "6.2.0", "7.0.0", "8.1.0", "9.0.0", "9.1.0",
+        "12.1.0", "13.0.0", "14.0.0", "15.0.0", "16.0.0", "17.0.0", "18.0.0", "19.0.0", "20.0.0", "21.0.0"
+    };
+    static readonly string[] KeyAreas = { "application", "ocean", "system" };
+    sealed class KeysMissing : Exception { public KeysMissing(string message) : base(message) { } }
+
+    // The missing key, if any, from the actual LibHac keyset. Do not inspect, log, or copy key values.
+    // Compare every existing section, not the NCA's header alone: a header may decrypt even when
+    // its game-data section needs a newer master key.
+    static (int Rev, string Key, string File)? MissingKey(KeySet keys, List<Nca> ncas, string path) {
+        (int Rev, string Key, string File)? newest = null;
+        foreach (Nca n in ncas) {
+            bool accessible = true;
+            for (int i = 0; i < 4; i++) if (n.SectionExists(i) && !n.CanOpenSection(i)) accessible = false;
+            if (accessible) continue;
+            int revision = Math.Max(n.Header.KeyGeneration - 1, 0);
+            if (n.Header.HasRightsId && !keys.ExternalKeySet.Contains(new RightsId(n.Header.RightsId))) {
+                newest ??= (-1, "a title key (the NSP has no matching common ticket)", Path.GetFileName(path));
+                continue;
+            }
+            int area = n.Header.KeyAreaKeyIndex;
+            string key = n.Header.HasRightsId ? $"titlekek_{revision:x2}" :
+                $"key_area_key_{(area < KeyAreas.Length ? KeyAreas[area] : area.ToString())}_{revision:x2}";
+            if (newest == null || revision > newest.Value.Rev)
+                newest = (revision, key, Path.GetFileName(path));
+        }
+        return newest;
+    }
+
+    static void RequireKeys(IEnumerable<(int Rev, string Key, string File)?> missing) {
+        (int Rev, string Key, string File)? newest = null;
+        int affected = 0;
+        foreach (var m in missing) if (m != null) {
+            affected++;
+            if (newest == null || m.Value.Rev > newest.Value.Rev) newest = m;
+        }
+        if (newest == null) return;
+        var (rev, key, file) = newest.Value;
+        string others = affected > 1 ? $" (and {affected - 1} other package(s))" : "";
+        if (rev < 0) throw new KeysMissing($"{file}{others}: {key}; use a complete dump containing the ticket for this content.");
+        string firmware = rev < Firmware.Length ? $"{Firmware[rev]} or newer" : $"newer than {Firmware[^1]}";
+        throw new KeysMissing($"{file}{others}: prod.keys cannot open an NCA section (missing {key}, master key revision {rev:x2}). " +
+            $"Import fresh prod.keys dumped from your own Switch running firmware {firmware}, then retry the build.");
+    }
+
     static int Main(string[] a) => Run(() => Extract(a));
 
     // File-data failures have their own handling below. A failure opening or traversing the filesystem cannot be recovered there.
@@ -44,6 +93,16 @@ static class P {
         catch (NcaOpenException e) {
             Console.Error.WriteLine($"[RED] {e.Message}");
             return 4;
+        }
+        catch (KeysMissing e) {
+            Console.Error.WriteLine($"[RED] {e.Message}");
+            return 6;
+        }
+        catch (MissingKeyException e) {
+            // Defense in depth for an NCA that escapes the up-front section check.
+            Console.Error.WriteLine($"[RED] prod.keys is missing a key required to decrypt this game: {e.Message}. " +
+                "Import a complete newer prod.keys dump from your own Switch and retry.");
+            return 6;
         }
         catch (HorizonResultException e) when (HashError(e)) {
             Console.Error.WriteLine($"[RED] extraction stopped by a filesystem integrity check: {e.Message}");
@@ -59,6 +118,7 @@ static class P {
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3]);
         if (a[1] == "--sysdata") { if (a.Length < 5) { Console.Error.WriteLine("usage: nx_extract <prod.keys> --sysdata <firmware dir> <title id> <out dir>"); return 2; } return SysData(ks, a[2], Convert.ToUInt64(a[3], 16), a[4]); }
         var basePkg = OpenNsp(ks, a[1]); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
+        RequireKeys(new[] { MissingKey(ks, basePkg, a[1]), updPkg == null ? null : MissingKey(ks, updPkg, a[2]) });
         // A package can hold the game's update as well (a cartridge dump rebuilt with the update merged in): the game is
         // the GameCard NCA, the update the Download one, whose RomFS is a patch (BKTR) over the game's. Reading the
         // patch as if it were the game gives a RomFS that cannot be read (its bucket tree's offsets do not fit).
@@ -119,6 +179,7 @@ static class P {
     // DLC NSP: one data NCA (content type PublicData / Data) + a meta NCA + the ticket; only the data NCA's RomFS is written
     static int Aoc(KeySet ks, string nsp, string outDir) {
         var pkg = OpenNsp(ks, nsp);
+        RequireKeys(new[] { MissingKey(ks, pkg, nsp) });
         Nca data = Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data) ?? throw new Exception("no data NCA in the DLC NSP");
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
         Directory.CreateDirectory(outDir);

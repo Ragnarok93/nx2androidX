@@ -98,6 +98,21 @@ static class IntegrityFixture {
             return Boundary(() => {
                 if (mode.StartsWith("copy")) return CopyCase(mode, args[1]);
                 if (mode.StartsWith("nca")) return NcaCase(mode, args[1]);
+                // Exercise the production error boundary with no copyrighted data or real key material.
+                if (mode == "keys-required") {
+                    Call("RequireKeys", new (int Rev, string Key, string File)?[] {
+                        (15, "key_area_key_application_0f", "update.nsp") });
+                    return 0;
+                }
+                if (mode == "keys-ticket") {
+                    Call("RequireKeys", new (int Rev, string Key, string File)?[] {
+                        (-1, "a title key (the NSP has no matching common ticket)", "update.nsp") });
+                    return 0;
+                }
+                if (mode == "keys-ready") {
+                    Call("RequireKeys", new (int Rev, string Key, string File)?[] { null });
+                    return 0;
+                }
                 if (mode == "invalid-data") throw new InvalidDataException("unrelated parser sentinel");
                 if (mode.StartsWith("card")) return CardCase(mode, args[1]);
                 if (mode == "io") throw new IOException("file access sentinel");
