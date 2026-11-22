@@ -300,6 +300,18 @@ public class GameActivity extends NativeActivity {
         deleteTree(backup);
     }
 
+    // Migrate a pre-update cache left inside the old data pack. The native
+    // loader still validates the driver identity and contents before use.
+    static void preserveVulkanCache(File files, File previousPack) {
+        File oldCache = new File(previousPack, "vk_pipeline_cache.bin");
+        if (!oldCache.isFile()) return;
+        File directory = new File(files, "vulkan-cache");
+        if (!directory.isDirectory() && !directory.mkdir()) return;
+        File cache = new File(directory, oldCache.getName());
+        if (!cache.exists() && !oldCache.renameTo(cache))
+            android.util.Log.w("nx2a-game", "Could not move the previous Vulkan pipeline cache");
+    }
+
     private static boolean safeEntry(String name) {
         if (name == null || name.isEmpty() || name.startsWith("/") || name.indexOf('\\') >= 0 || name.indexOf(':') >= 0)
             return false;
