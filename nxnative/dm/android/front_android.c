@@ -69,6 +69,7 @@ static char g_root[512];
 const char *dm_front_root(void) { return g_root; }   // overlay_theme.c: the player's path has no APK assets, the theme comes from the pack's overlay/
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // gamepad, rumble, frame rate
 static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalone FG preferences
+static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), 0 follows profile
 static _Atomic int g_set_fsr, g_set_fsr_sharp = 50;                 // FSR 1 spatial upscaling and RCAS 0..100
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
@@ -79,7 +80,14 @@ static _Atomic int g_cust[2][2][DM_AOV_N][3], g_cust_ver, g_edit;
 static const char *const LAYOUT_NAMES[2] = {"tablet", "phone"};
 static int ctl_named(const char *n) { for (int i = 0; i < OV_N; i++) if (!strcmp(OV_LAYOUTS[0][i].name, n)) return i; return -1; }
 int dm_opmode(void); void dm_set_opmode(int m);   // hle_oe.c: 0 handheld, 1 docked; a change reaches the game as the Switch's operation mode notification
+int dm_fps_lock_supported(void);  // host validates known Unreal CVar pairs by exact main build ID
+int dm_graphics_target_fps(void) { return dm_fps_lock_supported() ? atomic_load(&g_set_rate) : 0; }
+int dm_menu_rate(void) { return atomic_load(&g_set_rate); }
+int dm_menu_rate_supported(void) { return dm_fps_lock_supported(); }
 static void settings_load(void) {
+    const char *fpstarget = getenv("DM_FPS_TARGET");
+    int initial = fpstarget ? atoi(fpstarget) : DM_GAME_FPS_TARGET;
+    atomic_store(&g_set_rate, initial == 30 || initial == 40 || initial == 60 ? initial : 0);
     const char *fg_env;
     if ((fg_env = getenv("DM_LSFG"))) atomic_store(&g_set_fg, atoi(fg_env) != 0);
     if ((fg_env = getenv("DM_LSFG_MULT"))) {
@@ -104,6 +112,7 @@ static void settings_load(void) {
         else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow, v <= 0 ? 0 : v < 25 ? 25 : v > 100 ? 100 : v);
         else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_fsr, v != 0);
         else if (sscanf(line, "fsr_sharp=%d", &v) == 1) atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
+        else if (sscanf(line, "fps_mode=%d", &v) == 1 && (v == 30 || v == 40 || v == 60)) atomic_store(&g_set_rate, v);
         else if (!strncmp(line, "ui=", 3)) {   // ui=<layout>,<control>,<x>,<y>,<size>: x, y in 1/10000 of the window (-1 the layout's place), size in 1/1000
             char lay[16], name[32]; int x, y, z, l, i;
             if (sscanf(line + 3, "%15[^,],%31[^,],%d,%d,%d", lay, name, &x, &y, &z) != 5 || (i = ctl_named(name)) < 0) continue;
@@ -119,9 +128,9 @@ static void settings_load(void) {
 static void settings_save(void) {
     char p[600], tmp[610]; snprintf(p, sizeof p, "%s/settings.txt", g_root); snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
-    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\nfsr=%d\nfsr_sharp=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
+    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\nfsr=%d\nfsr_sharp=%d\nfps_mode=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
             atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow),
-            atomic_load(&g_set_fsr), atomic_load(&g_set_fsr_sharp));
+            atomic_load(&g_set_fsr), atomic_load(&g_set_fsr_sharp), atomic_load(&g_set_rate));
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
         _Atomic int *c = g_cust[0][l][i]; int x = atomic_load(&c[0]), y = atomic_load(&c[1]), z = atomic_load(&c[2]);
         if ((x && y) || z) fprintf(f, "ui=%s,%s,%d,%d,%d\n", LAYOUT_NAMES[l], OV_LAYOUTS[0][i].name, x && y ? x - 1 : -1, x && y ? y - 1 : -1, z ? z : 1000);

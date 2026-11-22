@@ -71,6 +71,17 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     { "320a17744aefd67fec5738ca0c629795", "Unity render frame interval", 0x481b2f8, 0, VSYNCS_I32, 1, 0xb8 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
+// Live frame-rate selection is supported only by validated Unreal CVar
+// pairs. FPSLocker rows are built for 30/60 and cannot be interpolated to 40.
+int dm_fps_lock_supported(void) {
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
+        for (int k = 0; k < NLOCKS; k++)
+            if (k_locks[k].kind == FPS_F32 && strstr(k_locks[k].what, "Unreal") &&
+                !strcmp(g_mod[i].build_id, k_locks[k].build)) return 1;
+    return 0;
+}
+__attribute__((weak)) int dm_graphics_target_fps(void) { return 0; }
+
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
 // the same, for the debug reads (peek, memdump): pages mapped but not readable that way, a GPU memory pool shared with the device (Android's zero-copy pools are
@@ -184,10 +195,17 @@ void dm_fps_lock_tick(void) {
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
         if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", k_locks[rows[r]].what, src);
-                  if (g_nimp) LOG("main: %d FPSLocker write(s) left out (%s 0)", g_nimp, src); return; }
+                  if (g_nimp) LOG("main: %d FPSLocker write(s) left out (%s 0)", g_nimp, src); }
         target = t; state = 0;
     }
-    if (g_nimp) { imp_tick(base, target); return; }
+    // The Android graphics menu owns an atomic 30/40/60 target. A changed
+    // value is read before the next guest present and rewrites both Unreal
+    // copies even after a level load changes them. Other titles keep env policy.
+    int live = dm_fps_lock_supported() ? dm_graphics_target_fps() : 0;
+    int want = live ? live : target;
+    if (want != 30 && want != 40 && want != 60) return;
+    if (g_nimp) { imp_tick(base, want == 40 ? 60 : want); return; }
+    target = want;
     for (int r = 0; r < nrow; r++) {
         int k = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (k_locks[k].ptr_off && (!rd((uint64_t)(uintptr_t)(base + k_locks[k].ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
@@ -201,7 +219,7 @@ void dm_fps_lock_tick(void) {
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", ms ? f * (float)ms : f);
             } else {
                 int fps = k_locks[k].kind == FPS_I32;
-                want = fps ? (uint32_t)target : 60 / (uint32_t)target;
+                want = fps ? (uint32_t)target : (target == 30 ? 2u : 1u);   // 40 FPS has no integer 60 Hz interval; host paces at 25 ms
                 if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 120u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);
             }

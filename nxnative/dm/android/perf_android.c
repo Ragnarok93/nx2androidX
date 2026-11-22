@@ -198,6 +198,7 @@ static int64_t g_work_start;
 // ---- adaptive frame rate: when the frames do not fit the period the game asks for, presentation steps to a longer one the display divides evenly
 // (60 → 40 → 30 fps; 40 asks the display for 120 Hz), and back when they fit the shorter one with room; a steady rate instead of alternating
 // one-vsync and two-vsync frames. DM_ADAPTIVE_FPS=0 keeps the game's own period.
+__attribute__((weak)) int dm_graphics_target_fps(void) { return 0; }
 static const int64_t STEPS[] = {16666667, 25000000, 33333333};   // 60, 40, 30 fps
 static int g_step = 0; static _Atomic int g_adapt = 1; static int64_t g_work_hist[64]; static int g_nwork;
 static int64_t g_last_change, g_last_up, g_up_hold = 2000000000; static int g_ok_frames; static uint64_t g_game_period;   // the period the game asks for, before the adaptive step
@@ -249,6 +250,18 @@ static int fps_cap_step(void) {
     return s;
 }
 uint64_t dm_present_period_adapt(uint64_t period) {
+    int fixed = dm_graphics_target_fps();
+    if (fixed == 30 || fixed == 40 || fixed == 60) {
+        static int prev_fixed;
+        if (fixed != prev_fixed) {
+            g_nwork = g_nshown = g_ok_frames = 0; g_last_change = g_last_up = 0;
+            LOG("[perf] live graphics target %d fps (adaptive downshift bypassed)", fixed);
+            prev_fixed = fixed;
+        }
+        g_step = fixed == 30 ? 2 : fixed == 40 ? 1 : 0;
+        g_game_period = (uint64_t)STEPS[g_step];
+        return g_game_period;
+    }
     g_game_period = period;
     if (!period) return period;
     if (!adaptive_enabled()) {
@@ -261,7 +274,10 @@ uint64_t dm_present_period_adapt(uint64_t period) {
 }
 // The rate the frames are held to now (60, 40 or 30 fps): the frame generation needs it (its frame's period is never shorter than the rate allows, or a game held
 // to 30 fps would be counted as one refresh short and the generation would ask for more frames than the panel can show)
-int dm_perf_rate_fps(void) { return (int)(1000000000ll / STEPS[g_step]); }
+int dm_perf_rate_fps(void) {
+    int fixed = dm_graphics_target_fps();
+    return fixed == 30 || fixed == 40 || fixed == 60 ? fixed : (int)(1000000000ll / STEPS[g_step]);
+}
 static int fps_pin(void) { return g_fps_pin; }   // the presenting thread refreshes DM_FPS_PIN every 30 frames in game_mode_sync
 // The frame's replay and GPU time (gfx_vk_present.c, before dm_perf_frame): the rate is judged on the largest of them and the presenting thread's work. With the
 // replay on a thread of its own (DM_NVN_ASYNC) Xenoblade Chronicles 3's presenting thread worked ~8 ms a frame, the rate stepped up to 40 fps for frames
