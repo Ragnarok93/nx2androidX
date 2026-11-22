@@ -381,12 +381,18 @@ static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int 
 }
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
-static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "FSR 1", "FSR sharpness", "Resume", ""};
+static const char *const OVM_LABELS[OVM_N] = {"Show gamepad", "Opacity", "Edit layout", "Rumble", "Show FPS", "Mode", "Export save", "Import save", "Face buttons", "Audio output", "Lossless FG", "FG multiplier", "FG flow scale", "Vulkan driver", "FSR 1", "FSR sharpness", "Frame rate", "Dynamic resolution", "Minimum scale", "Actual scale", "Internal scaling", "Resume", ""};
 static const char *const OVM_BUTTONS[OVM_N] = {[OVM_EDIT] = "Edit", [OVM_EXPORT] = "Export", [OVM_IMPORT] = "Import", [OVM_AUDIO] = "Select"};   // the rows that are a button: its word
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
 static const char *const OVM_PADS[2] = {"Position", "Label"};
 int dm_menu_fg_mult(void);
 int dm_menu_fg_flow(void);
+int dm_menu_rate(void);
+int dm_menu_rate_supported(void);
+int dm_menu_drs_supported(void);
+int dm_menu_drs_enabled(void);
+int dm_menu_drs_actual(void);
+int dm_menu_drs_min(void);
 __attribute__((weak)) int dm_fsr_enabled(void) { return 0; }
 __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
 int dm_menu_fg_has_dll(void);
@@ -402,11 +408,14 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             float lw = cv_text_w(OVM_LABELS[i], is),
                 cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) :
                      i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) :
-                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER) ? cv_text_w("System (fallback)", is) :
+                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_RATE || i == OVM_DRS_NOW || i == OVM_DRS_HOOK) ? cv_text_w("System (fallback)", is) :
                      OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
-            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP) ? fmaxf(lw / 0.38f, cv_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
+            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP || i == OVM_DRS_MIN) ? fmaxf(lw / 0.38f, cv_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
         }
-        if (need <= rw && cv_text_w(OVM_TAB_NAMES[2], is) < rw / OVM_TABS - sh) break;
+        int names_fit = 1;
+        for (int tabname = 0; tabname < OVM_TABS; tabname++)
+            if (cv_text_w(OVM_TAB_NAMES[tabname], is) >= rw / OVM_TABS - sh) names_fit = 0;
+        if (need <= rw && names_fit) break;
     }
     cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.18f, C_BG);
     for (int row = 0; row < OVM_ROWS; row++) {
@@ -423,9 +432,9 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
         }
         if (it == OVM_RESUME) { cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); cv_text(cv, r[0] + (rw - cv_text_w("Resume", is)) / 2, cy, "Resume", is, C_ACCENT); continue; }
         cv_text(cv, r[0] + rh * 0.15f, cy, OVM_LABELS[it], is, row == sel ? C_WHITE : C_DIM);
-        if (it == OVM_OPACITY || it == OVM_FSR_SHARP) {   // touch/controller slider: opacity or FSR RCAS sharpness
-            int value = it == OVM_OPACITY ? op : dm_fsr_sharpness();
-            float t[3]; ov_menu_track(p, row, t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : (float)value / 100.0f, th = fmaxf(2, rh * 0.08f), kr = rh * 0.20f;
+        if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
+            int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : dm_fsr_sharpness();
+            float t[3]; ov_menu_track(p, row, t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : it == OVM_DRS_MIN ? (float)(value - 50) / 45.0f : (float)value / 100.0f, th = fmaxf(2, rh * 0.08f), kr = rh * 0.20f;
             f = f < 0 ? 0 : f > 1 ? 1 : f;
             cv_rrect(cv, t[0], t[1] - th / 2, t[0] + t[2], t[1] + th / 2, th / 2, C_OFF);
             cv_rrect(cv, t[0], t[1] - th / 2, t[0] + f * t[2], t[1] + th / 2, th / 2, C_ACCENT);
@@ -436,13 +445,21 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
             while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
             cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
-        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER) {
+        } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK) {
             char value[128];
             if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
             else if (it == OVM_FG_FLOW) {
                 int scale = dm_menu_fg_flow();
                 if (!scale) snprintf(value, sizeof value, "Auto");
                 else snprintf(value, sizeof value, "%d%%", scale);
+            } else if (it == OVM_RATE) {
+                if (!dm_menu_rate_supported()) snprintf(value, sizeof value, "Unavailable");
+                else snprintf(value, sizeof value, "%d FPS", dm_menu_rate());
+            } else if (it == OVM_DRS_NOW) {
+                if (!dm_menu_drs_supported()) snprintf(value, sizeof value, "Unavailable");
+                else snprintf(value, sizeof value, "%d%%", dm_menu_drs_actual());
+            } else if (it == OVM_DRS_HOOK) {
+                snprintf(value, sizeof value, "%s", dm_menu_drs_supported() ? "Game engine" : "Not supported");
             } else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
             while (vs > 1 && cv_text_w(value, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
@@ -456,10 +473,12 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_rrect(cv, x0 + cur * segw, cy - hh / 2, x0 + (cur + 1) * segw, cy + hh / 2, hh / 2, C_ACCENT);
             for (int k = 0; k < 2; k++) cv_text(cv, x0 + k * segw + (segw - cv_text_w(seg[k], is)) / 2, cy, seg[k], is, k == cur ? C_WHITE : C_DIM);
         } else {   // a switch
-            int on = st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_FG ? 19 : it == OVM_FSR ? 8 : 3) & 1; float sx0 = x1 - sw;
+            int on = it == OVM_DRS ? dm_menu_drs_enabled() : (st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_FG ? 19 : it == OVM_FSR ? 8 : 3) & 1);
+            float sx0 = x1 - sw;
             cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
             cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
-            const char *word = it == OVM_FG && !dm_menu_fg_has_dll() ? "Need DLL" : on ? "ON" : "OFF";
+            const char *word = it == OVM_FG && !dm_menu_fg_has_dll() ? "Need DLL" :
+                               it == OVM_DRS && !dm_menu_drs_supported() ? "Unavailable" : on ? "ON" : "OFF";
             cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, on ? C_WHITE : C_DIM);
         }
     }

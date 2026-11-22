@@ -81,6 +81,7 @@ int dm_fps_lock_supported(void) {
     return 0;
 }
 __attribute__((weak)) int dm_graphics_target_fps(void) { return 0; }
+static int rd(uint64_t a, void *out, size_t n);
 // Optional, explicitly configured UE5 screen-percentage CVar. The exact
 // registration offset MUST be established for this game's main build; unlike
 // t.MaxFPS it has not yet been validated in FFRS. Never scan and overwrite

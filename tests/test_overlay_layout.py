@@ -93,6 +93,11 @@ int main(void) {
     assert(ov_menu_item(0, OVM_ROWS - 3) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 3) == -1);
     assert(ov_menu_item(0, OVM_ROWS - 2) == -1);
     assert(ov_menu_item(2, OVM_ROWS - 2) == OVM_DRIVER);
+    assert(ov_menu_item(3, 1) == OVM_RATE);
+    assert(ov_menu_item(3, 2) == OVM_DRS);
+    assert(ov_menu_item(3, 3) == OVM_DRS_MIN);
+    assert(ov_menu_item(3, 4) == OVM_DRS_NOW);
+    assert(ov_menu_item(3, 5) == OVM_DRS_HOOK);
     assert(ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     audio_available = 1;
     assert(ov_menu_item(1, OVM_ROWS - 3) == OVM_AUDIO);

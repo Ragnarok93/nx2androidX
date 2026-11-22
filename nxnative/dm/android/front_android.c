@@ -609,6 +609,7 @@ static void *pad_watch(void *a) {
 
 // ---- the pause menu: the game is held while it is open; touches and a controller's keys go to it. Two tabs (overlay_layout.h OVM_TAB_ITEMS): the gamepad's
 // settings (shown, opacity, the layout editor, rumble) and the game's (the frame rate counter, the mode, exporting and importing the save); Resume under them ----
+static _Atomic int g_menu_cfg_ver;
 static _Atomic int g_menu_hi = -1, g_menu_tab;   // the highlighted row (a controller's selection, or the row a finger is on), -1 none; the open tab
 static int g_menu_ptr = -1, g_menu_row = -2;   // the pointer pressing in the menu, and the row it went down on (-3 the menu button)
 static _Atomic int g_tx_ver;   // the text entry's edit count: the panel is drawn again when it changes
@@ -621,7 +622,7 @@ int dm_menu_state(void) {
     if (atomic_load(&g_edit)) return OVE_ST | atomic_load(&g_ed_st);
     if (atomic_load(&g_sp_on)) return OVS_ST | (atomic_load(&g_sp_hi) + 1) << 4 | (atomic_load(&g_sp_ver) & 255) << 20;
     return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 | atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
-           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 | atomic_load(&g_set_fsr) << 8 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | (atomic_load(&g_sv_n) & 15) << 24;
+           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 | atomic_load(&g_set_fsr) << 8 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | ((atomic_load(&g_sv_n) + atomic_load(&g_menu_cfg_ver)) & 15) << 24;
 }
 int dm_fsr_enabled(void) { return atomic_load(&g_set_fsr); }
 int dm_fsr_sharpness(void) { return atomic_load(&g_set_fsr_sharp); }
@@ -649,6 +650,38 @@ static void menu_close(void) {
     hold_sync(); dm_haptics_suspend(4, 0); dm_overlay_redraw();
     LOG("[menu] closed: the game goes on (gamepad %s, opacity %d%%, rumble %s, frame rate %s, %s)", atomic_load(&g_set_overlay) ? "on" : "off", atomic_load(&g_set_opacity),
         atomic_load(&g_set_rumble) ? "on" : "off", atomic_load(&g_set_fps) ? "shown" : "hidden", dm_opmode() ? "docked" : "handheld");
+}
+static void menu_rate_step(int direction) {
+    if (!dm_menu_rate_supported()) {
+        LOG("[graphics] cannot select live FPS: this game build has no validated Unreal frame-limit hooks");
+        return;
+    }
+    int previous = atomic_load(&g_set_rate), next;
+    if (previous == 30) next = direction < 0 ? 60 : 40;
+    else if (previous == 40) next = direction < 0 ? 30 : 60;
+    else next = direction < 0 ? 40 : 30;
+    atomic_store(&g_set_rate, next);
+    atomic_fetch_add(&g_menu_cfg_ver, 1);
+    LOG("[graphics] live source frame-rate target %d -> %d FPS; 40 uses a 25 ms presentation period", previous, next);
+    dm_haptics_android_tap(); settings_save(); dm_overlay_redraw();
+}
+static void menu_drs_toggle(void) {
+    if (!dm_menu_drs_supported()) {
+        LOG("[graphics] internal resolution unavailable: no verified render-scale hook for this game build");
+        dm_overlay_redraw(); return;
+    }
+    int on = !atomic_load(&g_set_dyn);
+    atomic_store(&g_set_dyn, on); atomic_fetch_add(&g_menu_cfg_ver, 1);
+    LOG("[graphics] internal dynamic resolution %s (floor %d%%)", on ? "on" : "off", atomic_load(&g_set_dyn_min));
+    dm_haptics_android_tap(); settings_save(); dm_overlay_redraw();
+}
+static void menu_drs_min(int pct) {
+    pct = pct < 50 ? 50 : pct > 95 ? 95 : pct;
+    pct = 5 * ((pct + 2) / 5);
+    if (atomic_exchange(&g_set_dyn_min, pct) != pct) {
+        atomic_fetch_add(&g_menu_cfg_ver, 1);
+        dm_haptics_android_tap(); dm_overlay_redraw();
+    }
 }
 static void menu_fsr_sharp(int v) {
     v = v < 0 ? 0 : v > 100 ? 100 : v;
@@ -720,7 +753,10 @@ static void menu_do(int item) {
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
     else if (item == OVM_FSR) { atomic_store(&g_set_fsr, !atomic_load(&g_set_fsr)); settings_save(); }
-    else if (item == OVM_FSR_SHARP) return;
+    else if (item == OVM_FSR_SHARP || item == OVM_DRS_MIN) return;
+    else if (item == OVM_RATE) { menu_rate_step(1); return; }
+    else if (item == OVM_DRS) { menu_drs_toggle(); return; }
+    else if (item == OVM_DRS_NOW || item == OVM_DRS_HOOK) return;
     else if (item == OVM_MODE) { dm_set_opmode(dm_opmode() ? 0 : 1); settings_save(); }   // the game takes it when it goes on
     else if (item == OVM_FG) {
         if (!atomic_load(&g_set_fg) && !dm_menu_fg_has_dll()) {
@@ -752,18 +788,20 @@ static void menu_touch(const dm_java_event *e, float W, float H) {   // a press 
         if (item == OVM_TAB) menu_tab(ov_menu_tab_at(x, p));   // a tab opens as the finger touches it
         else if (item == OVM_OPACITY) menu_opacity(ov_menu_track_value(x, p, row));
         else if (item == OVM_FSR_SHARP) menu_fsr_sharp(ov_menu_sharp_value(x, p, row));
+        else if (item == OVM_DRS_MIN) menu_drs_min(ov_menu_dyn_min_value(x, p, row));
         if (row >= 0) { atomic_store(&g_menu_hi, item >= 0 ? row : -1); dm_overlay_redraw(); }
     } else if (act == AMOTION_EVENT_ACTION_MOVE && g_menu_ptr >= 0 && g_menu_row >= 0) {   // the slider follows the finger; another row's highlight follows it off the row and back
         for (int k = 0; k < e->pointers; k++) if ((e->ptr[k].id & 31) == g_menu_ptr) {
             float kx = e->ptr[k].x, ky = e->ptr[k].y;
             if (ov_menu_item(tab, g_menu_row) == OVM_OPACITY) { menu_opacity(ov_menu_track_value(kx, p, g_menu_row)); continue; }
             if (ov_menu_item(tab, g_menu_row) == OVM_FSR_SHARP) { menu_fsr_sharp(ov_menu_sharp_value(kx, p, g_menu_row)); continue; }
+            if (ov_menu_item(tab, g_menu_row) == OVM_DRS_MIN) { menu_drs_min(ov_menu_dyn_min_value(kx, p, g_menu_row)); continue; }
             int r = ov_menu_row_at(kx, ky, W, H), hi = r == g_menu_row && ov_menu_item(tab, r) >= 0 ? r : -1;
             if (atomic_exchange(&g_menu_hi, hi) != hi) dm_overlay_redraw();
         }
     } else if ((act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) && id == g_menu_ptr) {
         int down = g_menu_row; g_menu_ptr = -1; atomic_store(&g_menu_hi, -1);
-        if (down >= 0 && (ov_menu_item(tab, down) == OVM_OPACITY || ov_menu_item(tab, down) == OVM_FSR_SHARP)) { settings_save(); dm_overlay_redraw(); }
+        if (down >= 0 && (ov_menu_item(tab, down) == OVM_OPACITY || ov_menu_item(tab, down) == OVM_FSR_SHARP || ov_menu_item(tab, down) == OVM_DRS_MIN)) { settings_save(); dm_overlay_redraw(); }
         else if (row == down && item >= 0 && item != OVM_TAB) menu_do(item);
         else if (row == down && (row == -2 || row == -3)) { dm_haptics_android_tap(); menu_close(); }
         else dm_overlay_redraw();
@@ -779,6 +817,8 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
     } else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_OPACITY) { menu_opacity(atomic_load(&g_set_opacity) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FSR_SHARP) { menu_fsr_sharp(atomic_load(&g_set_fsr_sharp) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_DRS_MIN) { menu_drs_min(atomic_load(&g_set_dyn_min) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_RATE) { menu_rate_step(bit == DM_BTN_LEFT ? -1 : 1); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_MULT) { fg_mult_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_FLOW) { fg_flow_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(tab + (bit == DM_BTN_LEFT ? -1 : 1));
