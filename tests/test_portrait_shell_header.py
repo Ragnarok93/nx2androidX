@@ -17,6 +17,10 @@ class PortraitShellHeaderTests(unittest.TestCase):
         self.assertIn("WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)", header)
         self.assertIn("TopBarBrand(Modifier.weight(1f), compact = true)", header)
         self.assertIn("TopBarTabs(selected, onSelect, compact = true)", header)
+        compact = header.split("if (maxWidth < 840.dp)", 1)[1].split("} else {\\n            Row(", 1)[0]
+        self.assertIn("Box(Modifier.weight(1f))", compact)
+        self.assertLess(compact.index("EnvChip(chip, onChip)"), compact.index("TopBarTabs(selected, onSelect, compact = true)"))
+        self.assertEqual(compact.count("Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically)"), 2)
         self.assertIn("Modifier.weight(1f).clickable { onSelect(tab) }", header)
         self.assertIn("overflow = TextOverflow.Ellipsis", header)
         # Both modes expose all actions, rather than hiding overflowed controls.

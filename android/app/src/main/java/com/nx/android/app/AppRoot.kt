@@ -512,8 +512,8 @@ fun MainScreen(prefs: PrefsStore, locale: AppLocale, port: PortState, library: L
 /**
  * Responsive shell header. A single horizontal row cannot accommodate the
  * brand, tabs, three actions, environment status and clock on portrait phones.
- * Keep the existing one-row arrangement on wide screens, and keep every
- * action visible in three bounded rows on narrow screens.
+ * Keep the existing one-row arrangement on wide screens, and put all controls
+ * into two bounded rows on narrow screens.
  *
  * Insets protect the top row from the display cutout/status bar even though
  * MainActivity requests immersive edge-to-edge rendering.
@@ -537,21 +537,24 @@ private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit
     ) {
         if (maxWidth < 840.dp) {
             Column(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
+                // Status and clock join the brand: the first row can shrink
+                // the name with an ellipsis, never the clickable status chip.
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     TopBarBrand(Modifier.weight(1f), compact = true)
+                    EnvChip(chip, onChip)
                     Text(time, style = MaterialTheme.typography.titleMedium,
                          color = MaterialTheme.colorScheme.onSurfaceVariant,
                          modifier = Modifier.padding(start = 8.dp))
                 }
-                // Tabs get bounded equal widths: long translations or large
-                // accessibility text cannot push the second tab off-screen.
-                TopBarTabs(selected, onSelect, compact = true)
+                // Two bounded tabs share the remaining width with the actions.
+                // No control is pushed outside the viewport on portrait phones.
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    EnvChip(chip, onChip)
-                    Spacer(Modifier.weight(1f))
+                    Box(Modifier.weight(1f)) {
+                        TopBarTabs(selected, onSelect, compact = true)
+                    }
                     TopIcon(Icons.Filled.Refresh, stringResource(R.string.app_refresh_library), onRefresh)
                     Spacer(Modifier.width(4.dp))
                     PadIcon(padCount, onOpenPadCenter)
