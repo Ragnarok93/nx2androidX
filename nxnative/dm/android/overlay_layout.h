@@ -163,22 +163,24 @@ void dm_overlay_theme_done(const ov_theme *t);   // the pixels are on the GPU: t
 
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
-enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER, OVM_FSR, OVM_FSR_SHARP, OVM_RATE, OVM_DRS, OVM_DRS_MIN, OVM_DRS_NOW, OVM_DRS_HOOK, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
-            // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
-            // OVM_PAD: a controller's face buttons by their position or by their label (front_player.c pad_labels)
+enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER, OVM_FSR, OVM_FSR_SHARP, OVM_RATE, OVM_DRS, OVM_DRS_MIN, OVM_DRS_NOW, OVM_DRS_HOOK, OVM_DIAG_OPEN, OVM_DIAG_CAPTURE, OVM_DIAG_EXPORT, OVM_DIAG_STATUS, OVM_DIAG_DELAY, OVM_DIAG_FLAGS, OVM_DIAG_BACK, OVM_FLAG_DLC, OVM_FLAG_DCC, OVM_FLAG_BC, OVM_FLAG_HIZ, OVM_FLAGS_BACK, OVM_RESUME, OVM_TAB, OVM_N };
 #define OVM_TABS 4
 #define OVM_PER_TAB 6
-static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {
+enum { OVM_DIAG_TAB = OVM_TABS, OVM_FLAGS_PAGE = OVM_TABS + 1, OVM_DIAG_STATE = 1u << 26, OVM_FLAGS_STATE = 1u << 27 };
+#define OVM_PAGES (OVM_TABS + 2)
+static const int OVM_TAB_ITEMS[OVM_PAGES][OVM_PER_TAB] = {
     {OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1},
     {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO, -1},
     {OVM_FSR, OVM_FSR_SHARP, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER},
-    {OVM_RATE, OVM_DRS, OVM_DRS_MIN, OVM_DRS_NOW, OVM_DRS_HOOK, OVM_DRIVER}
+    {OVM_RATE, OVM_DRS, OVM_DRS_MIN, OVM_DRS_NOW, OVM_DRS_HOOK, OVM_DIAG_OPEN},
+    {OVM_DIAG_CAPTURE, OVM_DIAG_DELAY, OVM_DIAG_EXPORT, OVM_DIAG_STATUS, OVM_DIAG_FLAGS, OVM_DIAG_BACK},
+    {OVM_FLAG_DLC, OVM_FLAG_DCC, OVM_FLAG_BC, OVM_FLAG_HIZ, OVM_FLAGS_BACK, -1}
 };
 static const char *const OVM_TAB_NAMES[OVM_TABS] = {"Gamepad", "Game", "Graphics", "Pacing"};
 #define OVM_ROWS (OVM_PER_TAB + 2)   // the tabs, a tab's rows (as many for every tab: the panel keeps its size), Resume
 int dm_menu_audio_available(void);
 static inline int ov_menu_item(int tab, int row) {
-    int item = row == 0 ? OVM_TAB : row == OVM_ROWS - 1 ? OVM_RESUME : row > 0 && row < OVM_ROWS - 1 ? OVM_TAB_ITEMS[tab >= 0 && tab < OVM_TABS ? tab : 0][row - 1] : -1;
+    int item = row == 0 ? OVM_TAB : row == OVM_ROWS - 1 ? OVM_RESUME : row > 0 && row < OVM_ROWS - 1 ? OVM_TAB_ITEMS[tab >= 0 && tab < OVM_PAGES ? tab : 0][row - 1] : -1;
     return item == OVM_AUDIO && !dm_menu_audio_available() ? -1 : item;
 }
 #define OV_MENU_ROW 0.115f   // row height, of the window's height

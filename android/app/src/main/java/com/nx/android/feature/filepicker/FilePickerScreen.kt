@@ -30,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,7 @@ import com.nx.android.core.ui.components.CapsuleButton
 import com.nx.android.core.ui.components.QuietButton
 import com.nx.android.core.ui.theme.NxPalette
 import java.io.File
+import java.io.IOException
 
 /** 选择模式：选一个文件，或选一个目录 */
 enum class PickerMode { FILE, DIR }
@@ -73,32 +75,33 @@ private data class PickerEntry(val file: File, val isDirectory: Boolean, val act
  * 所在目录，用户随时可以改主意。
  */
 @Composable
-fun FilePickerScreen(req: PickerRequest, volumes: List<Pair<String, File>>,
+fun FilePickerScreen(req: PickerRequest, volumes: List<Pair<String, File>>, storageRevision: Int,
                      onPicked: (File) -> Unit, onCancel: () -> Unit) {
-    var current by remember(req, volumes) { mutableStateOf(nearestExisting(req.initial, volumes)) }
-    val currentIsDir = remember(current) { current.isDirectory }
-    // 选中的文件仍留在它所在目录的列表里，用户可以改主意
-    val browsed = remember(current, currentIsDir) {
-        if (currentIsDir) current else current.parentFile ?: current
+    var current by remember(req) { mutableStateOf(nearestExisting(req.initial, volumes)) }
+    LaunchedEffect(volumes, storageRevision) {
+        if (volumeOf(current, volumes) == null || !current.exists()) {
+            current = nearestExisting(current, volumes)
+        }
     }
-    val children = remember(browsed) { browsed.listFiles()?.toList().orEmpty() }
-    val entries = remember(children, req.mode, req.extensions) { buildEntries(children, req.mode, req.extensions) }
-    // 当前所在的卷；在卷根时上一级不可用（卷切换走顶栏）
-    val currentVolume = volumes.firstOrNull {
-        current.path == it.second.path || current.path.startsWith(it.second.path + "/")
+    val currentIsDir = remember(current, storageRevision) { current.isDirectory }
+    val browsed = if (currentIsDir) current else current.parentFile ?: current
+    val children = remember(browsed, storageRevision) { browsed.listFiles()?.toList() }
+    val entries = remember(children, req.mode, req.extensions) {
+        buildEntries(children.orEmpty(), req.mode, req.extensions)
     }
-    val atVolumeRoot = currentVolume != null && current.path == currentVolume.second.path
-    val canConfirm = if (req.mode == PickerMode.FILE) !currentIsDir else currentIsDir
-    val canGoUp = !atVolumeRoot
+    val currentVolume = volumeOf(browsed, volumes)
+    val canGoUp = currentVolume != null && browsed != currentVolume.second
+    val canConfirm = currentVolume != null && children != null && req.accepts(current)
 
     BackHandler { onCancel() }
 
     Column(Modifier.fillMaxSize().background(NxPalette.Background)) {
-        PickerTopBar(req.title, current, volumes, onUp = {
-            current = current.parentFile ?: currentVolume?.second ?: current
+        PickerTopBar(req.title, current, volumes, canGoUp, onUp = {
+            current = browsed.parentFile ?: browsed
         }, onVolume = { current = it })
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
+                children == null || currentVolume == null -> PickerEmpty(stringResource(R.string.picker_storage_unavailable))
                 children.isEmpty() -> PickerEmpty(stringResource(R.string.picker_no_files))
                 entries.isEmpty() -> PickerEmpty(stringResource(R.string.picker_no_game_files))
                 else -> LazyVerticalGrid(
@@ -128,7 +131,7 @@ fun FilePickerScreen(req: PickerRequest, volumes: List<Pair<String, File>>,
             QuietButton(stringResource(R.string.common_cancel), onClick = onCancel, modifier = Modifier.heightIn(min = 48.dp))
             CapsuleButton(
                 if (req.mode == PickerMode.FILE) stringResource(R.string.picker_pick_file) else stringResource(R.string.picker_pick_folder),
-                onClick = { onPicked(current) },
+                onClick = { if (canConfirm && req.accepts(current)) onPicked(current) },
                 enabled = canConfirm,
                 modifier = Modifier.heightIn(min = 48.dp),
             )
@@ -147,10 +150,8 @@ private fun PickerEmpty(text: String) {
 /** 顶栏：上一级、标题与当前路径；右侧是存储卷切换（多于一卷才出现） */
 @Composable
 private fun PickerTopBar(title: String, current: File, volumes: List<Pair<String, File>>,
-                          onUp: () -> Unit, onVolume: (File) -> Unit) {
-    val currentVolume = volumes.firstOrNull {
-        current.path == it.second.path || current.path.startsWith(it.second.path + "/")
-    }
+                          canGoUp: Boolean, onUp: () -> Unit, onVolume: (File) -> Unit) {
+    val currentVolume = volumeOf(current, volumes)
     var volumeMenu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -158,11 +159,11 @@ private fun PickerTopBar(title: String, current: File, volumes: List<Pair<String
     ) {
         Box(
             Modifier.size(48.dp).clip(RoundedCornerShape(50)).background(NxPalette.Surface)
-                .clickable(enabled = !atVolumeRoot(current, volumes), onClick = onUp),
+                .clickable(enabled = canGoUp, onClick = onUp),
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.picker_up), Modifier.size(22.dp),
-                tint = if (!atVolumeRoot(current, volumes)) MaterialTheme.colorScheme.onBackground
+                tint = if (canGoUp) MaterialTheme.colorScheme.onBackground
                 else NxPalette.Unbuilt)
         }
         Spacer(Modifier.width(12.dp))
@@ -191,7 +192,7 @@ private fun PickerTopBar(title: String, current: File, volumes: List<Pair<String
                 }
                 DropdownMenu(expanded = volumeMenu, onDismissRequest = { volumeMenu = false }) {
                     volumes.forEach { (label, root) ->
-                        val on = current.path == root.path || current.path.startsWith(root.path + "/")
+                        val on = currentVolume?.second == root
                         DropdownMenuItem(
                             text = {
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -211,8 +212,9 @@ private fun PickerTopBar(title: String, current: File, volumes: List<Pair<String
     }
 }
 
-private fun atVolumeRoot(current: File, volumes: List<Pair<String, File>>): Boolean =
-    volumes.any { current.path == it.second.path }
+private fun volumeOf(file: File, volumes: List<Pair<String, File>>): Pair<String, File>? =
+    volumes.filter { (_, root) -> file == root || file.path.startsWith(root.path + "/") }
+        .maxByOrNull { it.second.path.length }
 
 /** One grid tile: the icon and the name. The whole tile is the target. */
 @Composable
@@ -262,7 +264,7 @@ private fun buildEntries(
         val isDirectory = f.isDirectory
         when {
             isDirectory -> PickerEntry(f, true, actionable = true)
-            mode == PickerMode.FILE && matchesExtension(f.name, extensions) ->
+            mode == PickerMode.FILE && f.isFile && f.canRead() && matchesExtension(f.name, extensions) ->
                 PickerEntry(f, false, actionable = true)
             mode == PickerMode.FILE -> null
             else -> PickerEntry(f, false, actionable = false)
@@ -283,13 +285,23 @@ private fun matchesExtension(name: String, extensions: Set<String>): Boolean {
     return extensions.any { lower.endsWith("." + it.trim().removePrefix(".").lowercase()) }
 }
 
-/** 起始目录不存在时，退到最近可用的祖先；一路都不可用就从第一个卷开始 */
+private fun PickerRequest.accepts(file: File): Boolean = file.canRead() && when (mode) {
+    PickerMode.FILE -> file.isFile && matchesExtension(file.name, extensions)
+    PickerMode.DIR -> file.isDirectory
+}
+
+/** Use the nearest mounted ancestor, or start on the first available volume. */
 internal fun nearestExisting(dir: File?, volumes: List<Pair<String, File>>): File {
-    val roots = volumes.map { it.second }
-    var f = dir
-    while (f != null && !f.isDirectory) f = f.parentFile
-    if (f != null && roots.any { f.path == it.path || f.path.startsWith(it.path + "/") }) return f
-    return roots.firstOrNull() ?: f ?: STORAGE_ROOT_FALLBACK
+    var folder = dir?.let {
+        try {
+            it.canonicalFile
+        } catch (_: IOException) {
+            it.absoluteFile
+        }
+    }
+    while (folder != null && !folder.isDirectory) folder = folder.parentFile
+    if (folder != null && volumeOf(folder, volumes) != null) return folder
+    return volumes.firstOrNull()?.second ?: STORAGE_ROOT_FALLBACK
 }
 
 private val STORAGE_ROOT_FALLBACK = File("/storage/emulated/0")

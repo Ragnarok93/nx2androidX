@@ -503,6 +503,7 @@
     <string name="lib_other_games_save">That save belongs to another game (%1$s); it was not imported</string>
     <string name="lib_import_confirm">Import this save?</string>
     <string name="lib_import_confirm_body">%1$s\n\nYour current progress will be replaced, and it cannot be brought back.</string>
+    <string name="picker_storage_unavailable">This storage location is unavailable</string>
     <string name="picker_no_files">There are no files here</string>
     <string name="picker_no_game_files">No game files with a known extension</string>
     <string name="picker_pick_file">Pick this file</string>
@@ -511,7 +512,7 @@
     <string name="picker_section_storage">Storage</string>
     <string name="picker_switch_volume">Switch the storage volume</string>
     <string name="storage_internal">Internal storage</string>
-    <string name="storage_sd_card">SD card (%1$s)</string>
+    <string name="storage_external">External storage (%1$s)</string>
     <string name="storage_role_workspace">Build cache</string>
     <string name="storage_role_pack">Data pack</string>
     <string name="storage_total">Total</string>

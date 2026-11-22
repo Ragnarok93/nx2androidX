@@ -2,7 +2,7 @@
 # mkapk.py: build and sign a code-less NativeActivity APK with the Python standard library only (no JDK, no Android SDK).
 #   binary AndroidManifest.xml (AXML) -> stored ZIP with the .so page-aligned -> APK Signature Scheme v2 (RSA-2048, SHA-256) with a self-signed cert.
 # Usage: mkapk.py <lib.so> <out.apk> [key.json] [--package P] [--label L] [--lib NAME] [--landscape] [--icon icon.png [--icon-fg fg.png --icon-bg bg.png]] [--release] [--version-code N] [--version-name V]   (the key is created on first use and reused, so reinstalls keep the same signer)
-import hashlib, json, os, struct, sys, time
+import hashlib, os, struct, sys
 
 import argparse as _ap
 _p = _ap.ArgumentParser(); _p.add_argument('so'); _p.add_argument('out'); _p.add_argument('key', nargs='?'); _p.add_argument('--package', default='org.nx2a.probe')
@@ -18,7 +18,8 @@ _p.add_argument('--launcher-activity', default='', help='the optional launcher a
 _p.add_argument('--activity', default='android.app.NativeActivity', help='NativeActivity class name')
 _p.add_argument('--release', action='store_true', help='not debuggable')
 _p.add_argument('--game-mode-performance', action='store_true', help='declare Performance Game Mode (requires the native NVN pacing policy)')
-_p.add_argument('--version-code', type=int, default=1, help='versionCode: a later port of the game must have a higher one to install over it')
+_p.add_argument('--version-code', type=int, default=1, help='Android APK versionCode')
+_p.add_argument('--preserve-version-floor', action='store_true', help='never lower versionCode for an existing package signed by this key')
 _p.add_argument('--version-name', default='1.0', help='versionName: the version the player sees (the game\'s display version)'); ARGS = _p.parse_args()
 PKG, LIB, LABEL = ARGS.package, ARGS.lib, ARGS.label
 if ARGS.activity != 'android.app.NativeActivity' and not ARGS.dex: _p.error('--activity requires --dex')
@@ -171,17 +172,24 @@ def walk_attrs(n):
     for a in n[1]: yield a
     for k in n[2]: yield from walk_attrs(k)
 
-from apksign import build_zip_file, cert, gen_key, sign_v2_file   # file-backed stored ZIP and bounded-memory v2 signer
+from apksign import build_zip_file, persistent_signer, sign_v2_file, upgrade_version
 
 def main():
-    so, out = ARGS.so, ARGS.out
-    keyf = ARGS.key if ARGS.key else os.path.join(os.path.dirname(os.path.abspath(out)), 'probe-signing-key.json')
-    if os.path.exists(keyf): k = {a: int(v) for a, v in json.load(open(keyf)).items() if a != 'cert'}; crt = bytes.fromhex(json.load(open(keyf))['cert'])
+    key_path = ARGS.key or os.path.join(os.path.dirname(os.path.abspath(ARGS.out)), 'probe-signing-key.json')
+    key, certificate = persistent_signer(key_path)
+    if ARGS.preserve_version_floor:
+        with upgrade_version(key_path, PKG, ARGS.version_code) as version_code:
+            if version_code > ARGS.version_code:
+                print(f'versionCode {version_code} preserves the previous export of {PKG}')
+            build_apk(key, certificate, version_code)
     else:
-        t = time.time(); k = gen_key(); crt = cert(k)
-        json.dump({**{a: str(v) for a, v in k.items()}, 'cert': crt.hex()}, open(keyf, 'w'))
-        print(f'new signing key {keyf} ({time.time() - t:.1f} s)')
-    entries = [('AndroidManifest.xml', axml(MANIFEST), 4), (f'lib/arm64-v8a/lib{LIB}.so', so, 16384)]
+        build_apk(key, certificate, ARGS.version_code)
+
+def build_apk(k, crt, version_code):
+    so, out = ARGS.so, ARGS.out
+    manifest = (MANIFEST[0], [(a, name, version_code if name == 'versionCode' else value)
+                             for a, name, value in MANIFEST[1]], MANIFEST[2])
+    entries = [('AndroidManifest.xml', axml(manifest), 4), (f'lib/arm64-v8a/lib{LIB}.so', so, 16384)]
     if ARGS.dex: entries.append(('classes.dex', ARGS.dex, 4))
     entries += [(f'lib/arm64-v8a/{os.path.basename(x)}', x, 16384) for x in ARGS.extra_so]
     if ARGS.data_root:   # the folder with the game's files: the game asks for it when it is not there
@@ -207,6 +215,6 @@ def main():
     finally:
         try: os.unlink(zip_tmp)
         except FileNotFoundError: pass
-    print(f'{out}: {size} bytes, signer SHA-256 {hashlib.sha256(crt).hexdigest()[:16]}...')
+    print(f'{out}: {size} bytes, signer SHA-256 {hashlib.sha256(crt).hexdigest()}')
 
 if __name__ == '__main__': main()

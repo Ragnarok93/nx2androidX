@@ -1,0 +1,8 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D depth_tex;
+layout(set = 0, binding = 1, std430) buffer Results { uint words[]; } results;
+void main() {
+    uvec2 p = gl_LocalInvocationID.xy;
+    results.words[256 + p.y * 8 + p.x] = floatBitsToUint(texelFetch(depth_tex, ivec2(p), 0).r);
+}

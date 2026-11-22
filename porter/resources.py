@@ -25,7 +25,8 @@ def memory_mb():
 
 def is_android():
     return (sys.platform == 'android' or hasattr(sys, 'getandroidapilevel') or
-            bool(os.environ.get('ANDROID_ROOT') or os.environ.get('ANDROID_DATA')))
+            bool(os.environ.get('ANDROID_ROOT') or os.environ.get('ANDROID_DATA')) or
+            os.path.isfile('/system/build.prop'))
 
 
 def safe_jobs(requested=None, *, total_mb=None, available_mb=None, cpu_count=None, android=None):

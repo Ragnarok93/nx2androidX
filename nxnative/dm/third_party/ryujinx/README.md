@@ -23,6 +23,12 @@ Three projects from Ryujinx 1.3.2: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` a
   Not yet in `dm/gfx/tools/dmsh_xlate_bin`, which is rebuilt on a Mac with
   `dmsh_chain.py --update-lock`; Android builds the translator from this source.
 
+- `Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs`, `RequiresOriginalExecutionPoint`:
+  keep subgroup operations, derivatives and texture samples out of expression
+  propagation. A single-use assignment can feed a divergent branch. Inlining
+  its expression there changes the lanes used by the operation. The translator
+  regression fixture checks both direct and nested expressions.
+
 The shader translation tool in `dm/gfx/tools/dmsh_xlate` references them to translate the original Switch shaders to SPIR-V.
 
 License: MIT, see `LICENSE.txt`. Upstream: <https://github.com/Ryubing>.

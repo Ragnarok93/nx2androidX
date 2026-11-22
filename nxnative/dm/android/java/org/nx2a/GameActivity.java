@@ -37,6 +37,27 @@ public class GameActivity extends NativeActivity {
     }
 
     private static final int REQUEST_LOSSLESS_DLL = 0x6e33;
+    private String diagnosticsRoot;
+    static native boolean diagnosticsExportStarted();
+    static native void diagnosticsExported(int result); // 0 failed, 1 saved, 2 cancelled
+    private final GameKeyboard keyboard = new GameKeyboard(this);
+
+    /** Called by the native pause-menu Diagnostics tab, never from gameplay. */
+    public void exportDiagnostics(String root) {
+        diagnosticsRoot = root;
+        DiagnosticsExport.request(this);
+    }
+
+    /** Called only by the Java archive worker, after the Android document picker. */
+    static void notifyDiagnosticsExport(int result) {
+        try { diagnosticsExported(result); }
+        catch (UnsatisfiedLinkError error) { Log.e("nx2a-diag", "Native export status unavailable", error); }
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        if (diagnosticsRoot != null) state.putString("nx2a.diagnosticsRoot", diagnosticsRoot);
+        super.onSaveInstanceState(state);
+    }
     static native String saveArchiveRoot();
     static native String saveExportSnapshot();
     static native void saveExportStatus(boolean success, String message);
@@ -122,11 +143,16 @@ public class GameActivity extends NativeActivity {
         // NativeActivity loads libdmhost here. Its native data setup defers game startup for embedded APKs;
         // extraction then runs off the UI thread so multi-gigabyte packs cannot ANR the launcher.
         super.onCreate(state);
+        if (state != null) diagnosticsRoot = state.getString("nx2a.diagnosticsRoot");
         prepareEmbeddedPack(this);
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == DiagnosticsExport.REQUEST) {
+            DiagnosticsExport.onResult(this, diagnosticsRoot, resultCode, data);
+            return;
+        }
         if (SaveDocuments.onActivityResult(this, requestCode, resultCode, data)) return;
         if (requestCode == REQUEST_LOSSLESS_DLL) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null)

@@ -43,6 +43,7 @@ class ShaderCache(unittest.TestCase):
         mock.patch.object(nsp, 'split_shaders').start()
         mock.patch.object(pipeline.Port, 'device_oodle_end').start()
         mock.patch.object(nsp, 'run', side_effect=self.run_external).start()
+        mock.patch.object(pipeline, '_has_network', return_value=True).start()
         mock.patch.object(pipeline.paths, 'user_dir', return_value=self.root / 'user').start()
 
     def run_external(self, argv, logfile, **kwargs):
@@ -54,6 +55,7 @@ class ShaderCache(unittest.TestCase):
             (out / 'dmsh_xlate.runtimeconfig.json').write_text('{}')
             return
         self.exports += 1
+        self.export_args = argv
         out = Path(argv[3])
         entries = [] if self.empty else [(1, 5, SPV, REFL)]
         dmsv.write(str(out), entries, level=0)
@@ -72,6 +74,14 @@ class ShaderCache(unittest.TestCase):
     def export(self):
         with mock.patch.object(pipeline.Port, 'translator', return_value=(self.dll, 'source-key')):
             with contextlib.redirect_stdout(io.StringIO()): self.p.shaders()
+
+    def test_android_port_limits_translator_batch_size(self):
+        with mock.patch.object(pipeline.resources, 'is_android', return_value=True), \
+             mock.patch.object(pipeline.resources, 'memory_mb', return_value=(7800, 5000)):
+            self.p.o.jobs = 8
+            self.export()
+        self.assertEqual(self.export_args[self.export_args.index('--jobs') + 1], '1')
+        self.assertEqual(self.export_args[self.export_args.index('--batch-size') + 1], '512')
 
     def test_unchanged_bundle_reused(self):
         self.export(); first = self.p.dmsv.read_bytes()
@@ -240,6 +250,29 @@ class ShaderCache(unittest.TestCase):
         self.during_export = omit
         with self.assertRaises(pipeline.BuildError): self.export()
         self.assertEqual(self.p.dmsv.read_bytes(), previous)
+
+    def test_phone_translator_survives_payload_refresh_and_migrates_receipt(self):
+        prebuilt = self.root / 'payload'
+        prebuilt.mkdir()
+        shipped = prebuilt / 'dmsh_xlate.dll'
+        shipped.write_bytes(b'bundled compiler')
+        with mock.patch.dict(os.environ, {'NX2A_DMSH_XLATE': str(prebuilt)}):
+            self.p.translator()
+            installed, stable_key = self.p.translator()
+            legacy = self.p.prebuilt_translator_previous_key
+            self.assertIsNotNone(legacy)
+            with mock.patch.object(self.p, 'translator', return_value=(installed, legacy)):
+                self.p.prebuilt_translator_previous_key = None
+                self.p.shaders()
+            original_mtime = installed.stat().st_mtime_ns
+            os.utime(shipped, ns=(shipped.stat().st_atime_ns, shipped.stat().st_mtime_ns + 30_000_000_000))
+            self.p.shaders()
+            self.assertEqual(installed.stat().st_mtime_ns, original_mtime)
+            self.assertEqual(self.exports, 1)
+            self.assertEqual(self.p.translator()[1], stable_key)
+            shipped.write_bytes(b'changed compiler')
+            self.p.shaders()
+            self.assertEqual(self.exports, 2)
 
     def test_translator_unchanged_reused(self):
         self.p.translator(); self.p.translator()

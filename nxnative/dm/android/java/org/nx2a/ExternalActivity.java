@@ -50,6 +50,11 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     private static native float[] externalOverlay(int width, int height);
     private static native int externalMenuState();
     private static native int[] externalMenuPixels(int width, int height, int state);
+    private String diagnosticsRoot;
+    public void exportDiagnostics(String root) {
+        diagnosticsRoot = root;
+        DiagnosticsExport.request(this);
+    }
     private ExternalDisplay external;
     private View pad;
     private Dialog phonePad;
@@ -90,6 +95,10 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == DiagnosticsExport.REQUEST) {
+            DiagnosticsExport.onResult(this, diagnosticsRoot, resultCode, data);
+            return;
+        }
         if (SaveDocuments.onActivityResult(this, requestCode, resultCode, data)) return;
         CompanionImporter.onActivityResult(this, requestCode, resultCode, data);
     }

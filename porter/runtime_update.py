@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from porter import config, toolchain
+from porter import config, resources, toolchain
 from porter.paths import DM
 from porter.revision import PLAYER_API_REVISION
 
@@ -102,18 +102,21 @@ def rebuild(pack, *, no_lsfg=False, jobs=None, allow_profile_drift=False, emit=p
             output = scratch / 'host'
             prebuilt = DM.parent.parent / 'tools' / 'adrenotools'
             use_prebuilt = all((prebuilt / name).is_file() for name in HOOKS)
+            workers = resources.safe_jobs(jobs)
             args = [sys.executable, str(DM / 'android/build.py'), '--game', title_id,
                     '--ndk', str(ndk), '--out', str(output), '--play', '--release',
-                    '--jobs', str(jobs or os.cpu_count() or 8)]
+                    '--jobs', str(workers)]
             if no_lsfg: args.append('--no-lsfg')
             if not use_prebuilt: args.append('--adrenotools')
             env = dict(os.environ, DM_GAME=title_id, DM_GAMES_DIR=str(profile_root), DM_GAMES_FIRST='1')
             tc_lib = DM.parent.parent / 'toolchain' / 'lib'
             if tc_lib.is_dir(): env['LD_LIBRARY_PATH'] = str(tc_lib) + os.pathsep + env.get('LD_LIBRARY_PATH', '')
-            emit('Building the player runtime')
+            emit(f'Building the player runtime with {workers} compiler worker(s)')
             with subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace') as process:
                 for line in process.stdout: emit(line.rstrip())
-                if process.wait(): raise RuntimeError('Runtime compilation failed. Retry, or port the game again from its original files.')
+                code = process.wait()
+                if code:
+                    raise RuntimeError(f'Runtime compilation failed (exit {code}). The previous runtime is still active.')
             host = output / 'libdmplay.so'
             with host.open('rb') as stream: header = stream.read(20)
             if len(header) < 20 or header[:5] != b'\x7fELF\x02' or struct.unpack_from('<H', header, 18)[0] != 183:

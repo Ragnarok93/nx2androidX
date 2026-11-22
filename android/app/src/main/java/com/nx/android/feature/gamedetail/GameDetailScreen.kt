@@ -414,6 +414,17 @@ private fun GameDetailScreen(lib: LibraryState, port: PortState, player: PlayerS
                                     else shareGameLog(p)
                                 },
                             )
+                            if (ported != null) {
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text(locale.str(R.string.runtime_update)) },
+                                    leadingIcon = { Icon(Icons.Filled.Tune, null, Modifier.size(18.dp)) },
+                                    enabled = !port.running && !player.running,
+                                    onClick = {
+                                        menuOpen = false
+                                        actions.onUpdateRuntime(ported.pack, e.label)
+                                    },
+                                )
+                            }
                             androidx.compose.material3.DropdownMenuItem(
                                 text = { Text(locale.str(if (packOnCard != null) R.string.lib_pack_move_back else R.string.lib_pack_move_to_card)) },
                                 leadingIcon = { Icon(Icons.Filled.SdCard, null, Modifier.size(18.dp)) },

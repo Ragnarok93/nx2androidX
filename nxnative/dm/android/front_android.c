@@ -7,6 +7,8 @@
 //   leaving and coming back pauses as on iOS.
 #include "dm.h"
 #include "front.h"
+#include "front_profile.h"
+#include "radv_test_flags.h"
 #include "dm_input.h"
 #include "overlay_layout.h"
 #include "saves_android.h"
@@ -30,7 +32,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/system_properties.h>
 #include <unistd.h>
 
 void front_run(void (*guest)(void)) { guest(); }
@@ -616,13 +617,73 @@ static _Atomic int g_tx_ver;   // the text entry's edit count: the panel is draw
 static _Atomic int g_ed_st;    // the layout editor's state for dm_menu_state (overlay_layout.h OVE_ST)
 static _Atomic int g_sp_on, g_sp_hi = -1, g_sp_ver;   // the save picker (below): open, its highlighted row, its edit count
 static _Atomic int g_sv_st, g_sv_n;                   // Export save: its outcome (overlay_layout.h OVX_*), the exports made
+// Diagnostics have no per-frame overhead until the player arms a one-shot scene
+// capture. The switch arms all capture instrumentation for the next gameplay frame.
+static _Atomic int g_diag_status, g_diag_ver, g_diag_flags_page;
+static _Atomic unsigned g_radv_pending, g_radv_applied;
+const char *dm_vk_driver_status(void);
+enum { DIAG_IDLE, DIAG_ARMED, DIAG_EXPORTING, DIAG_EXPORTED, DIAG_FAILED };
+static void diag_changed(void) { atomic_fetch_add_explicit(&g_diag_ver, 1, memory_order_relaxed); dm_overlay_redraw(); }
+static int menu_active_tab(void) {
+    int sub = atomic_load(&g_diag_flags_page);
+    return sub == 2 ? OVM_FLAGS_PAGE : sub == 1 ? OVM_DIAG_TAB : atomic_load(&g_menu_tab);
+}
+static void radv_test_report(FILE *file) {
+    fprintf(file, "radv_test_mask_applied=%u\nradv_test_mask_staged=%u\n",
+            atomic_load(&g_radv_applied), atomic_load(&g_radv_pending));
+    for (unsigned i = 0; i < RADV_TEST_COUNT; i++) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv(radv_test_flags[i].env);
+        if (!value || !*value) {
+            __system_property_get(radv_test_flags[i].property, property);
+            value = property[0] ? property : "(driver default)";
+        }
+        fprintf(file, "%s=%s\n", radv_test_flags[i].env, value);
+    }
+}
+void dm_menu_radv_note(int index, char *out, int cap) {
+    unsigned bit = 1u << index;
+    unsigned pending = atomic_load(&g_radv_pending) & bit;
+    unsigned active = atomic_load(&g_radv_applied) & bit;
+    const char *value = !radv_test_driver(dm_vk_driver_status()) ? "RADV only" :
+        pending != active ? (pending ? "Test on restart" : "Default on restart") :
+        active ? "Test active" : "Use defaults";
+    snprintf(out, (size_t)cap, "%s", value);
+}
+int vk_pass_dump_user_active(void);
+void dm_menu_diag_note(char *out, int cap) {
+    if (cap <= 0) return;
+    int status = atomic_load(&g_diag_status);
+    const char *name = status == DIAG_ARMED ? "Recording until export" :
+                       status == DIAG_EXPORTING ? "Saving ZIP..." :
+                       status == DIAG_EXPORTED ? "ZIP saved" :
+                       status == DIAG_FAILED ? "Export failed" : "Logs available";
+    if (status == DIAG_IDLE) {
+        // The report manifest is written after the GPU fence completes; the
+        // older pass_00.ppm could belong to a previous run.
+        char path[620], row[256];
+        snprintf(path, sizeof path, "%s/surface_usage.tsv", g_root);
+        FILE *m = fopen(path, "r");
+        int have = m && fgets(row, sizeof row, m) && fgets(row, sizeof row, m);
+        if (m) fclose(m);
+        if (have) name = "Capture available";
+    }
+    snprintf(out, (size_t)cap, "%s", name);
+}
+
 int dm_menu_state(void) {
     if (atomic_load(&g_tx_on)) return 1 << 16 | (atomic_load(&g_tx_ver) & 0xffff);   // the text entry's panel (gfx_vk_present.c ov_text_panel)
     if (!atomic_load(&g_menu)) return -1;
     if (atomic_load(&g_edit)) return OVE_ST | atomic_load(&g_ed_st);
     if (atomic_load(&g_sp_on)) return OVS_ST | (atomic_load(&g_sp_hi) + 1) << 4 | (atomic_load(&g_sp_ver) & 255) << 20;
-    return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 | atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
-           atomic_load(&g_menu_tab) << 29 | atomic_load(&g_set_fg) << 19 | atomic_load(&g_set_fsr) << 8 | atomic_load(&g_set_opacity) << 9 | atomic_load(&g_sv_st) << 20 | ((atomic_load(&g_sv_n) + atomic_load(&g_menu_cfg_ver)) & 15) << 24;
+    int sub = atomic_load(&g_diag_flags_page);
+    return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 |
+           atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
+           atomic_load(&g_set_fsr) << 8 | atomic_load(&g_set_opacity) << 9 |
+           atomic_load(&g_set_fg) << 19 | atomic_load(&g_sv_st) << 20 |
+           ((atomic_load(&g_sv_n) + atomic_load(&g_menu_cfg_ver) + atomic_load(&g_diag_ver)) & 3) << 24 |
+           (sub ? OVM_DIAG_STATE : 0) | (sub == 2 ? OVM_FLAGS_STATE : 0) |
+           atomic_load(&g_menu_tab) << 29;
 }
 int dm_fsr_enabled(void) { return atomic_load(&g_set_fsr); }
 int dm_fsr_sharpness(void) { return atomic_load(&g_set_fsr_sharp); }
@@ -691,7 +752,12 @@ static void menu_opacity(int v) {   // the slider: a new value is drawn at once 
     v = v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v;
     if (atomic_exchange(&g_set_opacity, v) != v) { dm_haptics_android_tap(); dm_overlay_redraw(); }
 }
-static void menu_tab(int t) { t = (t % OVM_TABS + OVM_TABS) % OVM_TABS; if (atomic_exchange(&g_menu_tab, t) != t) dm_haptics_android_tap(); dm_overlay_redraw(); }
+static void menu_tab(int t) {
+    t = (t % OVM_TABS + OVM_TABS) % OVM_TABS;
+    int previous = atomic_exchange(&g_diag_flags_page, 0);
+    if (atomic_exchange(&g_menu_tab, t) != t || previous) dm_haptics_android_tap();
+    dm_overlay_redraw();
+}
 static void ed_open(void); static void sp_open(void); static void save_export(void);
 static void jni_save_document_picker(const char *method) {
     ANativeActivity *a = g_act;
@@ -748,6 +814,97 @@ static void fg_flow_step(int direction) {
     atomic_store(&g_set_fg_flow, n);
     fg_apply();
 }
+int vk_pass_dump_user_begin(int delay);
+int vk_pass_dump_export_begin(void);
+void vk_pass_dump_export_end(int saved);
+static int diag_capture_arm(int delay) {
+    if (atomic_load(&g_diag_status) == DIAG_EXPORTING || !vk_pass_dump_user_begin(delay)) return 0;
+    static const char *const settings[][2] = {
+        {"DM_VK_PASSDUMP_FULL", "1"}, {"DM_VK_PASSDUMP_EFFECTS", "0"},
+        {"DM_VK_PASSDUMP_DEPTH_STATE", "1"}, {"DM_VK_PASSDUMP_INPUTS", "1"},
+        {"DM_VK_PASSDUMP_INPUT_VS", ""}, {"DM_VK_PASSDUMP_LIMIT", "96"},
+        // Allow the MRT and the later float effects to fit in the same sample.
+        {"DM_VK_PASSDUMP_MAX_MB", "80"}, {"DM_VK_PASSDUMP_RAW", "1"},
+        {"DM_VK_PASSDUMP_FRAMES", "1"}, {"DM_VK_PASSDUMP_SKIP", "0"},
+        {"DM_VK_PASSDUMP_SIZE", "0"},
+    };
+    static const char *const reports[] = {
+        "pass_dump_manifest.tsv", "gpu_draw_inputs.tsv", "surface_usage.tsv",
+        "surface_samples.tsv", "surface_samples.raw",
+    };
+    char path[620];
+    for (unsigned i = 0; i < sizeof reports / sizeof reports[0]; i++) {
+        snprintf(path, sizeof path, "%s/%s", g_root, reports[i]);
+        unlink(path);
+    }
+    for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
+        setenv(settings[i][0], settings[i][1], 1);
+
+    extern uint64_t g_tex_frame;
+    uint64_t frame = __atomic_load_n(&g_tex_frame, __ATOMIC_RELAXED);
+    snprintf(path, sizeof path, "%s/capture_meta.txt", g_root);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        const char *driver = dm_vk_driver_status();
+        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=continuous-rolling\nsnapshot_interval_presents=30\nsnapshot_slots=3\n"
+                   "max_gpu_readback_mb=64\nsurface_tile=16x16\n"
+                   "isolated_depth_transfer_control=0.625\n"
+                   "vulkan_driver=%s\nframe_generation_at_arm=%d\ncapture_delay_presents=%d\n",
+                (unsigned long long)frame, driver ? driver : "(unknown)", atomic_load(&g_set_fg), delay);
+        radv_test_report(f);
+        for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
+            fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
+        fclose(f);
+    }
+    atomic_store(&g_diag_status, DIAG_ARMED);
+    LOG("[diagnostics] continuous graphics capture started");
+    diag_changed();
+    return 1;
+}
+static void diag_export_request(void) {
+    if (atomic_load(&g_diag_status) == DIAG_EXPORTING) return;
+    ANativeActivity *a = g_act;
+    if (!a || !a->vm || !a->clazz) {
+        atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return;
+    }
+    fflush(stderr); // best-effort snapshot of the current run before SAF selection
+    JNIEnv *E = jni_attach(a);
+    if (!E) { atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return; }
+    jclass cls = (*E)->GetObjectClass(E, a->clazz);
+    jmethodID call = cls ? (*E)->GetMethodID(E, cls, "exportDiagnostics", "(Ljava/lang/String;)V") : NULL;
+    atomic_store(&g_diag_status, DIAG_EXPORTING);
+    int dispatched = 0;
+    if (call) {
+        jstring path = (*E)->NewStringUTF(E, g_root);
+        if (path) {
+            (*E)->CallVoidMethod(E, a->clazz, call, path);
+            (*E)->DeleteLocalRef(E, path);
+            dispatched = 1;
+        }
+    }
+    if ((*E)->ExceptionCheck(E) || !dispatched) {
+        (*E)->ExceptionClear(E);
+        LOG("[RED] [diagnostics] standalone Activity lacks the exportDiagnostics bridge");
+        atomic_store(&g_diag_status, DIAG_FAILED);
+    }
+    if (cls) (*E)->DeleteLocalRef(E, cls);
+    (*a->vm)->DetachCurrentThread(a->vm);
+    diag_changed();
+}
+__attribute__((visibility("default"))) JNIEXPORT jboolean JNICALL
+Java_org_nx2a_GameActivity_diagnosticsExportStarted(JNIEnv *E, jclass cls) {
+    (void)E; (void)cls;
+    return vk_pass_dump_export_begin() ? JNI_TRUE : JNI_FALSE;
+}
+__attribute__((visibility("default"))) JNIEXPORT void JNICALL
+Java_org_nx2a_GameActivity_diagnosticsExported(JNIEnv *E, jclass cls, jint result) {
+    (void)E; (void)cls;
+    vk_pass_dump_export_end(result == 1);
+    atomic_store(&g_diag_status, result == 1 ? DIAG_EXPORTED :
+                 vk_pass_dump_user_active() ? DIAG_ARMED : result == 2 ? DIAG_IDLE : DIAG_FAILED);
+    LOG("[diagnostics] report export %s", result == 1 ? "completed" : result == 2 ? "cancelled" : "failed");
+    diag_changed();
+}
 static void menu_do(int item) {
     if (item == OVM_OVERLAY) { atomic_store(&g_set_overlay, !atomic_load(&g_set_overlay)); atomic_store(&g_overlay, 1); settings_save(); }
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
@@ -768,6 +925,23 @@ static void menu_do(int item) {
     else if (item == OVM_FG_MULT) fg_mult_step(1);
     else if (item == OVM_FG_FLOW) fg_flow_step(1);
     else if (item == OVM_DRIVER) return; // read-only actual driver, cannot hot-swap a VkDevice
+    else if (item == OVM_DIAG_OPEN) { atomic_store(&g_diag_flags_page, 1); atomic_store(&g_menu_hi, -1); }
+    else if (item == OVM_DIAG_BACK) { atomic_store(&g_diag_flags_page, 0); atomic_store(&g_menu_hi, -1); }
+    else if (item == OVM_DIAG_CAPTURE || item == OVM_DIAG_DELAY) {
+        if (diag_capture_arm(item == OVM_DIAG_DELAY ? 120 : 0)) { dm_haptics_android_tap(); menu_close(); }
+        return;
+    } else if (item == OVM_DIAG_FLAGS || item == OVM_FLAGS_BACK) {
+        atomic_store(&g_diag_flags_page, item == OVM_DIAG_FLAGS ? 2 : 1);
+        atomic_store(&g_menu_hi, -1);
+    } else if (item >= OVM_FLAG_DLC && item <= OVM_FLAG_HIZ) {
+        if (!radv_test_driver(dm_vk_driver_status())) return;
+        unsigned next = atomic_load(&g_radv_pending) ^ (1u << (item - OVM_FLAG_DLC));
+        if (radv_test_save(g_root, next)) atomic_store(&g_radv_pending, next);
+        else LOG("[RED] [diagnostics] could not save RADV test flags");
+        diag_changed();
+    }
+    else if (item == OVM_DIAG_EXPORT) { diag_export_request(); return; }
+    else if (item == OVM_DIAG_STATUS) return;
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }
     else if (item == OVM_OPACITY) return;   // (the slider is dragged, or stepped with left and right)
@@ -780,7 +954,7 @@ static void menu_touch(const dm_java_event *e, float W, float H) {   // a press 
     int act = e->action & AMOTION_EVENT_ACTION_MASK, ai = e->action >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
     int i = act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_UP ? 0 : ai, id = i < e->pointers ? e->ptr[i].id & 31 : 0;
     float x = i < e->pointers ? e->ptr[i].x : 0, y = i < e->pointers ? e->ptr[i].y : 0, p[4]; ov_menu_rect(W, H, p);
-    int c = ctl_at(x, y, W, H), row = c >= 0 && OV_CTLS[c].kind == OV_MENU ? -3 : ov_menu_row_at(x, y, W, H), tab = atomic_load(&g_menu_tab);
+    int c = ctl_at(x, y, W, H), row = c >= 0 && OV_CTLS[c].kind == OV_MENU ? -3 : ov_menu_row_at(x, y, W, H), tab = menu_active_tab();
     int item = row >= 0 ? ov_menu_item(tab, row) : -1;
     if (act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_POINTER_DOWN) {
         if (g_menu_ptr >= 0) return;
@@ -811,7 +985,7 @@ static void ed_key(uint64_t bit); static void sp_key(uint64_t bit);
 static void menu_key(uint64_t bit) {   // a controller key pressed while the menu is open: up and down go through the rows, left and right change the tab or the
     if (atomic_load(&g_edit)) { ed_key(bit); return; }   // opacity on their rows, L and R change the tab anywhere, A does the row, B and + close
     if (atomic_load(&g_sp_on)) { sp_key(bit); return; }
-    int hi = atomic_load(&g_menu_hi), tab = atomic_load(&g_menu_tab), item = hi >= 0 ? ov_menu_item(tab, hi) : -1;
+    int hi = atomic_load(&g_menu_hi), tab = menu_active_tab(), item = hi >= 0 ? ov_menu_item(tab, hi) : -1;
     if (bit == DM_BTN_UP || bit == DM_BTN_DOWN) {
         for (int k = 0; k < OVM_ROWS; k++) { hi = hi < 0 ? (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1) : (hi + (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1)) % OVM_ROWS; if (ov_menu_item(tab, hi) >= 0) break; }
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
@@ -821,10 +995,10 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_RATE) { menu_rate_step(bit == DM_BTN_LEFT ? -1 : 1); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_MULT) { fg_mult_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_FLOW) { fg_flow_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
-    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(tab + (bit == DM_BTN_LEFT ? -1 : 1));
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(atomic_load(&g_menu_tab) + (bit == DM_BTN_LEFT ? -1 : 1));
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {
-        menu_tab(tab + (bit == DM_BTN_L || bit == DM_BTN_ZL ? -1 : 1));
-        if (hi > 0 && ov_menu_item(atomic_load(&g_menu_tab), hi) < 0) atomic_store(&g_menu_hi, OVM_ROWS - 1);   // (the other tab has fewer rows)
+        menu_tab(atomic_load(&g_menu_tab) + (bit == DM_BTN_L || bit == DM_BTN_ZL ? -1 : 1));
+        if (hi > 0 && ov_menu_item(menu_active_tab(), hi) < 0) atomic_store(&g_menu_hi, OVM_ROWS - 1);   // (the other tab has fewer rows)
     }
     else if (bit == DM_BTN_A) menu_do(hi < 0 ? OVM_RESUME : item);
     else if (bit == DM_BTN_B || bit == DM_BTN_PLUS) menu_close();
@@ -1494,96 +1668,18 @@ static void app_notice_keep(JNIEnv *E, JavaVM *vm, jobject act) {   // the start
     }
 }
 
-// A device-specific tuning request comes from the game's android.tsv, rather
-// than a global emulator change. The validated FFRS 60 FPS profile was tested
-// on an Adreno 830; don't assume that is viable on the S25 FE (Exynos 2400).
-// An explicit env.txt override or the player's saved docked setting wins.
-static void tune_ffrs_s25fe_radv(void) {
-    const char *enabled = getenv("DM_FFRS_S25FE_RADV_TUNE");
-    if (!enabled || strcmp(enabled, "1")) return;
-    char model[PROP_VALUE_MAX] = {0};
-    if (!__system_property_get("ro.product.model", model) || strncmp(model, "SM-S731", 7)) return;
-    const char *driver = getenv("DM_VK_DRIVER");
-    if (!driver || !(strstr(driver, "radeon") || strstr(driver, "radv"))) return;
-    // The game is paced by the value written into UE's rhi.SyncInterval and
-    // t.MaxFPS (hle_fpslock.c). Do not force a different rate on other GPUs.
-    if (!getenv("DM_FPS_TARGET")) {
-        setenv("DM_FPS_TARGET", "30", 0);
-        LOG("[profile] FFRS S25 FE/RADV: game FPS target 30 (override with DM_FPS_TARGET=60)");
-    }
-    // An explicit 60 FPS export must not be silently downshifted by the
-    // Android adaptive 60->40->30 policy or held at the Switch's 2-vsync
-    // presentation interval after the engine cvar has already initialized
-    // the window. Preserve an explicit user's env.txt overrides.
-    const char *fps = getenv("DM_FPS_TARGET");
-    if (fps && atoi(fps) == 60) {
-        if (!getenv("DM_ADAPTIVE_FPS")) {
-            setenv("DM_ADAPTIVE_FPS", "0", 0);
-            LOG("[profile] FFRS S25 FE/RADV: fixed 60 FPS pacing (override DM_ADAPTIVE_FPS=1 to allow downshifts)");
-        }
-        if (!getenv("DM_PRESENT_INTERVAL")) {
-            setenv("DM_PRESENT_INTERVAL", "display", 0);
-            LOG("[profile] FFRS S25 FE/RADV: ignoring the stale 2-vsync window hold for 60 FPS mode");
-        }
-    }
-    // Handheld mode is 1280x720 rather than docked 1920x1080 on this
-    // NVN title. Allow the saved "docked" setting to override this on restart.
-    if (!getenv("DM_OPMODE")) {
-        setenv("DM_OPMODE", "0", 0);
-        LOG("[profile] FFRS S25 FE/RADV: handheld 720p rendering (change Docked in the game menu)");
-    }
-    // Android repeatedly killed FFRS on the 8 GB S25 FE as eager NVN
-    // hardware pools were backed. Only eligible dirty-tracked and page-aligned
-    // pools are backed at first GPU use; ineligible pools keep the existing path.
-    // An explicit env.txt setting always takes precedence, including 0.
-    if (!getenv("DM_VK_ZEROCOPY_LAZY")) {
-        setenv("DM_VK_ZEROCOPY_LAZY", "2", 0);
-        LOG("[profile] FFRS S25 FE/RADV: lazy pool backing on (override with DM_VK_ZEROCOPY_LAZY=0)");
-    }
-    // JimVulkan's DCC_SMALL=0 affects only <=512x512 targets used by UE
-    // post-processing; it is a conservative correctness diagnostic and may
-    // cost some bandwidth. The larger render targets retain compression.
-    if (!getenv("RADV_XCLIPSE_DCC_SMALL")) {
-        setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0);
-        LOG("[profile] FFRS S25 FE/RADV: small-target compression off (override with RADV_XCLIPSE_DCC_SMALL=1)");
-    }
-    // This driver exposes dynamic rendering. Use it for FFRS to avoid the
-    // imageless-framebuffer/render-pass compatibility path while the title's
-    // missing geometry is being isolated. This does not touch other devices;
-    // DM_VK_RP=1 in env.txt restores the older path for an A/B comparison.
-    if (!getenv("DM_VK_RP")) {
-        setenv("DM_VK_RP", "0", 0);
-        LOG("[profile] FFRS S25 FE/RADV: dynamic rendering on (override with DM_VK_RP=1)");
-    }
-    // RADV Xclipse v1.9.0 (cc87fdf) provides a driver-cache coherency
-    // workaround for the Xclipse 940 when a shader reads data that another
-    // shader has written. FFRS makes extensive use of GPU-produced scene
-    // buffers; try the correctness path first while its disappearing meshes
-    // are being investigated. Older RADV builds ignore this new switch.
-    // An explicit RADV_XCLIPSE_DLC=0 restores the driver's default behavior.
-    if (!getenv("RADV_XCLIPSE_DLC")) {
-        setenv("RADV_XCLIPSE_DLC", "1", 0);
-        LOG("[profile] FFRS S25 FE/RADV: driver shader-cache coherence workaround on (override with RADV_XCLIPSE_DLC=0)");
-    }
-    // The failed first-battle capture used DM_VK_MT_REPLAY=1. That mode
-    // records Vulkan commands on a second thread and is experimental; it is
-    // NOT the default replayer. Keep command recording on the replay thread
-    // for this device/game until missing scene geometry is ruled out as a
-    // recorder lifetime or ordering problem. Adreno and other games keep their
-    // selected mode. The owner can opt in again for an A/B trial.
-    const char *allow_mt = getenv("DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY");
-    const char *mt = getenv("DM_VK_MT_REPLAY");
-    if (mt && atoi(mt) > 0 && !(allow_mt && atoi(allow_mt) > 0)) {
-        setenv("DM_VK_MT_REPLAY", "0", 1);
-        LOG("[profile] FFRS S25 FE/RADV: disabled experimental DM_VK_MT_REPLAY=1 for render correctness (opt in again with DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY=1)");
-    }
-    LOG("[profile] S25 FE RADV compatibility settings selected (driver %s)", driver);
-}
 static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char *internal) {
     if (g_host_up) return;   // the dialog's thread and the resume can both get here
     crash_install();   // the signal handlers: the Android host has no main.c to install them, so a crash here used to kill the game silently
     char p[700], q[720];
-    snprintf(p, sizeof p, "%s/log.txt", g_root); char prev[720]; snprintf(prev, sizeof prev, "%s/log.prev.txt", g_root); rename(p, prev);
+    // Preserve the previous three runs, even if a crash is followed by a
+    // restart before the player exports the diagnostic ZIP.
+    char hist2[720], hist3[720], prev[720];
+    snprintf(hist2, sizeof hist2, "%s/log.prev.2.txt", g_root);
+    snprintf(hist3, sizeof hist3, "%s/log.prev.3.txt", g_root);
+    snprintf(prev, sizeof prev, "%s/log.prev.txt", g_root);
+    rename(hist2, hist3); rename(prev, hist2);
+    snprintf(p, sizeof p, "%s/log.txt", g_root); rename(p, prev);
     if (!freopen(p, "w", stderr)) __android_log_print(ANDROID_LOG_ERROR, "dmhost", "cannot write %s", p);
     setvbuf(stderr, NULL, _IOLBF, 0);
     setenv("DM_ROOT", g_root, 1);
@@ -1594,9 +1690,17 @@ static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char 
     if (gid && gid[0] && strlen(gid) < sizeof sub - 2) snprintf(sub, sizeof sub, "/%s", gid);
     snprintf(p, sizeof p, "%s/save", internal); mkdir(p, 0700); snprintf(q, sizeof q, "%s%s", p, sub); mkdir(q, 0700); setenv("DM_SAVE", q, 0);
     snprintf(p, sizeof p, "%s/temp", internal); mkdir(p, 0700); snprintf(q, sizeof q, "%s%s", p, sub); mkdir(q, 0700); setenv("DM_TEMP", q, 0);
+    // An embedded or companion APK update replaces the game data directory.
+    // Standalone APKs have a private files directory for this one game.
+    if (!sub[0] && snprintf(p, sizeof p, "%s/vulkan-cache", internal) < (int)sizeof p &&
+        (mkdir(p, 0700) == 0 || errno == EEXIST))
+        setenv("DM_VK_PCACHE_DIR", p, 1);
     snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
     snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p);
     tune_ffrs_s25fe_radv();
+    atomic_store(&g_radv_pending, radv_test_load(g_root));
+    atomic_store(&g_radv_applied, radv_test_apply(g_root));
+    if (radv_test_driver(getenv("DM_VK_DRIVER"))) radv_test_report(stderr);
     // User-supplied Lossless.dll may live alongside imported game data.
     // Do not bundle copyrighted DLLs without the user's own provided file.
     if (!getenv("DM_LSFG_DLL") || !*getenv("DM_LSFG_DLL")) {

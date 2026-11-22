@@ -7,15 +7,13 @@
 # Its sprite particles' parameters (R32F buffer textures of 36-44 elements at offsets not a multiple of Adreno's 64) are read from an aligned copy (gfx_vk_tex.c vk_tbuf_view).
 # Its particle compute shaders write R32UI / R32I buffer textures through float images: those get an integer variant (gfx_vk_shader.c spv_int_images), and the battle's
 # haze and dust sprites (vertex shader fb570ef861debd17) draw since.
-# Not drawn: the fires in the first battle's background that the battle tutorial's picture shows. Likely by design on this platform, not proven on a Switch: every blended
-# draw of the battle frame was identified with DM_VK_X_FLAT_VS (in env.txt: pipelines made before it keep their state) and none is a flame: fb570ef8 the haze sprites,
-# 1300ca45ddca3566 / c55d54c8f41b1520 ground-fog volumes, 70eb4102 the moon's glow (pass 22), 1bbd4f87bfa7cdf5 light shafts and 6a4e114179eda634 a screen effect (pass 24,
-# after depth of field). The fire light (not a Niagara effect) is there. The game's Switch device profile holds fx.Niagara.QualityLevel at 1 (Min and Max 1 at main+0x779eb70 /
-# 0x779eb80 / 0x779eb90 at run time; 3 in the binary) and fx.Niagara.PruneEmittersOnCook is 1, so emitters of higher quality levels are left out of its packaged data; the
-# binary is the original Switch's (no Switch 2 model query among its imports), and the tutorial pictures may come from another platform. Ruled out on the port's side: the
-# GPU count readback, occlusion (only timestamps and SAMPLES_PASSED, answered as visible), the frame rate (DM_FPS_TARGET=30), handheld mode, Niagara's culling switches
-# (visibility, distance, instance count and global budget culling written to 0 from the title, main+0x779eca8 / 0x779ecac / 0x779ecb0 / 0x779ec74, with DM_CTL pokei).
-# The game ignores command-line console variables (a shipping build: -dpcvars and -ini: through DM_GAME_ARGS_ADD changed nothing, r.ScreenPercentage included).
+# Upstream nx2android PR #243 (merge 5803c1c5), originating with nxnative #168, establishes that the missing fires, smoke and particle effects are a shader-translation
+# defect, not a deliberately omitted Switch effect. Niagara vertex shaders pass texture-buffer handles through mixed c[2] phis; the old bindless optimizer deleted their
+# reads when it could not resolve all branches, collapsing particle meshes. The upstream Ryujinx BindlessElimination, BindlessToArray, Optimizer, Utils and ResourceManager
+# corrections preserve the reads and resolve the valid handles, with compatible resource types. The existing aligned GPU texel-buffer snapshot fallback remains in use.
+# This source change requires rebuilding the translator and the full FFRS SPIR-V bundle (shaders.dmsv), not merely replacing the installed native runtime.
+# The other upstream geometry fix (nx2android #25, indirect draw base instance via Vulkan draw_parameters) is already enabled by shader_vk.py.
+# Xclipse 940 battle geometry still needs hardware confirmation: upstream's Adreno particle result does not prove all missing meshes are fixed.
 # First road, standing still (2026-11-06, docked): patches of fog on the road lit and went dark in turn. Its lights go into 32x32x32 volumes drawn slice by slice
 # with additive blending; the core cleared only slice 0 of a layered pass, so the fog boxes that read them (1300ca45ddca3566) changed every frame: fixed in the core
 # (gfx_vk_exec.c clear_color, every layer cleared; same on Qualcomm's driver and Turnip). The patches still went on and off after that (2026-11-08: two exact
@@ -33,14 +31,29 @@ graphics	nvn
 # Existing player settings.txt is preserved; it may keep the previous toggle.
 setting	fps=1
 # The 60 FPS default is from an Adreno 830 tablet. On Galaxy S25 FE
-# (SM-S731*, Exynos 2400/Xclipse 940) with JimVulkan RADV Xclipse only,
-# front_android.c selects UE's 30 FPS target (DM_FPS_TARGET=30) and disables
-# small-render-target DCC, a conservative starting point for investigating
-# incorrect UE post-processing. Other devices and drivers keep their defaults.
-# Remove this row or set it to 0 to opt out. Explicit DM_FPS_TARGET and
-# RADV_XCLIPSE_DCC_SMALL values in env.txt take priority over the defaults.
-# The S25 FE/RADV tuning above also defaults DM_VK_ZEROCOPY_LAZY=2 on
-# compatible NVN pools; DM_VK_ZEROCOPY_LAZY=0 in env.txt opts out.
-# Pool-cache pressure trimming applies device-wide (opt out with
-# DM_VK_POOL_PRESSURE_TRIM=0 in env.txt).
+# (SM-S731*, Exynos 2400/Xclipse 940) with an explicitly selected RADV
+# driver, front_android.c uses the Switch-reference 30 FPS target unless
+# DM_FPS_TARGET is explicitly set. All earlier speculative rendering overrides
+# (DCC, imageless/dynamic pass selection, DLC, forced replay mode, handheld
+# resolution) are removed from this profile; user-provided env.txt controls
+# remain available for controlled A/B experiments.
+# The 2026-11-19 Xclipse run reports 384 skipped "no pipeline" draws by
+# present 4200, with no shader/target misses or Vulkan creation failures.
+# Its asynchronous pipeline path intentionally drops draws during compile.
+# S25 FE + imported RADV therefore disables that draw-omission mechanism by
+# default (DM_VK_ASYNC_PIPE=0), preserving explicit env.txt overrides and the
+# tested Snapdragon pipeline behavior. This is accuracy hardening, not a
+# demonstrated repair of persistent missing combatants.
+# Remove this row or set it to 0 to opt out of the 30 FPS device reference.
 env	DM_FFRS_S25FE_RADV_TUNE=1
+
+# Expensive compute variants from two Nov 20 RADV runs, including the first battle and summon.
+# Tried first by the selected driver's background history worker.
+env	DM_VK_COMPUTE_WARM_SEEDS=7d5360e7217da425:100:420,1d1b5d2228ef28a1:200:880,d17e8ae4746091e7:200:880,871a956888714cad:100:440,f0cb690586962b91:200:840,571584e1b477256c:200:840,3e901071781cb805:80:220,727f11ee6ea801a0:100:440,1d93538ab494b489:100:420,777a0d85b0fe5c5f:80:220,b7b84ae936557112:100:420,5578e86b911d054a:81200:200100,4264f862636487de:200:840,a4e6779feb8d7197:0:0,4c1f3149460a5612:200:910,f1018536f15fa04d:100:420
+
+# 2026-11-19 diagnostic: this RADV driver copied D24S8 depth to a buffer
+# as float32 (0x3f200000 for 0.625) instead of Vulkan-required packed
+# D24. The shared renderer's default LRZ copy/writeback is explicitly
+# an Adreno workaround. The S25 FE RADV-only profile disables it and
+# converts guest CPU-facing ReadTexels D24 depth. Both are overridable
+# via DM_VK_LRZ_TOUCH and DM_VK_D24_FLOAT_COPY in env.txt.

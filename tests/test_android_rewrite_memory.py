@@ -17,6 +17,10 @@ class RewriteWorkerBudgetTests(unittest.TestCase):
     def test_larger_android_devices_keep_the_requested_ceiling(self):
         self.assertEqual(nsp.rewrite_workers({'DM_REWRITE_JOBS': '2'}, cpu_count=10), 2)
 
+    def test_generic_J_limit_applies_when_android_override_is_absent(self):
+        self.assertEqual(nsp.rewrite_workers({'J': '1'}, cpu_count=10), 1)
+        self.assertEqual(nsp.rewrite_workers({'J': '9', 'DM_REWRITE_JOBS': '2'}, cpu_count=10), 2)
+
     def test_desktop_rewrite_keeps_original_parallelism(self):
         self.assertEqual(nsp.rewrite_workers({}, cpu_count=10), 10)
 
@@ -30,7 +34,10 @@ class RewriteWorkerBudgetTests(unittest.TestCase):
         self.assertIn("self.env['DM_REWRITE_JOBS'] = str(self.o.jobs)", source)
         self.assertIn("self.o.jobs = resources.safe_jobs(self.o.jobs)", source)
         driver = SCRIPT.read_text(encoding='utf-8')
-        self.assertIn('list(names), rewrite_workers(env)', driver)
+        # Validate the limit before extraction/rewriter side effects, not after
+        # staging files as in the former implementation.
+        self.assertIn('cores = rewrite_workers(env)', driver)
+        self.assertIn('procs, logf, todo = {}, {}, list(names)', driver)
 
     def test_android_uses_smaller_disassembly_pieces(self):
         rewriter = (ROOT / 'nxnative/dm/tools/patch_nso.py').read_text(encoding='utf-8')

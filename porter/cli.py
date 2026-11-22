@@ -76,7 +76,7 @@ def _parser():
     rt.add_argument('--allow-profile-drift', action='store_true',
                     help='rebuild with the profile the game has now even when it is not the one the pack was built with '
                          '(that profile is the one a full re-port would use too; the game may behave differently than when it was ported)')
-    rt.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
+    rt.add_argument('--jobs', type=int, default=None)
     rt.add_argument('--progress', choices=('json', 'lines'), default='lines')
     ins = sub.add_parser('install', help='install a port made earlier'); ins.add_argument('data', help='the data pack folder (<App>-data)'); ins.add_argument('--apk', help='the APK (default: <App>.apk beside the pack)')
     ins.add_argument('--device', default=''); ins.add_argument('--replace-signer', action='store_true'); ins.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'))

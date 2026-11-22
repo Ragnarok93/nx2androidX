@@ -29,6 +29,7 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
 
     companion object {
         const val TAG = "Nx2aEnv"
+        private val signingKeyLock = Any()
 
         /**
          * The generation of the build's stamp: it changes when the rule "the tree goes and comes again"
@@ -62,6 +63,17 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
     /** The .NET runtime (the extractor and the shader translator are C# and run on it): where the porter looks for it */
     val dotnet: File get() = File(nxHome, "toolchains/dotnet/dotnet")
 
+    private fun standaloneSigningKey(): File = synchronized(signingKeyLock) {
+        val legacy = File(nxHome, "signing-key.json")
+        val persistent = File(files, "standalone-signing-key.json")
+        if (!persistent.exists() && legacy.exists()) {
+            check(legacy.isFile && legacy.length() > 0L && legacy.renameTo(persistent)) {
+                "Cannot preserve the standalone APK signing key"
+            }
+        }
+        persistent
+    }
+
     /** The environment every guest program gets */
     override fun guestEnv(): MutableMap<String, String> {
         home.mkdirs(); tmp.mkdirs(); nxHome.mkdirs()
@@ -73,6 +85,7 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
             "PYTHONPATH" to "${tool}/pylibs",
             "LD_LIBRARY_PATH" to "${rootfs}/usr/lib/aarch64-linux-gnu:${rootfs}/usr/lib",
             "NX2A_HOME" to nxHome.absolutePath,
+            "NX2A_SIGNING_KEY" to standaloneSigningKey().absolutePath,
             "NX2A_NDK" to "${tool}/toolchain/ndk",
             "NX2A_REPO" to tool.absolutePath,
             // nx_extract is built on the computer and shipped: the phone has no SDK to restore packages with
@@ -186,6 +199,7 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
 
     /** Throws the environment away: the next unpack does everything again */
     override fun reset() {
+        standaloneSigningKey()
         marker.delete()
         File(files, ".nx2a-tool").delete()
         File(files, ".nx2a-toolchain").delete()

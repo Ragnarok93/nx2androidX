@@ -41,6 +41,14 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('getenv("DM_VK_PASSDUMP_MIN_COLORS")', part)
         self.assertIn('S.rt_has_col[i]', part)
         self.assertIn('if (have < need) return;', part)
+        self.assertIn('getenv("DM_VK_PASSDUMP_MIN_DRAWS")', part)
+        self.assertIn('vk_pd_pass_has_draws(g_pass_draws', part)
+        self.assertIn('vk_pd_depth_prepass_eligible', part)
+        self.assertIn('pass_dump_depth_control(VK_FORMAT_D24_UNORM_S8_UINT);', part)
+        self.assertIn('getenv("DM_VK_PASSDUMP_DEPTH_CONTROL")', part)
+        self.assertIn('vk_pd_d24_matches', exec_src)
+        self.assertIn('[depthcontrol] RESULT:', exec_src)
+        self.assertIn('pass_dump_depth_aspect(VK_IMAGE_ASPECT_DEPTH_BIT)', part)
         self.assertIn('g_npd >= pass_dump_limit()', part)
         self.assertIn('getenv("DM_VK_PASSDUMP_LIMIT")', exec_src)
         self.assertIn('g_npd < pass_dump_limit() - 1', exec_src)
@@ -51,9 +59,8 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('indirect_log(d);', exec_src)
         self.assertIn('entries++ >= 48', exec_src)
 
-    def test_xclipse_tuning_is_device_scoped_and_opt_out(self):
-        src = FRONT.read_text(encoding="utf-8")
-        tune = src[src.index("static void tune_ffrs_s25fe_radv(void) {"):src.index("static void host_start_common(")]
+    def test_xclipse_tuning_is_device_scoped_without_unproven_driver_defaults(self):
+        tune = FRONT.with_name("front_profile.h").read_text(encoding="utf-8")
         self.assertIn('strncmp(model, "SM-S731", 7)', tune)
         self.assertIn('strstr(driver, "radeon")', tune)
         self.assertIn('strstr(driver, "radv")', tune)
@@ -62,6 +69,9 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('setenv("DM_FPS_TARGET", "30", 0)', tune)
         self.assertIn('if (!getenv("DM_OPMODE"))', tune)
         self.assertIn('setenv("DM_OPMODE", "0", 0)', tune)
+self.assertIn('if (!getenv("DM_VK_ASYNC_PIPE"))', tune)
+self.assertIn('setenv("DM_VK_ASYNC_PIPE", "0", 0)', tune)
+self.assertIn('setenv("DM_VK_LRZ_TOUCH", "0", 0)', tune)
         self.assertIn('if (fps && atoi(fps) == 60)', tune)
         self.assertIn('setenv("DM_ADAPTIVE_FPS", "0", 0)', tune)
         self.assertIn('setenv("DM_PRESENT_INTERVAL", "display", 0)', tune)

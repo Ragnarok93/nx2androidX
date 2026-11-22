@@ -38,7 +38,7 @@ def check_batch(result, count):
         ok, bad = map(int, summary.groups())
         if ok + bad == count and result.returncode == bool(bad):
             return
-    raise RuntimeError('shader translator did not complete its batch: ' + result.stderr[-2000:])
+    raise RuntimeError(f'shader translator did not complete its batch (exit {result.returncode}): ' + result.stderr[-2000:])
 
 
 def validate_resource(resource, key, stage):

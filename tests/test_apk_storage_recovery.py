@@ -50,22 +50,18 @@ class ApkStorageRecoveryTests(unittest.TestCase):
                 Path("/data/user/0/com.nx.android/files/work"),
                 Path("/storage/0123-4567/Ports")))
 
-    def test_old_export_pack_is_only_removed_when_owned_and_without_saves(self):
+    def test_interrupted_archive_cleanup_keeps_previous_export(self):
         with tempfile.TemporaryDirectory() as root:
             p = object.__new__(pipeline.Port)
             p.o = SimpleNamespace(self_contained=True, out=Path(root))
             owned = Path(root) / "Example-data"
             owned.mkdir()
             (owned / "nx2a-data.json").write_text(json.dumps({"title_id": "0100000000000001", "package": "org.nx2a.example"}))
-            (owned / "romfs.bin").write_bytes(b"old generated data")
-            p.cleanup_legacy_self_contained_pack("Example", "0100000000000001", "org.nx2a.example")
-            self.assertFalse(owned.exists())
-            owned.mkdir()
-            (owned / "nx2a-data.json").write_text(json.dumps({"title_id": "0100000000000001", "package": "org.nx2a.example"}))
-            (owned / "saves").mkdir()
-            p.cleanup_legacy_self_contained_pack("Example", "0100000000000001", "org.nx2a.example")
+            interrupted = Path(root) / ".Example.nx2a-data.zip.partial"
+            interrupted.write_bytes(b"partial")
+            p.cleanup_interrupted_archive("Example")
             self.assertTrue(owned.exists())
-
+            self.assertFalse(interrupted.exists())
 
     def test_embedded_archive_retries_stronger_deflate_and_remains_readable(self):
         import random
