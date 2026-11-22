@@ -16,7 +16,8 @@ def sample_toc():
             struct.pack('<I', 2) + gid0 + gid1 +
             struct.pack('<I', 1) + struct.pack('<II', 0, 4) +
             struct.pack('<I', 4) + struct.pack('<4Q', *entries) +
-            struct.pack('<I', 2) + struct.pack('<4I', 0, 2, 5, 6) +
+            struct.pack('<I', 2) + struct.pack('<4I', 0, 2, 5, 1) +
+            struct.pack('<4I', 2, 2, 6, 6) +
             struct.pack('<I', 4) + struct.pack('<4I', *indices))
     class Toc:
         path = 'fixture.utoc'
