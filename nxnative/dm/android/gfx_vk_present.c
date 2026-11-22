@@ -586,7 +586,7 @@ static float ov_glow(int64_t t, int64_t now) {   // a held button's glow: bright
     if (!t) return 0;
     float f = (float)(now - t) / OV_FLASH_NS; return f >= 1 ? 0.22f : 0.22f + 0.48f * (1 - f) * (1 - f);
 }
-static _Atomic uint64_t g_fps_frames;   // successful game-frame presents (not menu redraws or generated frames)
+static _Atomic uint64_t g_fps_frames;   // accepted output presents: source plus generated, excluding menu redraws
 // The frame rate counter: the game's frames shown per second, measured over half a second, in the window's top left corner on a dark block
 static float ov_fps_cell(void) {   // a character cell's width in texels: the widest advance of OV_FPS_CHARS (8 columns: A, O, T), a clear texel each side
     static int adv;
@@ -1030,7 +1030,10 @@ static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch
     pthread_mutex_unlock(&g_vk_queue_mu);
     if (r >= 0) {
         hud_count(with_meta, period, mono_ns());
-        if (with_meta && period >= 0)
+        // Count actual accepted output images, not only base game presents.
+        // Generated frames have with_meta=0 and a non-negative period;
+        // menu redraws have period<0 and are never included.
+        if (period >= 0)
             atomic_fetch_add_explicit(&g_fps_frames, 1, memory_order_relaxed);
     }
     if (r == VK_ERROR_OUT_OF_DATE_KHR) swap_destroy();

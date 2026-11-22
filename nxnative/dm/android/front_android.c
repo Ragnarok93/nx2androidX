@@ -625,6 +625,23 @@ static void menu_opacity(int v) {   // the slider: a new value is drawn at once 
 }
 static void menu_tab(int t) { t = (t % OVM_TABS + OVM_TABS) % OVM_TABS; if (atomic_exchange(&g_menu_tab, t) != t) dm_haptics_android_tap(); dm_overlay_redraw(); }
 static void ed_open(void); static void sp_open(void); static void save_export(void);
+static void jni_save_document_picker(const char *method) {
+    ANativeActivity *a = g_act;
+    if (!a || !a->vm || !a->clazz) return;
+    JNIEnv *E = jni_attach(a);
+    if (!E) return;
+    jclass cls = (*E)->GetObjectClass(E, a->clazz);
+    jmethodID choose = cls ? (*E)->GetMethodID(E, cls, method, "()V") : NULL;
+    if (choose) (*E)->CallVoidMethod(E, a->clazz, choose);
+    if ((*E)->ExceptionCheck(E)) {
+        (*E)->ExceptionDescribe(E);
+        (*E)->ExceptionClear(E);
+        LOG("[RED] [saves] cannot open Android document picker (%s)", method);
+    }
+    if (cls) (*E)->DeleteLocalRef(E, cls);
+    (*a->vm)->DetachCurrentThread(a->vm);
+}
+
 static void fg_apply(void) {
     dm_fg_set(atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), 0, atomic_load(&g_set_fg_flow));
     settings_save();
@@ -681,8 +698,8 @@ static void menu_do(int item) {
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }
     else if (item == OVM_OPACITY) return;   // (the slider is dragged, or stepped with left and right)
-    else if (item == OVM_EXPORT) { if (atomic_load(&g_sv_st) == OVX_BUSY) return; save_export(); }
-    else if (item == OVM_IMPORT) { dm_haptics_android_tap(); sp_open(); return; }
+    else if (item == OVM_EXPORT) { if (atomic_load(&g_sv_st) == OVX_BUSY) return; jni_save_document_picker("chooseSaveExport"); }
+    else if (item == OVM_IMPORT) { jni_save_document_picker("chooseSaveImport"); return; }
     if (item >= 0 && item < OVM_N) dm_haptics_android_tap();
     if (item == OVM_RESUME) menu_close(); else dm_overlay_redraw();
 }
@@ -1564,6 +1581,44 @@ Java_org_nx2a_GameActivity_losslessDllReady(JNIEnv *E, jclass cls, jstring path)
         LOG("[fg] user supplied Lossless.dll; frame generation enabled");
     } else LOG("[RED] [fg] invalid Lossless.dll import path");
     (*E)->ReleaseStringUTFChars(E, path, f);
+}
+
+// Save documents use Android's SAF picker: the user selects the destination/source URI in Java.
+// The native snapshot is always taken on Java's worker thread, after a destination is selected.
+// Existing porter/ADB folder exports remain supported separately.
+__attribute__((visibility("default"))) JNIEXPORT jstring JNICALL
+Java_org_nx2a_GameActivity_saveExportSnapshot(JNIEnv *E, jclass cls) {
+    (void)cls;
+    char name[64] = "", err[600] = "";
+    atomic_store(&g_sv_st, OVX_BUSY);
+    dm_overlay_redraw();
+    int rc = dm_saves_export("", name, sizeof name, err, sizeof err);
+    char answer[610];
+    snprintf(answer, sizeof answer, "%s%s", rc ? "!" : "", rc ? err : name);
+    return (*E)->NewStringUTF(E, answer);
+}
+__attribute__((visibility("default"))) JNIEXPORT void JNICALL
+Java_org_nx2a_GameActivity_saveExportStatus(JNIEnv *E, jclass cls, jboolean success, jstring message) {
+    (void)cls;
+    const char *msg = message ? (*E)->GetStringUTFChars(E, message, NULL) : NULL;
+    pthread_mutex_lock(&g_sp_mu);
+    snprintf(g_sv_note, sizeof g_sv_note, "%s", msg ? msg : (success ? "Saved ZIP" : "Export failed"));
+    pthread_mutex_unlock(&g_sp_mu);
+    if (msg) (*E)->ReleaseStringUTFChars(E, message, msg);
+    atomic_store(&g_sv_st, success ? OVX_DONE : OVX_FAILED);
+    atomic_fetch_add(&g_sv_n, 1);
+    dm_overlay_redraw();
+}
+__attribute__((visibility("default"))) JNIEXPORT jboolean JNICALL
+Java_org_nx2a_GameActivity_saveImportStage(JNIEnv *E, jclass cls, jstring name) {
+    (void)cls;
+    if (!name) return JNI_FALSE;
+    const char *n = (*E)->GetStringUTFChars(E, name, NULL);
+    if (!n) return JNI_FALSE;
+    int valid = n[0] && n[0] != '.' && !strchr(n, '/') && !strchr(n, '\\') && strlen(n) < 64;
+    int ok = valid && !dm_saves_request_import(n);
+    (*E)->ReleaseStringUTFChars(E, name, n);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 // the player's start (jni_android.h): what the NativeActivity's onCreate and onResume would have done, with the

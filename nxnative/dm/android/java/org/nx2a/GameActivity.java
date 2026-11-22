@@ -37,6 +37,13 @@ public class GameActivity extends NativeActivity {
     }
 
     private static final int REQUEST_LOSSLESS_DLL = 0x6e33;
+    static native String saveExportSnapshot();
+    static native void saveExportStatus(boolean success, String message);
+    static native boolean saveImportStage(String name);
+    /** System documents picker, allowing the player to place a ZIP anywhere. */
+    public void chooseSaveExport() { SaveDocuments.chooseExport(this); }
+    /** System documents picker, allowing the player to import any supported ZIP URI. */
+    public void chooseSaveImport() { SaveDocuments.chooseImport(this); }
     private final GameKeyboard keyboard = new GameKeyboard(this);
 
     /** Called by the standalone performance menu when shader DLL is missing. */
@@ -119,6 +126,7 @@ public class GameActivity extends NativeActivity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (SaveDocuments.onActivityResult(this, requestCode, resultCode, data)) return;
         if (requestCode == REQUEST_LOSSLESS_DLL) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null)
                 importLosslessDll(data.getData());
