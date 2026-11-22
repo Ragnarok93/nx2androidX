@@ -37,6 +37,7 @@ public class GameActivity extends NativeActivity {
     }
 
     private static final int REQUEST_LOSSLESS_DLL = 0x6e33;
+    static native String saveArchiveRoot();
     static native String saveExportSnapshot();
     static native void saveExportStatus(boolean success, String message);
     static native boolean saveImportStage(String name);

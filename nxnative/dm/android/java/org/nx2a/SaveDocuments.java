@@ -70,11 +70,14 @@ final class SaveDocuments {
     }
 
     private static File saves(Activity a) throws IOException {
-        File root = a.getExternalFilesDir(null);
-        if (root == null) throw new IOException("App's external files directory is unavailable");
-        File saves = new File(root, "saves");
-        if (!saves.isDirectory() && !saves.mkdirs()) throw new IOException("Cannot create saves directory");
-        return saves;
+        // The native host chooses the data root. Self-contained APKs normally
+        // store it internally; legacy ports can keep it under Android/data.
+        // Never guess from getExternalFilesDir(): that would read the wrong save.
+        String path = GameActivity.saveArchiveRoot();
+        if (path == null || path.isEmpty()) throw new IOException("The game save manager is not ready");
+        File root = new File(path);
+        if (!root.isDirectory()) throw new IOException("The game's save directory is unavailable");
+        return root;
     }
 
     private static void export(Activity a, Uri uri) {

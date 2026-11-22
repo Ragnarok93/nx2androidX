@@ -1606,6 +1606,12 @@ Java_org_nx2a_GameActivity_losslessDllReady(JNIEnv *E, jclass cls, jstring path)
 // The native snapshot is always taken on Java's worker thread, after a destination is selected.
 // Existing porter/ADB folder exports remain supported separately.
 __attribute__((visibility("default"))) JNIEXPORT jstring JNICALL
+Java_org_nx2a_GameActivity_saveArchiveRoot(JNIEnv *E, jclass cls) {
+    (void)cls;
+    const char *root = dm_saves_dir();
+    return (*E)->NewStringUTF(E, root ? root : "");
+}
+__attribute__((visibility("default"))) JNIEXPORT jstring JNICALL
 Java_org_nx2a_GameActivity_saveExportSnapshot(JNIEnv *E, jclass cls) {
     (void)cls;
     char name[64] = "", err[600] = "";
