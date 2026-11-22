@@ -208,6 +208,21 @@ static void force_check(void) {
     LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused, unused);
 }
 
+static int g_render_scale_stubs;
+int dm_ue_screenpct_supported(void);
+void dm_ue_screenpct_apply(float percent);
+// Only actual game-engine render-scale hooks qualify. A final-image Vulkan
+// blit is NOT a 3D resolution reduction, and the FPS state page may exist
+// without any render-scale fixups.
+int dm_render_scale_supported(void) {
+    return (dm_fps_state && g_render_scale_stubs) || dm_ue_screenpct_supported();
+}
+void dm_render_scale_apply(float factor) {
+    if (!(factor >= 0.50f && factor <= 1.0f)) return;
+    if (dm_fps_state && g_render_scale_stubs)
+        memcpy(dm_fps_state + 0x10, &factor, sizeof factor);
+    else dm_ue_screenpct_apply(factor * 100.0f);
+}
 // Read the rewriter table header (segment boundaries, slot numbers); any row beyond the header means an old-format build output (code modified at load time), which is rejected
 static void read_layout(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.fixups.tsv", dir, m->name);
@@ -227,6 +242,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "RENDER_SCALE") && v) g_render_scale_stubs = 1;
         else if (!strcmp(key, "BUILD_ID")) sscanf(line, "# %*s %32s", m->build_id);
         else for (int k = 0; k < KEY_N; k++) {
             size_t n = strlen(kn[k]);

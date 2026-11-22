@@ -15,6 +15,7 @@
 #include "nvn_mtl.h"
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
+#include "nvn_dynres_policy.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
@@ -1913,39 +1914,85 @@ static void fstep_tick(const win_t *o) {
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
-// DM_DYN_SCALE=<lowest scale, 0.5 to 0.95> (live, a DM_CTL "env" line or env.txt; 0 or unset = off): the host's dynamic resolution, through the render-scale stubs
-// (patches.py, state page +0x10: Tears of the Kingdom, Breath of the Wild). Every 30 presents the 90th percentile of the frames' GPU time is compared with 85% of the cap's
-// frame time: over it the scale drops 0.05, under 70% of it the scale rises 0.05, between the lowest scale and 1.0; only while the frame step holds the cap (at a longer
-// hold the GPU clocks down: the pond's GPU p90 read 15-20 ms at 30 fps, and the scale fell to its floor while the CPU was what held the frames back). Tears of the Kingdom's own dynamic resolution
-// never lowered its size on the Adreno 830 (1280x720 handheld at 20 fps on the Great Sky Island); at its pond 1.0 held 30 fps (GPU p50 15.8 ms) and 0.7 held 60 (12.9 ms)
-static float g_dyn_min;   // the lowest scale while on (0 = off)
-static int dyn_scale_on(void) { return g_dyn_min > 0; }
+// Internal 3D dynamic resolution: only a real render-scale stub or a
+// validated game-engine screen-percentage CVar can accept its output. The
+// user-facing Graphics control must never be backed by final-image scaling.
+__attribute__((weak)) int dm_render_scale_supported(void) { return 0; }
+__attribute__((weak)) void dm_render_scale_apply(float scale) { (void)scale; }
+__attribute__((weak)) int dm_graphics_dynamic_enabled(void) { return 0; }
+__attribute__((weak)) int dm_graphics_scale_min_pct(void) { return 70; }
+static _Atomic int g_dyn_scale_pct = 100;
+int dm_graphics_scale_actual_pct(void) { return atomic_load(&g_dyn_scale_pct); }
+static int g_dyn_active;
 static void dyn_scale_tick(uint64_t presents) {
-    static float sc = 1.0f; static double win[30]; static int n;
-    if (presents % 30 == 0) {
-        const char *e = getenv("DM_DYN_SCALE"); float m = e ? strtof(e, NULL) : 0; if (!(m >= 0.5f && m <= 0.95f)) m = 0;
-        if (m != g_dyn_min) { LOG("[nvn] host dynamic resolution %s (DM_DYN_SCALE=%s)", m > 0 ? "on" : "off", e ? e : ""); g_dyn_min = m; n = 0;
-            if (!m) { sc = 1.0f; memcpy(dm_fps_state + 0x10, &sc, sizeof sc); } }
+    static nx_dynres_policy state = { .scale = 100, .floor = 70 };
+    static float last_applied = -1;
+    if (!dm_render_scale_supported()) {
+        if (g_dyn_active) LOG("[graphics] internal dynamic resolution unavailable: engine hook lost");
+        g_dyn_active = 0; atomic_store(&g_dyn_scale_pct, 100);
+        return;
     }
-    if (!g_dyn_min) return;
-    double g = -1; for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { g = mtl_gpu_ms(f); if (g >= 0) break; }
-    if (g < 0 || (fstep_on() && atomic_load(&g_fs_k) > 60 / (fps_step_cap() ? fps_step_cap() : 60))) return;   // frames held longer than the cap's vsyncs: the GPU clocks down with the slack, so its time says nothing about the cap
-    win[n++] = g; if (n < 30) return; n = 0;
-    double s[30]; memcpy(s, win, sizeof s);
-    for (int i = 1; i < 30; i++) { double x = s[i]; int j = i; while (j && s[j - 1] > x) { s[j] = s[j - 1]; j--; } s[j] = x; }
-    double p90 = s[26], budget = 0.85 * 1000.0 / (fps_step_cap() ? fps_step_cap() : 60);
-    float nsc = p90 > budget ? sc - 0.05f : p90 < 0.7 * budget ? sc + 0.05f : sc;
-    if (nsc < g_dyn_min) nsc = g_dyn_min;
-    if (nsc > 1.0f) nsc = 1.0f;
-    if (nsc != sc) { static int nlog; if (nlog++ < 100) LOG("[nvn] host dynamic resolution: scale %.2f → %.2f at present %llu (GPU p90 %.1f ms, budget %.1f)", sc, nsc, (unsigned long long)presents, p90, budget);
-        sc = nsc; memcpy(dm_fps_state + 0x10, &sc, sizeof sc); }
+    if (presents % 30 == 0) {
+        // A menu preference wins; the legacy DM_DYN_SCALE env override remains
+        // usable for host-side experiments on builds with render-scale hooks.
+        int active = dm_graphics_dynamic_enabled();
+        int floor = dm_graphics_scale_min_pct();
+        if (!active) {
+            const char *env = getenv("DM_DYN_SCALE");
+            float legacy = env ? strtof(env, NULL) : 0;
+            if (legacy >= 0.50f && legacy <= 0.95f) {
+                active = 1; floor = (int)(legacy * 100 + 0.5f);
+            }
+        }
+        if (floor < 50) floor = 50;
+        if (floor > 95) floor = 95;
+        if (state.floor != floor || g_dyn_active != active) {
+            g_dyn_active = active;
+            nx_dynres_reset(&state, floor);
+            LOG("[graphics] internal dynamic resolution %s, minimum %d%%",
+                active ? "enabled" : "disabled", floor);
+        }
+        if (!active) {
+            // Restore the game's native rendering size, not only the last
+            // presented frame's viewport.
+            if (last_applied != 1.0f) {
+                dm_render_scale_apply(1.0f); last_applied = 1.0f;
+            }
+            atomic_store(&g_dyn_scale_pct, 100);
+            return;
+        }
+    }
+    if (!g_dyn_active) return;
+    double gpu = -1;
+    for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) {
+        gpu = mtl_gpu_ms(f);
+        if (gpu >= 0) break;
+    }
+    if (gpu < 0 || gpu > 500) return;
+    // Never respond to the low-frequency/power-saving period of a frame-step
+    // hold: its GPU clock may be lowered deliberately below the cap.
+    if (fstep_on() && atomic_load(&g_fs_k) > 60 / (fps_step_cap() ? fps_step_cap() : 60)) return;
+    int target = dm_graphics_target_fps();
+    if (target != 30 && target != 40 && target != 60)
+        target = fps_step_cap() ? fps_step_cap() : 60;
+    if (target < 1) target = 60;
+    int changed = nx_dynres_sample(&state, (int)(gpu * 1000 + 0.5),
+                                    (int)(0.84 * 1000000.0 / target));
+    if (changed) {
+        float scale = state.scale / 100.0f;
+        dm_render_scale_apply(scale);
+        last_applied = scale;
+        atomic_store(&g_dyn_scale_pct, state.scale);
+        LOG("[graphics] render scale %d%%; GPU p90 %.2f ms, target GPU budget %.2f ms at %d FPS",
+            state.scale, state.last_p90_us / 1000.0, 840.0 / target, target);
+    }
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++; SEQ("present %d", idx);
     dm_fps_lock_tick();
     if (dm_fps_state) { static int was; int c = fps_step_cap(); if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? " (prerendered movie)" : ""); was = c; } }
-    if (dm_fps_state) dyn_scale_tick(o->presents);
-    if (dm_fps_state && o->presents % 30 == 0 && !dyn_scale_on()) {   // DM_RENDER_SCALE changed while the game runs (a DM_CTL "env" line): the render-scale stubs read the state page every frame
+    dyn_scale_tick(o->presents);
+    if (dm_fps_state && o->presents % 30 == 0 && !g_dyn_active) {   // DM_RENDER_SCALE changed while the game runs (a DM_CTL "env" line): the render-scale stubs read the state page every frame
         static char last[16] = "-"; const char *rs = getenv("DM_RENDER_SCALE"); if (!rs) rs = "";
         if (last[0] == '-') snprintf(last, sizeof last, "%s", rs);   // the value loader.c applied at start
         else if (strcmp(rs, last)) { snprintf(last, sizeof last, "%s", rs); char *e; float sc = *rs ? strtof(rs, &e) : 1.0f;

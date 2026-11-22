@@ -81,6 +81,45 @@ int dm_fps_lock_supported(void) {
     return 0;
 }
 __attribute__((weak)) int dm_graphics_target_fps(void) { return 0; }
+// Optional, explicitly configured UE5 screen-percentage CVar. The exact
+// registration offset MUST be established for this game's main build; unlike
+// t.MaxFPS it has not yet been validated in FFRS. Never scan and overwrite
+// guessed variables or silently claim a postprocess blit is internal scaling.
+// DM_UE_SCREENPCT_OFF: main-relative offset of the TAutoConsoleVariable object
+// (whose +0x10 points to two float copies). Restricted to FFRS build IDs.
+static uint64_t ue_screenpct_values(void) {
+    const char *env = getenv("DM_UE_SCREENPCT_OFF");
+    if (!env || !*env) return 0;
+    char *end; uint64_t off = strtoull(env, &end, 0);
+    if (end == env || *end || !off) return 0;
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (strcmp(m->name, "main") ||
+            (strcmp(m->build_id, "84e182f72ee1da4f477804bd05b54c15") &&
+             strcmp(m->build_id, "b7f965b9d7227db8e29f04e84ea7331b"))) continue;
+        if (off + 0x18 < off || off + 0x18 > m->size) return 0;
+        uint64_t ptr = 0; float values[2];
+        if (!rd((uint64_t)(uintptr_t)(m->base + off + 0x10), &ptr, sizeof ptr) || !ptr ||
+            !rd(ptr, values, sizeof values)) return 0;
+        // Both UE console-variable copies must look like percentages. This
+        // guards malformed offsets from clobbering unrelated pointers/fields.
+        if (!(values[0] >= 40 && values[0] <= 200 &&
+              values[1] >= 40 && values[1] <= 200)) return 0;
+        return ptr;
+    }
+    return 0;
+}
+int dm_ue_screenpct_supported(void) { return ue_screenpct_values() != 0; }
+void dm_ue_screenpct_apply(float percent) {
+    uint64_t ptr = ue_screenpct_values(); if (!ptr) return;
+    for (int i = 0; i < 2; i++) {
+        float *p = (float *)(uintptr_t)(ptr + i * sizeof(float));
+        dm_guest_write_prepare(p, sizeof *p);
+        memcpy(p, &percent, sizeof percent);
+    }
+    static int notices;
+    if (notices++ < 8) LOG("[graphics] UE r.ScreenPercentage %.0f%% (validated CVar offset override)", percent);
+}
 
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
