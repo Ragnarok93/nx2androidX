@@ -34,6 +34,10 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         self.assertIn("saveImportStage(name)", self.java)
         self.assertIn("dm_saves_request_import(n)", self.front)
         self.assertIn("dm_saves_export", self.front)
+        external = (ANDROID / "java/org/nx2a/ExternalActivity.java").read_text()
+        self.assertIn("SaveDocuments.onActivityResult(this", external)
+        self.assertIn("chooseSaveExport()", external)
+        self.assertIn("chooseSaveImport()", external)
 
     def test_graphics_tab_contains_no_duplicate_fps(self):
         self.assertIn('{"Gamepad", "Game", "Graphics"}', self.menu)

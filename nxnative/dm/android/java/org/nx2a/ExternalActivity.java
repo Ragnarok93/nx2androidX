@@ -56,6 +56,11 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     private AlertDialog audioDialog;
     private final ExecutorService audioExecutor = Executors.newSingleThreadExecutor();
 
+    // Standalone external-display games share the Android document picker.
+    // KeyboardExternalActivity inherits both actions and the result callback.
+    public void chooseSaveExport() { SaveDocuments.chooseExport(this); }
+    public void chooseSaveImport() { SaveDocuments.chooseImport(this); }
+
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -85,6 +90,7 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (SaveDocuments.onActivityResult(this, requestCode, resultCode, data)) return;
         CompanionImporter.onActivityResult(this, requestCode, resultCode, data);
     }
     @Override protected void onResume() { super.onResume(); }

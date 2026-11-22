@@ -35,7 +35,7 @@ final class SaveDocuments {
 
     private SaveDocuments() {}
 
-    static void chooseExport(GameActivity a) {
+    static void chooseExport(Activity a) {
         a.runOnUiThread(() -> {
             Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -47,7 +47,7 @@ final class SaveDocuments {
         });
     }
 
-    static void chooseImport(GameActivity a) {
+    static void chooseImport(Activity a) {
         a.runOnUiThread(() -> {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -58,7 +58,7 @@ final class SaveDocuments {
         });
     }
 
-    static boolean onActivityResult(GameActivity a, int request, int result, Intent data) {
+    static boolean onActivityResult(Activity a, int request, int result, Intent data) {
         if (request != EXPORT && request != IMPORT) return false;
         if (result != Activity.RESULT_OK || data == null || data.getData() == null) return true;
         Uri uri = data.getData();
@@ -69,7 +69,7 @@ final class SaveDocuments {
         return true;
     }
 
-    private static File saves(GameActivity a) throws IOException {
+    private static File saves(Activity a) throws IOException {
         File root = a.getExternalFilesDir(null);
         if (root == null) throw new IOException("App's external files directory is unavailable");
         File saves = new File(root, "saves");
@@ -77,7 +77,7 @@ final class SaveDocuments {
         return saves;
     }
 
-    private static void export(GameActivity a, Uri uri) {
+    private static void export(Activity a, Uri uri) {
         boolean success = false;
         String note = "Export failed";
         try {
@@ -126,7 +126,7 @@ final class SaveDocuments {
         }
     }
 
-    private static void importZip(GameActivity a, Uri uri) {
+    private static void importZip(Activity a, Uri uri) {
         File temp = null, primary = null, device = null;
         boolean staged = false;
         try {
@@ -226,10 +226,10 @@ final class SaveDocuments {
         if (!f.delete()) Log.w(TAG, "Could not remove " + f);
     }
 
-    private static void notify(GameActivity a, String msg) {
+    private static void notify(Activity a, String msg) {
         a.runOnUiThread(() -> Toast.makeText(a, msg, Toast.LENGTH_LONG).show());
     }
-    private static void fail(GameActivity a, String msg, Exception e) {
+    private static void fail(Activity a, String msg, Exception e) {
         Log.e(TAG, msg, e);
         notify(a, msg + ": " + e.getMessage());
     }
