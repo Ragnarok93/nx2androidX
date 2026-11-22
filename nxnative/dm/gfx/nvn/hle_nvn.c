@@ -1975,6 +1975,11 @@ static void dyn_scale_tick(uint64_t presents) {
         }
     }
     if (!g_dyn_active) return;
+    // Unreal can reapply its device profile at level transitions. Preserve
+    // the chosen screen percentage even when the policy is at its floor and
+    // no further scale step occurs. A host render-scale stub is idempotent.
+    if (presents % 120 == 0 && last_applied > 0)
+        dm_render_scale_apply(last_applied);
     double gpu = -1;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) {
         gpu = mtl_gpu_ms(f);
