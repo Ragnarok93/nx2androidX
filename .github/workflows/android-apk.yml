@@ -180,6 +180,9 @@ jobs:
           bash packaging/android-apk/build_apk.sh release
         env:
           GH_TOKEN: ${{ github.token }}   # built-in token can download the public payload release
+          # Only untrusted/unsigned branch verification builds use the ephemeral
+          # certificate. Release tags already fail in the signing-key preflight.
+          NX2A_VERIFICATION_BUILD: ${{ steps.signer.outputs.persistent == 'true' && '0' || '1' }}
       - name: the APK's name
         id: apk
         run: |
