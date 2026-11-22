@@ -198,8 +198,8 @@ static int64_t g_work_start;
 // ---- adaptive frame rate: when the frames do not fit the period the game asks for, presentation steps to a longer one the display divides evenly
 // (60 → 40 → 30 fps; 40 asks the display for 120 Hz), and back when they fit the shorter one with room; a steady rate instead of alternating
 // one-vsync and two-vsync frames. DM_ADAPTIVE_FPS=0 keeps the game's own period.
-__attribute__((weak)) int dm_graphics_target_fps(void) { return 0; }
-static const int64_t STEPS[] = {16666667, 25000000, 33333333};   // 60, 40, 30 fps
+static const int64_t STEPS[] = {16666667, 25000000, 33333333};
+__attribute__((weak)) int dm_graphics_target_fps(void) { return 0; }   // 60, 40, 30 fps
 static int g_step = 0; static _Atomic int g_adapt = 1; static int64_t g_work_hist[64]; static int g_nwork;
 static int64_t g_last_change, g_last_up, g_up_hold = 2000000000; static int g_ok_frames; static uint64_t g_game_period;   // the period the game asks for, before the adaptive step
 static int g_nshown;
