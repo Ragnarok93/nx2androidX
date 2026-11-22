@@ -67,30 +67,25 @@ class ResonanceXclipseTests(unittest.TestCase):
         self.assertIn('strcmp(enabled, "1")', tune)
         self.assertIn('if (!getenv("DM_FPS_TARGET"))', tune)
         self.assertIn('setenv("DM_FPS_TARGET", "30", 0)', tune)
-        self.assertIn('if (!getenv("DM_OPMODE"))', tune)
-        self.assertIn('setenv("DM_OPMODE", "0", 0)', tune)
-self.assertIn('if (!getenv("DM_VK_ASYNC_PIPE"))', tune)
-self.assertIn('setenv("DM_VK_ASYNC_PIPE", "0", 0)', tune)
-self.assertIn('setenv("DM_VK_LRZ_TOUCH", "0", 0)', tune)
         self.assertIn('if (fps && atoi(fps) == 60)', tune)
         self.assertIn('setenv("DM_ADAPTIVE_FPS", "0", 0)', tune)
         self.assertIn('setenv("DM_PRESENT_INTERVAL", "display", 0)', tune)
+        self.assertIn('if (!getenv("DM_VK_ASYNC_PIPE"))', tune)
+        self.assertIn('setenv("DM_VK_ASYNC_PIPE", "0", 0)', tune)
+        self.assertIn('setenv("DM_VK_LRZ_TOUCH", "0", 0)', tune)
+        self.assertIn('setenv("DM_VK_UNCACHED_MIP_INIT", "1", 0)', tune)
         self.assertIn('if (!getenv("DM_VK_ZEROCOPY_LAZY"))', tune)
         self.assertIn('setenv("DM_VK_ZEROCOPY_LAZY", "2", 0)', tune)
-        self.assertIn('if (!getenv("RADV_XCLIPSE_DCC_SMALL"))', tune)
-        self.assertIn('setenv("RADV_XCLIPSE_DCC_SMALL", "0", 0)', tune)
-        self.assertIn('if (!getenv("DM_VK_RP"))', tune)
-        self.assertIn('setenv("DM_VK_RP", "0", 0)', tune)
-        self.assertIn('override with DM_VK_RP=1', tune)
-        self.assertIn('if (!getenv("RADV_XCLIPSE_DLC"))', tune)
-        self.assertIn('setenv("RADV_XCLIPSE_DLC", "1", 0)', tune)
-        self.assertIn('override with RADV_XCLIPSE_DLC=0', tune)
-        # The prior game capture had experimental two-stage replay enabled.
-        # Default to correctness on this device, but allow a deliberate A/B
-        # opt-in; other devices are rejected by the guards at the top.
-        self.assertIn('getenv("DM_FFRS_S25FE_RADV_ALLOW_MT_REPLAY")', tune)
-        self.assertIn('getenv("DM_VK_MT_REPLAY")', tune)
-        self.assertIn('setenv("DM_VK_MT_REPLAY", "0", 1)', tune)
+        # Earlier forced DCC/dynamic rendering/DLC/handheld/replay defaults
+        # did not correct missing actors and must not return silently.
+        for forbidden in ('setenv("RADV_XCLIPSE_DCC_SMALL",',
+                          'setenv("DM_VK_RP",',
+                          'setenv("RADV_XCLIPSE_DLC",',
+                          'setenv("DM_OPMODE",',
+                          'setenv("DM_VK_MT_REPLAY",'):
+            self.assertNotIn(forbidden, tune)
+        src = FRONT.read_text(encoding="utf-8")
+        self.assertIn('#include "front_profile.h"', src)
         start = src.index("static void host_start_common(")
         code = src[start:src.index("static void host_start(", start)]
         self.assertLess(code.index("env_file(p);"), code.index("tune_ffrs_s25fe_radv();"))
