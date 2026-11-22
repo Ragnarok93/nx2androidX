@@ -1719,6 +1719,25 @@ def scan_file(args):
         print(f'skipped {rel}: {os.path.getsize(path):,} bytes, an Unreal modern pak or an IoStore container (the shaders are in the shader code archives)', flush=True)
         return rel, {}, set(), {}
     found = []; trees = {}
+    if head[:4] == b'BSA\0':
+        # Bethesda archives: read only shader-related members. Do not map/copy the
+        # multi-GB textures and meshes archives (Skyrim Switch, SDK 3).
+        import bsa
+        try:
+            names = lambda name: 'shader' in rel.lower() or 'shader' in name.lower()
+            count = 0
+            for member, data in bsa.members(path, names):
+                count += 1
+                label = f'/{rel}#{member}'
+                scan_blob(data, label, found)
+                if has(data, b'\x91\x68\x86\x19'):
+                    found += glslc_shaders(data, label, need=False)
+        except (ValueError, OSError, OverflowError) as e:
+            red(f'{rel}: BSA shader extraction failed: {e}')
+        print(f'BSA {rel}: {count} shader-related members, {len(found)} shader records', flush=True)
+        if count and not found:
+            print(f'[RED] {rel}: the BSA contains shader-related members but their shader encoding is not recognized', flush=True)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if LOOSE_MONO and ext in LOOSE_MONO and not (len(args) > 2):   # a loose Monolith file (.wishp, .wismt, .wismda …): HCPS archives in the file itself or in its xbc1 streams (mono_shaders)
         mono_shaders(read_whole(path), '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees

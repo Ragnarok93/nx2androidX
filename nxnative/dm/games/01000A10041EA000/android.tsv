@@ -1,0 +1,9 @@
+# The Elder Scrolls V: Skyrim: experimental Switch-to-Android profile.
+# Build log from Galaxy S25 FE (SM-S731U), Android 17, 2026-11-21:
+# ExeFS and RomFS extracted, main/sdk rewritten, shader splitting found zero
+# shaders and stopped before APK packaging. Boot, render, audio and gameplay
+# compatibility have NOT been tested. Do not mark this profile playable.
+status	experimental
+package	org.nx2a.skyrim
+orientation	landscape
+graphics	nvn

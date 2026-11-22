@@ -6,7 +6,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 
 "Profile here": `nxnative/dm/games/<title ID>/` has the game's profile from nxnative. "Upstream profile": only seedds/nxnative has one, to read as a reference or starter, not to pull. "60 fps with X" is upstream's note: they run that update at 60 fps (30 on the Switch).
 
-**59 / 112 ported**
+**59 / 113 ported**
 
 **Credit.** A ported game names the person who brought it up (`ported by @handle`), taken from the commit that added its profile. The ports from before this was written down are credited to the author of the commit that introduced them.
 
@@ -105,6 +105,7 @@ Left out because they have an official Android release: Unpacking (ported here a
 - [ ] Super Smash Bros. Ultimate · `01006A800016E000` · profile here · offline
 - [ ] Taiko Risshiden V DX · `0100346017304000` · profile here · Japanese · played by touch
 - [x] Tales of Eternia Remastered · `010006E0230AC000` · ported by @shirai91
+- [ ] The Elder Scrolls V: Skyrim · `01000A10041EA000` · profile here · experimental, not yet boot-verified
 - [ ] The Great Ace Attorney Chronicles · `010036E00FB20000` · profile here
 - [x] The Legend of Zelda: Breath of the Wild · `01007EF00011E000` · profile here · 60 fps with 1.9.0 · Galaxy S25 Ultra / Turnip; tested in the opening and on the Great Plateau
 - [x] The Legend of Zelda: Echoes of Wisdom · `01008CF01BAAC000` · Retroid Pocket 6 / PurpleVK; playable with minor transparency artifacts around rifts

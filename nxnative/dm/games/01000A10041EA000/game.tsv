@@ -1,0 +1,37 @@
+# The Elder Scrolls V: Skyrim (Switch, base v0; displayed version 1.0.12.517175).
+# Based on the alpha31 Android survey/build log, 2026-11-21. Not yet boot-verified.
+# Nintendo SDK 3; NVN graphics. The base RomFS contains Bethesda BSA archives.
+# Before BSA scanning, the shader split found zero shaders; main's control
+# sections could not be matched with code areas. No shader tables are committed.
+# Format: dm/games/README.md
+
+title_id	01000A10041EA000
+program_id	01000A10041EA000
+
+name	The Elder Scrolls V: Skyrim
+ipa	Skyrim.ipa
+app_category	public.app-category.role-playing-games
+
+build	v0	1.0.12.517175	main=b3f6e5da5c501857d754e3e186e04dc2	sdk=d6afd2cb180ca36e58ec21a12cf27eec
+package	v0
+shader_versions	v0
+
+modules	main sdk
+romfs_marker	Data/Skyrim - Meshes0.bsa
+zip_store	.bsa:.esm:.esp:.ini:.metallib
+
+# 8 MiB of system resource reported by main.npdm. Virtual address memory,
+# without a SetHeapSize request. These are survey-derived starting values.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x800000
+
+pad_layout	full
+
+# A Skyrim archive may contain GLSLC output, BNSH, or another packed shader
+# format. The generic BSA reader identifies candidate members; finding and
+# validating the actual NVN payload is still required.
+shader_groups	Skyrim - Shaders.bsa=skyrim
+shader_note	The Elder Scrolls V: Skyrim shaders
