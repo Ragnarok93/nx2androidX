@@ -42,6 +42,18 @@ int main(int argc, char **argv) {
     if (median) setenv("DM_ADAPT_UP_PCT", "50", 1); else unsetenv("DM_ADAPT_UP_PCT");
     game_mode_sync();   // presenting-frame policy initialization
     assert(dm_present_period_adapt(16666667) == 16666667);
+    if (strcmp(mode, "fixed60") == 0) {
+        setenv("DM_ADAPTIVE_FPS", "0", 1);
+        policy_refresh();
+        g_step = 1; g_last_change = 0; g_nwork = 64; g_nshown = 64;
+        for (int i = 0; i < 64; i++) { g_work_hist[i] = 28000000; g_late[i] = i < 12; }
+        // Explicit fixed 60 overrides a previous 40 FPS adaptive state.
+        assert(dm_present_period_adapt(16666667) == 16666667);
+        assert(g_step == 0);
+        for (int i = 0; i < 64; i++) adapt_frame(28000000, 6000000000ll + i * 16666667);
+        assert(g_step == 0);   // no 40/30 downshift, even when work exceeds 16.7 ms
+        return 0;
+    }
     if (strcmp(mode, "pin") == 0) {
         // DM_FPS_PIN holds one step (the drawer's frame rate step sets it while the game runs):
         // work that would drop the rate leaves it where the pin puts it
@@ -104,7 +116,7 @@ int main(int argc, char **argv) {
             c.write_text(harness, encoding='utf-8')
             result = subprocess.run([cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', str(c), '-o', str(exe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            for args in ([], ['median'], ['pin']):
+            for args in ([], ['median'], ['pin'], ['fixed60']):
                 with self.subTest(policy=args or 'default'):
                     result = subprocess.run([str(exe), *args], capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

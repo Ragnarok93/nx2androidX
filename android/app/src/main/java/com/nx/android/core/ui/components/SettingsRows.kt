@@ -2,6 +2,7 @@ package com.nx.android.core.ui.components
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -178,22 +179,41 @@ fun ActionRow(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                title,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (note != null) {
-                Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+        if (maxWidth < 420.dp) {
+            // Long localized labels shouldn't be squashed beside their actions
+            // on a phone. Give the label the full row, then the action below.
+            Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (note != null) {
+                    Text(note, style = MaterialTheme.typography.bodySmall,
+                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End) {
+                    QuietButton(label, onClick, enabled = enabled)
+                }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (note != null) {
+                        Text(note, style = MaterialTheme.typography.bodySmall,
+                             color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                QuietButton(label, onClick, enabled = enabled)
             }
         }
-        Spacer(Modifier.width(10.dp))
-        QuietButton(label, onClick, enabled = enabled)
     }
 }
 

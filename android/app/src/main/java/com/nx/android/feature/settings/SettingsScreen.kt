@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -136,32 +139,90 @@ fun SettingsScreen(ob: OnboardingState, drivers: List<Driver>, driverRepository:
                 )
                 CloseIcon(onClose)
             }
-            Row(Modifier.fillMaxSize()) {
-                // 左栏：分区条目（圆角 10，选中是奶油底 + 深色字，与 App 里的选择药丸同一套）
-                Column(
-                    Modifier.width(150.dp).fillMaxHeight(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    SettingsSection.entries.forEach { s ->
-                        RailItem(stringResource(s.title), s == section) { onSelectSection(s) }
+            // On a phone the old 150.dp navigation rail left less than 200.dp
+            // for controls. Use scrolling section chips above full-width
+            // content; retain the rail on tablets and landscape screens.
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                if (maxWidth < 640.dp) {
+                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            SettingsSection.entries.forEach { s ->
+                                CompactSectionItem(stringResource(s.title), s == section) { onSelectSection(s) }
+                            }
+                        }
+                        Column(
+                            Modifier.fillMaxWidth().weight(1f).verticalScroll(scroll),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            SettingsSectionContent(section, ob, drivers, driverRepository, update,
+                                storageViewModel, actions, onRequest, onDrivers, onDiagnosticLog)
+                        }
                     }
-                }
-                Spacer(Modifier.width(16.dp))
-                Column(
-                    Modifier.weight(1f).fillMaxHeight().verticalScroll(scroll),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    when (section) {
-                        SettingsSection.ENVIRONMENT -> EnvironmentSection(ob, actions, onRequest, onDiagnosticLog)
-                        SettingsSection.STORAGE -> StorageSection(storageViewModel)
-                        SettingsSection.DRIVERS -> DriversSection(drivers, driverRepository, actions, onRequest, onDrivers)
-                        SettingsSection.DISPLAY -> DisplaySection(actions, onRequest)
-                        SettingsSection.ABOUT -> AboutSection(ob, update, actions)
+                } else {
+                    Row(Modifier.fillMaxSize()) {
+                        Column(
+                            Modifier.width(150.dp).fillMaxHeight(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            SettingsSection.entries.forEach { s ->
+                                RailItem(stringResource(s.title), s == section) { onSelectSection(s) }
+                            }
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().verticalScroll(scroll),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            SettingsSectionContent(section, ob, drivers, driverRepository, update,
+                                storageViewModel, actions, onRequest, onDrivers, onDiagnosticLog)
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/** Full-width phone content and desktop-rail content share the same state. */
+@Composable
+private fun SettingsSectionContent(
+    section: SettingsSection,
+    ob: OnboardingState,
+    drivers: List<Driver>,
+    driverRepository: DriverRepository,
+    update: UpdateViewModel,
+    storageViewModel: StorageViewModel,
+    actions: AppActions,
+    onRequest: (PickerRequest) -> Unit,
+    onDrivers: () -> Unit,
+    onDiagnosticLog: () -> Unit,
+) {
+    when (section) {
+        SettingsSection.ENVIRONMENT -> EnvironmentSection(ob, actions, onRequest, onDiagnosticLog)
+        SettingsSection.STORAGE -> StorageSection(storageViewModel)
+        SettingsSection.DRIVERS -> DriversSection(drivers, driverRepository, actions, onRequest, onDrivers)
+        SettingsSection.DISPLAY -> DisplaySection(actions, onRequest)
+        SettingsSection.ABOUT -> AboutSection(ob, update, actions)
+    }
+}
+
+/** A single-line, touch-friendly section chip for portrait screens. */
+@Composable
+private fun CompactSectionItem(label: String, selected: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        style = MaterialTheme.typography.titleMedium,
+        color = if (selected) NxPalette.Background else MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) NxPalette.Cream else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    )
 }
 
 /** 页头的关闭：一个圆按钮里的叉 */

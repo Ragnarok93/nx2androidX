@@ -950,9 +950,18 @@ class Port:
         if not self.o.fps60: return
         PROG.stage('60 fps', step='the game profile')
         if self.g.get('fps_ceiling', '0') != '0':   # a game that runs at 60 on the Switch, held at 30 by default: the ceiling lifted (android/gfx_vk_present.c dm_fps_ceiling)
-            self.fps_env = ['DM_FPS_CEILING=0']; PROG.end('the game profile\'s 30 fps ceiling lifted (fps_ceiling)'); return
+            self.fps_env = ['DM_FPS_CEILING=0', 'DM_ADAPTIVE_FPS=0']; PROG.end('the game profile\'s 30 fps ceiling lifted (fps_ceiling), adaptive downshift disabled'); return
         if self.g.get('fps_target', '0') != '0':
-            self.fps_env = ['DM_FPS_TARGET=60']; PROG.end('the game profile\'s own frame-rate cap (fps_target), at 60'); return
+            self.fps_env = ['DM_FPS_TARGET=60', 'DM_ADAPTIVE_FPS=0']
+            # Unreal's rhi.SyncInterval may already have been applied to an
+            # NVN window before the host patches the game-thread cvar. Avoid
+            # keeping the Switch's two-vsync hold at 30 on a 60-fps export.
+            # This is safe for FFRS, whose simulation uses elapsed time; it
+            # is not a blanket display-interval override for other games.
+            if self.g.id.upper() == '0100606026F12000':
+                self.fps_env.append('DM_PRESENT_INTERVAL=display')
+            PROG.end('the game profile frame-rate cap at 60; automatic 40/30 downshifts disabled')
+            return
         img, bid = fpslocker.nso_image(self.game / 'ExeFS/main')
         src = fpslocker.url(self.g.id, bid); d = self.aw / 'fpslock'; d.mkdir(exist_ok=True); cache = d / f'{bid[:16].upper()}.yaml'
         PROG.set(step='fetching the FPSLocker-Warehouse config')
@@ -969,7 +978,7 @@ class Port:
         if cuts:   # code bytes: the rewriter's cuts, applied before it rewrites main (patch_nso.py DM_PATCHES_EXTRA; part of the rewrite's reuse key)
             (d / 'patches.py').write_text(fpslocker.patches_py(bid, cuts, src), encoding='utf-8', newline='\n'); self.env['DM_PATCHES_EXTRA'] = str(d / 'patches.py')
         # FPSLocker paces the presents for its target itself, whatever interval the game asks for, so its configs leave the game's interval alone: presents follow the display (present_interval display)
-        self.fps_env = ['DM_FPS_TARGET=60', f'DM_FPS_LOCKS={datapack.files_folder(self.package)}/fpslock.tsv', 'DM_PRESENT_INTERVAL=display']
+        self.fps_env = ['DM_FPS_TARGET=60', 'DM_ADAPTIVE_FPS=0', f'DM_FPS_LOCKS={datapack.files_folder(self.package)}/fpslock.tsv', 'DM_PRESENT_INTERVAL=display']
         self.fps_files = {'fpslock.tsv': d / 'fpslock.tsv'}
         n = tsv.count('\n') - 3
         say(f'60 fps: FPSLocker-Warehouse config {src}, by masagrator and contributors: {n} memory write(s)' + (f', {len(cuts)} code cut(s)' if cuts else ''))

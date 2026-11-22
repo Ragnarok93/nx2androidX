@@ -1450,6 +1450,21 @@ static void tune_ffrs_s25fe_radv(void) {
         setenv("DM_FPS_TARGET", "30", 0);
         LOG("[profile] FFRS S25 FE/RADV: game FPS target 30 (override with DM_FPS_TARGET=60)");
     }
+    // An explicit 60 FPS export must not be silently downshifted by the
+    // Android adaptive 60->40->30 policy or held at the Switch's 2-vsync
+    // presentation interval after the engine cvar has already initialized
+    // the window. Preserve an explicit user's env.txt overrides.
+    const char *fps = getenv("DM_FPS_TARGET");
+    if (fps && atoi(fps) == 60) {
+        if (!getenv("DM_ADAPTIVE_FPS")) {
+            setenv("DM_ADAPTIVE_FPS", "0", 0);
+            LOG("[profile] FFRS S25 FE/RADV: fixed 60 FPS pacing (override DM_ADAPTIVE_FPS=1 to allow downshifts)");
+        }
+        if (!getenv("DM_PRESENT_INTERVAL")) {
+            setenv("DM_PRESENT_INTERVAL", "display", 0);
+            LOG("[profile] FFRS S25 FE/RADV: ignoring the stale 2-vsync window hold for 60 FPS mode");
+        }
+    }
     // Handheld mode is 1280x720 rather than docked 1920x1080 on this
     // NVN title. Allow the saved "docked" setting to override this on restart.
     if (!getenv("DM_OPMODE")) {
