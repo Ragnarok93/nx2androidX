@@ -1947,18 +1947,30 @@ static void dyn_scale_tick(uint64_t presents) {
         if (floor < 50) floor = 50;
         if (floor > 95) floor = 95;
         if (state.floor != floor || g_dyn_active != active) {
+            int was_active = g_dyn_active;
             g_dyn_active = active;
             nx_dynres_reset(&state, floor);
+            // Switching to adaptive begins at native internal resolution.
+            // Switching away restores the separately configured manual
+            // DM_RENDER_SCALE rather than erasing the user's override.
+            if (active) {
+                dm_render_scale_apply(1.0f);
+                last_applied = 1.0f;
+            } else if (was_active) {
+                const char *manual = getenv("DM_RENDER_SCALE");
+                float requested = manual ? strtof(manual, NULL) : 1.0f;
+                if (!(requested >= 0.5f && requested <= 1.0f)) requested = 1.0f;
+                dm_render_scale_apply(requested);
+                last_applied = -1.0f;
+            }
             LOG("[graphics] internal dynamic resolution %s, minimum %d%%",
                 active ? "enabled" : "disabled", floor);
         }
         if (!active) {
-            // Restore the game's native rendering size, not only the last
-            // presented frame's viewport.
-            if (last_applied != 1.0f) {
-                dm_render_scale_apply(1.0f); last_applied = 1.0f;
-            }
-            atomic_store(&g_dyn_scale_pct, 100);
+            const char *manual = getenv("DM_RENDER_SCALE");
+            float current = manual ? strtof(manual, NULL) : 1.0f;
+            if (!(current >= 0.5f && current <= 1.0f)) current = 1.0f;
+            atomic_store(&g_dyn_scale_pct, (int)(100.0f * current + 0.5f));
             return;
         }
     }
