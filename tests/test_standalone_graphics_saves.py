@@ -43,7 +43,7 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         self.assertIn("chooseSaveImport()", external)
 
     def test_graphics_tab_contains_no_duplicate_fps(self):
-        self.assertIn('{"Gamepad", "Game", "Graphics"}', self.menu)
+        self.assertIn('{"Gamepad", "Game", "Graphics", "Pacing"}', self.menu)
         self.assertIn("{OVM_FSR, OVM_FSR_SHARP, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER}", self.menu)
         self.assertIn("{OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO, -1}", self.menu)
         self.assertIn("ov_menu_sharp_value", self.menu)
