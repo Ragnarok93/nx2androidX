@@ -19,7 +19,11 @@ class ResonanceXclipseTests(unittest.TestCase):
         present = src[src.index("static void present_one("):src.index("static void present_window(")]
         self.assertLess(present.index("r = vkQueuePresentKHR"), present.index("hud_count(with_meta, period, mono_ns());"))
         self.assertIn("if (r >= 0)", present)
-        self.assertIn("if (with_meta && period >= 0)", present)
+        # The standalone counter reports accepted output presents: source + LSFG.
+        # Source-only FPS remains available separately through hud_count().
+        self.assertIn("if (period >= 0)", present)
+        self.assertNotIn("if (with_meta && period >= 0)", present)
+        self.assertIn("present_one(NULL, gen[g]", src)
         self.assertIn("atomic_fetch_add_explicit(&g_fps_frames, 1, memory_order_relaxed)", present)
         self.assertNotIn("atomic_fetch_add(&g_fps_frames", src[src.index("uint64_t vk_present_vkimg("):])
         self.assertIn('atomic_load(&g_fps_frames)', src)

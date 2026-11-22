@@ -146,7 +146,8 @@ static void fsr_draw(VkCommandBuffer cb, int pass, VkImageView view,
                      int x, int y, uint32_t w, uint32_t h, fsr_constants c) {
     VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, view,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE};
+        pass == 0 ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD,
+        VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0,
         {{x, y}, {w, h}}, 1, 0, 1, &ca, NULL, NULL};
     vkCmdBeginRendering(cb, &ri);
@@ -163,13 +164,14 @@ static void fsr_draw(VkCommandBuffer cb, int pass, VkImageView view,
 
 static int fsr_record(VkCommandBuffer cb, VkImage source, VkImage target, VkImageView target_view,
                       int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh,
-                      VkImageLayout *target_layout) {
+                      int flip_y, VkImageLayout *target_layout) {
     if (!V.has_dynrender || sw < 16 || sh < 16 || dw < 16 || dh < 16) return 0;
     if ((uint64_t)sw * sh > 12000000ull || (uint64_t)dw * dh > 12000000ull) return 0; // bounded VRAM
     if (!fsr_prepare((uint32_t)sw, (uint32_t)sh, (uint32_t)dw, (uint32_t)dh)) return 0;
     barrier(cb, g_fsr.stage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkImageBlit copy = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}},
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {sw, sh, 1}}};
+    if (flip_y) { copy.srcOffsets[0].y = sy + sh; copy.srcOffsets[1].y = sy; }
     vkCmdBlitImage(cb, source, VK_IMAGE_LAYOUT_GENERAL, g_fsr.stage,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy, VK_FILTER_NEAREST);
     barrier(cb, g_fsr.stage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

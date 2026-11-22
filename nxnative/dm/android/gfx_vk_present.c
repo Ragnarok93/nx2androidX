@@ -97,6 +97,7 @@ static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorS
                 VkSampler samp; VkPipeline pipe; VkFormat pfmt; } g_rot;
 // FSR 1 is an optional pair of Vulkan raster passes before the HUD/gamepad.
 static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to);
+int dm_fsr_sharpness(void);
 #include "gfx_vk_fsr.h"
 static void rot_drop_image(void) {
     if (g_rot.view) vkDestroyImageView(V.dev, g_rot.view, NULL);
@@ -989,7 +990,7 @@ static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch
     VkImageLayout lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     // FSR EASU -> RCAS is optional and guarded by dynamic-rendering support.
     // Fall back to the original blit on unsupported GPUs or allocation errors.
-    if (!dm_fsr_enabled() || !fsr_record(cb, src, tgt, tview, cx, cy, cw, ch, dx, dy, dw, dh, &lay))
+    if (!dm_fsr_enabled() || !fsr_record(cb, src, tgt, tview, cx, cy, cw, ch, dx, dy, dw, dh, flip && vk_window_bottom_up(), &lay))
         vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, tgt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     int external = dm_external_active();
     int ovm = external ? 0 : dm_overlay_visible(), menu = external ? -1 : dm_menu_state(), fps = dm_overlay_fps();
