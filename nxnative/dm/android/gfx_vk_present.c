@@ -387,12 +387,14 @@ static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
 static const char *const OVM_PADS[2] = {"Position", "Label"};
 int dm_menu_fg_mult(void);
 int dm_menu_fg_flow(void);
-int dm_menu_rate(void);
-int dm_menu_rate_supported(void);
-int dm_menu_drs_supported(void);
-int dm_menu_drs_enabled(void);
-int dm_menu_drs_actual(void);
-int dm_menu_drs_min(void);
+// The headless host link omits front_android.c. These weak fallbacks are
+// overridden by the standalone game's live in-game Graphics controls.
+__attribute__((weak)) int dm_menu_rate(void) { return 0; }
+__attribute__((weak)) int dm_menu_rate_supported(void) { return 0; }
+__attribute__((weak)) int dm_menu_drs_supported(void) { return 0; }
+__attribute__((weak)) int dm_menu_drs_enabled(void) { return 0; }
+__attribute__((weak)) int dm_menu_drs_actual(void) { return 100; }
+__attribute__((weak)) int dm_menu_drs_min(void) { return 70; }
 __attribute__((weak)) int dm_fsr_enabled(void) { return 0; }
 __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
 int dm_menu_fg_has_dll(void);
