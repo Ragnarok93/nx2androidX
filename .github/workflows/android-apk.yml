@@ -60,6 +60,8 @@ jobs:
     # receives them through GitHub Actions secrets on trusted events.
     env:
       NX2A_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.NX2A_KEYSTORE_PASSWORD || '' }}
+      # SHA-256 of the DER certificate used by alpha16 and later upgradeable APKs.
+      NX2A_RELEASE_CERT_SHA256: 24c2fde0b7e75d5a8325ad21079fccbc5cd0929fe26e0a3e6dda7b4235026953
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -99,25 +101,42 @@ jobs:
         env:
           NX2A_KEYSTORE_B64: ${{ github.event_name != 'pull_request' && secrets.NX2A_KEYSTORE_B64 || '' }}
         run: |
-          # A throwaway debug key cannot update an installed APK. Only PRs may
-          # use one for verification; dispatches and tagged releases MUST have
-          # the same permanent key as previous production builds.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          # Every installable update must use the alpha16 migration certificate.
+          # Incorrect or absent secrets on branch builds produce an explicitly
+          # non-upgradeable debug-signed artifact; release tags fail closed.
+          test_signer() {
             echo "persistent=false" >> "$GITHUB_OUTPUT"
+            # Never fall back to a cached ~/.android/nx2android.keystore.
+            echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android-no-permanent-key" >> "$GITHUB_ENV"
+          }
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test_signer
             echo "::warning::PR verification APK uses an ephemeral signing key and CANNOT update an installed app"
           elif [ -z "$NX2A_KEYSTORE_B64" ] || [ -z "$NX2A_KEYSTORE_PASSWORD" ]; then
             if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-              echo "::error::Cannot publish a tagged release: configure NX2A_KEYSTORE_B64 and NX2A_KEYSTORE_PASSWORD to preserve the original APK signing identity"
+              echo "::error::Cannot publish a tagged release: restore the original NX2A_KEYSTORE_B64 and NX2A_KEYSTORE_PASSWORD secrets"
               exit 1
             fi
-            echo "persistent=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Permanent signing secrets are absent. Building a test-only APK with an ephemeral key; it CANNOT update an existing nx2android installation. Restore both GitHub Actions signing secrets to enable upgradeable APKs."
+            test_signer
+            echo "::warning::Permanent signing secrets are absent. Building a test-only APK that CANNOT update existing installations."
           else
-            printf '%s' "$NX2A_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/nx2android.keystore"
-            echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android.keystore" >> "$GITHUB_ENV"
-            keytool -list -keystore "$RUNNER_TEMP/nx2android.keystore" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" >/dev/null
-            echo "persistent=true" >> "$GITHUB_OUTPUT"
-            echo "Permanent signing key loaded and validated"
+            keyfile="$RUNNER_TEMP/nx2android.keystore"
+            printf '%s' "$NX2A_KEYSTORE_B64" | base64 --decode > "$keyfile"
+            keytool -list -keystore "$keyfile" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" >/dev/null
+            candidate=$(keytool -exportcert -keystore "$keyfile" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" | sha256sum | cut -d' ' -f1)
+            if [ "$candidate" != "$NX2A_RELEASE_CERT_SHA256" ]; then
+              rm -f "$keyfile"
+              if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+                echo "::error::Release signing secret has the wrong certificate ($candidate). Restore the original alpha16 signing key (SHA-256 $NX2A_RELEASE_CERT_SHA256)."
+                exit 1
+              fi
+              test_signer
+              echo "::warning::Configured signing secret has certificate $candidate, not the alpha16 release certificate $NX2A_RELEASE_CERT_SHA256. Producing TEST-ONLY APK with a throwaway key; it CANNOT update existing installations. Restore the original GitHub signing secrets."
+            else
+              echo "NX2A_KEYSTORE=$keyfile" >> "$GITHUB_ENV"
+              echo "persistent=true" >> "$GITHUB_OUTPUT"
+              echo "Permanent signing key matches the alpha16 update certificate"
+            fi
           fi
       - name: the tests
         run: |
@@ -193,10 +212,8 @@ jobs:
               echo "::error::APK signing certificate does not match the permanent keystore"
               exit 1
             }
-            # This is the alpha16 migration's permanent signer. A changed
-            # GitHub secret must not silently strand existing installations.
-            pinned=24c2fde0b7e75d5a8325ad21079fccbc5cd0929fe26e0a3e6dda7b4235026953
-            [ "$actual" = "$pinned" ] || {
+            # Catch any Gradle signer drift after the keystore preflight.
+            [ "$actual" = "$NX2A_RELEASE_CERT_SHA256" ] || {
               echo "::error::Signing keystore does not match the pinned update-compatible alpha16 certificate"
               exit 1
             }
