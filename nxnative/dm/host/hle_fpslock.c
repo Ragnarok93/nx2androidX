@@ -255,7 +255,9 @@ void dm_fps_lock_tick(void) {
             if (!rd(a, &cur, sizeof cur)) break;
             if (k_locks[k].kind != VSYNCS_I32 && k_locks[k].kind != FPS_I32) {
                 int ms = k_locks[k].kind == MS_F32 ? 1 : k_locks[k].kind == SEC_F32 ? 1000 : 0; float f, w = ms ? ms_want(target) / (float)ms : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
-                if (cur == want || !(ms ? f * (float)ms >= 8 && f * (float)ms <= 100 : f >= 10 && f <= 120)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
+                if (cur == want || !(ms ? f * (float)ms >= 8 && f * (float)ms <= 100 :
+                    (f >= 10 && f <= 120) ||
+                    (f == 0 && strstr(k_locks[k].what, "Unreal t.MaxFPS")))) continue;   // 0 = valid UE uncapped cvar after registration   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", ms ? f * (float)ms : f);
             } else {
                 int fps = k_locks[k].kind == FPS_I32;
