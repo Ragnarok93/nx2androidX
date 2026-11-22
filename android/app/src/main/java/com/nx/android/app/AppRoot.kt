@@ -611,7 +611,7 @@ private fun TopBarTabs(selected: Int, onSelect: (Tab) -> Unit, compact: Boolean 
                 style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
                 color = if (i == selected) MaterialTheme.colorScheme.onBackground else NxPalette.Unbuilt,
                 modifier = if (compact) Modifier.weight(1f).clickable { onSelect(tab) }
-                    .padding(vertical = 8.dp, end = 12.dp)
+                    .padding(top = 8.dp, bottom = 8.dp, end = 12.dp)
                 else Modifier.clickable { onSelect(tab) }.padding(end = 26.dp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
