@@ -12,8 +12,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -60,6 +66,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -502,7 +509,15 @@ fun MainScreen(prefs: PrefsStore, locale: AppLocale, port: PortState, library: L
     }
 }
 
-/** 一行式顶栏：品牌 + 两个纯文字 tab（选中亮/未选灰）+ 环境状态胶囊 + 右侧图标与时钟（capyps5 的骨架，我们的颜色） */
+/**
+ * Responsive shell header. A single horizontal row cannot accommodate the
+ * brand, tabs, three actions, environment status and clock on portrait phones.
+ * Keep the existing one-row arrangement on wide screens, and keep every
+ * action visible in three bounded rows on narrow screens.
+ *
+ * Insets protect the top row from the display cutout/status bar even though
+ * MainActivity requests immersive edge-to-edge rendering.
+ */
 @Composable
 private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit,
                    onSettings: () -> Unit,
@@ -515,12 +530,63 @@ private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit
             delay(10_000)
         }
     }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 14.dp),
+    BoxWithConstraints(
+        Modifier.fillMaxWidth().windowInsetsPadding(
+            WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+        )
     ) {
-        Image(painterResource(R.drawable.ic_launcher_mark), null, Modifier.size(32.dp))
-        // 品牌：名字只有 app_name 一处，末位的标记（X）单独用品牌色
+        if (maxWidth < 840.dp) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    TopBarBrand(Modifier.weight(1f), compact = true)
+                    Text(time, style = MaterialTheme.typography.titleMedium,
+                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                         modifier = Modifier.padding(start = 8.dp))
+                }
+                // Tabs get bounded equal widths: long translations or large
+                // accessibility text cannot push the second tab off-screen.
+                TopBarTabs(selected, onSelect, compact = true)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    EnvChip(chip, onChip)
+                    Spacer(Modifier.weight(1f))
+                    TopIcon(Icons.Filled.Refresh, stringResource(R.string.app_refresh_library), onRefresh)
+                    Spacer(Modifier.width(4.dp))
+                    PadIcon(padCount, onOpenPadCenter)
+                    Spacer(Modifier.width(4.dp))
+                    TopIcon(Icons.Filled.Settings, stringResource(R.string.app_tab_settings), onSettings)
+                }
+            }
+        } else {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 14.dp),
+            ) {
+                TopBarBrand()
+                TopBarTabs(selected, onSelect)
+                Spacer(Modifier.weight(1f))
+                TopIcon(Icons.Filled.Refresh, stringResource(R.string.app_refresh_library), onRefresh)
+                Spacer(Modifier.width(6.dp))
+                PadIcon(padCount, onOpenPadCenter)
+                Spacer(Modifier.width(6.dp))
+                TopIcon(Icons.Filled.Settings, stringResource(R.string.app_tab_settings), onSettings)
+                Spacer(Modifier.width(6.dp))
+                EnvChip(chip, onChip)
+                Text(time, style = MaterialTheme.typography.titleMedium,
+                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                     modifier = Modifier.padding(start = 6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun TopBarBrand(modifier: Modifier = Modifier, compact: Boolean = false) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Image(painterResource(R.drawable.ic_launcher_mark), null,
+              Modifier.size(if (compact) 28.dp else 32.dp))
         val brand = stringResource(R.string.app_name)
         Text(
             buildAnnotatedString {
@@ -528,28 +594,29 @@ private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit
                 withStyle(SpanStyle(color = NxPalette.Brand)) { append(brand.takeLast(1)) }
             },
             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-            modifier = Modifier.padding(start = 8.dp, end = 30.dp),
+            modifier = Modifier.padding(start = 8.dp, end = if (compact) 0.dp else 30.dp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
-        Tab.entries.forEachIndexed { i, t ->
+    }
+}
+
+@Composable
+private fun TopBarTabs(selected: Int, onSelect: (Tab) -> Unit, compact: Boolean = false) {
+    Row(modifier = if (compact) Modifier.fillMaxWidth() else Modifier,
+        verticalAlignment = Alignment.CenterVertically) {
+        Tab.entries.forEachIndexed { i, tab ->
             Text(
-                stringResource(t.label),
-                style = MaterialTheme.typography.titleLarge,
+                stringResource(tab.label),
+                style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
                 color = if (i == selected) MaterialTheme.colorScheme.onBackground else NxPalette.Unbuilt,
-                modifier = Modifier.clickable { onSelect(t) }.padding(end = 26.dp),
+                modifier = if (compact) Modifier.weight(1f).clickable { onSelect(tab) }
+                    .padding(vertical = 8.dp, end = 12.dp)
+                else Modifier.clickable { onSelect(tab) }.padding(end = 26.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.weight(1f))
-        TopIcon(Icons.Filled.Refresh, stringResource(R.string.app_refresh_library), onRefresh)
-        Spacer(Modifier.width(6.dp))
-        // 手柄中心：顶栏的入口（接着几只手柄就亮几颗）
-        PadIcon(padCount, onOpenPadCenter)
-        Spacer(Modifier.width(6.dp))
-        // 设置：它是一整页，从这个图标进来
-        TopIcon(Icons.Filled.Settings, stringResource(R.string.app_tab_settings), onSettings)
-        Spacer(Modifier.width(6.dp))
-        EnvChip(chip, onChip)
-        Text(time, style = MaterialTheme.typography.titleMedium,
-             color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp))
     }
 }
 
