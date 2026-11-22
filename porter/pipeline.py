@@ -894,32 +894,75 @@ class Port:
             for old in (d / 'ue_streams').iterdir():
                 if old != sdir: nsp.rmtree(old)   # another pak set's streams are of no use
             for rnd in range(self.UE_ROUNDS):
+                # FFR's thousands of IoStore streams previously duplicated hundreds
+                # of MB: compressed inputs plus the entire decoded DMOR result.
+                pending_dir = tmp / 'pending'
+                nsp.rmtree(pending_dir); pending_dir.mkdir(parents=True)
                 want = {}
                 def dec(comp, n):
                     k = (hashlib.sha1(comp).digest(), n)
-                    f = sdir / f'{k[0].hex()}-{k[1]}'
+                    name = f'{k[0].hex()}-{k[1]}'
+                    f = sdir / name
                     if f.is_file():
                         b = f.read_bytes()
-                        if len(b) == n: return b   # decoded in an earlier run
-                    want.setdefault(k, bytes(comp)); return bytes(n)
+                        if len(b) == n: return b
+                    if k not in want:
+                        src = pending_dir / name
+                        src.write_bytes(comp)
+                        want[k] = src
+                    return bytes(n)
                 nsp.rmtree(jd); PROG.set(step=f'{v}: the shader code archives (round {rnd + 1})')
                 try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
                 except (ValueError, struct.error, IndexError) as e:
                     if not want: raise BuildError(f'{v}: the Unreal shader code archives do not read: {e}') from e
-                if not want: break
-                job, out = tmp / 'round.job', tmp / 'round.out'
-                with open(job, 'wb') as f:
-                    f.write(b'DMOJ' + struct.pack('<I', len(want)))
-                    for (_, raw), comp in want.items(): f.write(struct.pack('<II', len(comp), raw) + comp)
-                PROG.set(step=f"{v}: {len(want):,} Oodle streams with the game's decoder {self.oodle_where} (round {rnd + 1})")
-                self.oodle_job(job, out)
-                b = out.read_bytes(); nsp.rmtree(out)
-                if b[:4] != b'DMOR' or struct.unpack_from('<I', b, 4)[0] != len(want): raise BuildError("the game's Oodle decoder answered for other streams than it was given")
-                o, got = 8, 0
-                for k in want:
-                    ln = struct.unpack_from('<I', b, o)[0]; o += 4
-                    if ln == k[1]: (sdir / f'{k[0].hex()}-{k[1]}').write_bytes(b[o:o + ln]); got += 1   # a stream decoded from zeros fails (0) and is asked for again with its real bytes
-                    o += ln if ln != 0xffffffff else 0
+                if not want:
+                    nsp.rmtree(pending_dir)
+                    break
+
+                # Bound the resident decoder result to ~64 MiB per child process,
+                # regardless of the number of groups in the game.
+                batches, group, raw_sum = [], [], 0
+                for k, src in want.items():
+                    if group and (raw_sum + k[1] > (64 << 20) or len(group) >= 1024):
+                        batches.append(group); group, raw_sum = [], 0
+                    group.append((k, src)); raw_sum += k[1]
+                if group: batches.append(group)
+                PROG.set(step=f"{v}: {len(want):,} Oodle streams in {len(batches)} bounded batch(es) {self.oodle_where} (round {rnd + 1})")
+                got = 0
+                for bi, group in enumerate(batches, 1):
+                    job, out = tmp / 'round.job', tmp / 'round.out'
+                    nsp.rmtree(job); nsp.rmtree(out)
+                    with job.open('wb') as f:
+                        f.write(b'DMOJ' + struct.pack('<I', len(group)))
+                        for (_, raw), src in group:
+                            f.write(struct.pack('<II', src.stat().st_size, raw))
+                            with src.open('rb') as inp: shutil.copyfileobj(inp, f, 1 << 20)
+                    PROG.set(step=f'{v}: Oodle batch {bi}/{len(batches)} (round {rnd + 1})')
+                    self.oodle_job(job, out)
+                    with out.open('rb') as inp:
+                        hdr = inp.read(8)
+                        if len(hdr) != 8 or struct.unpack('<II', hdr) != (0x524f4d44, len(group)):
+                            raise BuildError("the game's Oodle decoder answered for other streams than it was given")
+                        for k, _ in group:
+                            size = inp.read(4)
+                            if len(size) != 4: raise BuildError("the game's Oodle decoder returned a truncated record header")
+                            ln = struct.unpack('<I', size)[0]
+                            if ln in (0, 0xffffffff): continue
+                            if ln != k[1]:
+                                raise BuildError(f"the game's Oodle decoder returned {ln} bytes, expected {k[1]}")
+                            name = f'{k[0].hex()}-{k[1]}'
+                            partial = sdir / (name + '.partial')
+                            with partial.open('wb') as dst:
+                                left = ln
+                                while left:
+                                    chunk = inp.read(min(left, 1 << 20))
+                                    if not chunk: raise BuildError("the game's Oodle decoder returned a truncated record")
+                                    dst.write(chunk); left -= len(chunk)
+                            partial.replace(sdir / name)
+                            got += 1
+                        if inp.read(1): raise BuildError("the game's Oodle decoder returned trailing unexpected data")
+                    nsp.rmtree(out)
+                nsp.rmtree(pending_dir)
                 say(f'{v}: round {rnd + 1}: {got:,} of {len(want):,} Oodle streams decoded {self.oodle_where}')
                 if not got: raise BuildError(f"{v}: the game's Oodle decoder decoded none of {len(want):,} streams (see {self.logs / 'android_oodle_job.log'})")
             else: raise BuildError(f'{v}: the Unreal shader code archives still need Oodle streams after {self.UE_ROUNDS} rounds')

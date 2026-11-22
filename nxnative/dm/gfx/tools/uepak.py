@@ -379,6 +379,76 @@ def io_archive(toc, i, decode):
     out += struct.pack('<I', 0) + struct.pack(f'<I{len(idx)}I', len(idx), *idx)
     return bytes(out) + b''.join(code)
 
+
+def io_archive_file(toc, i, decode, path):
+    """Stream an IoStore shader library to disk, with no complete shader array in RAM.
+
+    The group index determines each shader's size and final file offset before
+    decoding. Decoded groups are written into their correct positions one by
+    one; an incomplete archive is never published.
+    """
+    r = R(toc.read(i, decode))
+    if r.take('<I') != 1: raise ValueError(f'{toc.path}: shader library chunk {i} is not version 1')
+    maph = r.raw(20 * r.take('<I')); nsh = r.take('<I'); shh = r.raw(20 * nsh)
+    gids = [r.raw(12) for _ in range(r.take('<I'))]
+    maps = [r.take('<II') for _ in range(r.take('<I'))]
+    n = r.take('<I'); ents = struct.unpack_from(f'<{n}Q', r.b, r.o); r.o += 8 * n
+    groups = [r.take('<IIII') for _ in range(r.take('<I'))]
+    k = r.take('<I'); idx = struct.unpack_from(f'<{k}I', r.b, r.o); r.o += 4 * k
+    if r.o != len(r.b) or n != nsh or len(gids) != len(groups):
+        raise ValueError(f'{toc.path}: shader library chunk {i} does not parse')
+
+    sizes = [None] * n
+    ordered = []
+    for g, (gid, (first, cnt, raw, stored)) in enumerate(zip(gids, groups)):
+        if gid not in toc.index: raise ValueError(f'{toc.path}: shader group {g} has no chunk')
+        if first + cnt > len(idx): raise ValueError(f'{toc.path}: shader group {g} indices outside the library')
+        mine = sorted((ents[s] >> 34, s) for s in idx[first:first + cnt])
+        for (at, s), (nxt, _) in zip(mine, mine[1:] + [(raw, None)]):
+            if (ents[s] >> 4) & 0x3FFFFFFF != g:
+                raise ValueError(f'{toc.path}: shader {s} is listed in group {g} but names another')
+            if not 0 <= at <= nxt <= raw or sizes[s] is not None:
+                raise ValueError(f'{toc.path}: invalid or repeated shader {s} in group {g}')
+            sizes[s] = nxt - at
+        ordered.append(mine)
+    if any(sz is None for sz in sizes):
+        raise ValueError(f'{toc.path}: {sum(sz is None for sz in sizes)} shaders in no group')
+
+    offsets, total = [], 0
+    head = bytearray(struct.pack('<II', ARCHIVE_VERSION, len(maph) // 20) + maph +
+                     struct.pack('<I', n) + shh + struct.pack('<I', len(maps)))
+    for first, count in maps: head += struct.pack('<IIII', first, count, 0, 0)
+    head += struct.pack('<I', n)
+    for e, sz in zip(ents, sizes):
+        offsets.append(total)
+        head += struct.pack('<QIIB', total, sz, sz, e & 0xF)
+        total += sz
+    head += struct.pack('<I', 0) + struct.pack(f'<I{len(idx)}I', len(idx), *idx)
+    start = len(head)
+    partial = os.fspath(path) + '.partial'
+    try:
+        with open(partial, 'wb+') as f:
+            f.write(head)
+            f.truncate(start + total)
+            for g, (gid, (_, _, raw, stored)) in enumerate(zip(gids, groups)):
+                d = toc.read(toc.index[gid], decode)
+                if len(d) != stored: raise ValueError(f'{toc.path}: shader group {g} is {len(d)} bytes, its entry says {stored}')
+                if stored < raw: d = decode(d, raw)
+                if len(d) != raw: raise ValueError(f'{toc.path}: shader group {g} decoded to {len(d)} bytes, expected {raw}')
+                mine = ordered[g]
+                for (at, s), (nxt, _) in zip(mine, mine[1:] + [(raw, None)]):
+                    f.seek(start + offsets[s])
+                    f.write(memoryview(d)[at:nxt])
+                del d
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(partial, path)
+    except BaseException:
+        try: os.unlink(partial)
+        except FileNotFoundError: pass
+        raise
+    return n
+
 def io_shader_tocs(romfs):
     """The IoStore containers under the RomFS that hold Unreal Engine 5 shader libraries"""
     out = []
@@ -430,19 +500,22 @@ def job(romfs, main_nso, work, decode=None):
     The shader libraries of IoStore containers (Unreal Engine 5.6, FINAL FANTASY RESONANCE: no archive in the pak) go there already decoded: their container blocks and shader groups are
     Oodle-compressed, two layers, so they need decode (OodleHost: the game's decoder over a pipe) rather than the job"""
     os.makedirs(os.path.join(work, 'archives'), exist_ok=True)
-    img, lo, hi = nso_image(main_nso); key = None; listing, recs = [], []
+    # Unencrypted IoStore archives do not use the executable image: avoid
+    # expanding a large NSO into RAM unless a pak actually needs its AES key.
+    img = lo = hi = None; key = None; listing, recs = [], []
     tocs = io_shader_tocs(romfs)
     if tocs and not decode: raise ValueError(f'{tocs[0]}: IoStore shader libraries need the game\'s decoder (decode)')
     names = archive_names(romfs)
     for tp in tocs:
         t = Toc(tp)
         for i in t.of_type(IO_SHADER_LIBRARY):
-            name = io_library_name(t, i, names) + '.ushaderbytecode'; b = io_archive(t, i, decode)
-            open(os.path.join(work, 'archives', name), 'wb').write(b)
-            listing.append(dict(name=name, pak=os.path.relpath(tp, romfs), path=f'chunk {t.ids[i].hex()}', shaders=len(archive(b)['shaders']), compressed=0, compression='IoStore, decoded'))
+            name = io_library_name(t, i, names) + '.ushaderbytecode'
+            count = io_archive_file(t, i, decode, os.path.join(work, 'archives', name))
+            listing.append(dict(name=name, pak=os.path.relpath(tp, romfs), path=f'chunk {t.ids[i].hex()}', shaders=count, compressed=0, compression='IoStore, decoded'))
     for pak in unreal_paks(romfs, legacy=False):
         with open(pak, 'rb') as f: enc = footer(f)[0]
         if enc and key is None:
+            if img is None: img, lo, hi = nso_image(main_nso)
             key = find_key(img, lo, hi, pak)
             if key is None: raise ValueError(f'{pak}: the index is encrypted and no window of main decrypts it')
         p = Pak(pak, key)
