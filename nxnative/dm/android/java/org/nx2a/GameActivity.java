@@ -233,6 +233,7 @@ public class GameActivity extends NativeActivity {
         File backup = new File(base, "nx2a-data.backup");
         File marker = new File(target, "nx2a-export.sha256");
         if (target.isDirectory() && marker.isFile() && expected.equals(readText(marker).trim())) {
+            preserveVulkanCache(base, backup);
             deleteTree(backup);  // a prior process may have died after activating the new directory
             return;
         }
@@ -297,6 +298,7 @@ public class GameActivity extends NativeActivity {
             deleteTree(partial);
             throw new IOException("cannot activate extracted game data");
         }
+        preserveVulkanCache(base, backup);
         deleteTree(backup);
     }
 

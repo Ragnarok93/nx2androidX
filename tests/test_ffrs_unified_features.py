@@ -51,6 +51,7 @@ class FinalFantasyResonanceUnifiedFeatures(unittest.TestCase):
             self.assertIn("SaveDocuments.onActivityResult", java)
         self.assertEqual((ANDROID / "java/org/nx2a/GameActivity.java").read_text().count("GameKeyboard keyboard"), 1)
         self.assertIn('static void preserveVulkanCache(File files, File previousPack)', java)
+        self.assertEqual(java.count("preserveVulkanCache(base, backup);"), 2)
 
 if __name__ == "__main__":
     unittest.main()
