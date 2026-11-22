@@ -10,7 +10,7 @@ def sample_toc():
     g0, g1 = b'ABCDE', b'123456'
     gid0, gid1 = b'group-zero!!', b'group-one!!!'
     indices = (2, 0, 3, 1)
-    entries = (0 << 34 | 0 << 4 | 0, 4 << 34 | 1 << 4 | 3,
+    entries = (2 << 34 | 0 << 4 | 0, 4 << 34 | 1 << 4 | 3,
                0 << 34 | 0 << 4 | 5, 0 << 34 | 1 << 4 | 5)
     data = (struct.pack('<II', 1, 0) + struct.pack('<I', 4) + b'H' * 80 +
             struct.pack('<I', 2) + gid0 + gid1 +
@@ -47,7 +47,7 @@ class IoStoreStreamingTests(unittest.TestCase):
             out = Path(temp) / 'test.ushaderbytecode'
             out.write_bytes(b'old valid output')
             with self.assertRaisesRegex(ValueError, 'decoded to'):
-                uepak.io_archive_file(toc, 0, lambda c, n: b'wrong', out)
+                uepak.io_archive_file(toc, 0, lambda c, n: b'bad', out)
             self.assertEqual(out.read_bytes(), b'old valid output')
             self.assertFalse(Path(str(out) + '.partial').exists())
 
