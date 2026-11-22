@@ -40,7 +40,6 @@ public class GameActivity extends NativeActivity {
     private String diagnosticsRoot;
     static native boolean diagnosticsExportStarted();
     static native void diagnosticsExported(int result); // 0 failed, 1 saved, 2 cancelled
-    private final GameKeyboard keyboard = new GameKeyboard(this);
 
     /** Called by the native pause-menu Diagnostics tab, never from gameplay. */
     public void exportDiagnostics(String root) {

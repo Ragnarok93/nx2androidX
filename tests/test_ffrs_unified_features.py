@@ -49,6 +49,7 @@ class FinalFantasyResonanceUnifiedFeatures(unittest.TestCase):
             java = (ANDROID / "java/org/nx2a" / p).read_text()
             self.assertIn("DiagnosticsExport.onResult", java)
             self.assertIn("SaveDocuments.onActivityResult", java)
+        self.assertEqual((ANDROID / "java/org/nx2a/GameActivity.java").read_text().count("GameKeyboard keyboard"), 1)
 
 if __name__ == "__main__":
     unittest.main()
