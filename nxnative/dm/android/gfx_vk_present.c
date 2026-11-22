@@ -15,6 +15,9 @@
 void crash_thread_init(void);   // the signal alternate stack is per thread (dm.h): the present thread faults on a bad frame, and without it the crash is silent
 #include "rot_vert.spv.h"
 #include "rot_frag.spv.h"
+#include "fsr_vert.spv.h"
+#include "fsr_easu_frag.spv.h"
+#include "fsr_rcas_frag.spv.h"
 
 __attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
 __attribute__((weak)) int dm_external_active(void) { return 0; }
@@ -92,6 +95,9 @@ static VkSurfaceTransformFlagBitsKHR g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_K
 static VkExtent2D g_next;   // the swapchain images' extent: the window's (g_sext), or the panel's orientation when pre-rotated
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
                 VkSampler samp; VkPipeline pipe; VkFormat pfmt; } g_rot;
+// FSR 1 is an optional pair of Vulkan raster passes before the HUD/gamepad.
+static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to);
+#include "gfx_vk_fsr.h"
 static void rot_drop_image(void) {
     if (g_rot.view) vkDestroyImageView(V.dev, g_rot.view, NULL);
     if (g_rot.img) vkDestroyImage(V.dev, g_rot.img, NULL);
@@ -101,7 +107,7 @@ static void rot_drop_image(void) {
 static void swap_destroy(void) {
     pace_reset();
     present_time_reset();
-    if (g_swap) { vkDeviceWaitIdle(V.dev); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
+    if (g_swap) { vkDeviceWaitIdle(V.dev); fsr_drop_images(); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
                   vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE; rot_drop_image(); g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR; }
     if (g_surf) { vkDestroySurfaceKHR(V.inst, g_surf, NULL); g_surf = VK_NULL_HANDLE; }
 }
@@ -980,8 +986,11 @@ static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
     if (flip && vk_window_bottom_up()) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up (gfx_vk_exec.c)
     if (im && im->layout == VK_IMAGE_LAYOUT_UNDEFINED) { barrier(cb, im->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL); im->layout = VK_IMAGE_LAYOUT_GENERAL; }   // an imported frame buffer, first shown (gl_android.c)
-    vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, tgt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     VkImageLayout lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    // FSR EASU -> RCAS is optional and guarded by dynamic-rendering support.
+    // Fall back to the original blit on unsupported GPUs or allocation errors.
+    if (!dm_fsr_enabled() || !fsr_record(cb, src, tgt, tview, cx, cy, cw, ch, dx, dy, dw, dh, &lay))
+        vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, tgt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     int external = dm_external_active();
     int ovm = external ? 0 : dm_overlay_visible(), menu = external ? -1 : dm_menu_state(), fps = dm_overlay_fps();
     if ((ovm || menu >= 0 || fps) && overlay_ready(cb, k, menu) && (V.has_dynrender || ov_fb(idx))) {   // without dynamic rendering, only with the image's framebuffer
