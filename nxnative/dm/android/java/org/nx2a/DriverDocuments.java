@@ -4,6 +4,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.view.Window;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 import android.util.AtomicFile;
@@ -37,7 +40,7 @@ final class DriverDocuments {
     }
     void choose() {
         if (busy || activity.isFinishing()) return;
-        new AlertDialog.Builder(activity)
+        AlertDialog dialog = new AlertDialog.Builder(activity)
             .setTitle("Vulkan driver")
             .setMessage("Active: " + GameActivity.activeVulkanDriver() +
                         "\nNext launch: " + selected() +
@@ -45,7 +48,21 @@ final class DriverDocuments {
             .setPositiveButton("Import ZIP / SO", (d, w) -> pick())
             .setNeutralButton("System Vulkan", (d, w) -> selectSystem())
             .setNegativeButton("Cancel", null)
-            .show();
+            .create();
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            GradientDrawable surface = new GradientDrawable();
+            surface.setColor(Color.rgb(39,37,43));
+            surface.setCornerRadius(28f * activity.getResources().getDisplayMetrics().density);
+            window.setBackgroundDrawable(surface);
+        }
+        int primary = Color.rgb(208,188,255);
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(primary);
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(primary);
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(primary);
+        android.widget.TextView message = dialog.findViewById(android.R.id.message);
+        if (message != null) message.setTextColor(Color.rgb(230,225,229));
     }
     private void pick() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);

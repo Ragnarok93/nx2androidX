@@ -307,6 +307,8 @@ static void cv_blend(const ov_canvas *cv, int x, int y, const uint8_t c[4], floa
     p[3] = (uint8_t)(oa * 255 + 0.5f);
 }
 static void cv_rrect(const ov_canvas *cv, float x0, float y0, float x1, float y1, float rad, const uint8_t c[4]) {   // a filled rounded rectangle
+    if (x1 <= x0 || y1 <= y0) return;
+    rad = fmaxf(0, fminf(rad, fminf(x1-x0,y1-y0)/2));
     float cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, hx = (x1 - x0) / 2 - rad, hy = (y1 - y0) / 2 - rad;
     for (int y = (int)y0 - 1; y <= (int)y1 + 1; y++) for (int x = (int)x0 - 1; x <= (int)x1 + 1; x++) {
         float qx = fabsf(x + 0.5f - cx) - hx, qy = fabsf(y + 0.5f - cy) - hy, ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
@@ -430,9 +432,8 @@ static void ov_text_panel(const ov_canvas *cv) {
 #define C_HI M3_SECONDARY
 #define C_DIM M3_VARIANT
 #define C_OFF M3_HIGH
-#define C_KNOB_OFF M3_OUTLINE
 static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int fill, int held) {   // a rounded button with its word, as large as fits
-    float rad = b[3] * 0.5f, edge = fmaxf(1, b[3] * 0.055f);
+    float rad = fminf(b[2], b[3]) * 0.5f, edge = fmaxf(1, b[3] * 0.055f);
     if (b[2] <= 2*edge || b[3] <= 2*edge) return;
     if (fill || held) cv_rrect(cv, b[0], b[1], b[0]+b[2], b[1]+b[3], rad, held ? M3_ON_SECONDARY : M3_PRIMARY);
     else {
@@ -529,7 +530,8 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
         if (it == OVM_TAB) {
             // Primary tabs, a tonal active container and a separate indicator.
             float th = rh * 0.73f, tw = rw / OVM_TABS, inset = rh * 0.07f;
-            cv_rrect(cv, r[0], cy-th/2, r[0]+rw, cy+th/2, th/2, M3_SURFACE);
+            if (row == sel) cv_rrect(cv,r[0],cy-th/2-rh*0.04f,r[0]+rw,cy+th/2+rh*0.04f,th/2,M3_PRIMARY);
+            cv_rrect(cv, r[0]+(row==sel?1:0), cy-th/2, r[0]+rw-(row==sel?1:0), cy+th/2, th/2, M3_SURFACE);
             cv_rrect(cv, r[0]+tab*tw+inset, cy-th/2+inset, r[0]+(tab+1)*tw-inset, cy+th/2-inset, th/2-inset, M3_SECONDARY);
             for (int k=0;k<OVM_TABS;k++) {
                 const char *label=OVM_TAB_NAMES[k];
@@ -558,7 +560,9 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
         } else if (it == OVM_EXPORT && (st >> 20 & 15) != OVX_IDLE) {   // the export's outcome in place of its button: its name, or why there is none
             char nm[64], v[80]; int x = dm_save_note(nm, sizeof nm), vs = is;
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
-            while (vs > 1 && m3_text_w(v, vs) > rw - m3_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
+            float room = rw - m3_text_w(OVM_LABELS[it], is) - gap - rh * 0.36f;
+            while (vs > 1 && m3_text_w(v, vs) > room) vs--;
+            while (v[0] && m3_text_w(v,vs) > room) pf_chop(v,strlen(v));
             m3_text(cv, x1 - m3_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? M3_ERROR : M3_ON_SURFACE);
         } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
             char value[128];

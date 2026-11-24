@@ -102,7 +102,7 @@ int main(void) {
     assert(ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     audio_available = 1;
     assert(ov_menu_item(1, 5) == OVM_AUDIO);
-    const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}};
+    const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}, {640,360}, {360,640}};
     for (unsigned s = 0; s < sizeof screens / sizeof screens[0]; s++) {
         float W = screens[s][0], H = screens[s][1], step = H / OVE_GRID_ROWS, p[4];
         ov_menu_rect(W, H, p);
@@ -115,6 +115,13 @@ int main(void) {
             float r[4]; ov_menu_rowrect(p, row, r);
             assert(ov_menu_row_at(r[0] + r[2] / 2, r[1] + r[3] / 2, W, H) == row);
         }
+        float track[3]; ov_menu_track(p,2,track);
+        assert(ov_menu_track_value(track[0]-1,p,2)==OV_OPACITY_MIN);
+        assert(ov_menu_track_value(track[0]+track[2]+1,p,2)==OV_OPACITY_MAX);
+        assert(ov_menu_dyn_min_value(track[0]-1,p,2)==50);
+        assert(ov_menu_dyn_min_value(track[0]+track[2]+1,p,2)==95);
+        assert(ov_menu_sharp_value(track[0]-1,p,2)==0);
+        assert(ov_menu_sharp_value(track[0]+track[2]+1,p,2)==100);
         for (int axis = 0; axis < 2; axis++) for (int i = -10; i <= 110; i++) {
             float extent = screens[s][axis], half = H * 0.12f;
             float pos = ov_drag_pos(extent * i / 100, half, extent, step);
