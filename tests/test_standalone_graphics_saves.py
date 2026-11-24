@@ -44,8 +44,13 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
 
     def test_graphics_tab_contains_no_duplicate_fps(self):
         self.assertIn('{"Gamepad", "Game", "Graphics", "Pacing"}', self.menu)
-        self.assertIn("{OVM_FSR, OVM_FSR_SHARP, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER}", self.menu)
-        self.assertIn("{OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO, -1}", self.menu)
+        # Check the actual tab membership, independent of padding or new controls.
+        import re
+        table = self.menu.split("OVM_TAB_ITEMS[OVM_PAGES][OVM_PER_TAB] = {", 1)[1].split("};", 1)[0]
+        rows = [re.findall(r"OVM_\w+", row) for row in re.findall(r"\{([^{}]+)\}", table)]
+        self.assertEqual(rows[1], ["OVM_FPS", "OVM_MODE", "OVM_EXPORT", "OVM_IMPORT", "OVM_AUDIO"])
+        self.assertEqual(rows[2], ["OVM_FSR", "OVM_FSR_SHARP", "OVM_FG", "OVM_FG_MULT", "OVM_FG_FLOW", "OVM_DRIVER", "OVM_VIVID"])
+        self.assertEqual(sum(row.count("OVM_FPS") for row in rows), 1)
         self.assertIn("ov_menu_sharp_value", self.menu)
         self.assertIn("fsr_sharp=%d", self.front)
 
