@@ -14,6 +14,9 @@ class PortraitShellHeaderTests(unittest.TestCase):
         header = src[src.index("private fun TopBar("):src.index("/** 手柄的入口：")]
         self.assertIn("BoxWithConstraints(", header)
         self.assertIn("if (maxWidth < 840.dp)", header)
+        # Compose layout DSL markers hide the outer BoxWithConstraintsScope inside Column.
+        self.assertLess(header.index("val narrow = maxWidth < 520.dp"), header.index("if (maxWidth < 840.dp)"))
+        self.assertEqual(header.count("maxWidth < 520.dp"), 1)
         self.assertIn("WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)", header)
         self.assertIn("TopBarBrand(Modifier.weight(1f), compact = true)", header)
         self.assertIn("TopBarTabs(selected, onSelect, compact = true)", header)

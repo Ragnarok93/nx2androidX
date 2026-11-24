@@ -572,6 +572,8 @@ private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit
             WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
         )
     ) {
+        // Capture constraints before entering the ColumnScope layout DSL.
+        val narrow = maxWidth < 520.dp
         if (maxWidth < 840.dp) {
             Column(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
@@ -587,7 +589,6 @@ private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit
                          modifier = Modifier.padding(start = 8.dp))
                 }
                 // On a narrow phone, three tabs need a full-width row; actions never steal their space.
-                val narrow = maxWidth < 520.dp
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) {
                         if (!narrow) TopBarTabs(selected, onSelect, compact = true)
