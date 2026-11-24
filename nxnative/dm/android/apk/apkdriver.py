@@ -5,9 +5,10 @@
 # overlay's font, which an APK ported before it came lacks).
 # The driver is loaded through libadrenotools and its hook libraries, which only an APK ported with a driver carries (porter port --vulkan-driver): one without them is refused.
 # Usage: apkdriver.py <in.apk> <out.apk> <key.json> [--driver <lib.so> | --system] [--host <libdmhost.so>] [--asset NAME=FILE ...]   → prints the driver library's name in the APK ('' with --system)
-import argparse, json, os, sys, zipfile
+import argparse, json, os, sys, zipfile, struct, tempfile
+from pathlib import Path
 
-from apksign import build_zip, sign_v2
+from apksign import build_zip, sign_v2, build_zip_file, sign_v2_file, ZipEntrySource, spki
 
 ABI = 'lib/arm64-v8a/'
 OWN = {'libdmhost.so', 'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so'}   # nx2android's own libraries; any other is the driver
@@ -53,16 +54,94 @@ def rebuild(src, driver=KEEP, host=None, assets=None):
     return entries, dropped, added
 
 
+def source_certificate(src, central):
+    """Read the single v2 signer certificate and public key, never the APK payload."""
+    def lp(data, pos=0):
+        if pos + 4 > len(data): raise ValueError('truncated APK signing field')
+        n = struct.unpack_from('<I', data, pos)[0]
+        start = pos + 4
+        if start + n > len(data): raise ValueError('truncated APK signing field')
+        return data[start:start+n], start+n
+    with open(src, 'rb') as f:
+        if central < 32: raise ValueError('APK has no v2 signing block')
+        f.seek(central - 24)
+        size, magic = struct.unpack('<Q16s', f.read(24))
+        if magic != b'APK Sig Block 42' or not 24 <= size <= min(central-8, 1 << 20):
+            raise ValueError('APK has no supported v2 signing block')
+        f.seek(central-size-8)
+        block = f.read(size+8)
+    if struct.unpack_from('<Q', block)[0] != size: raise ValueError('invalid APK signing block')
+    p = 8
+    while p < len(block)-24:
+        n = struct.unpack_from('<Q', block, p)[0]
+        if n < 4 or p+8+n > len(block)-24: raise ValueError('invalid APK signing pair')
+        if struct.unpack_from('<I', block, p+8)[0] == 0x7109871a:
+            signers, end = lp(block[p+12:p+8+n])
+            if end != n-4: raise ValueError('invalid v2 signer list')
+            signer, end = lp(signers)
+            if end != len(signers): raise ValueError('multiple APK signers not supported')
+            signed, pos = lp(signer)
+            _, pos = lp(signer, pos)
+            public, pos = lp(signer, pos)
+            _, pos = lp(signed)
+            certs, _ = lp(signed, pos)
+            cert, end = lp(certs)
+            if end != len(certs): raise ValueError('multiple APK certificates not supported')
+            return cert, public
+        p += 8+n
+    raise ValueError('APK has no v2 signer')
+
+
+def rewrite_runtime(src, out, key, host, dex, assets=None):
+    """Replace only runtime code, retaining the exact manifest and existing game assets."""
+    src, out = Path(src), Path(out)
+    if src.resolve() == out.resolve(): raise ValueError('choose a separate output APK')
+    kj = json.loads(Path(key).read_text())
+    k = {n: int(v) for n,v in kj.items() if n != 'cert'}
+    crt = bytes.fromhex(kj['cert'])
+    replace = {ABI+'libdmhost.so': host, 'classes.dex': dex}
+    for name, path in (assets or {}).items():
+        if not name.startswith('font/'): raise ValueError('only runtime font assets can be added')
+        replace['assets/'+name] = path
+    with zipfile.ZipFile(src) as archive:
+        cert, public = source_certificate(src, archive.start_dir)
+        if cert != crt or public != spki(k): raise ValueError('original APK signing key does not match; refusing to replace signer')
+        infos = archive.infolist()
+        names = {i.filename for i in infos}
+        if len(names) != len(infos) or any(i.compress_type != zipfile.ZIP_STORED for i in infos):
+            raise ValueError('not a supported standalone nx2android APK')
+        if not {ABI+'libdmhost.so', 'classes.dex', 'AndroidManifest.xml'} <= names:
+            raise ValueError('APK is missing standalone runtime components')
+        entries = [(i.filename, replace.get(i.filename, ZipEntrySource(archive, i)),
+                    16384 if i.filename.startswith(ABI) else 4) for i in infos]
+        entries += [(n, p, 4) for n,p in replace.items() if n not in names]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fd, staged = tempfile.mkstemp(prefix='.runtime-', suffix='.apk', dir=out.parent)
+        os.close(fd)
+        try:
+            offsets = build_zip_file(entries, staged)
+            sign_v2_file(staged, out, *offsets, k, crt)
+        finally:
+            Path(staged).unlink(missing_ok=True)
+
+
 def main():
     p = argparse.ArgumentParser(description='an installed port\'s APK with another Vulkan driver library, signed again with the same key')
     p.add_argument('src'); p.add_argument('out'); p.add_argument('key')
     g = p.add_mutually_exclusive_group(); g.add_argument('--driver', help='the driver library (.so, such as Mesa\'s Turnip)'); g.add_argument('--system', action='store_true', help='no driver library: the device\'s own')
     p.add_argument('--host', help='libdmhost.so built again from this checkout (porter host); the driver stays unless --driver / --system is given')
+    p.add_argument('--dex', help='updated standalone Java activity DEX; requires --host and preserves the original signer and game assets')
     p.add_argument('--asset', action='append', default=[], metavar='NAME=FILE', help='FILE as assets/NAME, replacing an entry of that name (porter host: the overlay font)')
     a = p.parse_args()
     if not (a.driver or a.system or a.host or a.asset): p.error('give --driver, --system, --host or --asset')
     if any('=' not in x or x.startswith('=') for x in a.asset): p.error('--asset takes NAME=FILE')
     assets = {n: f for n, _, f in (x.partition('=') for x in a.asset)}
+    if a.dex:
+        if not a.host or a.driver or a.system: p.error('--dex requires --host without driver changes')
+        try: rewrite_runtime(a.src, a.out, a.key, a.host, a.dex, assets)
+        except (OSError, ValueError, zipfile.BadZipFile) as e: p.error(str(e))
+        print(json.dumps({'runtime': a.out}))
+        return
     entries, dropped, added = rebuild(a.src, None if a.system else a.driver or KEEP, a.host, assets)
     kj = json.load(open(a.key)); k = {n: int(v) for n, v in kj.items() if n != 'cert'}; crt = bytes.fromhex(kj['cert'])
     z, cd, eocd = build_zip(entries)

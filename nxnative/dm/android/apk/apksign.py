@@ -167,6 +167,15 @@ def sign_v2(zip_entries, cd, eocd, k, crt):
 # ---------------- bounded-memory ZIP/APK path ----------------
 # Large game packs are file-backed. Keep only the central directory and one 1 MiB
 # I/O buffer resident; the pack, host library and APK are never read into RAM whole.
+class ZipEntrySource:
+    """A stored entry in an open source APK, copied with bounded memory."""
+    def __init__(self, archive, info):
+        self.archive, self.info = archive, info
+
+    def open(self):
+        return self.archive.open(self.info)
+
+
 def build_zip_file(entries, path):
     cd = bytearray()
     count = 0
@@ -180,6 +189,9 @@ def build_zip_file(entries, path):
                 size = len(data)
                 crc = zlib.crc32(data)
                 source = None
+            elif isinstance(data, ZipEntrySource):
+                source = data
+                size, crc = data.info.file_size, data.info.CRC
             else:
                 source = os.fspath(data)
                 size = os.path.getsize(source)
@@ -201,7 +213,7 @@ def build_zip_file(entries, path):
             if source is None:
                 out.write(data)
             else:
-                with open(source, 'rb') as src:
+                with (source.open() if isinstance(source, ZipEntrySource) else open(source, 'rb')) as src:
                     shutil.copyfileobj(src, out, 1 << 20)
             cd += struct.pack('<IHHHHHHIIIHHHHHII', 0x02014b50, 10, 10, 0, 0, dos_time, dos_date,
                               crc, size, size, len(nb), 0, 0, 0, 0, 0, off) + nb

@@ -78,6 +78,43 @@ class StreamingApkTests(unittest.TestCase):
             with apksign.upgrade_version(key, "org.nx2a.other", 7) as version:
                 self.assertEqual(version, 7)
 
+    def test_runtime_upgrade_replaces_code_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            apkdir = ROOT / "nxnative/dm/android/apk"
+            old, new = root / "old.apk", root / "new.apk"
+            host, dex = root / "host.so", root / "classes.dex"
+            host.write_bytes(b"old host")
+            dex.write_bytes(b"old dex")
+            payload = root / "data.zip"
+            payload.write_bytes(b"game assets" * 200000)
+            key = root / "key.json"
+            subprocess.run([sys.executable, str(apkdir / "mkapk.py"), str(host), str(old), str(key),
+                            "--package", "org.nx2a.runtimefixture", "--version-code", "42",
+                            "--dex", str(dex), "--activity", "org.nx2a.GameActivity",
+                            "--asset", f"nx2a-data.zip={payload}"], check=True, capture_output=True)
+            host.write_bytes(b"new host")
+            dex.write_bytes(b"new dex")
+            args = [sys.executable, str(apkdir / "apkdriver.py"), str(old), str(new), str(key),
+                    "--host", str(host), "--dex", str(dex)]
+            subprocess.run(args, check=True, capture_output=True)
+            with zipfile.ZipFile(old) as before, zipfile.ZipFile(new) as after:
+                self.assertEqual(before.namelist(), after.namelist())
+                self.assertEqual(after.read("classes.dex"), b"new dex")
+                self.assertEqual(after.read("lib/arm64-v8a/libdmhost.so"), b"new host")
+                for name in before.namelist():
+                    if name not in ("classes.dex", "lib/arm64-v8a/libdmhost.so"):
+                        self.assertEqual(before.read(name), after.read(name))
+            _assert_v2_digest(self, new.read_bytes())
+            self.assertIn(bytes.fromhex(json.loads(key.read_text())["cert"]), new.read_bytes())
+            other = root / "other.json"
+            subprocess.run([sys.executable, str(apkdir / "mkapk.py"), str(host), str(root / "other.apk"), str(other),
+                            "--package", "org.nx2a.other"], check=True, capture_output=True)
+            args[4] = str(other)
+            before = new.read_bytes()
+            self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
+            self.assertEqual(new.read_bytes(), before)
+
     def test_v2_signed_apk_keeps_zip_entries_readable(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
