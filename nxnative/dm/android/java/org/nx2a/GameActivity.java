@@ -41,6 +41,13 @@ public class GameActivity extends NativeActivity {
     }
 
     private static final int REQUEST_LOSSLESS_DLL = 0x6e33;
+    private final DriverDocuments driverDocuments = new DriverDocuments(this);
+    static native String activeVulkanDriver();
+
+    /** Graphics -> Vulkan driver. The current VkDevice is never modified. */
+    public void chooseVulkanDriver() {
+        runOnUiThread(driverDocuments::choose);
+    }
     private String diagnosticsRoot;
     static native boolean diagnosticsExportStarted();
     static native void diagnosticsExported(int result); // 0 failed, 1 saved, 2 cancelled
@@ -153,6 +160,7 @@ public class GameActivity extends NativeActivity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (driverDocuments.onResult(requestCode, resultCode, data)) return;
         if (requestCode == DiagnosticsExport.REQUEST) {
             DiagnosticsExport.onResult(this, diagnosticsRoot, resultCode, data);
             return;

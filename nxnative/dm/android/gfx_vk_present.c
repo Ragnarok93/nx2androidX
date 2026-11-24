@@ -386,7 +386,7 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_RUMBLE]="Rumble", [OVM_FPS]="Show FPS", [OVM_MODE]="Mode",
     [OVM_EXPORT]="Export save", [OVM_IMPORT]="Import save", [OVM_PAD]="Face buttons",
     [OVM_AUDIO]="Audio output", [OVM_FG]="Lossless FG", [OVM_FG_MULT]="FG multiplier",
-    [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver",
+    [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver > ",
     [OVM_VIVID]="Vivid", [OVM_FSR]="FSR 1", [OVM_FSR_SHARP]="FSR sharpness", [OVM_RATE]="Frame rate",
     [OVM_DRS]="Dynamic resolution", [OVM_DRS_MIN]="Minimum scale",
     [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling",

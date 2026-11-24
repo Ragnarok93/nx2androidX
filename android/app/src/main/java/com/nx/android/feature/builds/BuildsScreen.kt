@@ -317,25 +317,7 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
                 Hint(stringResource(R.string.fw_hint), size = 11.sp)
                 ConfigRow(stringResource(R.string.builds_mt_replay), cfg.mtReplay) { cfg = cfg.copy(mtReplay = it); lib.setConfig(f, cfg) }
                 Hint(stringResource(R.string.builds_mt_replay_hint), size = 11.sp)
-                // Installed drivers are not automatically included in exported game APKs.
-                // Choose a specific library before recompilation; the game's runtime
-                // status will then confirm a custom load or system fallback.
-                val driverChoices = listOf("" to "System Vulkan driver") +
-                    installedDrivers.filter { it.library.isFile }.map {
-                        it.library.absolutePath to it.label
-                    }
-                PickRow(
-                    "Vulkan driver (exported APK)", driverChoices, cfg.vulkanDriver,
-                    onSelect = { value ->
-                        cfg = cfg.copy(vulkanDriver = value.orEmpty())
-                        lib.setConfig(f, cfg)
-                    },
-                    fallback = "System Vulkan driver",
-                    hint = "Custom driver is packaged in the APK. Check its active status in the in-game Performance tab."
-                )
-                if (cfg.vulkanDriver.isNotBlank() && installedDrivers.none {
-                        it.library.isFile && it.library.absolutePath == cfg.vulkanDriver
-                    }) Hint("Selected driver is no longer installed. Select a driver or System before exporting.", size = 11.sp)
+                Hint("Select or import Vulkan drivers in the exported game’s Graphics menu. Driver changes apply after restarting the game.", size = 11.sp)
             }
 
             if (!canStart) {

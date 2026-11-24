@@ -13,6 +13,7 @@
 #include "overlay_layout.h"
 #include "saves_android.h"
 #include "jni_android.h"
+#include "driver_selection.h"
 #include <math.h>
 #include <time.h>
 #include <android/asset_manager.h>
@@ -930,7 +931,7 @@ static void menu_do(int item) {
     }
     else if (item == OVM_FG_MULT) fg_mult_step(1);
     else if (item == OVM_FG_FLOW) fg_flow_step(1);
-    else if (item == OVM_DRIVER) return; // read-only actual driver, cannot hot-swap a VkDevice
+    else if (item == OVM_DRIVER) { jni_save_document_picker("chooseVulkanDriver"); return; } // persisted for next process only
     else if (item == OVM_DIAG_OPEN) { atomic_store(&g_diag_flags_page, 1); atomic_store(&g_menu_hi, -1); }
     else if (item == OVM_DIAG_BACK) { atomic_store(&g_diag_flags_page, 0); atomic_store(&g_menu_hi, -1); }
     else if (item == OVM_DIAG_CAPTURE || item == OVM_DIAG_DELAY) {
@@ -1703,6 +1704,16 @@ static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char 
         setenv("DM_VK_PCACHE_DIR", p, 1);
     snprintf(p, sizeof p, "%s/shaders.dmsv", g_root); setenv("DM_VK_SHADERS", p, 0);
     snprintf(p, sizeof p, "%s/env.txt", g_root); env_file(p);
+    // The per-game private selection wins over the immutable original pack.
+    // Never apply it to the shared in-app player or change a live VkDevice.
+    if (!sub[0] && !g_play) {
+        char selected[1024];
+        int selection = dm_driver_selection(internal, selected, sizeof selected);
+        if (selection == DM_DRIVER_CUSTOM) setenv("DM_VK_DRIVER", selected, 1);
+        else if (selection == DM_DRIVER_SYSTEM || selection == DM_DRIVER_INVALID) unsetenv("DM_VK_DRIVER");
+        if (selection == DM_DRIVER_INVALID) LOG("[RED] [driver] Invalid imported selection; using system Vulkan");
+        else if (selection != DM_DRIVER_LEGACY) LOG("[driver] Runtime selection: %s", selection == DM_DRIVER_SYSTEM ? "system" : selected);
+    }
     tune_ffrs_s25fe_radv();
     atomic_store(&g_radv_pending, radv_test_load(g_root));
     atomic_store(&g_radv_applied, radv_test_apply(g_root));
@@ -1738,6 +1749,12 @@ static void host_start(ANativeActivity *act) {
 #endif
     snprintf(g_root, sizeof g_root, "%s", g_data_dir[0] ? g_data_dir : (act->externalDataPath ? act->externalDataPath : act->internalDataPath));
     host_start_common(act->env, act->vm, act->clazz, act->internalDataPath);
+}
+
+__attribute__((visibility("default"))) JNIEXPORT jstring JNICALL
+Java_org_nx2a_GameActivity_activeVulkanDriver(JNIEnv *E, jclass cls) {
+    (void)cls;
+    return (*E)->NewStringUTF(E, dm_vk_driver_status());
 }
 
 // The Java bootstrap calls this after its worker has verified and extracted the embedded pack.
