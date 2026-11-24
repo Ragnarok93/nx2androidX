@@ -95,7 +95,7 @@ class MainActivity : ComponentActivity() {
 
     /** 界面语言：toast 与分享面板的标题从这里取词 */
     /** Which tab the screen opens on (the notification's tap says the builds page) */
-    var launchTab = 1
+    var launchTab by mutableStateOf(1)
     private var launchBuildId by mutableStateOf("")
 
     /** 手柄中心（首页顶栏的入口）：档案跟游戏共用同一个文件 */
@@ -174,6 +174,22 @@ class MainActivity : ComponentActivity() {
         },
         onCancelPort = { PortService.cancel(this) },
         onExportApk = { apk -> exportApk(apk) },
+        onUpgradeApk = { apk, companion ->
+            if (!environmentSetup.ready) {
+                toast(locale.str(R.string.upgrade_prepare_environment))
+            } else if (!apk.isFile || !apk.canRead()) {
+                toast(locale.str(R.string.builds_needs_storage))
+                askStorage()
+            } else if (Player.playProcessAlive(this) || !operations.beginApkUpgrade(apk.absolutePath, companion?.absolutePath.orEmpty())) {
+                toast(locale.str(R.string.runtime_busy))
+            } else {
+                try {
+                    RuntimeUpdateService.start(this)
+                } catch (error: Exception) {
+                    runtime.finish(false, error.message.orEmpty())
+                }
+            }
+        },
         onRun = { pack, name ->
             // 运行一个完成的移植：这个游戏还活着就把它带回前台（不重启），否则拉起 :play
             // （包是唯一真源，拷贝覆盖旧副本）
@@ -417,6 +433,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.hasExtra(EXTRA_TAB)) launchTab = intent.getIntExtra(EXTRA_TAB, 1)
         if (intent.getStringExtra(EXTRA_BUILD_ID).orEmpty().isNotEmpty()) {
             launchTab = intent.getIntExtra(EXTRA_TAB, 0)
             launchBuildId = intent.getStringExtra(EXTRA_BUILD_ID).orEmpty()

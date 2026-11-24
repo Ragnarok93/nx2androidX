@@ -23,8 +23,34 @@ class RuntimeUpdateState private constructor(
 
     constructor(pending: String? = null) : this({}, pending)
 
-    var pack by mutableStateOf(pending.orEmpty()); private set
-    var name by mutableStateOf(pending?.let { File(it).name }.orEmpty()); private set
+    var apkUpgrade by mutableStateOf(pending?.startsWith("apk:") == true); private set
+    var pack by mutableStateOf(pending.orEmpty().removePrefix("apk:")); private set
+    var name by mutableStateOf(pending?.let { File(it.removePrefix("apk:")).name }.orEmpty()); private set
+    var apkData by mutableStateOf(""); private set
+    var apkOutput by mutableStateOf(if (apkUpgrade) upgradedPath(pack) else ""); private set
+    var apkLog by mutableStateOf<List<String>>(emptyList()); private set
+
+    companion object {
+        fun upgradedPath(source: String): String {
+            val file = File(source)
+            return File(file.parentFile, file.nameWithoutExtension + "-upgraded.apk").absolutePath
+        }
+    }
+
+    fun beginApk(source: String, data: String): Boolean {
+        if (running || source.isBlank() || !source.endsWith(".apk", ignoreCase = true)) return false
+        if (!begin(source, File(source).name)) return false
+        apkUpgrade = true
+        apkData = data
+        apkOutput = upgradedPath(source)
+        apkLog = emptyList()
+        savePending("apk:" + source)
+        return true
+    }
+
+    fun appendApkLog(line: String) {
+        if (running && apkUpgrade) apkLog = (apkLog + line.take(1000)).takeLast(24)
+    }
     var interrupted by mutableStateOf(pending != null); private set
     var reason by mutableStateOf(""); private set
     var phase by mutableStateOf(if (pending == null) RuntimeUpdatePhase.IDLE else RuntimeUpdatePhase.FAILED); private set
@@ -38,6 +64,10 @@ class RuntimeUpdateState private constructor(
 
     fun begin(path: String, label: String): Boolean {
         if (running || path.isBlank()) return false
+        apkUpgrade = false
+        apkData = ""
+        apkOutput = ""
+        apkLog = emptyList()
         pack = path
         name = label
         interrupted = false
@@ -74,6 +104,10 @@ class RuntimeUpdateState private constructor(
         if (running) return
         savePending(null)
         phase = RuntimeUpdatePhase.IDLE
+        apkUpgrade = false
+        apkData = ""
+        apkOutput = ""
+        apkLog = emptyList()
         pack = ""
         name = ""
         interrupted = false

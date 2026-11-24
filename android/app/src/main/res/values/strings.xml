@@ -3,6 +3,21 @@
     <string name="app_name" translatable="false">nx2androidX</string>
     <string name="app_tab_library">Library</string>
     <string name="app_tab_builds">Builds</string>
+    <string name="app_tab_upgrade">Upgrade</string>
+    <string name="upgrade_description">Update a previously exported game APK with the latest runtime. Your recompiled game code, assets, saves, settings, and signing identity are kept. No original ROM or keys are needed.</string>
+    <string name="upgrade_pick_apk">Choose game APK</string>
+    <string name="upgrade_no_apk">No APK selected</string>
+    <string name="upgrade_pick_data">Choose companion data folder</string>
+    <string name="upgrade_data_optional">Only needed for APKs with separate game data.</string>
+    <string name="upgrade_clear_data">Clear folder</string>
+    <string name="upgrade_output">Output: %1$s</string>
+    <string name="upgrade_prepare_environment">Prepare the compiler environment from Settings first.</string>
+    <string name="upgrade_start">Upgrade APK</string>
+    <string name="upgrade_running">Rebuilding and packaging the runtime only…</string>
+    <string name="upgrade_success">Upgrade APK created. Install it over the existing game without uninstalling.</string>
+    <string name="upgrade_export">Save APK to another location</string>
+    <string name="upgrade_interrupted">Upgrade interrupted. The original APK is unchanged. Select the companion folder if needed and retry.</string>
+    <string name="upgrade_failed">Upgrade failed. The original APK is unchanged.</string>
     <string name="app_tab_settings">Settings</string>
     <string name="app_storage_permission_needed">Storage permission needed</string>
     <string name="app_storage_permission_picker">The built-in file manager needs the \"All files access\" permission to list game files.</string>

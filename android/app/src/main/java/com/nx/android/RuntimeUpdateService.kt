@@ -45,7 +45,9 @@ class RuntimeUpdateService : Service() {
         manager.createNotificationChannel(NotificationChannel(CHANNEL,
             locale.str(R.string.runtime_update), NotificationManager.IMPORTANCE_LOW))
         val tap = PendingIntent.getActivity(this, 2,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP).apply {
+                if (state.apkUpgrade) putExtra(MainActivity.EXTRA_TAB, 2)
+            },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         startForeground(2, Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
@@ -57,16 +59,22 @@ class RuntimeUpdateService : Service() {
             .build())
         working = true
         val pack = state.pack
+        val apkUpgrade = state.apkUpgrade
+        val apkOutput = state.apkOutput
+        val apkData = state.apkData
         // 玩家点了「用当前档案继续」时这一轮才带上这个开关（第一次不带：照旧失败并说清原因）。
         // 这个选择只对这一次有效：别的重试照旧按档案核对。
         val allowDrift = state.takeDrift()
         val handler = Handler(mainLooper)
         Thread {
-            val result = compiler.rebuild(pack, allowProfileDrift = allowDrift)
+            val result = if (apkUpgrade) compiler.upgradeApk(pack, apkOutput, apkData) { line ->
+                com.nx.android.data.AppLog.line(line)
+                handler.post { state.appendApkLog(line) }
+            } else compiler.rebuild(pack, allowProfileDrift = allowDrift)
             handler.post {
                 working = false
                 state.finish(result.success, result.reason, result.profileDrift)
-                library.rescan()
+                if (!apkUpgrade) library.rescan()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }

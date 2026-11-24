@@ -48,7 +48,38 @@ class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProces
         }
     }
 
+    fun upgradeApk(source: String, output: String, data: String = "", noLsfg: Boolean = !BuildConfig.NX_LSFG,
+                   log: (String) -> Unit = AppLog::line): RuntimeUpdateResult {
+        return try {
+            var reported = false
+            var reason = ""
+            val process = guestLauncher.guest(apkArgs(source, output, data, noLsfg))
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    log(line)
+                    if (line.trim() == output) reported = true
+                    if (line.startsWith("Runtime APK upgrade failed:")) reason = line
+                }
+            }
+            val code = process.waitFor()
+            val success = code == 0 && reported && File(output).isFile && File(output).length() > 0
+            RuntimeUpdateResult(success, if (success) "" else reason.ifBlank {
+                if (code != 0) "APK runtime compiler exited with code $code" else "No completed upgrade APK was reported."
+            })
+        } catch (error: Exception) {
+            RuntimeUpdateResult(false, error.message.orEmpty())
+        }
+    }
+
     companion object {
+        fun apkArgs(source: String, output: String, data: String, noLsfg: Boolean): List<String> {
+            val args = mutableListOf("-m", "porter", "upgrade-apk", source, "-o", output)
+            if (data.isNotBlank()) args += listOf("--data", data)
+            if (noLsfg) args += "--no-lsfg"
+            return args
+        }
+
+
         fun args(pack: String, noLsfg: Boolean, allowProfileDrift: Boolean = false): List<String> {
             val args = mutableListOf("-m", "porter", "rebuild-runtime", pack, "--progress", "json")
             if (noLsfg) args.add("--no-lsfg")

@@ -4,6 +4,30 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RuntimeUpdateStateTest {
+    @Test fun `apk upgrade shares the runtime operation lock and preserves result path`() {
+        val state = RuntimeUpdateState()
+        assertTrue(state.beginApk("/games/FFR.apk", "/games/FFR-data"))
+        assertTrue(state.apkUpgrade)
+        assertEquals("/games/FFR-upgraded.apk", state.apkOutput)
+        assertEquals("/games/FFR-data", state.apkData)
+        assertFalse(state.begin("/other", "Other"))
+        state.appendApkLog("Rebuilding runtime")
+        state.finish(true)
+        assertEquals(RuntimeUpdatePhase.SUCCEEDED, state.phase)
+        assertEquals(listOf("Rebuilding runtime"), state.apkLog)
+        assertTrue(state.begin("/pack", "Pack"))
+        assertFalse(state.apkUpgrade)
+        assertEquals("", state.apkOutput)
+    }
+
+    @Test fun `interrupted apk upgrade does not open the legacy pack update dialog`() {
+        val state = RuntimeUpdateState("apk:/games/FFR.apk")
+        assertTrue(state.apkUpgrade)
+        assertTrue(state.interrupted)
+        assertEquals("/games/FFR.apk", state.pack)
+        assertEquals("/games/FFR-upgraded.apk", state.apkOutput)
+    }
+
     @Test fun `duplicate taps and dismissal cannot release an active update`() {
         val state = RuntimeUpdateState()
         assertTrue(state.begin("/pack/Game-data", "Game"))

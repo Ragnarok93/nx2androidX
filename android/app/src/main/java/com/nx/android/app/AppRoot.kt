@@ -142,6 +142,7 @@ import java.util.Locale
 enum class Tab(@StringRes val label: Int, val icon: ImageVector) {
     LIBRARY(R.string.app_tab_library, Icons.Filled.SportsEsports),
     BUILDS(R.string.app_tab_builds, Icons.Filled.Inventory2),
+    UPGRADE(R.string.app_tab_upgrade, Icons.Filled.Refresh),
 }
 
 /**
@@ -176,6 +177,7 @@ data class AppActions(
     val emptyBuildLogMessage: (String) -> String,
     val titleBuildLog: (String) -> String,
     val onUpdateRuntime: (File, String) -> Unit = { _, _ -> },
+    val onUpgradeApk: (File, File?) -> Unit = { _, _ -> },
     // the firmware: one for the machine (imported from a zip into the app's own folder, optional)
     val firmware: () -> String = { "" },
     val onImportFirmware: (File) -> Unit = {},
@@ -417,7 +419,11 @@ fun MainScreen(prefs: PrefsStore, locale: AppLocale, port: PortState, library: L
                onLog: (String) -> Unit,
                onDiagnosticLog: () -> Unit,
                onEnvCheck: () -> Unit) {
-    var tab by rememberSaveable { mutableIntStateOf(startTab) }
+    var tab by rememberSaveable { mutableIntStateOf(startTab.coerceIn(0, Tab.entries.lastIndex)) }
+    LaunchedEffect(startTab) { tab = startTab.coerceIn(0, Tab.entries.lastIndex) }
+    val upgradeState = rememberSaveable(saver = com.nx.android.feature.upgrade.UpgradeSelection.Saver) {
+        com.nx.android.feature.upgrade.UpgradeSelection()
+    }
     // 设置是一整页，盖住顶栏与下面的页面：从顶栏的设置图标进来，关掉才回到底下的页面
     var settingsOpen by remember { mutableStateOf(false) }
     var settingsSection by remember { mutableStateOf(SettingsSection.ENVIRONMENT) }
@@ -438,8 +444,8 @@ fun MainScreen(prefs: PrefsStore, locale: AppLocale, port: PortState, library: L
     // 肩键切页签：页签的状态在这一层，所以切页也在这里做（浮层开着时不切）。
     OnNavKey(enabled = navHost == NavHost.LIBRARY) { key ->
         when (key) {
-            NavKey.TabLeft -> tab = Tab.LIBRARY.ordinal
-            NavKey.TabRight -> tab = Tab.BUILDS.ordinal
+            NavKey.TabLeft -> tab = (tab - 1).coerceAtLeast(0)
+            NavKey.TabRight -> tab = (tab + 1).coerceAtMost(Tab.entries.lastIndex)
             else -> {}
         }
     }
@@ -457,7 +463,7 @@ fun MainScreen(prefs: PrefsStore, locale: AppLocale, port: PortState, library: L
     val environmentCheckUiState by environmentCheckViewModel.uiState.collectAsStateWithLifecycle()
     val installedDrivers by drivers.drivers.collectAsStateWithLifecycle()
 
-    com.nx.android.feature.runtime.RuntimeUpdateDialog(runtime,
+    if (!runtime.apkUpgrade) com.nx.android.feature.runtime.RuntimeUpdateDialog(runtime,
         onRetry = { actions.onUpdateRuntime(File(runtime.pack), runtime.name) },
         onFinished = { actions.onToast(locale.str(R.string.runtime_updated)) },
         onUseCurrentProfile = {
@@ -488,6 +494,10 @@ fun MainScreen(prefs: PrefsStore, locale: AppLocale, port: PortState, library: L
                     onGoBuilds = { buildsViewModel.setTarget(lib.buildsTarget); tab = Tab.BUILDS.ordinal }, onRequest = onRequest,
                     navActive = navHost == NavHost.LIBRARY)
                 Tab.BUILDS -> BuildsRoute(buildsViewModel, prefs.keys, environmentSetup.ready, installedDrivers, actions, onRequest, onLog)
+                Tab.UPGRADE -> com.nx.android.feature.upgrade.UpgradeScreen(upgradeState, runtime,
+                    busy = port.running || player.running || runtime.running,
+                    ready = environmentSetup.ready, onRequest = onRequest,
+                    onUpgrade = actions.onUpgradeApk, onExport = actions.onExportApk)
             }
         }
         if (port.running || buildsViewModel.gameInfo.reading) {
@@ -576,11 +586,11 @@ private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit
                          color = MaterialTheme.colorScheme.onSurfaceVariant,
                          modifier = Modifier.padding(start = 8.dp))
                 }
-                // Two bounded tabs share the remaining width with the actions.
-                // No control is pushed outside the viewport on portrait phones.
+                // On a narrow phone, three tabs need a full-width row; actions never steal their space.
+                val narrow = maxWidth < 520.dp
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) {
-                        TopBarTabs(selected, onSelect, compact = true)
+                        if (!narrow) TopBarTabs(selected, onSelect, compact = true)
                     }
                     TopIcon(Icons.Filled.Refresh, stringResource(R.string.app_refresh_library), onRefresh)
                     Spacer(Modifier.width(4.dp))
@@ -588,6 +598,7 @@ private fun TopBar(selected: Int, onSelect: (Tab) -> Unit, onRefresh: () -> Unit
                     Spacer(Modifier.width(4.dp))
                     TopIcon(Icons.Filled.Settings, stringResource(R.string.app_tab_settings), onSettings)
                 }
+                if (narrow) TopBarTabs(selected, onSelect, compact = true)
             }
         } else {
             Row(
@@ -639,9 +650,10 @@ private fun TopBarTabs(selected: Int, onSelect: (Tab) -> Unit, compact: Boolean 
             Text(
                 stringResource(tab.label),
                 style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                fontWeight = if (i == selected) FontWeight.Bold else FontWeight.Normal,
                 color = if (i == selected) MaterialTheme.colorScheme.onBackground else NxPalette.Unbuilt,
                 modifier = if (compact) Modifier.weight(1f).clickable { onSelect(tab) }
-                    .padding(top = 8.dp, bottom = 8.dp, end = 12.dp)
+                    .padding(top = 8.dp, bottom = 8.dp, end = 4.dp)
                 else Modifier.clickable { onSelect(tab) }.padding(end = 26.dp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

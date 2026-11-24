@@ -7,6 +7,15 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 class RuntimeCompilerTest {
+    @Test fun `standalone upgrade invokes only the APK runtime command`() {
+        assertEquals(listOf("-m", "porter", "upgrade-apk", "/games/FFR.apk", "-o",
+            "/games/FFR-upgraded.apk", "--data", "/games/FFR-data", "--no-lsfg"),
+            RuntimeCompiler.apkArgs("/games/FFR.apk", "/games/FFR-upgraded.apk", "/games/FFR-data", true))
+        assertEquals(listOf("-m", "porter", "upgrade-apk", "/games/FFR.apk", "-o",
+            "/games/FFR-upgraded.apk"),
+            RuntimeCompiler.apkArgs("/games/FFR.apk", "/games/FFR-upgraded.apk", "", false))
+    }
+
     private fun compile(output: String, code: Int): RuntimeUpdateResult {
         val launcher = object : GuestProcessLauncher {
             override fun guestEnv() = mutableMapOf<String, String>()
