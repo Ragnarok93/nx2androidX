@@ -9,6 +9,10 @@ import android.net.Uri;
 import android.provider.OpenableColumns;
 import android.database.Cursor;
 import android.os.Bundle;
+import android.os.Build;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.os.StatFs;
 import android.util.Log;
 import android.widget.Toast;
@@ -143,6 +147,7 @@ public class GameActivity extends NativeActivity {
         // extraction then runs off the UI thread so multi-gigabyte packs cannot ANR the launcher.
         super.onCreate(state);
         if (state != null) diagnosticsRoot = state.getString("nx2a.diagnosticsRoot");
+        enterImmersiveMode();
         prepareEmbeddedPack(this);
     }
 
@@ -164,6 +169,31 @@ public class GameActivity extends NativeActivity {
     @Override protected void onResume() {
         super.onResume();
         keyboard.pause(false);
+        enterImmersiveMode();
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) enterImmersiveMode();
+    }
+
+    // The system may reveal its bars with an edge swipe, but they are transient.
+    // Re-enter after the document picker, keyboard dialog or a lifecycle transition.
+    @SuppressWarnings("deprecation")
+    private void enterImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                controller.hide(WindowInsets.Type.systemBars());
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN |
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        }
     }
 
     static boolean hasEmbeddedPack(Context context) {

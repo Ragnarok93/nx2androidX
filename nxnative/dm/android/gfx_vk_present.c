@@ -387,7 +387,7 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_EXPORT]="Export save", [OVM_IMPORT]="Import save", [OVM_PAD]="Face buttons",
     [OVM_AUDIO]="Audio output", [OVM_FG]="Lossless FG", [OVM_FG_MULT]="FG multiplier",
     [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver",
-    [OVM_FSR]="FSR 1", [OVM_FSR_SHARP]="FSR sharpness", [OVM_RATE]="Frame rate",
+    [OVM_VIVID]="Vivid", [OVM_FSR]="FSR 1", [OVM_FSR_SHARP]="FSR sharpness", [OVM_RATE]="Frame rate",
     [OVM_DRS]="Dynamic resolution", [OVM_DRS_MIN]="Minimum scale",
     [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling",
     [OVM_DIAG_OPEN]="Diagnostics", [OVM_DIAG_CAPTURE]="Capture graphics",
@@ -416,6 +416,7 @@ __attribute__((weak)) int dm_menu_drs_supported(void) { return 0; }
 __attribute__((weak)) int dm_menu_drs_enabled(void) { return 0; }
 __attribute__((weak)) int dm_menu_drs_actual(void) { return 100; }
 __attribute__((weak)) int dm_menu_drs_min(void) { return 70; }
+__attribute__((weak)) int dm_vivid_enabled(void) { return 0; }
 __attribute__((weak)) int dm_fsr_enabled(void) { return 0; }
 __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
 int dm_menu_fg_has_dll(void);
@@ -506,7 +507,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_rrect(cv, x0 + cur * segw, cy - hh / 2, x0 + (cur + 1) * segw, cy + hh / 2, hh / 2, C_ACCENT);
             for (int k = 0; k < 2; k++) cv_text(cv, x0 + k * segw + (segw - cv_text_w(seg[k], is)) / 2, cy, seg[k], is, k == cur ? C_WHITE : C_DIM);
         } else {   // a switch
-            int on = it == OVM_DRS ? dm_menu_drs_enabled() : (st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_FG ? 19 : it == OVM_FSR ? 8 : 3) & 1);
+            int on = it == OVM_VIVID ? dm_vivid_enabled() : it == OVM_DRS ? dm_menu_drs_enabled() : (st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_FG ? 19 : it == OVM_FSR ? 8 : 3) & 1);
             float sx0 = x1 - sw;
             cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
             cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
@@ -1044,7 +1045,8 @@ static void present_one(vkimg_t *im, VkImage src, int cx, int cy, int cw, int ch
     VkImageLayout lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     // FSR EASU -> RCAS is optional and guarded by dynamic-rendering support.
     // Fall back to the original blit on unsupported GPUs or allocation errors.
-    if (!dm_fsr_enabled() || !fsr_record(cb, src, tgt, tview, cx, cy, cw, ch, dx, dy, dw, dh, flip && vk_window_bottom_up(), &lay))
+    int use_fsr = dm_fsr_enabled(), vivid = dm_vivid_enabled();
+    if (!(use_fsr || vivid) || !fsr_record(cb, src, tgt, tview, cx, cy, cw, ch, dx, dy, dw, dh, flip && vk_window_bottom_up(), use_fsr, vivid, &lay))
         vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, tgt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     int external = dm_external_active();
     int ovm = external ? 0 : dm_overlay_visible(), menu = external ? -1 : dm_menu_state(), fps = dm_overlay_fps();
