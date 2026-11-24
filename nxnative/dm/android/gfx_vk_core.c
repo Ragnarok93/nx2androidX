@@ -142,6 +142,7 @@ static int drv_has_gpu(PFN_vkGetInstanceProcAddr g, const char *requested_driver
     // The RADV Android driver is distributed as vulkan.radeon.so. Require its Vulkan
     // driver ID so a failed adrenotools hook cannot silently masquerade as RADV.
     const int expect_radv = requested_driver && (strstr(requested_driver, "radeon") || strstr(requested_driver, "radv"));
+    const int expect_turnip = requested_driver && (strstr(requested_driver, "freedreno") || strstr(requested_driver, "turnip"));
     VkPhysicalDevice pd[8]; uint32_t n = 8;
     if (ep && gp && ep(in, &n, pd) >= 0) for (uint32_t i = 0; i < n && !ok; i++) {
         VkPhysicalDeviceProperties p; gp(pd[i], &p);
@@ -149,13 +150,16 @@ static int drv_has_gpu(PFN_vkGetInstanceProcAddr g, const char *requested_driver
         VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver };
         if (gp2) gp2(pd[i], &p2);
         const int is_radv = gp2 && driver.driverID == VK_DRIVER_ID_MESA_RADV;
-        ok = p.apiVersion >= VK_API_VERSION_1_3 && (!expect_radv || is_radv);
+        const int is_turnip = gp2 && driver.driverID == VK_DRIVER_ID_MESA_TURNIP;
+        ok = p.apiVersion >= VK_API_VERSION_1_3 && (!expect_radv || is_radv) && (!expect_turnip || is_turnip);
         VKLOG("DM_VK_DRIVER: %s, Vulkan %u.%u, driver version 0x%x, driver ID %d (%s); RADV required %s",
               p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion),
               p.driverVersion, gp2 ? (int)driver.driverID : -1, gp2 ? driver.driverName : "unavailable",
               expect_radv ? "yes" : "no");
         if (expect_radv && !is_radv)
             VKLOG("[RED] DM_VK_DRIVER: requested RADV Xclipse but Vulkan enumerated a different driver; custom loader hook did not activate RADV");
+        if (expect_turnip && !is_turnip)
+            VKLOG("[RED] DM_VK_DRIVER: requested Turnip but Vulkan enumerated a different driver; custom loader hook did not activate Turnip");
     }
     if (di) di(in, NULL);
     return ok;

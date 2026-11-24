@@ -91,12 +91,11 @@ class PortRunnerTest {
     }
 
     @Test
-    fun `selected RADV library is included in the exported game options`() {
+    fun `legacy selected RADV library is not embedded in a newly exported game`() {
         val selected = "/data/user/0/com.nx.android/files/drivers/RADV/libvulkan_radeon.so"
         val args = args(-1, vulkanDriver = selected)
-        val at = args.indexOf("--vulkan-driver")
-        assertTrue(at >= 0)
-        assertEquals(selected, args[at + 1])
+        assertFalse(args.contains("--vulkan-driver"))
+        assertFalse(args.contains(selected))
     }
 
     @Test

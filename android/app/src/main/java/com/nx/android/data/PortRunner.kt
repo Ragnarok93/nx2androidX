@@ -71,7 +71,7 @@ class PortRunner(
             if (sharedFont.isNotBlank()) args += listOf("--shared-font", sharedFont.trim())
             if (firmware.isNotBlank()) args += listOf("--firmware", firmware.trim())
             if (mtReplay) args += "--mt-replay"
-            if (vulkanDriver.isNotBlank()) args += listOf("--vulkan-driver", vulkanDriver.trim())
+            // Legacy build configuration is intentionally ignored: standalone games import drivers at runtime.
             if (deviceLanguage.isNotBlank()) args += listOf("--language-preferred", deviceLanguage.trim())
             // A build without the frame generation (the Gradle property nxLsfg=false): the host the app builds on the
             // device is then smaller and the frame generation reports that it is not in this build (android/NOTICE.md).
