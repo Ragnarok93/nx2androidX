@@ -13,7 +13,6 @@ import androidx.compose.ui.unit.dp
 import com.nx.android.R
 import com.nx.android.appstate.RuntimeUpdatePhase
 import com.nx.android.appstate.RuntimeUpdateState
-import com.nx.android.core.ui.theme.GlassSheet
 import com.nx.android.feature.filepicker.PickerMode
 import com.nx.android.feature.filepicker.PickerRequest
 import java.io.File
@@ -58,7 +57,8 @@ fun UpgradeScreen(selection: UpgradeSelection, runtime: RuntimeUpdateState,
     ) {
         Text(stringResource(R.string.app_tab_upgrade), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text(stringResource(R.string.upgrade_description), style = MaterialTheme.typography.bodyMedium)
-        GlassSheet(modifier = Modifier.fillMaxWidth()) {
+        Surface(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)) {
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(stringResource(R.string.upgrade_pick_apk), fontWeight = FontWeight.Bold)
                 Text(selection.source.ifBlank { stringResource(R.string.upgrade_no_apk) }, style = MaterialTheme.typography.bodySmall)
@@ -99,7 +99,8 @@ fun UpgradeScreen(selection: UpgradeSelection, runtime: RuntimeUpdateState,
             }
         }
         if (runtime.apkUpgrade && runtime.phase != RuntimeUpdatePhase.IDLE) {
-            GlassSheet(modifier = Modifier.fillMaxWidth()) {
+            Surface(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(runtime.name, fontWeight = FontWeight.Bold)
                     when (runtime.phase) {

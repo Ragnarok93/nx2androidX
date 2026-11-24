@@ -600,4 +600,19 @@
     <string name="drawer_players_note">玩家 1 永远是手机：触屏的虚拟按键与体感都是它的，它再接手柄。默认「自动」——没被指派走的手柄都算玩家 1（单人游戏插两只手柄都能玩）。锁死某一只之后，别的就闲置了（按了没人管）。一只手柄只能属于一个玩家。</string>
     <string name="pad_center_player">玩家 %1$d</string>
     <string name="pad_center_idle">闲置</string>
+    <string name="app_tab_upgrade">升级</string>
+    <string name="upgrade_description">更新已导出的游戏 APK 的运行时，保留游戏代码、资源、存档、设置与签名，无需原始 ROM 或密钥。</string>
+    <string name="upgrade_pick_apk">选择游戏 APK</string>
+    <string name="upgrade_no_apk">尚未选择 APK</string>
+    <string name="upgrade_pick_data">选择游戏数据文件夹</string>
+    <string name="upgrade_data_optional">仅独立数据文件夹的 APK 需要。</string>
+    <string name="upgrade_clear_data">清除文件夹</string>
+    <string name="upgrade_output">输出：%1$s</string>
+    <string name="upgrade_prepare_environment">请先在设置中准备编译环境。</string>
+    <string name="upgrade_start">升级 APK</string>
+    <string name="upgrade_running">仅重新编译并打包运行时…</string>
+    <string name="upgrade_success">升级 APK 已生成。请直接覆盖安装，勿卸载原游戏。</string>
+    <string name="upgrade_export">将 APK 保存到其他位置</string>
+    <string name="upgrade_interrupted">升级已中断，原 APK 未更改。必要时选择数据文件夹后重试。</string>
+    <string name="upgrade_failed">升级失败，原 APK 未更改。</string>
 </resources>

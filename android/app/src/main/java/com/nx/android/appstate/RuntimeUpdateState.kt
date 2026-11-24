@@ -39,13 +39,7 @@ class RuntimeUpdateState private constructor(
 
     fun beginApk(source: String, data: String): Boolean {
         if (running || source.isBlank() || !source.endsWith(".apk", ignoreCase = true)) return false
-        if (!begin(source, File(source).name)) return false
-        apkUpgrade = true
-        apkData = data
-        apkOutput = upgradedPath(source)
-        apkLog = emptyList()
-        savePending("apk:" + source)
-        return true
+        return beginInternal(source, File(source).name, apk = true, data = data)
     }
 
     fun appendApkLog(line: String) {
@@ -62,18 +56,20 @@ class RuntimeUpdateState private constructor(
     /** 下一次更新用当前档案（玩家点了「用当前档案继续」；成功之后清掉） */
     var allowDrift by mutableStateOf(false); private set
 
-    fun begin(path: String, label: String): Boolean {
+    fun begin(path: String, label: String): Boolean = beginInternal(path, label)
+
+    private fun beginInternal(path: String, label: String, apk: Boolean = false, data: String = ""): Boolean {
         if (running || path.isBlank()) return false
-        apkUpgrade = false
-        apkData = ""
-        apkOutput = ""
+        apkUpgrade = apk
+        apkData = if (apk) data else ""
+        apkOutput = if (apk) upgradedPath(path) else ""
         apkLog = emptyList()
         pack = path
         name = label
         interrupted = false
         reason = ""
         profileDrift = false
-        savePending(path)
+        savePending(if (apk) "apk:" + path else path)
         phase = RuntimeUpdatePhase.RUNNING
         return true
     }

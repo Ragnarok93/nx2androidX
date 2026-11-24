@@ -57,7 +57,10 @@ class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProces
             process.inputStream.bufferedReader().useLines { lines ->
                 lines.forEach { line ->
                     log(line)
-                    if (line.trim() == output) reported = true
+                    val reportedPath = line.trim()
+                    if (reportedPath.startsWith("/") && runCatching {
+                            File(reportedPath).canonicalFile == File(output).canonicalFile
+                        }.getOrDefault(false)) reported = true
                     if (line.startsWith("Runtime APK upgrade failed:")) reason = line
                 }
             }
