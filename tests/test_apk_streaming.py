@@ -90,7 +90,7 @@ class StreamingApkTests(unittest.TestCase):
             payload.write_bytes(b"game assets" * 200000)
             key = root / "key.json"
             subprocess.run([sys.executable, str(apkdir / "mkapk.py"), str(host), str(old), str(key),
-                            "--package", "org.nx2a.runtimefixture", "--version-code", "42",
+                            "--package", "org.nx2a.runtimefixture", "--version-code", "42", "--lib", "dmhost",
                             "--dex", str(dex), "--activity", "org.nx2a.GameActivity",
                             "--asset", f"nx2a-data.zip={payload}"], check=True, capture_output=True)
             host.write_bytes(b"new host")

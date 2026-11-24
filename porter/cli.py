@@ -78,6 +78,14 @@ def _parser():
                          '(that profile is the one a full re-port would use too; the game may behave differently than when it was ported)')
     rt.add_argument('--jobs', type=int, default=None)
     rt.add_argument('--progress', choices=('json', 'lines'), default='lines')
+    up = sub.add_parser('upgrade-apk', help='rebuild only the runtime of an existing standalone APK')
+    up.add_argument('apk')
+    up.add_argument('-o', '--out', required=True)
+    up.add_argument('--data', help='existing companion data folder for a split APK')
+    up.add_argument('--key', help='original APK signing key (default: existing porter key)')
+    up.add_argument('--jobs', type=int, default=None)
+    up.add_argument('--no-lsfg', action='store_true')
+    up.add_argument('--debug', action='store_true')
     ins = sub.add_parser('install', help='install a port made earlier'); ins.add_argument('data', help='the data pack folder (<App>-data)'); ins.add_argument('--apk', help='the APK (default: <App>.apk beside the pack)')
     ins.add_argument('--device', default=''); ins.add_argument('--replace-signer', action='store_true'); ins.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'))
     _romfs_at(ins)
@@ -330,7 +338,19 @@ def cmd_driver(a):   # porter driver and porter host: the installed APK rebuilt 
     return 0
 
 
+def cmd_upgrade_apk(a):
+    import subprocess, zipfile
+    from porter.upgrade_apk import upgrade
+    from porter.upstream import BuildError
+    try:
+        print(upgrade(a.apk, a.out, data=a.data, key=a.key, jobs=a.jobs, no_lsfg=a.no_lsfg, debug=a.debug))
+        return 0
+    except (BuildError, OSError, ValueError, KeyError, subprocess.CalledProcessError, zipfile.BadZipFile) as e:
+        print(f'Runtime APK upgrade failed: {e}', file=sys.stderr)
+        return 1
+
+
 def main(argv):
     if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8', errors='replace')   # game names and progress bars on a Windows console
     a = _parser().parse_args(argv)
-    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'rebuild-runtime': cmd_rebuild_runtime, 'install': cmd_install, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver}[a.cmd](a)
+    return {'doctor': cmd_doctor, 'profiles': cmd_profiles, 'inspect': cmd_inspect, 'port': cmd_port, 'rebuild-runtime': cmd_rebuild_runtime, 'upgrade-apk': cmd_upgrade_apk, 'install': cmd_install, 'devices': cmd_devices, 'tools': cmd_tools, 'config': cmd_config, 'saves': cmd_saves, 'driver': cmd_driver, 'host': cmd_driver}[a.cmd](a)

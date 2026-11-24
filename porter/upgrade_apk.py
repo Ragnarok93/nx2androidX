@@ -1,0 +1,115 @@
+"""Upgrade the existing standalone APK without a guest recompilation or asset extraction."""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+from porter import config, host, paths, resources, runtime_update, toolchain
+from porter.upstream import BuildError
+from porter.paths import DM
+
+
+def metadata(apk, data):
+    def read_pack(names, read):
+        manifest = json.loads(read('nx2a-data.json'))
+        record = read('mods/build_src.sha256').decode()
+        modules = []
+        for name in sorted(names):
+            if name.startswith('mods/') and name.endswith('.cuts.tsv'):
+                obs = name[:-len('.cuts.tsv')] + '.obs.tsv'
+                modules.append(host.module_tables(read(name).decode(), read(obs).decode() if obs in names else ''))
+        return manifest, record, modules
+    with zipfile.ZipFile(apk) as z:
+        if 'assets/nx2a-data.zip' in z.namelist():
+            with z.open('assets/nx2a-data.zip') as stream, zipfile.ZipFile(stream) as pack:
+                return read_pack(set(pack.namelist()), pack.read)
+        if data is None:
+            raise BuildError('For a companion-data APK, pass --data pointing to its existing data folder.')
+        data = Path(data)
+        descriptor = json.loads(z.read('assets/nx2a-companion.json'))
+        if hashlib.sha256((data/'nx2a-data.json').read_bytes()).hexdigest() != descriptor['manifest_sha256']:
+            raise BuildError('Companion data does not match this APK.')
+        names = {p.relative_to(data).as_posix() for p in (data/'mods').glob('*.tsv')}
+        return read_pack(names, lambda name: (data/name).read_bytes())
+
+
+def activity_dex(apk, scratch):
+    from porter.pipeline import launcher_dex
+    with zipfile.ZipFile(apk) as z:
+        manifest = z.read('AndroidManifest.xml')
+    launcher = 'com.nx2a.launcher.LauncherActivity'.encode('utf-16le') in manifest
+    javac = shutil.which('javac')
+    roots = toolchain._sdk_roots()
+    platforms = [p for root in roots for p in (root/'platforms').glob('android-*/android.jar')]
+    d8s = [p for root in roots for p in (root/'build-tools').glob('*/d8' + ('.bat' if os.name == 'nt' else ''))]
+    def version(p): return tuple(int(x) for x in re.findall(r'\d+', p.parent.name))
+    if javac and platforms and d8s:
+        platform, d8 = max(platforms, key=version), max(d8s, key=version)
+        classes, dex = scratch/'classes', scratch/'dex'
+        classes.mkdir(); dex.mkdir()
+        sources = sorted((DM/'android/java/org/nx2a').glob('*.java'))
+        subprocess.run([javac, '-source', '8', '-target', '8', '-classpath', str(platform), '-d', str(classes), *map(str,sources)], check=True)
+        inputs = sorted(classes.rglob('*.class'))
+        if launcher:
+            extra = launcher_dex()
+            if not extra: raise BuildError('The original APK requires the optional launcher DEX; prepare the matching launcher first.')
+            inputs.append(extra)
+        subprocess.run([str(d8), '--min-api', '29', '--lib', str(platform), '--output', str(dex), *map(str,inputs)], check=True)
+        out = dex/'classes.dex'
+    else:
+        out = DM.parent.parent/'tools/game-activity.dex'
+        if not out.is_file(): raise BuildError('Updated bundled game-activity.dex or Android SDK/JDK required.')
+    if launcher and b'Lcom/nx2a/launcher/LauncherActivity;' not in out.read_bytes():
+        raise BuildError('The updated DEX lacks the APK launcher; refusing an incompatible update.')
+    return out
+
+
+def upgrade(apk, output, *, data=None, key=None, jobs=None, no_lsfg=False, debug=False):
+    apk, output = Path(apk).resolve(), Path(output).resolve()
+    if apk == output: raise BuildError('Choose a separate output APK.')
+    key = Path(key or paths.signing_key())
+    if not key.is_file(): raise BuildError('Original signing key is unavailable; do not generate a new one.')
+    manifest, record, modules = metadata(apk, data)
+    title = manifest.get('title_id', '').upper()
+    fingerprint = manifest.get('profile_h')
+    if not host.TITLE_ID.fullmatch(title) or not fingerprint:
+        raise BuildError('Original game profile identity is missing.')
+    profile, _, _ = runtime_update.find_profile(title, fingerprint)
+    if profile is None: raise BuildError('The original profile is unavailable; refusing a potentially incompatible runtime.')
+    if not record.strip(): raise BuildError('Original guest rewriter fingerprint is missing.')
+    stale = host.stale_sources(record, title, modules=modules)
+    if stale: raise BuildError('Guest rewrite inputs changed: ' + ', '.join(stale))
+    ndk, _ = toolchain.find_ndk(config.load())
+    if ndk is None: raise BuildError('Android NDK unavailable; prepare the compiler environment first.')
+    root = Path(os.environ.get('NX2A_WORK') or tempfile.gettempdir())/'runtime'
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='apk-upgrade-', dir=root) as tmp:
+        scratch = Path(tmp)
+        target = scratch/'profile'/title
+        target.mkdir(parents=True)
+        for name in ('game.tsv', 'android.tsv'):
+            shutil.copyfile(profile/name, target/name)
+        env = dict(os.environ, DM_GAME=title, DM_GAMES_DIR=str(target.parent), DM_GAMES_FIRST='1')
+        tc_lib = DM.parent.parent/'toolchain/lib'
+        if tc_lib.is_dir(): env['LD_LIBRARY_PATH'] = str(tc_lib) + os.pathsep + env.get('LD_LIBRARY_PATH', '')
+        dex = activity_dex(apk, scratch)
+        built = scratch/'host'
+        args = [sys.executable, str(DM/'android/build.py'), '--game', title, '--ndk', str(ndk),
+                '--out', str(built), '--lib', '--jobs', str(resources.safe_jobs(jobs))]
+        if not debug: args.append('--release')
+        if no_lsfg: args.append('--no-lsfg')
+        subprocess.run(args, env=env, check=True)
+        header = built/'gen'/title/'game_profile.h'
+        if hashlib.sha256(header.read_bytes()).hexdigest() != fingerprint:
+            raise BuildError('Built runtime profile does not match the original APK.')
+        from porter.pipeline import ui_font_assets
+        fonts = [arg for name,path in ui_font_assets().items() if path.is_file() for arg in ('--asset', f'{name}={path}')]
+        subprocess.run([sys.executable, str(DM/'android/apk/apkdriver.py'), str(apk), str(output),
+                        str(key), '--host', str(built/'libdmhost.so'), '--dex', str(dex), *fonts], check=True)
+    return output
