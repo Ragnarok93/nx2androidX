@@ -184,8 +184,10 @@ static inline int ov_menu_item(int tab, int row) {
     return item == OVM_AUDIO && !dm_menu_audio_available() ? -1 : item;
 }
 #define OV_MENU_ROW 0.115f   // row height, of the window's height
-#define OV_MENU_W 0.95f      // panel width, of the window's height
-#define OV_MENU_PAD 0.03f
+#define OV_MENU_W 1.26f      // Material 3 dialog width relative to the window's height
+#define OV_MENU_PAD 0.045f
+#define OV_MENU_HEADER 0.080f // title above the primary tabs
+#define OV_MENU_HEIGHT (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD + OV_MENU_HEADER)
 #define OV_OPACITY_MIN 20    // the gamepad's opacity, percent (the Opacity slider, settings.txt opacity=)
 #define OV_OPACITY_MAX 80
 // what the menu shows (-1 = closed): bit 0 the gamepad is on, bit 1 rumble is on, bit 2 docked, bit 3 the frame rate shown, bits 4..7 the highlighted row + 1
@@ -194,15 +196,15 @@ static inline int ov_menu_item(int tab, int row) {
 int dm_menu_state(void);
 enum { OVX_IDLE, OVX_BUSY, OVX_DONE, OVX_NOSAVE, OVX_FAILED };   // Export save: the button; copying; the export's name; the game has not saved yet; failed
 int dm_save_note(char *out, int cap);   // front_player.c: the outcome (OVX_*) and the last export's name, or why it failed
-static inline float ov_menu_scale(void) { float s = dm_overlay_scale(), fit = 0.92f / (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD); return s < fit ? s : fit; }
+static inline float ov_menu_scale(void) { float s = dm_overlay_scale(), fit = 0.92f / OV_MENU_HEIGHT; return s < fit ? s : fit; }
 static inline void ov_menu_rect(float W, float H, float r[4]) {   // x, y, width, height in window pixels
-    float s = ov_menu_scale(), pw = OV_MENU_W * H * s, ph = (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD) * H * s;
-    if (pw > W * 0.96f) pw = W * 0.96f;
+    float s = ov_menu_scale(), pw = OV_MENU_W * H * s, ph = OV_MENU_HEIGHT * H * s;
+    if (pw > W * 0.92f) pw = W * 0.92f;
     r[0] = (W - pw) / 2; r[1] = (H - ph) / 2; r[2] = pw; r[3] = ph;
 }
 static inline void ov_menu_rowrect(const float p[4], int row, float r[4]) {   // row's rectangle in the panel p
-    float u = p[3] / (OVM_ROWS * OV_MENU_ROW + 2 * OV_MENU_PAD);
-    r[0] = p[0] + OV_MENU_PAD * u; r[1] = p[1] + (OV_MENU_PAD + row * OV_MENU_ROW) * u; r[2] = p[2] - 2 * OV_MENU_PAD * u; r[3] = OV_MENU_ROW * u;
+    float u = p[3] / OV_MENU_HEIGHT;
+    r[0] = p[0] + OV_MENU_PAD * u; r[1] = p[1] + (OV_MENU_PAD + OV_MENU_HEADER + row * OV_MENU_ROW) * u; r[2] = p[2] - 2 * OV_MENU_PAD * u; r[3] = OV_MENU_ROW * u;
 }
 static inline int ov_menu_row_at(float x, float y, float W, float H) {   // the row under (x, y): 0..OVM_ROWS-1, -1 the panel elsewhere, -2 outside it
     float r[4]; ov_menu_rect(W, H, r);

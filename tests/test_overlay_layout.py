@@ -90,9 +90,10 @@ int main(void) {
 
     // Graphics has six controls; the other tabs retain their original five,
     // with a blank sixth row to keep the panel's height stable.
-    assert(ov_menu_item(0, OVM_ROWS - 3) == OVM_PAD && ov_menu_item(1, OVM_ROWS - 3) == -1);
+    assert(ov_menu_item(0, 5) == OVM_PAD && ov_menu_item(1, 5) == -1);
     assert(ov_menu_item(0, OVM_ROWS - 2) == -1);
-    assert(ov_menu_item(2, OVM_ROWS - 2) == OVM_DRIVER);
+    assert(ov_menu_item(2, 6) == OVM_DRIVER);
+    assert(ov_menu_item(2, 7) == OVM_VIVID);
     assert(ov_menu_item(3, 1) == OVM_RATE);
     assert(ov_menu_item(3, 2) == OVM_DRS);
     assert(ov_menu_item(3, 3) == OVM_DRS_MIN);
@@ -100,11 +101,16 @@ int main(void) {
     assert(ov_menu_item(3, 5) == OVM_DRS_HOOK);
     assert(ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     audio_available = 1;
-    assert(ov_menu_item(1, OVM_ROWS - 3) == OVM_AUDIO);
+    assert(ov_menu_item(1, 5) == OVM_AUDIO);
     const float screens[][2] = {{915, 412}, {1216, 760}, {2400, 1080}, {1080, 2400}};
     for (unsigned s = 0; s < sizeof screens / sizeof screens[0]; s++) {
         float W = screens[s][0], H = screens[s][1], step = H / OVE_GRID_ROWS, p[4];
         ov_menu_rect(W, H, p);
+        assert(p[0] >= 0 && p[1] >= 0 && p[0]+p[2] <= W && p[1]+p[3] <= H);
+        assert(ov_menu_row_at(p[0]+p[2]/2,p[1]+p[3]*0.02f,W,H) == -1); // title is not a tab
+        float tabs[4]; ov_menu_rowrect(p,0,tabs);
+        for (int tab=0;tab<OVM_TABS;tab++)
+            assert(ov_menu_tab_at(tabs[0]+(tab+0.5f)*tabs[2]/OVM_TABS,p)==tab);
         for (int row = 0; row < OVM_ROWS; row++) {
             float r[4]; ov_menu_rowrect(p, row, r);
             assert(ov_menu_row_at(r[0] + r[2] / 2, r[1] + r[3] / 2, W, H) == row);

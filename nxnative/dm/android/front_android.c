@@ -752,7 +752,7 @@ static void menu_drs_min(int pct) {
 }
 static void menu_fsr_sharp(int v) {
     v = v < 0 ? 0 : v > 100 ? 100 : v;
-    if (atomic_exchange(&g_set_fsr_sharp, v) != v) { dm_haptics_android_tap(); dm_overlay_redraw(); }
+    if (atomic_exchange(&g_set_fsr_sharp, v) != v) { atomic_fetch_add(&g_menu_cfg_ver, 1); dm_haptics_android_tap(); dm_overlay_redraw(); }
 }
 static void menu_opacity(int v) {   // the slider: a new value is drawn at once and saved when the finger lifts (menu_touch) or with each controller step
     v = v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v;
@@ -811,6 +811,7 @@ static void jni_fg_dll_picker(void) {
 static void fg_mult_step(int direction) {
     int n = atomic_load(&g_set_fg_mult);
     atomic_store(&g_set_fg_mult, 2 + ((n - 2 + (direction < 0 ? 2 : 1)) % 3));
+    atomic_fetch_add(&g_menu_cfg_ver, 1);
     fg_apply();
 }
 static void fg_flow_step(int direction) {
@@ -818,6 +819,7 @@ static void fg_flow_step(int direction) {
     n = direction < 0 ? (n == 0 ? 100 : n <= 25 ? 0 : n - 5)
                       : (n == 0 ? 25 : n >= 100 ? 0 : n + 5);
     atomic_store(&g_set_fg_flow, n);
+    atomic_fetch_add(&g_menu_cfg_ver, 1);
     fg_apply();
 }
 int vk_pass_dump_user_begin(int delay);

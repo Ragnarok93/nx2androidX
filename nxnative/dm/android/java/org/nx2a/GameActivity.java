@@ -152,6 +152,8 @@ public class GameActivity extends NativeActivity {
     @Override protected void onCreate(Bundle state) {
         // NativeActivity loads libdmhost here. Its native data setup defers game startup for embedded APKs;
         // extraction then runs off the UI thread so multi-gigabyte packs cannot ANR the launcher.
+        // Install the smooth system typeface before the native host can draw a menu.
+        MenuTypography.install();
         super.onCreate(state);
         if (state != null) diagnosticsRoot = state.getString("nx2a.diagnosticsRoot");
         enterImmersiveMode();

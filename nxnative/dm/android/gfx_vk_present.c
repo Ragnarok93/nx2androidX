@@ -331,6 +331,61 @@ static void cv_text_plot(void *u, int x, int y) { const cv_ink *k = u; cv_blend(
 static void cv_text(const ov_canvas *cv, float x, float cy, const char *s, int scale, const uint8_t c[4]) {   // x: the left edge
     cv_ink k = {cv, c}; pf_draw(dm_overlay_font(), s, (int)(x + 0.5f), (int)(cy + PF_CAP * scale / 2.0f + 0.5f), scale, cv_text_plot, &k);
 }
+// Material 3 dark roles. The existing gamepad and FPS sprites keep their original colors.
+static const uint8_t M3_SURFACE[4] = {29, 27, 32, 255},
+    M3_CONTAINER[4] = {39, 37, 43, 255}, M3_HIGH[4] = {49, 46, 55, 255},
+    M3_PRIMARY[4] = {208, 188, 255, 255}, M3_ON_PRIMARY[4] = {56, 30, 114, 255},
+    M3_SECONDARY[4] = {74, 68, 88, 255}, M3_ON_SECONDARY[4] = {232, 222, 248, 255},
+    M3_ON_SURFACE[4] = {230, 225, 229, 255}, M3_VARIANT[4] = {202, 196, 208, 255},
+    M3_OUTLINE[4] = {147, 143, 153, 255}, M3_DIVIDER[4] = {73, 69, 79, 255},
+    M3_ERROR[4] = {242, 184, 181, 255};
+enum { M3_CELL = 48, M3_GLYPHS = 95, M3_BASE = 35, M3_LEFT = 3 };
+static uint8_t m3_alpha[M3_GLYPHS * M3_CELL * M3_CELL];
+static jint m3_adv[M3_GLYPHS];
+static _Atomic int m3_cap;
+JNIEXPORT void JNICALL Java_org_nx2a_MenuTypography_installAtlas(JNIEnv *env, jclass cls, jbyteArray alpha, jintArray adv, jint cap) {
+    (void)cls;
+    if (atomic_load(&m3_cap) || !alpha || !adv || cap < 12 || cap > 32 ||
+        (*env)->GetArrayLength(env, alpha) != (jsize)sizeof m3_alpha ||
+        (*env)->GetArrayLength(env, adv) != M3_GLYPHS) return;
+    (*env)->GetByteArrayRegion(env, alpha, 0, sizeof m3_alpha, (jbyte *)m3_alpha);
+    (*env)->GetIntArrayRegion(env, adv, 0, M3_GLYPHS, m3_adv);
+    if (!(*env)->ExceptionCheck(env)) atomic_store_explicit(&m3_cap, cap, memory_order_release);
+}
+static int m3_ascii(const char *s) {
+    if (!s || !atomic_load_explicit(&m3_cap, memory_order_acquire)) return 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) if (*p < 32 || *p > 126) return 0;
+    return 1;
+}
+static float m3_text_w(const char *s, int scale) {
+    if (!s) return 0;
+    if (!m3_ascii(s)) return cv_text_w(s, scale);
+    float advance = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) advance += m3_adv[*p - 32] / 64.0f;
+    return advance * PF_CAP * scale / atomic_load(&m3_cap);
+}
+static void m3_text(const ov_canvas *cv, float x, float cy, const char *s, int scale, const uint8_t color[4]) {
+    if (!s) return;
+    if (!m3_ascii(s)) { cv_text(cv, x, cy, s, scale, color); return; }
+    float factor = (float)(PF_CAP * scale) / atomic_load(&m3_cap);
+    float top = cy + PF_CAP * scale / 2.0f - M3_BASE * factor;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        const uint8_t *glyph = m3_alpha + (*p - 32) * M3_CELL * M3_CELL;
+        float left = x - M3_LEFT * factor;
+        for (int py = (int)floorf(top); py < (int)ceilf(top + M3_CELL * factor); py++)
+            for (int px = (int)floorf(left); px < (int)ceilf(left + M3_CELL * factor); px++) {
+                float sx = (px + 0.5f - left) / factor - 0.5f, sy = (py + 0.5f - top) / factor - 0.5f;
+                int ix = (int)floorf(sx), iy = (int)floorf(sy);
+                if (ix < 0 || iy < 0 || ix >= M3_CELL - 1 || iy >= M3_CELL - 1) continue;
+                float fx = sx - ix, fy = sy - iy;
+                const uint8_t *a = glyph + iy * M3_CELL + ix;
+                float cov = ((a[0] * (1-fx) + a[1] * fx) * (1-fy) +
+                    (a[M3_CELL] * (1-fx) + a[M3_CELL+1] * fx) * fy) / 255.0f;
+                cv_blend(cv, px, py, color, cov);
+            }
+        x += m3_adv[*p - 32] / 64.0f * factor;
+    }
+}
 static const uint8_t C_WHITE[4] = {255, 255, 255, 255}, C_ACCENT[4] = {255, 60, 142, 255}, C_HOT[4] = {255, 64, 48, 255};
 static void ov_menu_icon(const ov_canvas *cv, const ov_ctl *c, const float b[4]) {   // the menu button: a dark pill with a ring and three bars
     static const uint8_t fill[4] = {20, 20, 26, 170}, ring[4] = {255, 255, 255, 210};
@@ -347,37 +402,46 @@ static void ov_menu_icon(const ov_canvas *cv, const ov_ctl *c, const float b[4])
 static void ov_text_panel(const ov_canvas *cv) {
     char title[128], text[256]; int sel, shift; if (!dm_text_entry(title, sizeof title, text, sizeof text, &sel, &shift)) return;
     float W = (float)cv->w, H = (float)cv->h, p[4] = {0, 0, W, H}, pad = W * 0.03f;
-    static const uint8_t bg[4] = {14, 14, 20, 236}, field[4] = {255, 255, 255, 30}, key[4] = {255, 255, 255, 26}, dim[4] = {200, 200, 210, 255};
+    const uint8_t *bg = M3_CONTAINER, *field = M3_HIGH, *key = M3_SECONDARY, *dim = M3_VARIANT;
     cv_rrect(cv, 0, 0, W, H, H * 0.03f, bg);
     int ts = (int)fmaxf(1, roundf(H * 0.045f / PF_CAP)), xs = (int)fmaxf(1, roundf(H * 0.06f / PF_CAP)), ks = (int)fmaxf(1, roundf(H * 0.05f / PF_CAP)), hs = (int)fmaxf(1, roundf(H * 0.036f / PF_CAP));
     float room = W - 4 * pad;
-    while (title[0] && cv_text_w(title, ts) > room) pf_chop(title, strlen(title));   // a long title is cut
-    cv_text(cv, (W - cv_text_w(title, ts)) / 2, H * 0.07f, title, ts, C_WHITE);
+    while (title[0] && m3_text_w(title, ts) > room) pf_chop(title, strlen(title));   // a long title is cut
+    m3_text(cv, (W - m3_text_w(title, ts)) / 2, H * 0.07f, title, ts, M3_ON_SURFACE);
     cv_rrect(cv, pad, H * 0.14f, W - pad, H * 0.27f, H * 0.02f, field);
     char shown[260]; snprintf(shown, sizeof shown, "%s_", text);   // the caret
-    const char *s = shown; while (*s && cv_text_w(s, xs) > room) pf_next(&s);   // the end of a long text
-    cv_text(cv, 2 * pad, H * 0.205f, s, xs, C_WHITE);
+    const char *s = shown; while (*s && m3_text_w(s, xs) > room) pf_next(&s);   // the end of a long text
+    m3_text(cv, 2 * pad, H * 0.205f, s, xs, M3_ON_SURFACE);
     static const char *wide[4] = {"Shift", "Space", "Del", "OK"};
     for (int i = 0; i < OVK_N; i++) {
         float r[4]; ov_kb_key(i, p, r);
         int on = i == sel || (i == OVK_SHIFT && shift);
-        cv_rrect(cv, r[0], r[1], r[0] + r[2], r[1] + r[3], r[3] * 0.18f, i == sel ? C_ACCENT : on ? field : key);
+        cv_rrect(cv, r[0], r[1], r[0] + r[2], r[1] + r[3], r[3] * 0.18f, i == sel ? M3_PRIMARY : on ? field : key);
         char one[2] = {(char)ov_kb_char(i, shift), 0}; const char *l = i < 40 ? one : wide[i - 40];
-        int ls = ks; while (ls > 1 && cv_text_w(l, ls) > r[2] * 0.85f) ls--;   // a wide key's word fits inside it
-        cv_text(cv, r[0] + (r[2] - cv_text_w(l, ls)) / 2, r[1] + r[3] / 2, l, ls, i == OVK_OK && i != sel ? C_ACCENT : C_WHITE);
+        int ls = ks; while (ls > 1 && m3_text_w(l, ls) > r[2] * 0.85f) ls--;   // a wide key's word fits inside it
+        m3_text(cv, r[0] + (r[2] - m3_text_w(l, ls)) / 2, r[1] + r[3] / 2, l, ls, i == sel ? M3_ON_PRIMARY : i == OVK_OK ? M3_PRIMARY : M3_ON_SURFACE);
     }
     const char *k = "A key  B delete  Y shift  + OK  - cancel";   // one line, centred, smaller until it fits
-    while (hs > 1 && cv_text_w(k, hs) > W - 2 * pad) hs--;
-    cv_text(cv, (W - cv_text_w(k, hs)) / 2, H * 0.95f, k, hs, dim);
+    while (hs > 1 && m3_text_w(k, hs) > W - 2 * pad) hs--;
+    m3_text(cv, (W - m3_text_w(k, hs)) / 2, H * 0.95f, k, hs, dim);
 }
-static const uint8_t C_BG[4] = {14, 14, 20, 236}, C_LINE[4] = {255, 255, 255, 40}, C_HI[4] = {255, 255, 255, 34}, C_DIM[4] = {200, 200, 210, 255}, C_OFF[4] = {80, 80, 92, 255},
-                     C_KNOB_OFF[4] = {215, 215, 222, 255};
+#define C_BG M3_CONTAINER
+#define C_LINE M3_DIVIDER
+#define C_HI M3_SECONDARY
+#define C_DIM M3_VARIANT
+#define C_OFF M3_HIGH
+#define C_KNOB_OFF M3_OUTLINE
 static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int fill, int held) {   // a rounded button with its word, as large as fits
-    static const uint8_t face[4] = {255, 255, 255, 30}, rim[4] = {255, 255, 255, 90};
-    float rad = b[3] * 0.28f; cv_rrect(cv, b[0], b[1], b[0] + b[2], b[1] + b[3], rad, held ? C_WHITE : rim);
-    cv_rrect(cv, b[0] + 2, b[1] + 2, b[0] + b[2] - 2, b[1] + b[3] - 2, rad - 2, held ? C_ACCENT : fill ? C_ACCENT : face);
-    int s = (int)fmaxf(1, roundf(b[3] * 0.40f / PF_CAP)); while (s > 1 && cv_text_w(l, s) > b[2] * 0.82f) s--;
-    cv_text(cv, b[0] + (b[2] - cv_text_w(l, s)) / 2, b[1] + b[3] / 2, l, s, C_WHITE);
+    float rad = b[3] * 0.5f, edge = fmaxf(1, b[3] * 0.055f);
+    if (b[2] <= 2*edge || b[3] <= 2*edge) return;
+    if (fill || held) cv_rrect(cv, b[0], b[1], b[0]+b[2], b[1]+b[3], rad, held ? M3_ON_SECONDARY : M3_PRIMARY);
+    else {
+        cv_rrect(cv, b[0], b[1], b[0]+b[2], b[1]+b[3], rad, M3_OUTLINE);
+        cv_rrect(cv, b[0]+edge, b[1]+edge, b[0]+b[2]-edge, b[1]+b[3]-edge, rad-edge, M3_CONTAINER);
+    }
+    int s = (int)fmaxf(1, roundf(b[3] * 0.40f / PF_CAP));
+    while (s > 1 && m3_text_w(l, s) > b[2] * 0.82f) s--;
+    m3_text(cv, b[0]+(b[2]-m3_text_w(l,s))/2, b[1]+b[3]/2, l, s, fill || held ? M3_ON_PRIMARY : M3_PRIMARY);
 }
 // The pause menu (overlay_layout.h: the rows, the tabs, the slider's track), in the raster's panel rectangle. Its letters are as large as a row allows (0.30 of
 // its height, about 2.7 mm on a 6.7" phone and 3.6 mm on the 8.8" tablet) and smaller only when the widest row would not fit beside its control
@@ -386,7 +450,7 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_RUMBLE]="Rumble", [OVM_FPS]="Show FPS", [OVM_MODE]="Mode",
     [OVM_EXPORT]="Export save", [OVM_IMPORT]="Import save", [OVM_PAD]="Face buttons",
     [OVM_AUDIO]="Audio output", [OVM_FG]="Lossless FG", [OVM_FG_MULT]="FG multiplier",
-    [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver > ",
+    [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver",
     [OVM_VIVID]="Vivid", [OVM_FSR]="FSR 1", [OVM_FSR_SHARP]="FSR sharpness", [OVM_RATE]="Frame rate",
     [OVM_DRS]="Dynamic resolution", [OVM_DRS_MIN]="Minimum scale",
     [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling",
@@ -429,54 +493,73 @@ __attribute__((weak)) void dm_menu_radv_note(int index, char *out, int cap) {
 static int ov_flag_item(int item) { return item >= OVM_FLAG_DLC && item <= OVM_FLAG_HIZ; }
 static void ov_menu_panel(const ov_canvas *cv, int st) {
     float p[4] = {0, 0, (float)cv->w, (float)cv->h}, r[4]; ov_menu_rowrect(p, 0, r);
-    float rh = r[3], rw = r[2], gap = rh * 0.35f, sh = rh * 0.40f, sw = sh * 1.85f;
+    float rh = r[3], rw = r[2], gap = rh * 0.28f, sh = rh * 0.52f, sw = sh * 1.65f;
     int tab = ((unsigned)st >> 29) & 3, sel = (st >> 4 & 15) - 1, op = st >> 9 & 127;
     int page = (st & OVM_FLAGS_STATE) ? OVM_FLAGS_PAGE : (st & OVM_DIAG_STATE) ? OVM_DIAG_TAB : tab;
     int is = (int)fmaxf(1, roundf(rh * 0.30f / PF_CAP));
     for (; is > 1; is--) {   // the widest row: its label, a gap and its control
         float need = 0;
         for (int i = 0; i < OVM_RESUME; i++) {
-            float lw = cv_text_w(OVM_LABELS[i], is),
-                cw = i == OVM_MODE ? 2 * (cv_text_w(OVM_MODES[0], is) + sh) :
-                     i == OVM_PAD ? 2 * (cv_text_w(OVM_PADS[0], is) + sh) :
-                     ov_flag_item(i) ? cv_text_w("Default on restart", is) :
-                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_RATE || i == OVM_DRS_NOW || i == OVM_DRS_HOOK || i == OVM_DIAG_STATUS) ? cv_text_w("System (fallback)", is) :
-                     OVM_BUTTONS[i] ? cv_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + cv_text_w("OFF", is);
-            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP || i == OVM_DRS_MIN) ? fmaxf(lw / 0.38f, cv_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
+            if (!OVM_LABELS[i]) continue;
+            float lw = m3_text_w(OVM_LABELS[i], is),
+                cw = i == OVM_MODE ? 2 * (m3_text_w(OVM_MODES[0], is) + sh) :
+                     i == OVM_PAD ? 2 * (m3_text_w(OVM_PADS[0], is) + sh) :
+                     ov_flag_item(i) ? m3_text_w("Default on restart", is) :
+                     (i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_RATE || i == OVM_DRS_NOW || i == OVM_DRS_HOOK || i == OVM_DIAG_STATUS) ? m3_text_w("System (fallback)", is) :
+                     OVM_BUTTONS[i] ? m3_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + m3_text_w("OFF", is);
+            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP || i == OVM_DRS_MIN) ? fmaxf(lw / 0.38f, m3_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
         }
         int names_fit = 1;
         for (int tabname = 0; tabname < OVM_TABS; tabname++)
-            if (cv_text_w(OVM_TAB_NAMES[tabname], is) >= rw / OVM_TABS - sh) names_fit = 0;
+            if (m3_text_w(OVM_TAB_NAMES[tabname], is) >= rw / OVM_TABS - sh) names_fit = 0;
         if (need <= rw && names_fit) break;
     }
-    cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.18f, C_BG);
+    cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.48f, C_BG);
+    const char *title = page == OVM_FLAGS_PAGE ? "RADV test flags" : page == OVM_DIAG_TAB ? "Diagnostics" : "Game settings";
+    const char *subtitle = "PAUSED";
+    float title_y = r[1] * 0.53f;
+    int title_size = (int)fmaxf(1, roundf(rh * 0.43f / PF_CAP));
+    while (title_size > 1 && m3_text_w(title,title_size) + m3_text_w(subtitle,is) > rw * 0.9f) title_size--;
+    m3_text(cv, r[0]+rh*0.18f, title_y, title, title_size, M3_ON_SURFACE);
+    m3_text(cv, r[0]+rw-rh*0.18f-m3_text_w(subtitle,is), title_y, subtitle, is, M3_PRIMARY);
     for (int row = 0; row < OVM_ROWS; row++) {
         int it = ov_menu_item(page, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
         if (it < 0) continue;
         if (row == sel) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
-        if (it == OVM_TAB) {   // the tabs: a segmented bar, the open one filled
-            float th = rh * 0.62f, tw = rw / OVM_TABS;
-            cv_rrect(cv, r[0], cy - th / 2, r[0] + rw, cy + th / 2, th / 2, C_OFF);
-            cv_rrect(cv, r[0] + tab * tw, cy - th / 2, r[0] + (tab + 1) * tw, cy + th / 2, th / 2, C_ACCENT);
-            for (int k = 0; k < OVM_TABS; k++) cv_text(cv, r[0] + k * tw + (tw - cv_text_w(OVM_TAB_NAMES[k], is)) / 2, cy, OVM_TAB_NAMES[k], is, k == tab ? C_WHITE : C_DIM);
-            cv_rrect(cv, r[0], r[1] + rh - 1, r[0] + rw, r[1] + rh, 0.5f, C_LINE);
+        if (it == OVM_TAB) {
+            // Primary tabs, a tonal active container and a separate indicator.
+            float th = rh * 0.73f, tw = rw / OVM_TABS, inset = rh * 0.07f;
+            cv_rrect(cv, r[0], cy-th/2, r[0]+rw, cy+th/2, th/2, M3_SURFACE);
+            cv_rrect(cv, r[0]+tab*tw+inset, cy-th/2+inset, r[0]+(tab+1)*tw-inset, cy+th/2-inset, th/2-inset, M3_SECONDARY);
+            for (int k=0;k<OVM_TABS;k++) {
+                const char *label=OVM_TAB_NAMES[k];
+                m3_text(cv,r[0]+k*tw+(tw-m3_text_w(label,is))/2,cy-rh*0.02f,label,is,k==tab?M3_ON_SECONDARY:M3_VARIANT);
+            }
+            float cx=r[0]+(tab+0.5f)*tw, line=fmaxf(1,rh*0.045f);
+            cv_rrect(cv,cx-tw*0.17f,cy+th*0.36f,cx+tw*0.17f,cy+th*0.36f+line,line/2,M3_PRIMARY);
             continue;
         }
-        if (it == OVM_RESUME) { cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); cv_text(cv, r[0] + (rw - cv_text_w("Resume", is)) / 2, cy, "Resume", is, C_ACCENT); continue; }
-        cv_text(cv, r[0] + rh * 0.15f, cy, OVM_LABELS[it], is, row == sel ? C_WHITE : C_DIM);
+        if (it == OVM_RESUME) {
+            float b[4] = {r[0]+rh*0.12f, r[1]+rh*0.12f, rw-rh*0.24f, rh*0.76f};
+            cv_button(cv,b,"Resume game",1,row==sel);
+            continue;
+        }
+        float x0 = r[0]+rh*0.18f;
+        if (row != sel) cv_rrect(cv,r[0],r[1]+rh*0.055f,r[0]+rw,r[1]+rh*0.945f,rh*0.18f,M3_HIGH);
+        m3_text(cv,x0,cy,OVM_LABELS[it],is,M3_ON_SURFACE);
         if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
             int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : dm_fsr_sharpness();
-            float t[3]; ov_menu_track(p, row, t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : it == OVM_DRS_MIN ? (float)(value - 50) / 45.0f : (float)value / 100.0f, th = fmaxf(2, rh * 0.08f), kr = rh * 0.20f;
+            float t[3]; ov_menu_track(p, row, t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : it == OVM_DRS_MIN ? (float)(value - 50) / 45.0f : (float)value / 100.0f, th = fmaxf(2, rh * 0.14f), kr = rh * 0.18f;
             f = f < 0 ? 0 : f > 1 ? 1 : f;
-            cv_rrect(cv, t[0], t[1] - th / 2, t[0] + t[2], t[1] + th / 2, th / 2, C_OFF);
-            cv_rrect(cv, t[0], t[1] - th / 2, t[0] + f * t[2], t[1] + th / 2, th / 2, C_ACCENT);
-            cv_disc(cv, t[0] + f * t[2], t[1], kr, C_WHITE);
-            char v[8]; snprintf(v, sizeof v, "%d%%", value); cv_text(cv, x1 - cv_text_w(v, is), cy, v, is, C_WHITE);
+            cv_rrect(cv, t[0], t[1] - th / 2, t[0] + t[2], t[1] + th / 2, th / 2, M3_SECONDARY);
+            if (f * t[2] >= th) cv_rrect(cv, t[0], t[1] - th / 2, t[0] + f * t[2], t[1] + th / 2, th / 2, M3_PRIMARY);
+            cv_disc(cv, t[0] + f * t[2], t[1], kr, M3_PRIMARY);
+            char v[8]; snprintf(v, sizeof v, "%d%%", value); m3_text(cv, x1 - m3_text_w(v, is), cy, v, is, M3_ON_SURFACE);
         } else if (it == OVM_EXPORT && (st >> 20 & 15) != OVX_IDLE) {   // the export's outcome in place of its button: its name, or why there is none
             char nm[64], v[80]; int x = dm_save_note(nm, sizeof nm), vs = is;
             snprintf(v, sizeof v, "%s", x == OVX_BUSY ? "Exporting..." : x == OVX_DONE ? nm : x == OVX_NOSAVE ? "No save yet" : "Failed");
-            while (vs > 1 && cv_text_w(v, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
-            cv_text(cv, x1 - cv_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? C_ACCENT : C_WHITE);
+            while (vs > 1 && m3_text_w(v, vs) > rw - m3_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
+            m3_text(cv, x1 - m3_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? M3_ERROR : M3_ON_SURFACE);
         } else if (it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
             char value[128];
             if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
@@ -496,24 +579,30 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
-            while (vs > 1 && cv_text_w(value, vs) > rw - cv_text_w(OVM_LABELS[it], is) - gap - rh * 0.3f) vs--;
-            cv_text(cv, x1 - cv_text_w(value, vs), cy, value, vs, C_WHITE);
+            const int action = it == OVM_DRIVER || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
+            float trailing = action ? rh*0.30f : 0, room = rw - m3_text_w(OVM_LABELS[it],is)-gap-rh*0.36f-trailing;
+            while (vs > 1 && m3_text_w(value, vs) > room) vs--;
+            while (value[0] && m3_text_w(value,vs) > room) pf_chop(value,strlen(value));
+            m3_text(cv,x1-trailing-m3_text_w(value,vs),cy,value,vs,action?M3_PRIMARY:M3_VARIANT);
+            if (action) m3_text(cv,x1-m3_text_w(">",is),cy,">",is,M3_PRIMARY);
         } else if (OVM_BUTTONS[it]) {   // a button
-            float bw = cv_text_w(OVM_BUTTONS[it], is) + 2 * sh, b[4] = {x1 - bw, cy - rh * 0.30f, bw, rh * 0.60f}; cv_button(cv, b, OVM_BUTTONS[it], 0, 0);
+            float bw = m3_text_w(OVM_BUTTONS[it], is) + 2 * sh, b[4] = {x1 - bw, cy - rh * 0.30f, bw, rh * 0.60f}; cv_button(cv, b, OVM_BUTTONS[it], 0, 0);
         } else if (it == OVM_MODE || it == OVM_PAD) {   // two segments, the current one filled: handheld (performance) | docked (resolution); by position | by label
             const char *const *seg = it == OVM_MODE ? OVM_MODES : OVM_PADS; int cur = it == OVM_MODE ? st >> 2 & 1 : st >> 28 & 1;
-            float hh = rh * 0.46f, segw = fmaxf(cv_text_w(seg[0], is), cv_text_w(seg[1], is)) + sh, x0 = x1 - 2 * segw;
+            float hh = rh * 0.60f, segw = fmaxf(m3_text_w(seg[0], is), m3_text_w(seg[1], is)) + sh, x0 = x1 - 2 * segw;
             cv_rrect(cv, x0, cy - hh / 2, x1, cy + hh / 2, hh / 2, C_OFF);
-            cv_rrect(cv, x0 + cur * segw, cy - hh / 2, x0 + (cur + 1) * segw, cy + hh / 2, hh / 2, C_ACCENT);
-            for (int k = 0; k < 2; k++) cv_text(cv, x0 + k * segw + (segw - cv_text_w(seg[k], is)) / 2, cy, seg[k], is, k == cur ? C_WHITE : C_DIM);
+            cv_rrect(cv, x0 + cur * segw, cy - hh / 2, x0 + (cur + 1) * segw, cy + hh / 2, hh / 2, M3_SECONDARY);
+            for (int k = 0; k < 2; k++) m3_text(cv, x0 + k * segw + (segw - m3_text_w(seg[k], is)) / 2, cy, seg[k], is, k == cur ? M3_ON_SECONDARY : C_DIM);
         } else {   // a switch
             int on = it == OVM_VIVID ? dm_vivid_enabled() : it == OVM_DRS ? dm_menu_drs_enabled() : (st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : it == OVM_FG ? 19 : it == OVM_FSR ? 8 : 3) & 1);
             float sx0 = x1 - sw;
-            cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
-            cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
+            float edge=fmaxf(1,sh*0.07f);
+            cv_rrect(cv,sx0,cy-sh/2,x1,cy+sh/2,sh/2,on?M3_PRIMARY:M3_OUTLINE);
+            if (!on) cv_rrect(cv,sx0+edge,cy-sh/2+edge,x1-edge,cy+sh/2-edge,sh/2-edge,M3_HIGH);
+            cv_disc(cv,on?x1-sh/2:sx0+sh/2,cy,sh*(on?0.36f:0.24f),on?M3_ON_PRIMARY:M3_OUTLINE);
             const char *word = it == OVM_FG && !dm_menu_fg_has_dll() ? "Need DLL" :
                                it == OVM_DRS && !dm_menu_drs_supported() ? "Unavailable" : on ? "ON" : "OFF";
-            cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, on ? C_WHITE : C_DIM);
+            m3_text(cv, sx0 - gap - m3_text_w(word, is), cy, word, is, on ? M3_PRIMARY : C_DIM);
         }
     }
 }
@@ -538,16 +627,16 @@ static void ov_edit_panel(const ov_canvas *cv, int st, float W, float H) {
     if (sel >= 0 && sel < OV_N && hid) snprintf(hint, sizeof hint, "%s: hidden, Show", ov_ctl_name(&OV_CTLS[sel]));
     else if (sel >= 0 && sel < OV_N) snprintf(hint, sizeof hint, "%s: drag, pinch, - +", ov_ctl_name(&OV_CTLS[sel]));   // (short: 2x-scale letters on a phone)
     else snprintf(hint, sizeof hint, "Drag to move, pinch to resize");
-    int hs = (int)fmaxf(1, roundf(tb[3] * 0.11f / PF_CAP)); while (hs > 1 && cv_text_w(hint, hs) > tb[2] * 0.94f) hs--;
-    cv_text(cv, tb[0] + (tb[2] - cv_text_w(hint, hs)) / 2, tb[1] + tb[3] * 0.14f, hint, hs, sel >= 0 ? C_WHITE : C_DIM);
+    int hs = (int)fmaxf(1, roundf(tb[3] * 0.11f / PF_CAP)); while (hs > 1 && m3_text_w(hint, hs) > tb[2] * 0.94f) hs--;
+    m3_text(cv, tb[0] + (tb[2] - m3_text_w(hint, hs)) / 2, tb[1] + tb[3] * 0.14f, hint, hs, sel >= 0 ? M3_ON_SURFACE : C_DIM);
     for (int i = 0; i < OVE_N; i++) { float b[4]; ov_ed_button(i, tb, b); int grid = i == OVE_GRID && (st & OVE_GRID_ON);
         if (i == OVE_HIDE && !can_hide) { cv_rrect(cv, b[0], b[1], b[0] + b[2], b[1] + b[3], b[3] * 0.3f, C_OFF); int ws = (int)fmaxf(1, roundf(b[3] * 0.45f / 7));
-            while (ws > 1 && cv_text_w(words[i], ws) > b[2] * 0.9f) ws--; cv_text(cv, b[0] + (b[2] - cv_text_w(words[i], ws)) / 2, b[1] + b[3] / 2, words[i], ws, C_DIM); continue; }   // nothing to hide
+            while (ws > 1 && m3_text_w(words[i], ws) > b[2] * 0.9f) ws--; m3_text(cv, b[0] + (b[2] - m3_text_w(words[i], ws)) / 2, b[1] + b[3] / 2, words[i], ws, C_DIM); continue; }   // nothing to hide
         cv_button(cv, b, i == OVE_HIDE && hid ? "Show" : grid ? "Snap to grid: On" : words[i], i == OVE_SAVE || grid || (i == OVE_HIDE && hid), i == held); }
     if (!(st & 1)) return;
     cv_rrect(cv, pr[0], pr[1], pr[0] + pr[2], pr[1] + pr[3], pr[3] * 0.10f, C_BG);
-    const char *q = "Discard your changes?"; int qs = (int)fmaxf(1, roundf(pr[3] * 0.13f / PF_CAP)); while (qs > 1 && cv_text_w(q, qs) > pr[2] * 0.9f) qs--;
-    cv_text(cv, pr[0] + (pr[2] - cv_text_w(q, qs)) / 2, pr[1] + pr[3] * 0.27f, q, qs, C_WHITE);
+    const char *q = "Discard your changes?"; int qs = (int)fmaxf(1, roundf(pr[3] * 0.13f / PF_CAP)); while (qs > 1 && m3_text_w(q, qs) > pr[2] * 0.9f) qs--;
+    m3_text(cv, pr[0] + (pr[2] - m3_text_w(q, qs)) / 2, pr[1] + pr[3] * 0.27f, q, qs, M3_ON_SURFACE);
     for (int i = OVE_DISCARD; i <= OVE_KEEP; i++) { float b[4]; ov_ed_button(i, pr, b); cv_button(cv, b, words[i], i == OVE_DISCARD, i == held); }
 }
 // The save picker (overlay_layout.h OVS_*): the menu panel's rows, as front_player.c fills them (dm_save_rows); letters as the menu's (notes a little smaller),
@@ -558,17 +647,17 @@ static void ov_save_panel(const ov_canvas *cv, int st) {
     float rh = r[3], rw = r[2], gap = rh * 0.35f, room = rw - rh * 0.3f; int sel = (st >> 4 & 15) - 1, is0 = (int)fmaxf(1, roundf(rh * 0.30f / PF_CAP)), size[OVS_BACK + 1];
     for (int k = 0; k <= OVS_BACK; k++) size[k] = k == OVS_NOTE ? (int)fmaxf(1, roundf(is0 * 0.8f)) : is0;
     for (int row = 0; row < OVM_ROWS; row++) { const ov_srow *q = &rows[row]; int *s = &size[q->style];
-        while (*s > 1 && cv_text_w(q->left, *s) + (q->right[0] ? gap + cv_text_w(q->right, *s) : 0) > room) --*s; }
-    cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.18f, C_BG);
+        while (*s > 1 && m3_text_w(q->left, *s) + (q->right[0] ? gap + m3_text_w(q->right, *s) : 0) > room) --*s; }
+    cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.48f, C_BG);
     for (int row = 0; row < OVM_ROWS; row++) {
         const ov_srow *q = &rows[row]; ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x0 = r[0] + rh * 0.15f, x1 = r[0] + rw - rh * 0.15f;
         if (q->style == OVS_EMPTY) continue;
         int is = size[q->style];
         if (row == sel) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
-        if (q->style == OVS_BACK) { cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); cv_text(cv, r[0] + (rw - cv_text_w(q->left, is)) / 2, cy, q->left, is, C_ACCENT); continue; }
-        if (q->style == OVS_BUTTON) { float bw = fminf(rw, cv_text_w(q->left, is) + 4 * gap), b[4] = {r[0] + (rw - bw) / 2, cy - rh * 0.34f, bw, rh * 0.68f}; cv_button(cv, b, q->left, 1, row == sel); continue; }
-        cv_text(cv, x0, cy, q->left, is, q->style == OVS_TITLE || row == sel ? C_WHITE : C_DIM);
-        if (q->right[0]) cv_text(cv, x1 - cv_text_w(q->right, is), cy, q->right, is, C_DIM);
+        if (q->style == OVS_BACK) { cv_rrect(cv, r[0], r[1], r[0] + rw, r[1] + 1, 0.5f, C_LINE); m3_text(cv, r[0] + (rw - m3_text_w(q->left, is)) / 2, cy, q->left, is, M3_PRIMARY); continue; }
+        if (q->style == OVS_BUTTON) { float bw = fminf(rw, m3_text_w(q->left, is) + 4 * gap), b[4] = {r[0] + (rw - bw) / 2, cy - rh * 0.34f, bw, rh * 0.68f}; cv_button(cv, b, q->left, 1, row == sel); continue; }
+        m3_text(cv, x0, cy, q->left, is, q->style == OVS_TITLE || row == sel ? M3_ON_SURFACE : C_DIM);
+        if (q->right[0]) m3_text(cv, x1 - m3_text_w(q->right, is), cy, q->right, is, C_DIM);
         if (q->style == OVS_TITLE) cv_rrect(cv, r[0], r[1] + rh - 1, r[0] + rw, r[1] + rh, 0.5f, C_LINE);
     }
 }
@@ -582,6 +671,13 @@ static void ov_panel(int st) {   // the pause menu, the text entry or the layout
 }
 // The phone window uses the same menu raster as Vulkan, independently of the external swapchain.
 JNIEXPORT jint JNICALL Java_org_nx2a_ExternalActivity_externalMenuState(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_menu_state(); }
+JNIEXPORT jfloatArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuGeometry(JNIEnv *env, jclass cls, jint W, jint H) {
+    (void)cls;
+    jfloat geometry[5]; ov_menu_rect((float)W,(float)H,geometry); geometry[4]=ov_menu_scale();
+    jfloatArray out=(*env)->NewFloatArray(env,5);
+    if (out) (*env)->SetFloatArrayRegion(env,out,0,5,geometry);
+    return out;
+}
 JNIEXPORT jintArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuPixels(JNIEnv *env, jclass cls, jint W, jint H, jint st) {
     (void)cls;
     if (W <= 0 || H <= 0 || W > 8192 || H > 8192 || st < 0) return NULL;
