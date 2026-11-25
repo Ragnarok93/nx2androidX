@@ -27,8 +27,9 @@ gh secret set NX2A_KEYSTORE_PASSWORD --repo Ragnarok93/nx2androidX
 ```
 
 Then rerun the failed trusted branch build. CI checks the certificate before building and checks the final
-APK before publishing. PR verification uses a runner-only debug signer. Its APK stays inside the verification
-job. For a local release, set `NX2A_KEYSTORE` to the permanent keystore path or place it at
+APK before publishing. Both checks use the same certificate pin as Gradle. Trusted branch builds, manually
+queued builds and tags require the repository signing secrets. A missing or mismatched key stops the build.
+Pull requests run regression tests and native link checks without an APK artifact. For a local release, set `NX2A_KEYSTORE` to the permanent keystore path or place it at
 `~/.android/nx2android.keystore`. The same password variables apply. Keep a private offline backup of the
 keystore and password.
 

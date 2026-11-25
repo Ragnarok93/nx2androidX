@@ -41,13 +41,8 @@ else
 fi
 [[ -n ${JAVA_HOME:-} ]] || die "no JDK was found (set JAVA_HOME or NX2A_JDK to one)"
 
-signing_args=()
 if [[ $variant == release ]]; then
-    if [[ ${NX2A_VERIFICATION_BUILD:-} == 1 ]]; then
-        signing_args+=(-PnxVerificationSigning=true)
-    else
-        (cd "$root/android" && ./gradlew :app:verifyReleaseSigningIdentity --console=plain)
-    fi
+    (cd "$root/android" && ./gradlew :app:verifyReleaseSigningIdentity --console=plain)
 fi
 
 mkdir -p "$cache"
@@ -96,7 +91,7 @@ fi
 # 4. the APK
 echo ">> the APK"
 cd "$root/android"
-./gradlew ":app:assemble$(python3 -c "print('Debug' if '$variant' == 'debug' else 'Release')")" $payload_flag "${signing_args[@]}" --console=plain
+./gradlew ":app:assemble$(python3 -c "print('Debug' if '$variant' == 'debug' else 'Release')")" $payload_flag --console=plain
 apk=$(ls -t "$root/android/app/build/outputs/apk/$variant"/*.apk | head -1)
 echo
 echo "APK: $apk ($(du -m "$apk" | cut -f1) MB)"

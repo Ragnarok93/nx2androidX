@@ -25,41 +25,37 @@ val assetsDir = rootProject.layout.projectDirectory.dir("../packaging/android-ap
 // default library paths — the app's native library folder is the only one of those the app controls.
 val jniLibsDir = rootProject.layout.projectDirectory.dir("../packaging/android-apk/.cache/jniLibs")
 
-// Release builds keep the signing identity of the installed app. Only the
-// explicit verification build uses the runner's debug certificate.
+// Release builds use the permanent certificate pinned by the repository.
 fun envOf(name: String) = System.getenv(name)?.takeIf { it.isNotBlank() }
 val nx2aKeystore = File(envOf("NX2A_KEYSTORE") ?: "${System.getProperty("user.home")}/.android/nx2android.keystore")
 val nx2aStorePassword = envOf("NX2A_KEYSTORE_PASSWORD") ?: "nx2android"
 val nx2aKeyAlias = envOf("NX2A_KEYSTORE_ALIAS") ?: "nx2android"
 val nx2aKeyPassword = envOf("NX2A_KEY_PASSWORD") ?: nx2aStorePassword
-val verificationSigning = providers.gradleProperty("nxVerificationSigning").map { it == "true" }.orElse(false).get()
 val releaseFingerprint = rootProject.file("../packaging/android-apk/signing-cert.sha256").readText().trim()
 val verifyReleaseSigningIdentity by tasks.registering {
     doLast {
-        if (!verificationSigning) {
-            check(nx2aKeystore.isFile) {
-                "Release signing needs the original nx2android keystore. Set NX2A_KEYSTORE to its path."
-            }
-            val keystore = try {
-                KeyStore.getInstance(nx2aKeystore, nx2aStorePassword.toCharArray())
-            } catch (e: Exception) {
-                throw GradleException("Cannot open the release keystore. Check NX2A_KEYSTORE_PASSWORD.", e)
-            }
-            val certificate = keystore.getCertificate(nx2aKeyAlias)
-            check(certificate != null && keystore.isKeyEntry(nx2aKeyAlias)) {
-                "Release keystore has no signing key under alias $nx2aKeyAlias."
-            }
-            val digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(certificate.encoded))
-            check(digest == releaseFingerprint) {
-                "Release keystore certificate SHA-256 $digest does not match $releaseFingerprint."
-            }
-            val key = try {
-                keystore.getKey(nx2aKeyAlias, nx2aKeyPassword.toCharArray())
-            } catch (e: Exception) {
-                throw GradleException("Cannot unlock the release signing key. Check NX2A_KEY_PASSWORD.", e)
-            }
-            check(key is PrivateKey) { "Release signing requires a private key." }
+        check(nx2aKeystore.isFile) {
+            "Release signing needs the original nx2android keystore. Set NX2A_KEYSTORE to its path."
         }
+        val keystore = try {
+            KeyStore.getInstance(nx2aKeystore, nx2aStorePassword.toCharArray())
+        } catch (e: Exception) {
+            throw GradleException("Cannot open the release keystore. Check NX2A_KEYSTORE_PASSWORD.", e)
+        }
+        val certificate = keystore.getCertificate(nx2aKeyAlias)
+        check(certificate != null && keystore.isKeyEntry(nx2aKeyAlias)) {
+            "Release keystore has no signing key under alias $nx2aKeyAlias."
+        }
+        val digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(certificate.encoded))
+        check(digest == releaseFingerprint) {
+            "Release keystore certificate SHA-256 $digest does not match $releaseFingerprint."
+        }
+        val key = try {
+            keystore.getKey(nx2aKeyAlias, nx2aKeyPassword.toCharArray())
+        } catch (e: Exception) {
+            throw GradleException("Cannot unlock the release signing key. Check NX2A_KEY_PASSWORD.", e)
+        }
+        check(key is PrivateKey) { "Release signing requires a private key." }
     }
 }
 tasks.matching { it.name == "preReleaseBuild" || it.name == "validateSigningRelease" }.configureEach {
@@ -169,7 +165,7 @@ android {
         getByName("debug") { signingConfig = signingConfigs.findByName("nx2android") ?: signingConfigs.getByName("debug") }
         release {
             isMinifyEnabled = false
-            signingConfig = if (verificationSigning) signingConfigs.getByName("debug") else signingConfigs.findByName("nx2android")
+            signingConfig = signingConfigs.findByName("nx2android")
         }
     }
 
