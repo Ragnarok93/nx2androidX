@@ -4282,6 +4282,11 @@ static void bind_handles_rec(uint32_t op, const void *a) {
 }
 uint32_t g_sub_ops[64];   // record ops replayed in the open submission, by op (logged when the driver refuses it)
 #include "gfx_vk_resolution_scope.inc"
+void mtl_exec_rest(const uint64_t *h,int n) {
+    if (!g_rs_scopes) return;
+    g_rs_scope_rest=h;g_rs_scope_rest_n=n>0?(unsigned)n:0;
+    if (!h && g_rs_scope_end) die("[vk] resolution: certified submission did not close");
+}
 static void exec_ops(const uint8_t *p);
 // DM_VK_PROF=1 (start-up): a 1 ms CPU-time timer on the replay thread samples where it is; every 20 s the most frequent places are logged: offsets in this library,
 // time in other libraries charged to the first caller of ours ("via:"), or with =2 the place itself (libc, the driver). Resolve offsets with llvm-symbolizer
@@ -4339,7 +4344,12 @@ static void exec_ops(const uint8_t *p) {
         if (h.op < 64 && h.op > 3 && (skip >> h.op & 1)) { p += h.size; continue; }
         const uint8_t *a = p + 8;
         switch (h.op) {
-        case OP_END: if (g_rs_scope_end) die("[vk] resolution: certified scope did not close"); return;
+        case OP_END:
+            if (g_rs_scope_end) {
+                if (!g_rs_scope_crossed || !g_rs_scope_rest_n) die("[vk] resolution: certified scope did not close");
+                g_rs_scope_crossed--;
+            }
+            return;
         case OP_BEGIN: break;
         case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
         case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (g_rs_scopes) g_rs_scope_nested++; exec_ops((const uint8_t *)(uintptr_t)t); if (g_rs_scopes) g_rs_scope_nested--; break; }
@@ -4380,7 +4390,7 @@ static void exec_ops(const uint8_t *p) {
                 if (p==g_rs_scope_end) {
                     vk_end_pass();
                     if (!vk_rs_suspend_discarded_group()) die("[vk] resolution: certified discard publication failed");
-                    g_rs_scope_end=NULL; g_rs_scope_program_count=0;
+                    g_rs_scope_end=NULL; g_rs_scope_program_count=0; g_rs_scope_crossed=0;
                     vk_rs_scope_freeze_end();
                 }
                 break;

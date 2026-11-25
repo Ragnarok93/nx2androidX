@@ -4,7 +4,9 @@
 #include "gfx_vk_resolution_scope.h"
 static const uint8_t *g_rs_scope_end;
 static unsigned g_rs_scope_nested,g_rs_scope_program_count;
-enum { RS_SCOPE_PROGRAM_MAX=32, RS_SCOPE_OP_MAX=4096, RS_SCOPE_BYTES_MAX=4*1024*1024 };
+static const uint64_t *g_rs_scope_rest;
+static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
+enum { RS_SCOPE_PROGRAM_MAX=32, RS_SCOPE_OP_MAX=4096, RS_SCOPE_BYTES_MAX=4*1024*1024, RS_SCOPE_HANDLE_MAX=32 };
 typedef struct { const uint8_t *record; const prog_t *prog; vkshader_t *sh[6]; } rs_scope_program;
 static rs_scope_program g_rs_scope_programs[RS_SCOPE_PROGRAM_MAX];
 typedef struct { const tex_t *target[9]; uint64_t addr[9]; unsigned mask; uint32_t w,h; } rs_scope_group;
@@ -143,11 +145,20 @@ static int rs_scope_rt(const rs_scope_group *g,const p_set_rt *r) {
 static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
     __typeof__(S) look=S;
     nx_rs_scope life; if (!nx_rs_scope_init(&life,g->mask)) return NULL;
-    size_t bytes=0;
+    size_t bytes=0;unsigned crossed=0;
+    g_rs_scope_crossed=0;
     for (unsigned op=0;op<RS_SCOPE_OP_MAX;op++) {
         op_hdr h;memcpy(&h,p,sizeof h);
         if (h.size<8 || (h.size&7) || h.size>RS_SCOPE_BYTES_MAX-bytes) return NULL;
         bytes+=h.size;const uint8_t *a=p+8;size_t n=h.size-8;
+        // The replay job owns every flattened handle in this array. Keep
+        // the same byte/op bound across all handles, not per handle.
+        if (h.op==OP_END) {
+            if (h.size!=8 || !g_rs_scope_rest || crossed>=g_rs_scope_rest_n || crossed>=RS_SCOPE_HANDLE_MAX) return NULL;
+            p=(const uint8_t *)(uintptr_t)g_rs_scope_rest[crossed++];
+            if (!p) return NULL;
+            continue;
+        }
         if (life.phase==2 && h.op!=OP_RS_DISCARD) return NULL;
 #define RS_NEED(T) do { if (n<sizeof(T)) return NULL; } while (0)
         switch (h.op) {
@@ -172,7 +183,7 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
             if (i<-1 || i>=8) return NULL;
             int result=nx_rs_scope_discard(&life,1u<<(i==-1?8:i));
             if (!result) return NULL;
-            if (result==2) return p;
+            if (result==2) {g_rs_scope_crossed=crossed;return p;}
             break; }
         case OP_BIND_PROGRAM: RS_NEED(p_bind_program);
             if (!rs_scope_program_proof(&look,p,(const p_bind_program *)a)) return NULL;break;
@@ -227,7 +238,7 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
     return NULL;
 }
 static void rs_scope_try_begin(const uint8_t *next) {
-    // rec_copy makes an immutable, flat handle with a terminal OP_END.
+    // rec_copy makes immutable, flat handles with terminal OP_END records.
     // Synchronous guest command memory and nested/unflattened calls are not
     // proof inputs. Reject diagnostic modes that can inject extra accesses.
     if (!nvn_replaying_job() || S.pass_open || vk_rs_cache_has_scaled() || g_rc_skip || g_tf_on ||
@@ -236,6 +247,7 @@ static void rs_scope_try_begin(const uint8_t *next) {
         g_lrz_touch || g_ubolog_key || g_x_logfs || slot0_fill_on()) return;
     rs_scope_group group={0};nx_rs_group dims={0};
     for (unsigned i=0;i<9;i++) {
+        if (i<8 && i<(unsigned)S.rt_n && S.rt_bad[i]) return;
         if (i<8 && (i>=(unsigned)S.rt_n || !S.rt_has_col[i])) continue;
         if (i==8 && !S.rt_has_dep) continue;
         if (i==8?S.rt_has_dview:S.rt_has_cview[i]) return;
@@ -253,7 +265,7 @@ static void rs_scope_try_begin(const uint8_t *next) {
     g_rs_scope_program_count=0;
     const uint8_t *end=rs_scope_scan(next,&group);
     if (!end || !vk_rs_allocate_fresh_group(group.target,ext.w,ext.h)) {
-        g_rs_scope_program_count=0;vk_rs_scope_freeze_end();return;
+        g_rs_scope_program_count=0;g_rs_scope_crossed=0;vk_rs_scope_freeze_end();return;
     }
     vk_rs_scope_freeze_seal();g_rs_scope_end=end;
     static unsigned accepted;

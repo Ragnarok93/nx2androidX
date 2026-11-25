@@ -63,6 +63,8 @@ class ScopeTests(unittest.TestCase):
 #include "nvn_obj.h"
 #include "gfx_vk_resolution_scope.h"
 #include "gfx_vk_resolution_preflight.h"
+static const uint64_t *g_rs_scope_rest;
+static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 static struct {
     p_scissor sc; int sc_set,rast_discard;
     p_bind_buf ubo[6][16]; NVNbufferRange vbuf[16];
@@ -101,7 +103,7 @@ static uint8_t *append(unsigned op,const void *payload,size_t n) {
     at+=len;return p;
 }
 static void reset(void) {
-    at=0;memset(&S,0,sizeof S);
+    at=0;memset(&S,0,sizeof S);g_rs_scope_rest=NULL;g_rs_scope_rest_n=g_rs_scope_crossed=0;
     for(unsigned i=0;i<3;i++)t[i]=(tex_t){.magic=MAGIC('T','E','X',0),.serial=i+1,.pool=&pool,.mem=storage+4096*i,.off=4096*i,.L={.size=4096},.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=64,.height=64,.depth=1,.levels=1}};
 }
 static void rt(tex_t *target) {p_set_rt r={.n=1,.color={target}};append(OP_SET_RT,&r,sizeof r);}
@@ -125,6 +127,14 @@ int main(void) {
     reset();producer();consumer();rt(&t[0]);draw();discard();assert(!scan());
     reset();producer();consumer();rt(&t[0]);append(OP_RS_DISCARD,NULL,0);assert(!scan());
     reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    // A lifetime can cross immutable handle boundaries, including between
+    // producer and consumer and before the terminal discard.
+    reset();producer();append(OP_END,NULL,0);uint8_t *h2=commands+at;
+    consumer();append(OP_END,NULL,0);uint8_t *h3=commands+at;rt(&t[0]);end=discard();
+    uint64_t rest[]={ (uintptr_t)h2,(uintptr_t)h3 };
+    g_rs_scope_rest=rest;g_rs_scope_rest_n=2;
+    assert(scan()==end && g_rs_scope_crossed==2);
+    g_rs_scope_rest_n=1;assert(!rs_scope_scan(commands,&(rs_scope_group){.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64}));
 }
 """
         with tempfile.TemporaryDirectory() as d:

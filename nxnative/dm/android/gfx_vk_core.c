@@ -1802,7 +1802,6 @@ int vk_ubd_shadow(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off) {
     return 1;
 }
 void mtl_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }
-void mtl_exec_rest(const uint64_t *h, int n) { (void)h; (void)n; }
 
 // completion: a queue of committed submissions, each with its CPU-visible effects
 typedef struct cpend { uint64_t fence, frame; post_op *ops; int n; int slot, rslot; int npass; pass_meta pmeta[PASSQ]; struct cpend *next; } cpend;
