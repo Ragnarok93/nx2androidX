@@ -2575,7 +2575,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
             if (b->desc == RD_TBUF) {
                 if (cnt > 32 || nbv + (uint32_t)cnt > sizeof bv / sizeof *bv) die("[RED] [vk] dynamic texel buffer array exceeds capacity");
                 for (int k = 0; k < cnt; k++) {
-                    uint64_t h = dynslots ? (S.tex[st][128+k] ? S.tex[st][128+k] : S.tex[st][k]) : 0;
+                    uint64_t h = dynslots ? vk_dyn_tex_slot_handle(S.tex[st],(unsigned)k,1) : 0;
                     const view_t *v = NULL; const tex_t *t = NULL;
                     int tid = (int)(h & 0xfffff);
                     bv[nbv + k] = tid && vk_tex_by_id(tid, &v, &t) && t && t->d.target == NVN_TEXTURE_TARGET_BUFFER && !view_num(t, NULL) ? vk_tbuf_view(t, 0) : VK_NULL_HANDLE;
@@ -2595,7 +2595,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
                     di->sampler = sid ? vk_samp_by_id(sid) : VK_NULL_HANDLE;
                     if (!di->sampler) di->sampler = vk_dummy_sampler();
                 } else {
-                    uint64_t h = dynslots ? (S.tex[st][k] ? S.tex[st][k] : S.tex[st][128+k]) : 0;
+                    uint64_t h = dynslots ? vk_dyn_tex_slot_handle(S.tex[st],(unsigned)k,0) : 0;
                     const view_t *v = NULL; const tex_t *t = NULL;
                     int tid = (int)(h & 0xfffff), fits = 0;
                     if (tid && vk_tex_by_id(tid, &v, &t) && t) {
@@ -2895,6 +2895,56 @@ static int resolution_preflight_buffer_binding(int st,const dmsv_bind *b) {
     return nx_rs_buffer_span(p->lo,p->hi,u->addr,n,align,&start,&size) &&
         vk_rs_preflight_buffer(start,size);
 }
+// Native-only bindings can coexist with a scaled group when every
+// resolved resource is independently disjoint. Enumerate the exact same
+// slots as stage_set; a dynamic array must NEVER expose a scaled owner.
+// Return 0 for a different binding class, +1 for a proved native binding,
+// or -1 when it cannot be proved. Both lookahead and actual replay use this.
+typedef int (*rs_native_check)(const tex_t *,const view_t *,int,void *);
+static int resolution_native_binding(const dmsv_bind *b,const uint64_t *tex,const uint64_t *img,
+                                     int compute,int dynamic,rs_native_check check,void *ctx) {
+    if (b->kind==RK_SAMPD)
+        return b->desc==RD_SAMPLER && b->count<=32 && b->samp!=RS_UBO?1:-1;
+    int array=b->kind==RK_TEXD;
+    int storage=b->kind==RK_IMG_TBUF;
+    if (!array && b->kind!=RK_TBUF && !storage) return 0;
+    int texel=b->desc==RD_TBUF || b->desc==RD_STORAGE_TBUF;
+    if (b->samp==RS_UBO) return -1;
+    if (array) {
+        if (b->count>32 || (b->desc!=RD_IMAGE && b->desc!=RD_TBUF)) return -1;
+        // Profile-disabled arrays are all dummy descriptors.
+        if (!dynamic) return 1;
+    } else if (b->count!=1 || b->reg<0 || b->reg>=(storage?32:256) ||
+               (storage?(!compute || b->desc!=RD_STORAGE_TBUF):b->desc!=RD_TBUF)) return -1;
+    unsigned count=array?(b->count?b->count:32):1;
+    for (unsigned i=0;i<count;i++) {
+        uint64_t h=array?vk_dyn_tex_slot_handle(tex,i,texel):
+            storage?img[b->reg]:vk_tex_slot_handle(tex,img,(unsigned)b->reg);
+        int tid=(int)(h&0xfffff);
+        if (!tid) { if (storage) return -1; continue; }
+        const tex_t *t=NULL; const view_t *v=NULL;
+        if (!vk_tex_by_id(tid,&v,&t) || !t || !check(t,v,texel,ctx)) return -1;
+    }
+    return 1;
+}
+static int resolution_texel_span(const tex_t *t,const view_t *v,uint64_t *addr,uint64_t *bytes) {
+    const vkfmt_t *f=t?vk_fmt(t->d.format):NULL;
+    if (!t || v || !t->pool || (t->pool->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) ||
+        t->d.target!=NVN_TEXTURE_TARGET_BUFFER || !f || !f->bpb || !t->mem ||
+        !t->d.width || t->d.width>V.props.limits.maxTexelBufferElements) return 0;
+    *addr=(uintptr_t)t->mem; *bytes=(uint64_t)t->d.width*f->bpb;
+    return *bytes<=UINT64_MAX-*addr;
+}
+static int resolution_raw_span(uint64_t,uint64_t,int);
+static int resolution_native_preflight(const tex_t *t,const view_t *v,int texel,void *ctx) {
+    (void)ctx;
+    if (texel) {
+        uint64_t addr,bytes;
+        return resolution_texel_span(t,v,&addr,&bytes) && resolution_raw_span(addr,bytes,0);
+    }
+    nx_rs_draw_extent extent;
+    return t->d.target!=NVN_TEXTURE_TARGET_BUFFER && vk_rs_preflight_view(t,v,0,&extent)==0;
+}
 static int resolution_preflight_stages(int target_scaled) {
     for (int st=0;st<3;st++) {
         vkshader_t *s=S.sh[st];
@@ -2904,6 +2954,8 @@ static int resolution_preflight_stages(int target_scaled) {
         int support=0, sample_scaled=0;
         for (unsigned i=0;i<s->nbind;i++) {
             const dmsv_bind *b=&s->b[i];
+            int native=resolution_native_binding(b,S.tex[st],S.img[st],0,DM_GAME_TEX_DYN_SLOTS,resolution_native_preflight,NULL);
+            if (native) { if (native<0) return 0; continue; }
             if (b->samp==RS_UBO) return 0; // CPU-decoded sampler handle
             switch (b->kind) {
             case RK_SUPPORT: case RK_C1: case RK_DRV:
@@ -3789,6 +3841,8 @@ static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *
     int support=0, sampled_scaled=0;
     for (int i=0;i<cs->nbind;i++) {
         const dmsv_bind *b=&cs->b[i];
+        int native=resolution_native_binding(b,S.tex[5],S.img[5],1,DM_GAME_TEX_DYN_SLOTS,resolution_native_preflight,NULL);
+        if (native) { if (native<0) return 0; continue; }
         if (b->count!=1 || b->samp==RS_UBO) return 0;
         if (b->kind==RK_SUPPORT || b->kind==RK_C1 || b->kind==RK_DRV) {
             if (b->desc!=RD_UBO) return 0;

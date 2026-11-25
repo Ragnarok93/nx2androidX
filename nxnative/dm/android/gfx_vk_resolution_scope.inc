@@ -63,6 +63,14 @@ static int rs_scope_uniform(const rs_scope_group *g,const p_bind_buf *u) {
     return p && p->buf && align && !(p->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) && !(p->boff%align) &&
         nx_rs_buffer_span(p->lo,p->hi,u->addr,n,align,&start,&size) && rs_scope_raw(g,start,size,0);
 }
+static int rs_scope_native_check(const tex_t *t,const view_t *v,int texel,void *ctx) {
+    const rs_scope_group *g=ctx;
+    if (texel) {
+        uint64_t addr,bytes;
+        return resolution_texel_span(t,v,&addr,&bytes) && rs_scope_raw(g,addr,bytes,0);
+    }
+    return t->d.target!=NVN_TEXTURE_TARGET_BUFFER && rs_scope_match(g,t,v)==0;
+}
 static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look,int scaled,int *samples) {
     *samples=0;
     if (!look->sh[0] || look->rast_discard || look->sh[2] || look->sh[3] || look->sh[4]) return 0;
@@ -74,6 +82,8 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
         int support=0,stage_samples=0;
         for (int i=0;i<s->nbind;i++) {
             const dmsv_bind *b=&s->b[i];
+            int native=resolution_native_binding(b,look->tex[st],look->img[st],0,DM_GAME_TEX_DYN_SLOTS,rs_scope_native_check,(void *)g);
+            if (native) { if (native<0) return 0; continue; }
             if (b->count!=1 || b->samp==RS_UBO) return 0;
             switch (b->kind) {
             case RK_SUPPORT: case RK_C1: case RK_DRV:
@@ -124,6 +134,8 @@ static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *l
     int support=0;
     for (int i=0;i<s->nbind;i++) {
         const dmsv_bind *b=&s->b[i];
+        int native=resolution_native_binding(b,look->tex[5],look->img[5],1,DM_GAME_TEX_DYN_SLOTS,rs_scope_native_check,(void *)g);
+        if (native) { if (native<0) return 0; continue; }
         if (b->count!=1 || b->samp==RS_UBO) return 0;
         switch(b->kind) {
         case RK_SUPPORT: case RK_C1: case RK_DRV:
