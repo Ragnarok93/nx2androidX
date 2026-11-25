@@ -110,6 +110,7 @@ static void rot_drop_image(void) {
 }
 static void swap_destroy(void) {
     pace_reset();
+    g_flow.ticket = 0;
     present_time_reset();
     if (g_swap) { vkDeviceWaitIdle(V.dev); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
                   vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE; rot_drop_image(); g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR; }
@@ -489,7 +490,7 @@ __attribute__((weak)) int dm_menu_rs_mode(void) {return 0;}
 __attribute__((weak)) int dm_menu_rs_max(void) {return 100;}
 __attribute__((weak)) unsigned dm_menu_rs_recorded(void) {return 0;}
 __attribute__((weak)) int dm_vivid_enabled(void) { return 0; }
-__attribute__((weak)) int dm_spatial_mode(void) { return SP_NATIVE; }
+__attribute__((weak)) int dm_spatial_mode(void) { return SP_AUTO; }
 __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
 int dm_menu_fg_has_dll(void);
 const char *dm_vk_driver_status(void);   // a controller's face buttons (front_android.c pad_labels)
@@ -1380,6 +1381,13 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         // A guest crop can carry engine dynamic-resolution information.
         // Keep the existing native image path for anything but the full copy.
         int full = !raw[0] && !raw[1] && raw[2] == (int)im->w && raw[3] == (int)im->h;
+        int mode = dm_spatial_mode();
+        if (mode == SP_AUTO || mode == SP_SGSR2) {
+            uint64_t now = mono_ns();
+            if (g_flow.last_source_ns && now - g_flow.last_source_ns > 250000000) g_flow.ticket = 0;
+            g_flow.last_source_ns = now;
+        }
+        g_spatial.flow_budget_ms = period > 0 ? (float)fmin(2.5, period * 100.0) : 2.0f;
         reconstructed = spatial_reconstruct(im, raw, flip_y, picture.width, picture.height, ticket,
                                            full ? physical : NULL);
     }

@@ -11,6 +11,8 @@
 #include <string.h>
 
 #include "sgsr2_2fs_convert_frag.spv.h"
+#include "sgsr2_flow_convert_frag.spv.h"
+#include "sgsr2_flow_upscale_frag.spv.h"
 #include "sgsr2_2fs_upscale_frag.spv.h"
 #include "sgsr2_fullscreen_vert.spv.h"
 #include "sgsr2_2cs_convert_comp.spv.h"
@@ -46,7 +48,7 @@ _Static_assert(sizeof(fragment_params) == 144 && offsetof(fragment_params, rende
                "Qualcomm fragment std140 UBO");
 
 enum { G2_CLIP, G2_MOTION, G2_YCOCG, G2_RESULT, G2_HISTORY0, G2_HISTORY1, G2_LUMA0, G2_LUMA1, G2_IMAGES };
-enum { G2_COLOR = G2_IMAGES, G2_DEPTH, G2_VELOCITY, G2_OPAQUE, G2_PREV, G2_NEXT, G2_PREV_LUMA, G2_NEXT_LUMA };
+enum { G2_COLOR = G2_IMAGES, G2_DEPTH, G2_VELOCITY, G2_OPAQUE, G2_PREV_COLOR, G2_PREV, G2_NEXT, G2_PREV_LUMA, G2_NEXT_LUMA };
 enum { G2_PASS_MAX = 3, G2_BINDINGS_MAX = 7 };
 
 typedef struct {
@@ -74,6 +76,13 @@ static const pass_spec passes_2fs[] = {
         {G2_UBO, G2_READ(1, G2_DEPTH), G2_READ(2, G2_VELOCITY)}, G2_CLIP},
     {G2_SHADER(sgsr2_2fs_upscale_frag_spv), 4,
         {G2_UBO, G2_LINEAR(1, G2_PREV), G2_READ(2, G2_CLIP), G2_READ(3, G2_COLOR)}, G2_NEXT},
+};
+static const pass_spec passes_image[] = {
+    {G2_SHADER(sgsr2_flow_convert_frag_spv), 3,
+        {G2_UBO, G2_LINEAR(1, G2_COLOR), G2_LINEAR(2, G2_PREV_COLOR)}, G2_CLIP},
+    {G2_SHADER(sgsr2_flow_upscale_frag_spv), 5,
+        {G2_UBO, G2_LINEAR(1, G2_PREV), G2_READ(2, G2_CLIP), G2_READ(3, G2_COLOR),
+         G2_LINEAR(4, G2_PREV_COLOR)}, G2_NEXT},
 };
 static const pass_spec passes_2cs[] = {
     {G2_SHADER(sgsr2_2cs_convert_comp_spv), 6,
@@ -112,7 +121,7 @@ typedef struct {
 struct vk_gsr2 {
     uint32_t variant, pass_count, next;
     VkExtent2D render, output;
-    int fragment, pending, initialized;
+    int fragment, image_driven, pending, initialized;
     VkDeviceSize bytes, budget, ubo_stride;
     VkDescriptorPool descriptors;
     VkSampler samplers[2];
@@ -188,7 +197,9 @@ static int gsr2_image(vk_gsr2 *ctx, unsigned index, VkExtent2D extent, VkFormat 
 
 static int gsr2_images(vk_gsr2 *ctx) {
     VkFormat rgba = VK_FORMAT_R16G16B16A16_SFLOAT, integer = VK_FORMAT_R32_UINT;
-    if (!gsr2_image(ctx, G2_CLIP, ctx->render, rgba) ||
+    VkExtent2D clip = ctx->render;
+    if (ctx->image_driven) clip = (VkExtent2D){(clip.width + 7) / 8, (clip.height + 7) / 8};
+    if (!gsr2_image(ctx, G2_CLIP, clip, rgba) ||
         !gsr2_image(ctx, G2_HISTORY0, ctx->output, rgba) ||
         !gsr2_image(ctx, G2_HISTORY1, ctx->output, rgba)) return 0;
     if (ctx->fragment) return 1;
@@ -298,7 +309,8 @@ static int gsr2_pipelines(vk_gsr2 *ctx) {
     return ready;
 }
 
-vk_gsr2 *vk_gsr2_create(uint32_t variant, VkExtent2D render, VkExtent2D output, VkDeviceSize budget) {
+static vk_gsr2 *gsr2_create(uint32_t variant, VkExtent2D render, VkExtent2D output,
+                            VkDeviceSize budget, int image_driven) {
     if (!render.width || !render.height || render.width > output.width || render.height > output.height ||
         (variant != DM_TEMPORAL_2FS && variant != DM_TEMPORAL_2CS && variant != DM_TEMPORAL_3CS) ||
         !(vk_gsr2_variants() & variant)) return NULL;
@@ -310,8 +322,10 @@ vk_gsr2 *vk_gsr2_create(uint32_t variant, VkExtent2D render, VkExtent2D output, 
     const VkDeviceSize limit = 96u * 1024 * 1024;
     ctx->budget = budget < limit ? budget : limit;
     ctx->fragment = variant == DM_TEMPORAL_2FS;
+    ctx->image_driven = image_driven;
     ctx->pass_count = variant == DM_TEMPORAL_3CS ? 3 : 2;
     ctx->spec = ctx->fragment ? passes_2fs : variant == DM_TEMPORAL_2CS ? passes_2cs : passes_3cs;
+    if (image_driven) ctx->spec = passes_image;
     if (!gsr2_images(ctx) || !gsr2_uniform(ctx) || !gsr2_pipelines(ctx)) goto fail;
     for (unsigned i = 0; i < 2; i++) {
         VkFilter filter = i ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -324,6 +338,14 @@ vk_gsr2 *vk_gsr2_create(uint32_t variant, VkExtent2D render, VkExtent2D output, 
 fail:
     vk_gsr2_destroy(ctx);
     return NULL;
+}
+
+vk_gsr2 *vk_gsr2_create(uint32_t variant, VkExtent2D render, VkExtent2D output, VkDeviceSize budget) {
+    return gsr2_create(variant, render, output, budget, 0);
+}
+
+vk_gsr2 *vk_gsr2_create_image(VkExtent2D render, VkExtent2D output, VkDeviceSize budget) {
+    return gsr2_create(DM_TEMPORAL_2FS, render, output, budget, 1);
 }
 
 void vk_gsr2_destroy(vk_gsr2 *ctx) {
@@ -636,7 +658,7 @@ static void gsr2_descriptors(vk_gsr2 *ctx, unsigned slot, unsigned pass, const v
     VkDescriptorBufferInfo ubo = {ctx->ubo, slot * ctx->ubo_stride,
         ctx->fragment ? sizeof(fragment_params) : sizeof(compute_params)};
     VkWriteDescriptorSet writes[G2_BINDINGS_MAX];
-    const vk_gsr2_input external[] = {input->color, input->depth, input->motion, input->opaque};
+    const vk_gsr2_input external[] = {input->color, input->depth, input->motion, input->opaque, input->previous_color};
     for (unsigned i = 0; i < spec->count; i++) {
         const pass_binding *b = &spec->binding[i];
         writes[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,
@@ -710,9 +732,14 @@ int vk_gsr2_record(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
     if (!ctx || !frame || !cb || !output || slot >= VK_GSR2_SLOTS || ctx->pending) return 0;
     dm_temporal_frame f = *frame;
     f.variants &= ctx->variant;
+    unsigned known = ctx->image_driven ? DM_TEMPORAL_IMAGE_PAIR : (DM_TEMPORAL_REQUIRED | DM_TEMPORAL_OPAQUE);
+    f.inputs &= known;
+    int valid = ctx->image_driven ?
+        (input && gsr2_sampleable(input->color) && gsr2_sampleable(input->previous_color)) :
+        gsr2_inputs_valid(input, ctx->variant == DM_TEMPORAL_3CS);
     if (f.iw != ctx->render.width || f.ih != ctx->render.height ||
         f.ow != ctx->output.width || f.oh != ctx->output.height ||
-        !gsr2_inputs_valid(input, ctx->variant == DM_TEMPORAL_3CS)) f.inputs = 0;
+        !valid) f.inputs = 0;
     dm_temporal_plan plan = dm_temporal_choose(&ctx->history, &f, ctx->variant);
     if (!plan.variant) {
         dm_temporal_commit(&ctx->history, &f, plan, 0);
@@ -742,6 +769,16 @@ int vk_gsr2_record(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
     ctx->pending_plan = plan;
     ctx->pending = 1;
     return 1;
+}
+
+int vk_gsr2_record_image(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
+                         const dm_temporal_frame *frame, vk_gsr2_input current,
+                         vk_gsr2_input previous, vk_gsr2_output *output) {
+    if (!ctx || !ctx->image_driven) return 0;
+    const vk_gsr2_inputs inputs = {
+        .color = current, .previous_color = previous, .pre_exposure = 1.0f,
+    };
+    return vk_gsr2_record(ctx, cb, slot, frame, &inputs, NULL, output);
 }
 
 void vk_gsr2_commit(vk_gsr2 *ctx, int submitted) {

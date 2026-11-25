@@ -85,4 +85,47 @@ def shader_sources(vendor, generated):
             if not path.exists() or path.read_text(encoding="utf-8") != text:
                 path.write_text(text, encoding="utf-8", newline="\n")
             shaders.append(path)
+            if variant == "2fs" and stage == "upscale":
+                flow = text
+                substitutions = {
+                    "void main()": """vec4 flowColor(ivec2 pixel) {
+    return texelFetch(InputColor, clamp(pixel, ivec2(0), textureSize(InputColor, 0) - 1), 0);
+}
+
+void main()""",
+                    "layout(std140, set = 0, binding = 0)": (
+                        "layout(set = 0, binding = 4) uniform highp sampler2D PreviousColor;\n"
+                        "layout(std140, set = 0, binding = 0)"),
+                    "textureLod(MotionDepthClipAlphaBuffer, Jitteruv, 0.0).xyz": (
+                        "texelFetch(MotionDepthClipAlphaBuffer, InputPos / 8, 0).xyz"),
+                    "Upsampledcw.xyz / Upsampledcw.w": (
+                        "(abs(Upsampledcw.w) > 1e-5 ? Upsampledcw.xyz / Upsampledcw.w : flowColor(InputPos).rgb)"),
+                    "Upsampledcw.xyz = mix(HistoryColor, Upsampledcw.xyz, alpha);": """
+    // Reject per-pixel mismatches even when the tile matched. This protects
+    // moving edges, newly revealed pixels, and UI baked into the game frame.
+    vec2 unclamped = Hruv + Motion * vec2(-0.5, 0.5);
+    vec4 live = flowColor(InputPos);
+    if (depthfactor >= 1.0 || any(lessThan(unclamped, vec2(0))) ||
+        any(greaterThan(unclamped, vec2(1)))) {
+        alpha = 1.0;
+    } else if (alpha < 1.0) {
+        vec3 prior = textureLod(PreviousColor, PrevUV, 0.0).rgb;
+        vec3 error = abs(prior - live.rgb) / (vec3(0.15) + max(prior, live.rgb));
+        float mismatch = max(max(error.r, error.g), error.b);
+        alpha = mix(alpha, 1.0, smoothstep(0.08, 0.18, mismatch));
+    }
+    Upsampledcw.xyz = mix(HistoryColor, Upsampledcw.xyz, alpha);""",
+                    "Output = vec4(Upsampledcw.xyz, 0.0);": "Output = vec4(Upsampledcw.xyz, live.a);",
+                }
+                flow, taps = re.subn(r"texelFetch\(InputColor, (InputPos \+ ivec2\([^)]*\))\s*, 0\)", r"flowColor(\1)", flow)
+                if taps != 9:
+                    raise ValueError(f"{source}: unexpected image-driven source tap count ({taps})")
+                for old, new in substitutions.items():
+                    if flow.count(old) != 1:
+                        raise ValueError(f"{source}: unexpected image-driven upscale layout")
+                    flow = flow.replace(old, new)
+                path = generated / "sgsr2_flow_upscale.frag"
+                if not path.exists() or path.read_text(encoding="utf-8") != flow:
+                    path.write_text(flow, encoding="utf-8", newline="\n")
+                shaders.append(path)
     return shaders

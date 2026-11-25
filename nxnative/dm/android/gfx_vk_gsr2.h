@@ -3,7 +3,7 @@
 #include <vulkan/vulkan.h>
 #include "gfx_vk_temporal_policy.h"
 
-enum { VK_GSR2_SLOTS = 3 };
+enum { VK_GSR2_SLOTS = 8 };
 enum { VK_GSR2_DEPTH_STANDARD, VK_GSR2_DEPTH_REVERSED };
 enum { VK_GSR2_MOTION_UE, VK_GSR2_MOTION_NDC_A, VK_GSR2_MOTION_UV_A, VK_GSR2_MOTION_PIXELS_A };
 enum { VK_GSR2_MOTION_Y_DOWN = 1, VK_GSR2_MOTION_PREV_MINUS_CURRENT = 2 };
@@ -19,7 +19,7 @@ typedef struct {
 } vk_gsr2_input;
 
 typedef struct {
-    vk_gsr2_input color, depth, motion, opaque;
+    vk_gsr2_input color, depth, motion, opaque, previous_color;
     float clip_to_prev[16]; // column-major, excluding sampling jitter
     float jitter[2];       // signed input pixels
     float pre_exposure;    // previous/current scene pre-exposure
@@ -88,6 +88,12 @@ typedef struct {
 uint32_t vk_gsr2_variants(void);
 vk_gsr2 *vk_gsr2_create(uint32_t variant, VkExtent2D render, VkExtent2D output,
                        VkDeviceSize budget);
+// Image-driven two-pass variant. The previous source must be the prior real
+// game frame at the same size and orientation, or the current image on a cut.
+vk_gsr2 *vk_gsr2_create_image(VkExtent2D render, VkExtent2D output, VkDeviceSize budget);
+int vk_gsr2_record_image(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
+                         const dm_temporal_frame *frame, vk_gsr2_input current,
+                         vk_gsr2_input previous, vk_gsr2_output *output);
 void vk_gsr2_destroy(vk_gsr2 *ctx);
 
 // Invoke on the GPU replay queue, outside a render pass. Slot must be retired

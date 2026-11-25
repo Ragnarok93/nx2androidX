@@ -359,9 +359,112 @@ static void check_variant(uint32_t variant) {
     printf("SGSR 2 variant %u passed moving geometry, reset, submission and input normalization checks\n", variant);
 }
 
+static void flow_frame(spatial_image *source, int shift, int cut) {
+    const int size = (int)source->texture.w;
+    for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++) {
+            float a = (float)(x - shift);
+            float value = cut ? 0.94f : 0.48f + 0.21f * sinf(a * 0.44f + y * 0.27f)
+                + 0.16f * cosf(a * 0.65f - y * 0.42f);
+            uint8_t *dst = mapped + 4 * (y * size + x);
+            dst[0] = dst[1] = dst[2] = (uint8_t)(255.0f * value);
+            dst[3] = 173;
+        }
+    begin();
+    barrier(test_cb, source->texture.img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy copy = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {size, size, 1}};
+    vkCmdCopyBufferToImage(test_cb, pixels, source->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    barrier(test_cb, source->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    complete();
+}
+
+static void check_image_temporal(void) {
+    if (!(vk_gsr2_variants() & DM_TEMPORAL_2FS)) return;
+    spatial_image src = source_image(24);
+    int crop[4] = {0, 0, 24, 24};
+    selected_mode = SP_AUTO;
+    flow_frame(&src, 0, 0);
+    spatial_image *output = spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 100, NULL);
+    assert(output && spatial_active == SP_SGSR2 && g_flow.ctx->pending_plan.reset);
+    CHECK(vkQueueWaitIdle(V.q));
+    flow_frame(&src, 2, 0);
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 101, NULL) == output);
+    assert(g_flow.ctx->history.ticket == 101 && !g_flow.ctx->pending_plan.reset);
+
+    begin();
+    temporal_image motion = g_flow.ctx->images[G2_CLIP];
+    assert(motion.extent.width == 3 && motion.extent.height == 3);
+    VkBufferImageCopy flow_copy = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {3, 3, 1}};
+    vkCmdCopyImageToBuffer(test_cb, motion.image, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &flow_copy);
+    complete();
+    const uint16_t *field = (const uint16_t *)mapped;
+    unsigned found = 0;
+    for (unsigned i = 0; i < 9; ++i)
+        if (unpack_fp16(field[i * 4 + 2]) < 0.1f &&
+            fabsf(unpack_fp16(field[i * 4]) - 4.0f / 24.0f) < 0.002f &&
+            fabsf(unpack_fp16(field[i * 4 + 1])) < 0.002f)
+            found++;
+    assert(found > 0);
+
+    flow_frame(&src, 0, 1);
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 102, NULL) == output);
+    begin();
+    VkBufferImageCopy copy = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {OUT, OUT, 1}};
+    vkCmdCopyImageToBuffer(test_cb, output->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &copy);
+    complete();
+    for (unsigned i = 0; i < OUT * OUT * 4; i += 4) {
+        assert(abs((int)mapped[i] - 239) <= 2); // rejected history cannot darken the new scene
+        assert(mapped[i + 3] == 173);
+    }
+
+    // Duplicates cannot advance history. An over-budget frame uses spatial.
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 102, NULL) == output);
+    assert(g_flow.ctx->history.ticket == 102);
+    g_flow.retry_after = 104;
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 103, NULL) == output);
+    assert(spatial_active == SP_SGSR1 && g_flow.ctx->history.ticket == 102);
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 104, NULL) == output);
+    assert(spatial_active == SP_SGSR2 && g_flow.ctx->pending_plan.reset);
+    CHECK(vkQueueWaitIdle(V.q));
+    spatial_image_drop(&src);
+    puts("SGSR 2 image-driven presentation passed motion, scene change, history and fallback checks");
+}
+
+static void check_physical_image_temporal(void) {
+    if (!(vk_gsr2_variants() & DM_TEMPORAL_2FS)) return;
+    CHECK(vkQueueWaitIdle(V.q));
+    spatial_drop_images();
+    g_sfmt = VK_FORMAT_R8G8B8A8_SRGB;
+    spatial_image src = source_image(16);
+    vk_rs_variant backing = {.image = src.texture.img, .view = src.view, .refs = 1};
+    vkimg_t guest = {.w = 32, .h = 32, .fmt = g_sfmt, .layout = VK_IMAGE_LAYOUT_GENERAL};
+    vk_reconstruction_input input = {
+        .backing = &backing, .physical = {16, 16}, .logical = {32, 32},
+        .valid = {{0, 0}, {16, 16}}, .sampled = src.view, .format = g_sfmt,
+        .layout = VK_IMAGE_LAYOUT_GENERAL, .ticket = 110,
+    };
+    selected_mode = SP_SGSR2;
+    int crop[4] = {0, 0, 32, 32};
+    spatial_image *out = spatial_reconstruct(&guest, crop, 0, 32, 32, input.ticket, &input);
+    assert(out && spatial_active == SP_SGSR2 && backing.refs == 2);
+    assert(g_flow.ctx->render.width == 16 && g_flow.ctx->render.height == 16);
+    begin();
+    VkBufferImageCopy copy = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {32, 32, 1}};
+    vkCmdCopyImageToBuffer(test_cb, out->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &copy);
+    complete();
+    assert(abs((int)mapped[4 * (32 * 7 + 12)] - 55) < 16);
+    assert(abs((int)mapped[4 * (32 * 24 + 12)] - 218) < 16);
+    spatial_collect_sources();
+    assert(backing.refs == 1);
+    spatial_image_drop(&src);
+    puts("SGSR 2 physical replay handoff and sRGB presentation passed");
+}
+
 static void check_temporal(void) {
     uint32_t supported = vk_gsr2_variants();
     assert(supported);
     for (uint32_t variant = 1; variant <= DM_TEMPORAL_3CS; variant <<= 1)
         if (supported & variant) check_variant(variant);
+    check_image_temporal();
+    check_physical_image_temporal();
 }

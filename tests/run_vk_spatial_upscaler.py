@@ -28,6 +28,7 @@ def main():
             from sgsr2_shaders import shader_sources
             shaders += shader_sources(ANDROID.parent / "third_party/sgsr2/include", build / "sgsr2")
             shaders.append(ANDROID / "shaders/sgsr2_fullscreen.vert")
+            shaders.append(ANDROID / "shaders/sgsr2_flow_convert.frag")
         for shader in shaders:
             name = shader.name
             spv = build / (name + ".spv")

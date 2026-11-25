@@ -85,6 +85,7 @@ static void vk_rs_variant_destroy(vk_rs_variant *v) {
     }
 }
 
+#define SPATIAL_HOST_PROBE 1
 #include "gfx_vk_spatial.h"
 
 enum { SRC = 20, OUT = 32 };

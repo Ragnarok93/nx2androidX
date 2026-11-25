@@ -188,12 +188,19 @@ Per-build knowledge stays where upstream keeps it: the rewriter's cuts in `patch
 
 ### Standalone spatial reconstruction
 
-The Vulkan present thread identifies real frames by their game present tickets. It crops and orients the source, then runs Bilinear, FSR 1 EASU/RCAS, or Qualcomm GSR 1 into a picture-sized image before passing that image to LSFG. The Native selection leaves the source at its guest size and fits it to the surface at presentation. Auto currently prefers GSR 1 and falls back to Bilinear if the raster path is unavailable. The runtime logs the effective mode, any fallback, and GPU timing when the queue supports timestamps. Changing the upscaler takes effect on the next real frame.
+The Vulkan present thread identifies real frames by their game present tickets.
+It crops and orients the source, then passes the reconstructed picture to LSFG.
+Auto is the default when a game has no saved preference. It tries image-driven
+GSR 2 when the picture needs enlargement and the queue can time the work.
+GSR 1 and Bilinear provide automatic fallback. FSR 1 and Native remain
+selectable. Native fits the guest-sized frame to the surface at presentation.
+The runtime reports the effective mode, fallback reason and measured GPU time.
 
 A certified full color copy to a same-size NVN display texture also offers the
 physical backing to the presenter. The handoff checks the display image and
 write sequence at the real-frame ticket. For an uncropped frame, Bilinear,
-FSR 1 and GSR 1 reconstruct from the physical extent into the picture extent.
+FSR 1, GSR 1 and image-driven GSR 2 reconstruct from the physical extent
+into the picture extent.
 Compatible raster inputs can be sampled from their original image view.
 Other encodings or orientations use a physical-size staging image. The original
 display copy preserves the guest texture for its other consumers and for
@@ -206,6 +213,27 @@ LSFG outputs and pause-menu redraws use the reconstructed images already availab
 The Upgrade tab and `python -m porter upgrade-apk` reuse existing rewritten modules, game data, and compatible shader bundles. The upgrade verifies the original signer, runtime ABI, profile and rewrite inputs, and replaces the standalone runtime and its display assets. The package identity, save directory, and imported driver files remain in place.
 
 ### Temporal Vulkan backend
+
+The image-driven GSR 2 path uses two consecutive real frames with matching
+source extents. Two physical-sized source surfaces alternate, so the current
+source stays available for the next frame without a second source copy. An
+8-by-8 tile motion pass and Qualcomm's two-pass fragment accumulation share
+the existing reconstruction submission. A limited coarse-to-fine search
+checks luma agreement, reverse matches and ambiguity. The accumulation
+shader checks actual color at the reprojected pixel and removes history
+from rejected regions, including newly revealed pixels and changed overlays.
+A HUD already blended into a game image is reconstructed with that image.
+For pixel-accurate temporal accumulation, replay-certified game inputs are
+still preferable.
+
+Surface rebuilds, gaps in real-frame tickets, and changes in the input or
+output geometry invalidate history. The image-driven path runs below the
+existing output pixel limit, caps its history allocation at 48 MiB, and uses
+existing reconstruction timestamps to measure its complete GPU cost. It
+falls back for 120 frames after three consecutive measurements over the
+cadence-based budget. Results are converted to the presentation format
+before LSFG. The frame path uses rendered images directly across game and
+engine versions.
 
 The GSR 2 backend accepts replay-certified scene color, [0,1] standard or
 reversed depth, object motion, camera reprojection, jitter and exposure.

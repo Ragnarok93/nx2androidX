@@ -83,7 +83,7 @@ unsigned dm_menu_rs_recorded(void) {return vk_rs_live_recorded();}
 static _Atomic int g_set_dyn, g_set_dyn_min = 70;             // requested true 3D dynamic-resolution mode and minimum percent
 static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), -1 unlocked, 0 follows profile
 static _Atomic int g_set_vivid;
-static _Atomic int g_set_upscaler, g_set_fsr_sharp = 50;            // spatial backend and sharpness 0..100
+static _Atomic int g_set_upscaler = SP_AUTO, g_set_fsr_sharp = 50;            // spatial backend and sharpness 0..100
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid

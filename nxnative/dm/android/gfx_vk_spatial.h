@@ -1,8 +1,15 @@
 // Present-thread-owned spatial reconstruction. All work uses the graphics queue.
 int vk_pass_dump_user_active(void);
 
+#if !defined(SPATIAL_HOST_PROBE) || defined(SGSR2_HOST_PROBE)
+#include "gfx_vk_gsr2.h"
+#define SP_TEMPORAL 1
+#else
+#define SP_TEMPORAL 0
+#endif
+
 enum { SP_EASU, SP_RCAS, SP_GSR1, SP_VIVID, SP_PASS_COUNT };
-enum { SP_SOURCE, SP_INTERMEDIATE, SP_DISPLAY, SP_OUTPUT, SP_IMAGE_COUNT };
+enum { SP_SOURCE, SP_INTERMEDIATE, SP_DISPLAY, SP_OUTPUT, SP_FLOW0, SP_FLOW1, SP_IMAGE_COUNT };
 enum { SP_SLOTS = 8, SP_MAX_PIXELS = 3840 * 1080 };
 
 typedef struct {
@@ -32,11 +39,27 @@ static struct {
     VkQueryPool queries;
     uint32_t timestamp_bits;
     unsigned slot, encoding;
+    float flow_budget_ms;
     uint64_t ticket, retry_after, measured_ticket;
     uint64_t query_ticket[SP_SLOTS];
     double gpu_ms;
     int submit_failed;
 } g_spatial;
+
+#if SP_TEMPORAL
+_Static_assert(SP_SLOTS == VK_GSR2_SLOTS, "shared reconstruction fence ring");
+static struct {
+    vk_gsr2 *ctx;
+    VkFence fence;
+    VkFormat format, source_format;
+    VkExtent2D render, output, candidate_render, candidate_output;
+    unsigned stable_frames;
+    int crop[4], flip_y, physical;
+    unsigned next, slow_frames;
+    uint64_t ticket, retry_after, last_source_ns;
+    float budget_ms[SP_SLOTS];
+} g_flow;
+#endif
 
 static void spatial_image_drop(spatial_image *s) {
     if (s->view) vkDestroyImageView(V.dev, s->view, NULL);
@@ -46,6 +69,9 @@ static void spatial_image_drop(spatial_image *s) {
 }
 
 static void spatial_forget_fence(VkFence fence) {
+#if SP_TEMPORAL
+    if (g_flow.fence == fence) g_flow.fence = VK_NULL_HANDLE;
+#endif
     for (int i = 0; i < SP_IMAGE_COUNT; i++)
         if (g_spatial.image[i].last_use == fence) g_spatial.image[i].last_use = VK_NULL_HANDLE;
 }
@@ -65,6 +91,11 @@ static void spatial_collect_sources(void) {
 }
 
 static void spatial_drop_images(void) {
+#if SP_TEMPORAL
+    if (g_flow.fence && vkWaitForFences(V.dev, 1, &g_flow.fence, VK_TRUE, UINT64_MAX)) return;
+    vk_gsr2_destroy(g_flow.ctx);
+    memset(&g_flow, 0, sizeof g_flow);
+#endif
     for (unsigned i = 0; i < SP_SLOTS; i++) spatial_release_source(i);
     for (int i = 0; i < SP_IMAGE_COUNT; i++) spatial_image_drop(&g_spatial.image[i]);
     g_spatial.ticket = g_spatial.retry_after = 0;
@@ -291,6 +322,15 @@ static void spatial_read_timing(unsigned slot) {
         uint64_t mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
         g_spatial.gpu_ms = ((stamp[1] - stamp[0]) & mask) * (double)V.props.limits.timestampPeriod / 1e6;
         g_spatial.measured_ticket = g_spatial.query_ticket[slot];
+#if SP_TEMPORAL
+        if (g_flow.budget_ms[slot] > 0) {
+            if (g_spatial.gpu_ms <= g_flow.budget_ms[slot]) g_flow.slow_frames = 0;
+            else if (++g_flow.slow_frames == 3) {
+                g_flow.retry_after = g_spatial.measured_ticket + 120;
+                g_flow.slow_frames = 0;
+            }
+        }
+#endif
     }
 }
 
@@ -314,6 +354,97 @@ static void spatial_report(int requested, int active, const char *reason, uint64
     }
 }
 
+#if SP_TEMPORAL
+static void spatial_flow_release(void) {
+    if (g_flow.fence && vkWaitForFences(V.dev, 1, &g_flow.fence, VK_TRUE, 0) != VK_SUCCESS)
+        return;
+    vk_gsr2_destroy(g_flow.ctx);
+    g_flow.ctx = NULL;
+    g_flow.fence = VK_NULL_HANDLE;
+    g_flow.ticket = 0;
+    for (unsigned i = SP_FLOW0; i <= SP_FLOW1; ++i) spatial_image_drop(&g_spatial.image[i]);
+}
+
+static int spatial_flow_ready(uint32_t iw, uint32_t ih, uint32_t w, uint32_t h,
+                              VkFormat format, const int crop[4], int flip_y,
+                              int physical, uint64_t ticket) {
+    if (ticket < g_flow.retry_after || iw > w || ih > h || iw < 16 || ih < 16 ||
+        (uint64_t)iw * ih > 1920u * 1080u || (uint64_t)w * h > SP_MAX_PIXELS) return 0;
+    if (g_flow.candidate_render.width != iw || g_flow.candidate_render.height != ih ||
+        g_flow.candidate_output.width != w || g_flow.candidate_output.height != h) {
+        g_flow.candidate_render = (VkExtent2D){iw, ih};
+        g_flow.candidate_output = (VkExtent2D){w, h};
+        g_flow.stable_frames = 0;
+    }
+    if (g_flow.stable_frames < 3) g_flow.stable_frames++;
+    if (g_flow.ctx && (g_flow.render.width != iw || g_flow.render.height != ih ||
+                      g_flow.output.width != w || g_flow.output.height != h ||
+                      g_flow.format != g_sfmt)) {
+        // Reallocating during an adaptive transition must not wait behind
+        // an in-flight frame. The spatial path handles this frame instead.
+        if (g_flow.stable_frames < 3) return 0;
+        spatial_flow_release();
+        if (g_flow.ctx) return 0;
+    }
+    if (!g_flow.ctx) {
+        VkFormatFeatureFlags color = spatial_features(g_sfmt);
+        const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+        if ((color & required) != required ||
+            !(spatial_features(VK_FORMAT_R16G16B16A16_SFLOAT) & VK_FORMAT_FEATURE_BLIT_SRC_BIT))
+            goto unavailable;
+        g_flow.render = (VkExtent2D){iw, ih};
+        g_flow.output = (VkExtent2D){w, h};
+        g_flow.format = g_sfmt;
+        g_flow.ctx = vk_gsr2_create_image(g_flow.render, g_flow.output, 48u * 1024u * 1024u);
+        if (!g_flow.ctx) goto unavailable;
+    }
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (!spatial_image_ready(SP_FLOW0, iw, ih, usage, g_sfmt) ||
+        !spatial_image_ready(SP_FLOW1, iw, ih, usage, g_sfmt)) goto unavailable;
+    if (g_flow.source_format != format || g_flow.flip_y != flip_y ||
+        g_flow.physical != physical || memcmp(g_flow.crop, crop, sizeof g_flow.crop))
+        g_flow.ticket = 0;
+    g_flow.source_format = format;
+    g_flow.flip_y = flip_y;
+    g_flow.physical = physical;
+    memcpy(g_flow.crop, crop, sizeof g_flow.crop);
+    return 1;
+
+unavailable:
+    spatial_flow_release();
+    g_flow.retry_after = ticket + 120;
+    return 0;
+}
+
+static int spatial_flow_record(VkCommandBuffer cb, unsigned slot, VkImage image,
+                               const int crop[4], int flip_y, uint64_t ticket,
+                               spatial_image *output) {
+    spatial_image *current = &g_spatial.image[SP_FLOW0 + g_flow.next];
+    const int cut = !g_flow.ticket || ticket - g_flow.ticket != 1;
+    spatial_image *previous = cut ? current : &g_spatial.image[SP_FLOW0 + (g_flow.next ^ 1)];
+    barrier(cb, current->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    spatial_blit(cb, image, current->texture.img, crop, g_flow.render.width, g_flow.render.height,
+                 flip_y, VK_FILTER_NEAREST);
+    barrier(cb, current->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    dm_temporal_frame frame = {.ticket = ticket, .stream = 1, .epoch = 1,
+        .iw = g_flow.render.width, .ih = g_flow.render.height,
+        .ow = g_flow.output.width, .oh = g_flow.output.height,
+        .inputs = DM_TEMPORAL_IMAGE_PAIR, .variants = DM_TEMPORAL_2FS,
+        .real = 1, .memory_ok = 1, .cut = cut};
+    vk_gsr2_output result;
+    if (!vk_gsr2_record_image(g_flow.ctx, cb, slot, &frame,
+            (vk_gsr2_input){current->view, VK_IMAGE_LAYOUT_GENERAL},
+            (vk_gsr2_input){previous->view, VK_IMAGE_LAYOUT_GENERAL}, &result)) return 0;
+    int full[4] = {0, 0, (int)result.extent.width, (int)result.extent.height};
+    barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    spatial_blit(cb, result.image, output->texture.img, full, result.extent.width, result.extent.height,
+                 0, VK_FILTER_NEAREST);
+    barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    return 1;
+}
+#endif
+
 // A nonzero ticket identifies a unique rendered game frame. Generated frames
 // and overlay-only presents never enter this function. Cached output remains
 // readable by LSFG and the presenter until the next reconstruction.
@@ -325,8 +456,12 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (g_spatial.ticket == ticket) return output;
     g_spatial.ticket = 0;
     int requested = dm_spatial_mode();
-    int mode = requested == SP_AUTO ? SP_SGSR1 : requested;
+    int wants_flow = requested == SP_AUTO || requested == SP_SGSR2;
+    int mode = wants_flow ? SP_SGSR1 : requested;
     const char *reason = NULL;
+#if SP_TEMPORAL
+    if (!wants_flow && g_flow.ctx) spatial_flow_release();
+#endif
     if (mode == SP_NATIVE) {
         spatial_report(requested, SP_NATIVE, NULL, ticket);
         return NULL;
@@ -366,10 +501,21 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     VkFormatFeatureFlags raster_features = spatial_features(sample_fmt);
     VkFormatFeatureFlags sampling = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     uint32_t iw = (uint32_t)crop[2], ih = (uint32_t)crop[3];
+    int flow = 0;
+#if SP_TEMPORAL
+    flow = wants_flow && (g_spatial.queries || g_spatial.flow_budget_ms == 0.0f) &&
+        (src_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
+        (dst_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
+        spatial_flow_ready(iw, ih, w, h, format, crop, flip_y, physical != NULL, ticket);
+    if (flow) {
+        mode = SP_SGSR2;
+        reason = "image-driven motion";
+    } else if (wants_flow) reason = "temporal reconstruction unavailable or over budget";
+#endif
     float sharpness = dm_fsr_sharpness() / 100.0f;
     int rcas = mode == SP_FSR1 && sharpness > 0.001f;
     int first_pass = mode == SP_FSR1 ? SP_EASU : SP_GSR1;
-    if (mode != SP_BILINEAR &&
+    if (!flow && mode != SP_BILINEAR &&
         (iw < 16 || ih < 16 || (raster_features & sampling) != sampling ||
          !(raster_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ||
          !spatial_pipeline_ready(first_pass) || (rcas && !spatial_pipeline_ready(SP_RCAS)))) {
@@ -387,7 +533,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
 
     spatial_image *stage = &g_spatial.image[SP_SOURCE];
     spatial_image *intermediate = &g_spatial.image[SP_INTERMEDIATE];
-    int raster = mode != SP_BILINEAR;
+    int raster = !flow && mode != SP_BILINEAR;
     int isolated = crop[0] || crop[1] || iw != sw || ih != sh;
     unsigned slot = g_spatial.slot % SP_SLOTS;
     // A matching encoded view can feed the raster filters directly. Cropped,
@@ -404,7 +550,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
             g_spatial.pool, 1, &g_spatial.dsl};
         if (vkAllocateDescriptorSets(V.dev, &ai, source_set)) direct = 0;
     }
-    int stage_needed = (raster && !direct) || isolated;
+    int stage_needed = !flow && ((raster && !direct) || isolated);
     VkImageUsageFlags stage_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         (raster ? VK_IMAGE_USAGE_SAMPLED_BIT : VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     rcas = raster && rcas;
@@ -448,6 +594,16 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         barrier(cb, stage->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 raster ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL);
     }
+#if SP_TEMPORAL
+    if (flow) {
+        if (!spatial_flow_record(cb, slot, image, crop, flip_y, ticket, output)) {
+            vkEndCommandBuffer(cb);
+            g_flow.ticket = 0;
+            spatial_report(requested, SP_NATIVE, "temporal recording rejected", ticket);
+            return NULL;
+        }
+    } else
+#endif
     if (raster) {
         spatial_constants params = {{(float)iw, (float)ih, (float)w, (float)h}, {0, 0}, sharpness, 0};
         spatial_image *first = rcas ? intermediate : output;
@@ -478,6 +634,16 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     pthread_mutex_unlock(&g_vk_queue_mu);
     if (r) goto submit_error;
 
+#if SP_TEMPORAL
+    g_flow.budget_ms[slot] = flow ? g_spatial.flow_budget_ms : 0.0f;
+    if (flow) {
+        vk_gsr2_commit(g_flow.ctx, 1);
+        g_flow.next ^= 1;
+        g_flow.ticket = ticket;
+        g_flow.fence = fence;
+        for (unsigned i = SP_FLOW0; i <= SP_FLOW1; ++i) g_spatial.image[i].last_use = fence;
+    }
+#endif
     if (physical) {
         atomic_fetch_add(&physical->backing->refs, 1);
         g_spatial.source[slot] = physical->backing;
@@ -497,6 +663,9 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     return output;
 
 submit_error:
+#if SP_TEMPORAL
+    if (flow) vk_gsr2_commit(g_flow.ctx, 0);
+#endif
     g_spatial.submit_failed = 1;
     spatial_report(requested, SP_NATIVE, "reconstruction submission failed", ticket);
     return NULL;
