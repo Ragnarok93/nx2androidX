@@ -14,6 +14,7 @@
 #include "dm.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
+#include "gfx_vk_resolution_draw.h"
 
 #define VKLOG(...) LOG("[vk] " __VA_ARGS__)
 #define VKRED_ONCE(id, ...) do { static int once_##id; if (!once_##id++) LOG("[RED] [vk] " __VA_ARGS__); } while (0)
@@ -225,7 +226,7 @@ void vk_shaders_open(const char *path);
 VkBuffer vk_support_buffer(void);
 // Optional trailer is absent in old bundles. Lookup is used only by scaled path.
 int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned *slot, unsigned *flags);
-typedef struct { unsigned binding; float scale; } vk_rs_sample_scale;
+typedef nx_rs_draw_sample_entry vk_rs_sample_scale;
 // Only for the scaled replay path. Identity returns the original immutable
 // support buffer. Nonidentity data is submission-owned, not mutable globally.
 int vk_shader_resolution_support(const vkshader_t *s, float target_scale,

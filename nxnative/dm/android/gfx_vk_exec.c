@@ -235,7 +235,9 @@ static void render_cond(const p_render_cond *rc) {
 }
 
 // Startup-only diagnostic switches; the native path bypasses the classifier.
-static int g_rs_audit, g_rs_probe, g_rs_observe;
+static int g_rs_audit, g_rs_probe, g_rs_observe, g_rs_replay;
+static nx_rs_raster g_rs_raster;
+static int g_rs_pass_scaled;
 static void exec_begin(int continuing) {   // internal segments retain the current logical NVN and conditional state
     static int inited; if (!inited) {
         inited = 1;
@@ -244,10 +246,13 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         __atomic_store_n(&g_vk_rs_tracking,g_rs_audit,__ATOMIC_RELAXED);
         g_rs_probe = probe && atoi(probe) != 0;
         g_rs_observe = g_rs_audit || g_rs_probe;
+        const char *replay = getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
+        g_rs_replay = replay && atoi(replay) != 0;
         state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start();
     }
     if (!continuing) { g_rc_npend = 0; g_rc_skip = 0; }
     { void vk_tex_release_drain(void); vk_tex_release_drain(); }   // Finalized textures' CPU-written marks that no queued job needs any more (gfx_vk_tex.c)
+    g_rs_pass_scaled = 0;
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_cb_draws = 0; g_ord_parts = 0; g_psplit_now = 0; g_set_epoch++; x_read();
     if (g_prof_on) { extern uint64_t g_pkg_ns, g_pkg_n; memset(g_prof_ns, 0, sizeof g_prof_ns); g_prof_t0 = tick(); g_prof_pkg0 = g_pkg_ns; g_prof_npkg0 = g_pkg_n; g_prof_pipes0 = g_vkst.pipes_built; }
     { extern volatile int g_vk_samp_log; if (g_vk_samp_log > 0) VKLOG("submission begins (present %llu, thread %d)", (unsigned long long)g_tex_frame, (int)gettid()); }
@@ -458,7 +463,11 @@ static void lrz_touch(vkimg_t *im, int write) {
         VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &m)); VKCHK(vkBindBufferMemory(V.dev, b, m, 0)); }
     VkCommandBuffer cb = vk_cmd();
     VkBufferImageCopy c = {0, 0, 0, {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, {0, 0, 0}, {1, 1, 1}};
-    if ((g_lrz_touch & LRZ_CORNER) && im->w && im->h) c.imageOffset = (VkOffset3D){(int32_t)im->w - 1, (int32_t)im->h - 1, 0};
+    if (g_lrz_touch & LRZ_CORNER) {
+        const vk_rs_variant *v=im->rs_backing;
+        uint32_t w=v?v->physical_w:im->w,h=v?v->physical_h:im->h;
+        if (w && h) c.imageOffset=(VkOffset3D){(int32_t)w-1,(int32_t)h-1,0};
+    }
     vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, b, 1, &c); vk_img_barrier_all(cb);   // (begin_pass's barrier already ordered it after the writes)
     if (write) { vkCmdCopyBufferToImage(cb, b, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c); vk_img_barrier_all(cb); }
 }
@@ -1285,11 +1294,12 @@ void vk_end_pass(void) {
     if (S.pass_open == 1 && g_lin_back && g_pass_draws) lin_back();
     if (S.pass_open == 1) crumb_mark(0);
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_tf_in_pass = 0;
+    g_rs_pass_scaled = 0;
 }
 // a pass end before something that reads or writes pool memory other than through a uniform binding (copies, fills, dispatches, buffer ↔ texture
 // copies, the submission's end): the deferred uniform updates land first (draws read them through their shadows, so ordinary pass ends keep them)
 void vk_end_pass_land(void) { vk_end_pass(); if (vk_sub_open()) vk_ubd_land(vk_cmd()); }
-static int pass_whole(VkRect2D r) { return !r.offset.x && !r.offset.y && r.extent.width >= S.pass_w && r.extent.height >= S.pass_h; }
+static int pass_whole(VkRect2D r) { return !r.offset.x && !r.offset.y && r.extent.width >= P_ri.renderArea.extent.width && r.extent.height >= P_ri.renderArea.extent.height; }
 // An empty colour slot 0 (DM_VK_SLOT0_FILL; opt-in, any GPU). A pass whose colour attachments start past slot 0 (slot 0 a null view, VK_ATTACHMENT_UNUSED in a render
 // pass) hung the GPU of an Adreno 830 and lost the device every frame: a OnePlus Pad 3 (driver 0x8032004a) whose pass bound a target in slot 5 with slots 0-4 empty, which a
 // later pass drew into as slot 0; a scratch target in slot 0 alone fixed it (droidplay-core 87bd41d62, the idea). Not reproduced with nx2android: no such hang is known on
@@ -1339,8 +1349,34 @@ fail:
     if (im.mem) vkFreeMemory(V.dev, im.mem, NULL);
     return 0;
 }
+// Actual replay geometry for pre-authorized scaled backing owners. Do not
+// infer physical dimensions from a requested setting. Native-only passes
+// retain their existing mixed-size semantics.
+static int resolution_configure_pass(void) {
+    nx_rs_draw_extent ext[9] = {0}, chosen;
+    int scaled=0;
+    for (unsigned i=0;i<9;i++) {
+        vkimg_t *im=P_att[i].im; if (!im) continue;
+        const vk_rs_variant *v=im->rs_backing;
+        ext[i]=(nx_rs_draw_extent){P_att[i].w,P_att[i].h,v?v->physical_w:P_att[i].w,v?v->physical_h:P_att[i].h,1};
+        if (v && (v->physical_w!=im->w || v->physical_h!=im->h)) {
+            scaled=1;
+            if (v->image!=im->img || P_att[i].w!=im->w || P_att[i].h!=im->h ||
+                P_att[i].layers!=1 || P_att[i].fmt!=im->fmt) return 0;
+        }
+    }
+    if (!scaled) return 1;
+    if (!nx_rs_draw_group(ext,9,&chosen) || chosen.lw!=P_ri.renderArea.extent.width ||
+        chosen.lh!=P_ri.renderArea.extent.height || P_ri.layerCount!=1 ||
+        !nx_rs_raster_init(&g_rs_raster,chosen.lw,chosen.lh,chosen.pw,chosen.ph)) return 0;
+    P_ri.renderArea.extent=(VkExtent2D){chosen.pw,chosen.ph};
+    for (unsigned i=0;i<9;i++) if (ext[i].live) { P_att[i].w=ext[i].pw; P_att[i].h=ext[i].ph; }
+    g_rs_pass_scaled=1;
+    return 1;
+}
 static int begin_pass(void) {
     if (S.pass_open) return 1;
+    g_rs_pass_scaled = 0;
     int psplit = g_psplit_now; g_psplit_now = 0;   // a pass split (prepare_draw): taken before any early return, so the flag never forces a later pass's cut
     VkCommandBuffer cb = vk_cmd();
     VkRenderingAttachmentInfo *ca = P_ca; memset(ca, 0, sizeof P_ca);
@@ -1446,6 +1482,7 @@ static int begin_pass(void) {
     P_da = da; P_sa = sa; P_cleared = 0;
     P_ri = (VkRenderingInfo){VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, {w, h}}, layers, 0, (uint32_t)ncol, P_ca,
                              (S.daspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? &P_da : NULL, (S.daspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? &P_sa : NULL};
+    if (g_rs_replay && !resolution_configure_pass()) { VKLOG("[resolution] incompatible physical attachment group; replay refused"); return 0; }
     S.pass_open = 2; S.pass_w = w; S.pass_h = h; S.samples = samples; S.ncol = ncol; S.bound_pipe = VK_NULL_HANDLE;
     return 1;
 }
@@ -1491,6 +1528,11 @@ static VkRect2D scissor_rect(void) {
         if (sx > x) x = (int32_t)sx; if (sy > y) y = (int32_t)sy; if (sx1 < x1) x1 = sx1; if (sy1 < y1) y1 = sy1;
     }
     if (x1 < x) x1 = x; if (y1 < y) y1 = y;
+    if (g_rs_pass_scaled) {
+        nx_rs_raster_rect r;
+        if (!nx_rs_clip_scissor(&g_rs_raster,x,y,(uint32_t)(x1-x),(uint32_t)(y1-y),0,&r)) return (VkRect2D){{0,0},{0,0}};
+        return (VkRect2D){{(int32_t)r.x,(int32_t)r.y},{r.w,r.h}};
+    }
     return (VkRect2D){{x, y}, {(uint32_t)(x1 - x), (uint32_t)(y1 - y)}};
 }
 // A clear of some channels only (NVN's ClearColor mask): vkCmdClearAttachments writes every channel, so it is a draw of dm/android/shaders/maskclear.* with the mask as
@@ -1544,7 +1586,7 @@ static int clear_masked(const p_clear_color *c, VkRect2D r) {   // 1 = done
     if (!pass_commit()) return 1;
     VkCommandBuffer cb = vk_cmd();
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); S.bound_pipe = VK_NULL_HANDLE;
-    VkViewport vp = {0, 0, (float)S.pass_w, (float)S.pass_h, 0, 1}; vkCmdSetViewport(cb, 0, 1, &vp); vkCmdSetScissor(cb, 0, 1, &r);
+    VkViewport vp = {0, 0, (float)P_ri.renderArea.extent.width, (float)P_ri.renderArea.extent.height, 0, 1}; vkCmdSetViewport(cb, 0, 1, &vp); vkCmdSetScissor(cb, 0, 1, &r);
     vkCmdPushConstants(cb, g_mc.pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, c->rgba);
     vkCmdDraw(cb, 3, 1, 0, 0);
     g_bc_stale = 1;   // the next draw sets its viewport, scissor and bindings again (bc_fresh)
@@ -2121,6 +2163,22 @@ static void resolution_note_binding(int st, const dmsv_bind *b, vkimg_t *im, int
         b->count!=1 || b->dim!=1 || (b->flags & 3)) flags|=NX_RO_UNKNOWN;
     vk_rs_note(im,flags);
 }
+// Collect physical source ratios at the actual descriptor resolution seam,
+// including cache hits. Stage-local scale buffers use the translator binding
+// metadata; never guess from a texture ID or a requested global percentage.
+typedef struct { nx_rs_draw_samples samples; int failed; } rs_stage_collect;
+static rs_stage_collect *g_rs_collect;
+static void resolution_collect_sample(int st,const dmsv_bind *b,vkimg_t *im,int storage) {
+    if (!im || !im->rs_backing) return;
+    const vk_rs_variant *v=im->rs_backing;
+    if (v->physical_w==im->w && v->physical_h==im->h) return;
+    nx_rs_raster r; unsigned slot,flags;
+    int ok=st>=0 && st<3 && !storage && b->count==1 && b->dim==1 && !(b->flags&3) &&
+        v->image==im->img && nx_rs_raster_init(&r,im->w,im->h,v->physical_w,v->physical_h) &&
+        S.sh[st] && vk_shader_resolution_binding(S.sh[st],b->binding,&slot,&flags) &&
+        slot!=NX_RS_REF_UNKNOWN && !(flags&(NX_RS_REF_UNSUPPORTED|NX_RS_REF_WRITES));
+    if (!ok || !nx_rs_draw_sample(&g_rs_collect->samples,b->binding,r.scale,1)) g_rs_collect->failed=1;
+}
 static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *ii, unsigned element, int storage) {   // the view's view_num
     int tid = (int)(h & 0xfffff); const view_t *v = NULL; const tex_t *t = NULL;
     ii->imageLayout = VK_IMAGE_LAYOUT_GENERAL; ii->sampler = VK_NULL_HANDLE; ii->imageView = VK_NULL_HANDLE;
@@ -2137,6 +2195,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         ii->imageView = g_tvc[ck].v; if (g_tvc[ck].im) g_tvc[ck].im->last_use = mtl_last_fence() + 1; vk_texdump_note(g_tvc[ck].im);
         if (storage) note_storage_image(st, g_tvc[ck].im);
         if (vk_rs_tracking()) resolution_note_binding(st,b,g_tvc[ck].im,storage);
+        if (g_rs_collect) resolution_collect_sample(st,b,g_tvc[ck].im,storage);
         if (!storage) ii->sampler = samp_for(st, b, h, g_tvc[ck].num != 0);
         return g_tvc[ck].num;
     }
@@ -2191,6 +2250,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
                              (unsigned long long)t->serial, (const void *)t->pool, (unsigned long long)t->off, (unsigned long long)t->L.size, (const void *)t->mem, (unsigned)t->d.flags, t->pool ? (unsigned)t->pool->flags : 0u, (int)t->has_layout, (void *)im, im ? im->w : 0, im ? im->h : 0, im ? im->fmt : 0, im ? im->layers : 0, im ? im->levels : 0, im ? (int)im->gpu_w : -1, (void *)ii->imageView);
         if (im) im->last_use = mtl_last_fence() + 1;
         if (vk_rs_tracking()) resolution_note_binding(st,b,im,storage);
+        if (g_rs_collect) resolution_collect_sample(st,b,im,storage);
         if (ii->imageView) num = view_num(t, v);
         if (ii->imageView) { g_tvc[ck].epoch = g_set_epoch; g_tvc[ck].gen = g_tex_gen; g_tvc[ck].tid = tid; g_tvc[ck].dim = b->dim; g_tvc[ck].arr = b->flags & 1; g_tvc[ck].v = ii->imageView; g_tvc[ck].im = im; g_tvc[ck].num = num; g_tvc[ck].sc = cache_class; }
     }
@@ -2334,13 +2394,15 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         if (k == RK_SBUF || k == RK_SBUF_UBO || k == RK_IMG || k == RK_IMG_UBO || k == RK_IMG_TBUF) { vk_readback_unknown(); break; }
         if (d != RD_UBO && d != RD_SAMPLED && d != RD_TBUF && d != RD_IMAGE && d != RD_SAMPLER) { vk_readback_unknown(); break; }
     }
-    int memo = !vk_rs_tracking() && st < 3 && !g_texel_snapshots[st].have_snapshot && !(g_pd_state == 1 && (g_pd_effects || g_pd_full)) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
+    int memo = !g_rs_replay && !vk_rs_tracking() && st < 3 && !g_texel_snapshots[st].have_snapshot && !(g_pd_state == 1 && (g_pd_effects || g_pd_full)) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
     uint32_t vd[96]; uint64_t vum = 0, vim = 0;   // verify: what the memo gave
     if (memo && set_memo_get(st, s, dofs)) { static unsigned nv; if (!g_x_setverify || ++nv % 64) { g_set_memo++; return g_smemo[st].set; }
         verify = 1; memcpy(vd, dofs, sizeof *dofs * (size_t)s->ndyn); vum = g_num_um; vim = g_num_im; }
     uint64_t gtex = g_tex_gen, gsamp = __atomic_load_n(&g_samp_gen, __ATOMIC_ACQUIRE); uint32_t gpool = vk_pool_gen();   // before collecting: a change racing it (game thread) leaves the memo outdated
     VkDescriptorSet set = VK_NULL_HANDLE; struct { uint32_t b, o; int i; } dp[96]; int nd = 0; uint64_t tb0 = tick();
     VkWriteDescriptorSet w[96]; VkDescriptorBufferInfo bi[96]; VkDescriptorImageInfo ii[96 * 4]; VkBufferView bv[128]; uint32_t nw = 0, nii = 0, nbv = 0;
+    rs_stage_collect rs; int rs_support=-1;
+    if (g_rs_replay) { memset(&rs,0,sizeof rs); g_rs_collect=&rs; }
     int ncb = 0; uint8_t mci[MEMO_CB]; VkDescriptorBufferInfo mcd[MEMO_CB];   // the constant buffers, for the memo
     g_num_um = g_num_im = g_num_r32 = 0;
     int dynslots = 0;
@@ -2352,7 +2414,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         wr->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr->dstSet = set; wr->dstBinding = b->binding; wr->descriptorCount = 1;
         VkBuffer buf; VkDeviceSize off, len;
         switch (b->kind) {
-        case RK_SUPPORT: bi[nw] = (VkDescriptorBufferInfo){vk_support_buffer(), 0, 65536}; break;
+        case RK_SUPPORT: bi[nw] = (VkDescriptorBufferInfo){vk_support_buffer(), 0, 65536}; if (g_rs_collect) rs_support=(int)nw; break;
         case RK_C1: vk_shader_c1(s, &buf, &off, &len); bi[nw] = (VkDescriptorBufferInfo){buf, off, len}; break;
         case RK_CBUF: {
             int bound = cbuf_desc(st, s, b, &bi[nw]);
@@ -2508,6 +2570,15 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         }
         nw++;
     }
+    if (g_rs_collect) {
+        g_rs_collect=NULL;
+        float target=st==1 && g_rs_pass_scaled ? g_rs_raster.scale : 1.0f;
+        if (rs.failed || ((target!=1.0f || rs.samples.count) &&
+            (rs_support<0 || !vk_shader_resolution_support(s,target,rs.samples.entries,rs.samples.count,&bi[rs_support])))) {
+            VKLOG("[resolution] unrepresentable stage %d shader %016llx; replay refused",st,(unsigned long long)s->key);
+            return VK_NULL_HANDLE;
+        }
+    }
     for (int j = 0; j < nd; j++) dofs[j] = dp[j].o;
     if (g_tracing) for (int j = 0; j < nd; j++) VKLOG("  stage %d binding %u: dynamic offset %u", st, dp[j].b, dp[j].o);
     if (g_tracing) for (uint32_t i = 0; i < nw; i++) {   // the refused draw (bisection): every descriptor it is given
@@ -2574,6 +2645,10 @@ static void set_dynamic(VkCommandBuffer cb, int depth_bounds) {
     { uint32_t sw; memcpy(&sw, S.vp_sw[0], 4);
       if (sw == 0x100) { vp.y += vp.height; vp.height = -vp.height; }
       else if (sw) VKRED_ONCE(81, "viewport swizzle %d,%d,%d,%d not implemented (drawn unswizzled)", S.vp_sw[0][0], S.vp_sw[0][1] ^ 2, S.vp_sw[0][2] ^ 4, S.vp_sw[0][3] ^ 6); }
+    if (g_rs_pass_scaled) {
+        nx_rs_viewport r={vp.x,vp.y,vp.width,vp.height}; nx_rs_scale_viewport(&g_rs_raster,&r);
+        vp.x=r.x; vp.y=r.y; vp.width=r.w; vp.height=r.h;
+    }
     if (vp.minDepth < 0) vp.minDepth = 0; if (vp.maxDepth > 1) vp.maxDepth = 1;
     if (!BC_SAME(vp, vp)) { vkCmdSetViewport(cb, 0, 1, &vp); g_bc.vp = vp; }
     VkRect2D sc = scissor_rect(); if (!BC_SAME(sc, sc)) { vkCmdSetScissor(cb, 0, 1, &sc); g_bc.sc = sc; }
@@ -2834,7 +2909,8 @@ static int prepare_draw(int prim, int indexed) {
     for (int st = 0; st < 3; st++) if (S.sh[st] && !(st == 1 && k.raster_discard)) {
         uint64_t m0 = g_set_memo; int n0 = g_stn[st]; g_stn[st] = 0; g_coll_st = st;   // the images it is collected with (vk_watch); a memoized set keeps the last ones
         sets[S.sh[st]->set] = stage_set(st, S.sh[st], dofs[S.sh[st]->set], NULL); k.um[st] = g_num_um; k.im[st] = g_num_im; k.r32[st] = g_num_r32;
-        g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0; }
+        g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0;
+        if (g_rs_replay && !sets[S.sh[st]->set]) { g_vkst.skip_rt++; return 0; } }
     if (g_order_check) {   // the order-only barrier before this draw (see g_order_keep): kept, or the pass ends here with it
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
         if (g_pass_wmem || shader_wmem(S.sh[0]) || shader_wmem(fs) || shader_wmem(S.sh[2]) || order_feedback(3)) {
@@ -3506,6 +3582,7 @@ static void dispatch(const p_dispatch *d) {
     if (g_sc.usage) g_sc.storage_count = g_sc.uniform_count = 0;
     g_compute_image_count = 0;
     uint32_t dofs[96]; VkDescriptorSet set = stage_set(5, cs, dofs, d->ind ? &indirect_c0 : NULL);
+    if (g_rs_replay && !set) { g_compute_failed++; return; }
     uint64_t ck[4] = {cs->key, g_num_um, g_num_im, g_num_r32};
     pthread_mutex_lock(&g_cpipe_mu);
     if (g_cpipe_warming && !memcmp(g_cpipe_warm_key, ck, sizeof ck)) {
