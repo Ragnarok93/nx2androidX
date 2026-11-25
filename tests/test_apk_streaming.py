@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import io
 import json
 import sys
 import os
@@ -95,11 +96,14 @@ class StreamingApkTests(unittest.TestCase):
                             "--asset", f"nx2a-data.zip={payload}"], check=True, capture_output=True)
             host.write_bytes(b"new host")
             dex.write_bytes(b"new dex")
+            gsr_license = ROOT / "nxnative/dm/android/shaders/licenses/sgsr1.txt"
             args = [sys.executable, str(apkdir / "apkdriver.py"), str(old), str(new), str(key),
-                    "--host", str(host), "--dex", str(dex)]
+                    "--host", str(host), "--dex", str(dex),
+                    "--asset", f"licenses/sgsr1.txt={gsr_license}"]
             subprocess.run(args, check=True, capture_output=True)
             with zipfile.ZipFile(old) as before, zipfile.ZipFile(new) as after:
-                self.assertEqual(before.namelist(), after.namelist())
+                self.assertEqual(set(after.namelist()) - set(before.namelist()), {"assets/licenses/sgsr1.txt"})
+                self.assertEqual(after.read("assets/licenses/sgsr1.txt"), gsr_license.read_bytes())
                 self.assertEqual(after.read("classes.dex"), b"new dex")
                 self.assertEqual(after.read("lib/arm64-v8a/libdmhost.so"), b"new host")
                 for name in before.namelist():
@@ -114,6 +118,42 @@ class StreamingApkTests(unittest.TestCase):
             before = new.read_bytes()
             self.assertNotEqual(subprocess.run(args, capture_output=True).returncode, 0)
             self.assertEqual(new.read_bytes(), before)
+
+    def test_runtime_upgrade_checks_elf_shader_and_interface_compatibility(self):
+        from porter.revision import PLAYER_API_REVISION
+        from porter.upgrade_apk import metadata
+        from porter.upstream import BuildError
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "game.apk"
+
+            def build(machine=183, shader_version=2, revision=PLAYER_API_REVISION):
+                payload = io.BytesIO()
+                with zipfile.ZipFile(payload, "w") as pack:
+                    manifest = {"title_id": "0100000000010000"}
+                    if revision is not None:
+                        manifest["player_api_revision"] = revision
+                    pack.writestr("nx2a-data.json", json.dumps(manifest))
+                    pack.writestr("mods/build_src.sha256", "test fixture")
+                    pack.writestr("shaders.dmsv", struct.pack("<4sII", b"DMSV", shader_version, 0))
+                with zipfile.ZipFile(path, "w") as apk:
+                    ident = b"\x7fELF\x02\x01\x01".ljust(16, b"\0")
+                    apk.writestr("lib/arm64-v8a/libdmhost.so", ident + struct.pack("<HH", 3, machine))
+                    apk.writestr("assets/nx2a-data.zip", payload.getvalue())
+
+            build()
+            self.assertEqual(metadata(path, None)[0]["player_api_revision"], PLAYER_API_REVISION)
+            build(shader_version=1, revision=None)
+            self.assertNotIn("player_api_revision", metadata(path, None)[0])
+            for args, error in [
+                ({"machine": 62}, "arm64-v8a"),
+                ({"shader_version": 3}, "shader bundle is incompatible"),
+                ({"revision": PLAYER_API_REVISION + 1}, "runtime interface revision"),
+            ]:
+                with self.subTest(args=args):
+                    build(**args)
+                    with self.assertRaisesRegex(BuildError, error):
+                        metadata(path, None)
 
     def test_v2_signed_apk_keeps_zip_entries_readable(self):
         with tempfile.TemporaryDirectory() as temp:

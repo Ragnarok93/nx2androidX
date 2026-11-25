@@ -11,6 +11,7 @@
 #include "radv_test_flags.h"
 #include "dm_input.h"
 #include "overlay_layout.h"
+#include "spatial_upscaler.h"
 #include "saves_android.h"
 #include "jni_android.h"
 #include "driver_selection.h"
@@ -74,7 +75,7 @@ static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalo
 static _Atomic int g_set_dyn, g_set_dyn_min = 70;             // requested true 3D dynamic-resolution mode and minimum percent
 static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), 0 follows profile
 static _Atomic int g_set_vivid;
-static _Atomic int g_set_fsr, g_set_fsr_sharp = 50;                 // FSR 1 spatial upscaling and RCAS 0..100
+static _Atomic int g_set_upscaler, g_set_fsr_sharp = 50;            // spatial backend and sharpness 0..100
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid
@@ -109,12 +110,17 @@ static void settings_load(void) {
         int n = atoi(fg_env); atomic_store(&g_set_fg_flow, n <= 0 ? 0 : n < 25 ? 25 : n > 100 ? 100 : n);
     }
     if ((fg_env = getenv("DM_VIVID"))) atomic_store(&g_set_vivid, atoi(fg_env) != 0);
-    if ((fg_env = getenv("DM_FSR"))) atomic_store(&g_set_fsr, atoi(fg_env) != 0);
+    if ((fg_env = getenv("DM_FSR"))) atomic_store(&g_set_upscaler, atoi(fg_env) ? SP_FSR1 : SP_NATIVE);
+    if ((fg_env = getenv("DM_UPSCALER"))) {
+        int mode = atoi(fg_env);
+        if (spatial_mode_valid(mode)) atomic_store(&g_set_upscaler, mode);
+    }
     if ((fg_env = getenv("DM_FSR_SHARPNESS"))) {
         int v = atoi(fg_env); atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
     }
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
     if (!f) return;
+    int saved_upscaler = -1;
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
         else if (sscanf(line, "fps=%d", &v) == 1) atomic_store(&g_set_fps, v != 0);
         else if (sscanf(line, "docked=%d", &v) == 1) setenv("DM_OPMODE", v ? "1" : "0", 1);   // over env.txt's: the host reads it once, at its first query
@@ -124,7 +130,8 @@ static void settings_load(void) {
         else if (sscanf(line, "fg_mult=%d", &v) == 1) atomic_store(&g_set_fg_mult, v < 2 ? 2 : v > 4 ? 4 : v);
         else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow, v <= 0 ? 0 : v < 25 ? 25 : v > 100 ? 100 : v);
         else if (sscanf(line, "vivid=%d", &v) == 1) atomic_store(&g_set_vivid, v != 0);
-        else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_fsr, v != 0);
+        else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_upscaler, v ? SP_FSR1 : SP_NATIVE);
+        else if (sscanf(line, "upscaler=%d", &v) == 1 && spatial_mode_valid(v)) saved_upscaler = v;
         else if (sscanf(line, "fsr_sharp=%d", &v) == 1) atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
         else if (sscanf(line, "fps_mode=%d", &v) == 1 && (v == 30 || v == 40 || v == 60)) atomic_store(&g_set_rate, v);
         else if (sscanf(line, "dyn_scale=%d", &v) == 1) atomic_store(&g_set_dyn, v != 0);
@@ -139,14 +146,16 @@ static void settings_load(void) {
         } else if (sscanf(line, "menu_x=%d", &v) == 1 && v >= 0 && v <= 10000) { int m = ctl_named("menu"); for (int l = 0; l < 2 && m >= 0; l++) atomic_store(&g_cust[0][l][m][0], v + 1); }   // before
         else if (sscanf(line, "menu_y=%d", &v) == 1 && v >= 0 && v <= 10000) { int m = ctl_named("menu"); for (int l = 0; l < 2 && m >= 0; l++) atomic_store(&g_cust[0][l][m][1], v + 1); }   // the editor
     }
+    if (saved_upscaler >= 0) atomic_store(&g_set_upscaler, saved_upscaler);
     fclose(f);
 }
 static void settings_save(void) {
     char p[600], tmp[610]; snprintf(p, sizeof p, "%s/settings.txt", g_root); snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
-    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\nfsr=%d\nfsr_sharp=%d\nfps_mode=%d\ndyn_scale=%d\ndyn_min=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
+    int upscaler = dm_spatial_mode();
+    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\nfsr=%d\nupscaler=%d\nfsr_sharp=%d\nfps_mode=%d\ndyn_scale=%d\ndyn_min=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
             atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow),
-            atomic_load(&g_set_fsr), atomic_load(&g_set_fsr_sharp), atomic_load(&g_set_rate),
+            upscaler == SP_FSR1, upscaler, atomic_load(&g_set_fsr_sharp), atomic_load(&g_set_rate),
             atomic_load(&g_set_dyn), atomic_load(&g_set_dyn_min));
     fprintf(f, "vivid=%d\n", atomic_load(&g_set_vivid));
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
@@ -684,14 +693,14 @@ int dm_menu_state(void) {
     int sub = atomic_load(&g_diag_flags_page);
     return atomic_load(&g_set_overlay) | atomic_load(&g_set_rumble) << 1 | (dm_opmode() != 0) << 2 |
            atomic_load(&g_set_fps) << 3 | (atomic_load(&g_menu_hi) + 1) << 4 |
-           atomic_load(&g_set_fsr) << 8 | atomic_load(&g_set_opacity) << 9 |
+           atomic_load(&g_set_opacity) << 9 |
            atomic_load(&g_set_fg) << 19 | atomic_load(&g_sv_st) << 20 |
            ((atomic_load(&g_sv_n) + atomic_load(&g_menu_cfg_ver) + atomic_load(&g_diag_ver)) & 3) << 24 |
            (sub ? OVM_DIAG_STATE : 0) | (sub == 2 ? OVM_FLAGS_STATE : 0) |
            atomic_load(&g_menu_tab) << 29;
 }
 int dm_vivid_enabled(void) { return atomic_load(&g_set_vivid); }
-int dm_fsr_enabled(void) { return atomic_load(&g_set_fsr); }
+int dm_spatial_mode(void) { return atomic_load(&g_set_upscaler); }
 int dm_fsr_sharpness(void) { return atomic_load(&g_set_fsr_sharp); }
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
 static void menu_open(int hi) {
@@ -917,7 +926,11 @@ static void menu_do(int item) {
     if (item == OVM_OVERLAY) { atomic_store(&g_set_overlay, !atomic_load(&g_set_overlay)); atomic_store(&g_overlay, 1); settings_save(); }
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
-    else if (item == OVM_FSR) { atomic_store(&g_set_fsr, !atomic_load(&g_set_fsr)); settings_save(); }
+    else if (item == OVM_FSR) {
+        atomic_store(&g_set_upscaler, (dm_spatial_mode() + 1) % SP_MODE_COUNT);
+        atomic_fetch_add(&g_menu_cfg_ver, 1);
+        settings_save();
+    }
     else if (item == OVM_VIVID) { atomic_store(&g_set_vivid, !atomic_load(&g_set_vivid)); atomic_fetch_add(&g_menu_cfg_ver, 1); settings_save(); }
     else if (item == OVM_FSR_SHARP || item == OVM_DRS_MIN) return;
     else if (item == OVM_RATE) { menu_rate_step(1); return; }

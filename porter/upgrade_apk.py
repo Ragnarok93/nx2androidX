@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -13,11 +14,34 @@ from pathlib import Path
 from porter import config, host, paths, resources, runtime_update, toolchain
 from porter.upstream import BuildError
 from porter.paths import DM
+from porter.revision import PLAYER_API_REVISION
+
+
+def check_runtime_abi(header):
+    # ELF64, little endian, ET_DYN, EM_AARCH64.
+    if (len(header) < 20 or header[:7] != b'\x7fELF\x02\x01\x01'
+            or struct.unpack_from('<HH', header, 16) != (3, 183)):
+        raise BuildError('The standalone runtime must be an arm64-v8a ELF shared library.')
+
+
+def check_shader_header(header, size):
+    if len(header) != 12 or header[:4] != b'DMSV':
+        raise BuildError('The existing translated shader bundle has an invalid header.')
+    version, count = struct.unpack_from('<II', header, 4)
+    if version not in (1, 2) or 12 + 32 * count > size:
+        raise BuildError('The existing translated shader bundle is incompatible with this runtime.')
 
 
 def metadata(apk, data):
-    def read_pack(names, read):
+    shader = 'shaders.dmsv'
+
+    def read_pack(names, read, shader_header):
         manifest = json.loads(read('nx2a-data.json'))
+        revision = manifest.get('player_api_revision')
+        if revision is not None and (type(revision) is not int or not 1 <= revision <= PLAYER_API_REVISION):
+            raise BuildError(f'Unsupported original APK runtime interface revision: {revision}.')
+        if shader in names:
+            check_shader_header(*shader_header())
         record = read('mods/build_src.sha256').decode()
         modules = []
         for name in sorted(names):
@@ -25,18 +49,36 @@ def metadata(apk, data):
                 obs = name[:-len('.cuts.tsv')] + '.obs.tsv'
                 modules.append(host.module_tables(read(name).decode(), read(obs).decode() if obs in names else ''))
         return manifest, record, modules
+
     with zipfile.ZipFile(apk) as z:
-        if 'assets/nx2a-data.zip' in z.namelist():
-            with z.open('assets/nx2a-data.zip') as stream, zipfile.ZipFile(stream) as pack:
-                return read_pack(set(pack.namelist()), pack.read)
-        if data is None:
-            raise BuildError('For a companion-data APK, pass --data pointing to its existing data folder.')
-        data = Path(data)
-        descriptor = json.loads(z.read('assets/nx2a-companion.json'))
-        if hashlib.sha256((data/'nx2a-data.json').read_bytes()).hexdigest() != descriptor['manifest_sha256']:
-            raise BuildError('Companion data does not match this APK.')
-        names = {p.relative_to(data).as_posix() for p in (data/'mods').glob('*.tsv')}
-        return read_pack(names, lambda name: (data/name).read_bytes())
+        try:
+            with z.open('lib/arm64-v8a/libdmhost.so') as lib:
+                check_runtime_abi(lib.read(20))
+            if 'assets/nx2a-data.zip' in z.namelist():
+                with z.open('assets/nx2a-data.zip') as stream, zipfile.ZipFile(stream) as pack:
+                    def shader_header():
+                        with pack.open(shader) as src:
+                            return src.read(12), pack.getinfo(shader).file_size
+
+                    return read_pack(set(pack.namelist()), pack.read, shader_header)
+            if data is None:
+                raise BuildError('For a companion-data APK, pass --data pointing to its existing data folder.')
+            data = Path(data)
+            descriptor = json.loads(z.read('assets/nx2a-companion.json'))
+            if hashlib.sha256((data/'nx2a-data.json').read_bytes()).hexdigest() != descriptor['manifest_sha256']:
+                raise BuildError('Companion data does not match this APK.')
+            names = {p.relative_to(data).as_posix() for p in (data/'mods').glob('*.tsv')}
+            shader_path = data / shader
+            if shader_path.is_file():
+                names.add(shader)
+
+            def shader_header():
+                with shader_path.open('rb') as src:
+                    return src.read(12), shader_path.stat().st_size
+
+            return read_pack(names, lambda name: (data/name).read_bytes(), shader_header)
+        except KeyError as exc:
+            raise BuildError(f'Original standalone APK or data is missing {exc}.') from exc
 
 
 def activity_dex(apk, scratch):
@@ -108,8 +150,13 @@ def upgrade(apk, output, *, data=None, key=None, jobs=None, no_lsfg=False, debug
         header = built/'gen'/title/'game_profile.h'
         if hashlib.sha256(header.read_bytes()).hexdigest() != fingerprint:
             raise BuildError('Built runtime profile does not match the original APK.')
-        from porter.pipeline import ui_font_assets
-        fonts = [arg for name,path in ui_font_assets().items() if path.is_file() for arg in ('--asset', f'{name}={path}')]
+        library = built/'libdmhost.so'
+        with library.open('rb') as lib:
+            check_runtime_abi(lib.read(20))
+        from porter.pipeline import ui_font_assets, spatial_shader_license_assets
+        runtime_assets = {name: path for name, path in ui_font_assets().items() if path.is_file()}
+        runtime_assets.update(spatial_shader_license_assets())
+        assets = [arg for name, path in runtime_assets.items() for arg in ('--asset', f'{name}={path}')]
         subprocess.run([sys.executable, str(DM/'android/apk/apkdriver.py'), str(apk), str(output),
-                        str(key), '--host', str(built/'libdmhost.so'), '--dex', str(dex), *fonts], check=True)
+                        str(key), '--host', str(library), '--dex', str(dex), *assets], check=True)
     return output

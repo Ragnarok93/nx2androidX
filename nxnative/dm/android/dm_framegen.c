@@ -53,8 +53,10 @@ int dm_fg_status(char *buf, int n) {
 }
 
 #ifndef NX_LSFG
-int dm_fg_frame(vkimg_t *im, const int *crop, double period, VkImage gen[3], double *hold, double *out_period) {
-    (void)im; (void)crop; (void)period; (void)gen;
+int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding,
+                double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
+    (void)im; (void)crop; (void)period; (void)gen; (void)flip_y; (void)encoding;
+    *consumer = VK_NULL_HANDLE;
     settings_init(); *hold = 0; *out_period = 0;
     if (atomic_load(&g_on) > 0) { atomic_store(&g_state, -1); reason("%s", "not in this build (built without NX_LSFG)"); }
     return 0;
@@ -64,7 +66,7 @@ enum { NFG = 3 };
 static struct {
     int state;                         // 0 not tried, 1 ready (modules loaded), -1 unavailable
     lsfg_modules mods;
-    lsfg_chain *chain; VkExtent2D ext; int flow;
+    lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
     VkImage out[LSFG_MAX_GENERATIONS]; VkImageView out_view[LSFG_MAX_GENERATIONS]; VkDeviceMemory out_mem[LSFG_MAX_GENERATIONS];
     VkCommandPool pool; struct { VkCommandBuffer cb; VkFence fence; } fr[NFG]; unsigned fi;
     lsfg_pacer pacer; uint64_t count; uint32_t warm_streak;
@@ -152,16 +154,17 @@ static void full_barrier(VkCommandBuffer cb) {   // the game's writes to the win
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
 
-int dm_fg_frame(vkimg_t *im, const int *crop, double period, VkImage gen[3], double *hold, double *out_period) {
+int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding,
+                double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
     settings_init();
-    *hold = 0; *out_period = 0;
+    *hold = 0; *out_period = 0; *consumer = VK_NULL_HANDLE;
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     if (!on) {
         if (F.chain) { teardown(); VLOG("frame generation off"); }
         if (F.state >= 0) { atomic_store(&g_state, 0); reason("%s", "off"); }
         return 0;
     }
-    if (!im || !im->img) return 0;
+    if (!im || !im->img || im->layout != VK_IMAGE_LAYOUT_GENERAL) return 0;
     if (atomic_exchange(&g_reprobe, 0) && F.state < 0) {
         F.state = 0;
         atomic_store(&g_state, 0);
@@ -188,6 +191,10 @@ int dm_fg_frame(vkimg_t *im, const int *crop, double period, VkImage gen[3], dou
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
         if (!rebuild(e, flow)) { unavailable("%s", "the frame generation chain could not be made (see the [RED] lines)"); return 0; }
+    }
+    if (encoding != F.encoding) {
+        F.encoding = encoding;
+        F.count = F.warm_streak = 0;
     }
     // The floor for the game's own rate (DM_LSFG_MIN_FPS, default 30): the generation's work must not push the game under it
     F.pacer.min_base = 30.0f;
@@ -219,14 +226,14 @@ int dm_fg_frame(vkimg_t *im, const int *crop, double period, VkImage gen[3], dou
         VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
         vk.vkAllocateCommandBuffers(V.dev, &ai, &F.fr[k].cb); vk.vkCreateFence(V.dev, &fi, NULL, &F.fr[k].fence);
     }
-    vk.vkWaitForFences(V.dev, 1, &F.fr[k].fence, VK_TRUE, UINT64_MAX);
+    if (vk.vkWaitForFences(V.dev, 1, &F.fr[k].fence, VK_TRUE, UINT64_MAX)) return 0;
     vk.vkResetFences(V.dev, 1, &F.fr[k].fence);
     VkCommandBuffer cb = F.fr[k].cb; vk.vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vk.vkBeginCommandBuffer(cb, &bi);
     full_barrier(cb);
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {cw, ch, 1}}};
-    if (vk_window_bottom_up()) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up, the chain sees it upright
+    if (flip_y) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up, the chain sees it upright
     vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(F.chain, count), VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
     if (warm) lsfg_chain_shared(F.chain, cb, count);
     for (size_t g = 0; g < ng; g++) lsfg_chain_generate(F.chain, cb, count, ng, g);
@@ -234,7 +241,12 @@ int dm_fg_frame(vkimg_t *im, const int *crop, double period, VkImage gen[3], dou
     vk.vkEndCommandBuffer(cb);
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cb};
     pthread_mutex_lock(V.qmu); VkResult r = vk.vkQueueSubmit(V.q, 1, &si, F.fr[k].fence); pthread_mutex_unlock(V.qmu);
-    if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("frame generation submission %d", r); ng = 0; }
+    if (r) {
+        VRED("frame generation submission %d", r);
+        unavailable("%s", "GPU submission failed");
+        return 0;
+    }
+    *consumer = F.fr[k].fence;
     for (size_t g = 0; g < ng; g++) gen[g] = F.out[g];
     double interval = F.pacer.smoothed_interval > 0 ? F.pacer.smoothed_interval : period;
     if (interval < period) interval = period;

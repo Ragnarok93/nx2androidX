@@ -11,11 +11,11 @@ SOURCE = Path(__file__).resolve().parents[1] / "nxnative/dm/android/gfx_vk_prese
 class PresentFormatTests(unittest.TestCase):
     def test_async_present_uses_image_format_not_uninitialized_metadata(self):
         src = SOURCE.read_text(encoding="utf-8")
-        present = src[src.index("static void present_one("):src.index("static void present_window(")]
+        present = src[src.index("static void present_window("):src.index("static void *present_thread(")]
         thread = src[src.index("static void *present_thread("):src.index("static void present_thread_start(")]
-        self.assertIn("present_window_format(im->fmt)", present)
-        self.assertIn("if (with_meta && im)", present)
-        self.assertIn("present_one(e.im, e.im->img", thread)
+        self.assertLess(present.index("present_window_format(im->fmt)"), present.index("spatial_reconstruct("))
+        self.assertIn("if (!redraw)", present)
+        self.assertIn("present_window(e.im,", thread)
         self.assertNotIn("im_meta_srgb", src)
         self.assertIn("if (want != g_want)", present)
 
@@ -24,7 +24,7 @@ class PresentFormatTests(unittest.TestCase):
         if not cc:
             self.skipTest("C compiler unavailable")
         src = SOURCE.read_text(encoding="utf-8")
-        helper = src[src.index("static VkFormat present_window_format("):src.index("static void present_one(")]
+        helper = src[src.index("static VkFormat present_window_format("):src.index("static VkExtent2D picture_extent(")]
         code = r"""
 #include <assert.h>
 typedef int VkFormat;

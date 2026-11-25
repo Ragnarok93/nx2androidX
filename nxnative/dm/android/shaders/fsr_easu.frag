@@ -24,5 +24,6 @@ void main() {
                params.sizes.x, params.sizes.y, params.sizes.z, params.sizes.w);
     AF3 rgb;
     FsrEasuF(rgb, AU2(gl_FragCoord.xy), c0, c1, c2, c3);
-    color = vec4(clamp(rgb, vec3(0.0), vec3(1.0)), 1.0);
+    float alpha = textureLod(tex, gl_FragCoord.xy / params.sizes.zw, 0.0).a;
+    color = vec4(clamp(rgb, vec3(0.0), vec3(1.0)), alpha);
 }

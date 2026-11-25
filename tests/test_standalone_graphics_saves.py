@@ -16,7 +16,7 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         cls.front = (ANDROID / "front_android.c").read_text()
         cls.java = (ANDROID / "java/org/nx2a/SaveDocuments.java").read_text()
         cls.gfx = (ANDROID / "gfx_vk_present.c").read_text()
-        cls.fsr = (ANDROID / "gfx_vk_fsr.h").read_text()
+        cls.spatial = (ANDROID / "gfx_vk_spatial.h").read_text()
 
     def test_android_picker_for_import_and_export(self):
         self.assertIn("Intent.ACTION_CREATE_DOCUMENT", self.java)
@@ -53,21 +53,34 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         self.assertEqual(sum(row.count("OVM_FPS") for row in rows), 1)
         self.assertIn("ov_menu_sharp_value", self.menu)
         self.assertIn("fsr_sharp=%d", self.front)
+        self.assertIn("upscaler=%d", self.front)
+        self.assertIn("v ? SP_FSR1 : SP_NATIVE", self.front)
 
     def test_fsr_native_pipeline_has_true_easu_and_rcas_stages(self):
         easu = (ANDROID / "shaders/fsr_easu.frag").read_text()
         rcas = (ANDROID / "shaders/fsr_rcas.frag").read_text()
         self.assertIn("FsrEasuF(", easu)
         self.assertIn("FsrRcasF(", rcas)
-        self.assertIn("fsr_draw(cb, 0,", self.fsr)
-        self.assertIn("fsr_draw(cb, 1,", self.fsr)
-        self.assertIn("if (!V.has_dynrender", self.fsr)
-        self.assertIn("VK_ATTACHMENT_LOAD_OP_LOAD", self.fsr)
-        self.assertIn("if (flip_y)", self.fsr)
-        self.assertIn("VK_FILTER_LINEAR", self.gfx)  # graceful fallback
+        self.assertIn("spatial_draw(cb, SP_RCAS, SP_INTERMEDIATE", self.spatial)
+        self.assertIn("mode == SP_FSR1 ? SP_EASU : SP_GSR1", self.spatial)
+        self.assertIn("gsr1_frag_spv", self.spatial)
+        self.assertIn("if (g_spatial.ticket == ticket) return output", self.spatial)
+        self.assertIn("if (flip_y)", self.spatial)
+        self.assertNotIn("vkDeviceWaitIdle", self.spatial)
+
+    def test_processing_order_and_redraw_exclusion(self):
+        window = self.gfx.split("static void present_window(", 1)[1].split("static void *present_thread(", 1)[0]
+        present = self.gfx.split("static void present_one(", 1)[1].split("// headless frame shots", 1)[0]
+        self.assertEqual(window.count("spatial_reconstruct("), 1)
+        self.assertLess(window.index("if (redraw)"), window.index("spatial_reconstruct("))
+        self.assertLess(window.index("spatial_reconstruct("), window.index("dm_fg_frame("))
+        self.assertLess(window.index("if (redraw || period < 0)"), window.index("dm_fg_frame("))
+        self.assertIn("dm_fg_frame(source, rect, flip_y", window)
+        self.assertNotIn("spatial_reconstruct(", present)
+        self.assertLess(present.index("vivid_record("), present.index("ov_render("))
 
     def test_fps_counts_generated_only_on_accepted_presents(self):
-        src = self.gfx[self.gfx.index("static void present_one("):self.gfx.index("static void present_window(")]
+        src = self.gfx[self.gfx.index("static void present_one("):self.gfx.index("// headless frame shots")]
         self.assertLess(src.index("r = vkQueuePresentKHR"), src.index("if (period >= 0)"))
         self.assertIn("if (r >= 0)", src)
         self.assertIn("hud_count(with_meta, period", src)

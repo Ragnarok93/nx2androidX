@@ -186,6 +186,14 @@ Per-build knowledge stays where upstream keeps it: the rewriter's cuts in `patch
 
 `python -m porter rebuild-runtime <pack>` compiles the current player runtime using the final `profile/<titleId>/game.tsv` and `android.tsv` saved during the original port. It does not read keys or source games, or regenerate mods, shaders or RomFS. Compiler switches follow the current APK policy. A fresh runtime and its managed hooks are staged in a new `.runtime-*` directory; an atomic manifest replacement activates the complete set. Failed or interrupted attempts leave the previous manifest and game data intact. Launch copies are refreshed even when file sizes are unchanged. Runtime updates have their own modal state and foreground service. They never enter the port progress screen, port history or source-file bookkeeping. The dialog closes on success; failures offer retry, a full re-port or close. An interrupted process restores a retry prompt from a single pending-pack marker.
 
+### Standalone spatial reconstruction
+
+The Vulkan present thread identifies real frames by their game present tickets. It crops and orients the source, then runs Bilinear, FSR 1 EASU/RCAS, or Qualcomm GSR 1 into a picture-sized image before passing that image to LSFG. The Native selection leaves the source at its guest size and fits it to the surface at presentation. Auto currently prefers GSR 1 and falls back to Bilinear if the raster path is unavailable. The runtime logs the effective mode, any fallback, and GPU timing when the queue supports timestamps. Changing the upscaler takes effect on the next real frame.
+
+LSFG outputs and pause-menu redraws use the reconstructed images already available. Vivid applies display-referred SDR contrast and saturation after LSFG, followed by the runtime overlay. sRGB images use compatible UNORM views for the spatial shaders so they filter display-encoded values, then present and composite with their sRGB encoding intact.
+
+The Upgrade tab and `python -m porter upgrade-apk` reuse existing rewritten modules, game data, and compatible shader bundles. The upgrade verifies the original signer, runtime ABI, profile and rewrite inputs, and replaces the standalone runtime and its display assets. The package identity, save directory, and imported driver files remain in place.
+
 Legacy packs without saved profiles cannot use this path and receive a clear suggestion to port again. Compilation failure offers retry or a full re-port; load failures and identifiable native crashes also suggest a full re-port without claiming that old data caused the error. Full re-port still requires source game files and keys, so keeping a backup is useful. Saves, user settings and selected drivers are retained during runtime updates.
 
 

@@ -37,6 +37,7 @@ describes what every one of them is, which version it is and where it is used.
 | DroidSansFallbackFull | Apache-2.0 | `nxnative/dm/tools/DroidSansFallbackFull.ttf` | `nxnative/dm/tools/DroidSansFallbackFull.NOTICE` |
 | OpenSans-Regular | Apache-2.0 | `nxnative/dm/tools/OpenSans-Regular.ttf` | `nxnative/dm/tools/OpenSans-Regular.NOTICE` |
 | The shared font the app ships (`shared_cjk.ttf`, built from the two above by `dm/tools/cjk_font.py`) | Apache-2.0 | `nxnative/dm/tools/shared_cjk.ttf` | the two NOTICE files above |
+| Qualcomm Snapdragon Game Super Resolution 1 | BSD 3-Clause | `nxnative/dm/android/shaders/gsr1.frag`, adapted from [Qualcomm revision d926f074](https://github.com/SnapdragonGameStudios/snapdragon-gsr/tree/d926f074bcb9d714e179f1ce0fcb9ee2eeb5074e/sgsr/v1) | `nxnative/dm/android/shaders/licenses/sgsr1.txt` and `assets/licenses/sgsr1.txt` in standalone APKs |
 | The LSFG frame generation port | GPL-3.0-or-later | `nxnative/dm/android/lsfg/` | `nxnative/dm/android/lsfg/LICENSE.md`, full text in `nxnative/dm/android/lsfg/COPYING` |
 
 The LSFG port is from the Eden emulator's frame generation, which builds on
