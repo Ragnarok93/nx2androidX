@@ -16,6 +16,7 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_dynres_policy.h"
+#include "gfx_vk_resolution_plan.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
@@ -1964,6 +1965,7 @@ static int g_dyn_active;
 static void dyn_scale_tick(uint64_t presents) {
     static nx_dynres_policy state = { .scale = 100, .floor = 70 };
     static float last_applied = -1;
+    static nx_rs_timing timing = {0};
     if (!dm_render_scale_supported()) {
         if (g_dyn_active) LOG("[graphics] internal dynamic resolution unavailable: engine hook lost");
         g_dyn_active = 0; atomic_store(&g_dyn_scale_pct, 100);
@@ -1987,6 +1989,8 @@ static void dyn_scale_tick(uint64_t presents) {
             int was_active = g_dyn_active;
             g_dyn_active = active;
             nx_dynres_reset(&state, floor);
+            // Ignore GPU queries from before the policy transition.
+            if (g_frame) { timing.frame = g_frame - 1; timing.valid = 1; }
             // Switching to adaptive begins at native internal resolution.
             // Switching away restores the separately configured manual
             // DM_RENDER_SCALE rather than erasing the user's override.
@@ -2018,11 +2022,12 @@ static void dyn_scale_tick(uint64_t presents) {
     if (presents % 120 == 0 && last_applied > 0)
         dm_render_scale_apply(last_applied);
     double gpu = -1;
+    uint64_t measured_frame = 0;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) {
         gpu = mtl_gpu_ms(f);
-        if (gpu >= 0) break;
+        if (gpu >= 0) { measured_frame = f; break; }
     }
-    if (gpu < 0 || gpu > 500) return;
+    if (gpu <= 0 || gpu > 500 || !nx_rs_new_sample(&timing, measured_frame)) return;
     // Never respond to the low-frequency/power-saving period of a frame-step
     // hold: its GPU clock may be lowered deliberately below the cap.
     if (fstep_on() && atomic_load(&g_fs_k) > 60 / (fps_step_cap() ? fps_step_cap() : 60)) return;

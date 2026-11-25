@@ -6,6 +6,7 @@
 #include "gfx_vk.h"
 #include "gfx_vk_slot.h"
 #include "gfx_vk_passdump_plan.h"
+#include "gfx_vk_resolution_plan.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -323,6 +324,44 @@ static VkFramebuffer fb_get(const fbkey *k) {
 // the attachments begin_pass found, for the render pass begin: each colour slot's (and the depth's) image, view, view format and layers, size at the view's level
 static struct { vkimg_t *im; VkImageView v; uint32_t fmt, layers, w, h, bc_lv, bc_ly, bc_nly; VkImageSubresourceRange range; } P_att[9];   // (bc_*: a block-compressed image's stand-in, the level and layers this pass draws)
 
+// Phase 0: inspect attachment groups without changing image sizes or GPU work.
+// A candidate is NOT a proven scalable pass; shader and later resource consumers
+// must also be classified before allocating any physical-size variant.
+static void resolution_observe_pass(void) {
+    static int enabled = -1;
+    static uint64_t total, eligible, blocked[8], pixels, planned_pixels;
+    if (enabled < 0) { const char *env = getenv("DM_VK_RESOLUTION_AUDIT"); enabled = env && atoi(env) != 0; }
+    if (!enabled) return;
+    nx_rs_group group = {0};
+    for (int i = 0; i < 9; i++) {
+        const vkimg_t *im = P_att[i].im;
+        if (!im) continue;
+        uint32_t flags = 0;
+        if (im->novl) flags |= NX_RS_ALIAS;
+        if (im->usage & VK_IMAGE_USAGE_STORAGE_BIT) flags |= NX_RS_STORAGE;
+        if (im->target != NVN_TEXTURE_TARGET_2D || im->d != 1 || im->layers != 1) flags |= NX_RS_NON_2D;
+        if (im->samples != 1) flags |= NX_RS_MULTISAMPLE;
+        if (im->packaged || im->lin_mem || (im->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) flags |= NX_RS_GUEST_DATA;
+        const vkfmt_t *fmt = vk_fmt(im->nvn_format);
+        if (!im->pool || !fmt || fmt->compressed || im->bc_of || im->bc_draw || im->levels != 1 ||
+            P_att[i].w != im->w || P_att[i].h != im->h || P_att[i].layers != 1) flags |= NX_RS_SPECIAL_VIEW;
+        nx_rs_add(&group, P_att[i].w, P_att[i].h, flags);
+    }
+    if (!group.n) group.blockers |= NX_RS_INVALID;
+    nx_rs_extent extent;
+    if (nx_rs_plan(&group, 75, V.props.limits.maxFramebufferWidth, V.props.limits.maxFramebufferHeight, &extent)) {
+        eligible++;
+        pixels += (uint64_t)group.w * group.h;
+        planned_pixels += (uint64_t)extent.w * extent.h;
+    }
+    for (unsigned i = 0; i < 8; i++) if (group.blockers & (1u << i)) blocked[i]++;
+    if (++total % 300 == 0)
+        VKLOG("[resolution-audit] passes=%llu candidates=%llu logical_pixels=%llu planned_75pct_pixels=%llu blockers mixed=%llu alias=%llu storage=%llu non2d=%llu msaa=%llu guest=%llu view=%llu invalid=%llu; observation only",
+              (unsigned long long)total, (unsigned long long)eligible, (unsigned long long)pixels, (unsigned long long)planned_pixels,
+              (unsigned long long)blocked[0], (unsigned long long)blocked[1], (unsigned long long)blocked[2], (unsigned long long)blocked[3],
+              (unsigned long long)blocked[4], (unsigned long long)blocked[5], (unsigned long long)blocked[6], (unsigned long long)blocked[7]);
+}
+
 // Before a pass that goes on with a depth buffer (loads it), one texel of its depth is copied out: a transfer read makes Adreno's driver drop the buffer's
 // low-resolution depth (LRZ), which it otherwise kept from earlier passes even within one command buffer. NEO's menu → field wipe drew whole 32x32 squares of
 // its old frame brown for two frames (the overlay's tiles rejected); with the read, never. Copying the colour target out instead, or a barrier alone, did not help.
@@ -382,6 +421,7 @@ static int pass_commit(void) {
         else { VKRED_ONCE(76, "render pass or framebuffer failed without dynamic rendering: pass skipped"); return 0; }   // (still pass_open 2: vk_end_pass drops it)
     } else { vkCmdBeginRendering(vk_cmd(), &P_ri); S.rp_pass = 0; }
     S.pass_open = 1; g_vkst.passes++; g_sub_pass++; g_pass_wmem = 0;
+    resolution_observe_pass();
     for (int i = 0; i < 9; i++) { vkimg_t *a = P_att[i].im; if (a && a->rt_last != g_tex_frame + 1) { a->rt_frames = a->rt_last == g_tex_frame ? a->rt_frames + 1 : 1; a->rt_last = g_tex_frame + 1; } }   // (async_pipe)
     { extern uint64_t g_cmd_gen; g_cmd_gen++; }   // the bind cache starts empty in each pass: Adreno does not keep the state a pass's draws set for the next pass (XC3 drew its lighting black)
     if (g_x_tracepass == -2) { g_x_listpasses = 1; list_reads("before it, dispatches");
