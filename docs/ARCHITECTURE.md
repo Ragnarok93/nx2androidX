@@ -218,6 +218,16 @@ world-to-clip matrices into an unjittered clip-to-previous-clip transform
 and top-left pixel jitter. Depth-aspect sampling avoids dependence on the
 D24S8 image-to-buffer representation.
 
+A replay adapter that can identify both jittered and unjittered transforms
+can derive jitter without a separate shader field. The backend checks that
+their difference is a subpixel homogeneous XY shift with unchanged Z and W.
+It derives depth direction, near plane and horizontal FOV from the verified
+view projection. A change between the two frames' pre-exposure uniforms
+resets history. The sampled depth must match projected Z with a zero-to-one
+viewport range. Jitter is expressed in actual render pixels. Shader semantics and
+the live bindings must establish the matrix roles and shared world origin
+before replay supplies those values.
+
 The backend owns its bounded intermediates and ping-pong history. The replay
 caller owns command submission, slot retirement, image lifetimes and the
 output consumer. Each successful real-frame submission advances history once.

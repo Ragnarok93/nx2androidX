@@ -22,9 +22,9 @@ typedef struct {
     vk_gsr2_input color, depth, motion, opaque;
     float clip_to_prev[16]; // column-major, excluding sampling jitter
     float jitter[2];       // signed input pixels
-    float pre_exposure;    // previous/current exposure
+    float pre_exposure;    // compute color compression/expansion scale
     float tan_half_fov_x, near_plane, min_lerp;
-    int same_camera;
+    int same_camera, exposure_changed;
     unsigned depth_convention, motion_format, motion_flags;
 } vk_gsr2_inputs;
 
@@ -39,6 +39,29 @@ typedef struct {
 int vk_gsr2_set_camera(vk_gsr2_inputs *input, VkExtent2D render,
                       const vk_gsr2_camera *current, const vk_gsr2_camera *previous,
                       int clip_y_down, unsigned clip_depth_convention);
+
+// Effective values of shader uniforms whose roles replay has verified. Both
+// transform pairs use the same world origin. Each unjittered matrix describes
+// the same camera as its paired jittered matrix. The projection describes
+// the current view, in the same zero-to-one clip space as the transforms.
+// The depth view must store that projected Z with a 0-to-1 viewport range.
+typedef struct {
+    float jittered[16], unjittered[16]; // column-major world-to-clip
+} vk_gsr2_replay_camera;
+
+typedef struct {
+    vk_gsr2_replay_camera current, previous;
+    float projection[16]; // column-major perspective view-to-clip
+    float current_pre_exposure, previous_pre_exposure;
+    int clip_y_down;
+} vk_gsr2_replay_constants;
+
+// Derive camera, jitter, perspective and exposure-change inputs from recorded
+// uniforms. Reject ambiguous layouts, depth conventions or jitter pairs.
+// This validates numeric relationships. Replay must establish uniform roles,
+// the shared origin, and same-frame image bindings before calling it.
+int vk_gsr2_set_replay_constants(vk_gsr2_inputs *input, VkExtent2D render,
+                                 const vk_gsr2_replay_constants *uniforms);
 
 typedef struct vk_gsr2 vk_gsr2;
 typedef struct {

@@ -439,6 +439,79 @@ int vk_gsr2_set_camera(vk_gsr2_inputs *in, VkExtent2D render,
     return 1;
 }
 
+static int gsr2_read_camera(const vk_gsr2_replay_camera *pair, VkExtent2D render,
+                            vk_gsr2_camera *camera) {
+    unsigned wcol = 0;
+    for (unsigned i = 0; i < 16; i++)
+        if (!isfinite(pair->jittered[i]) || !isfinite(pair->unjittered[i])) return 0;
+    for (unsigned col = 0; col < 16; col += 4) {
+        if (pair->jittered[col + 2] != pair->unjittered[col + 2] ||
+            pair->jittered[col + 3] != pair->unjittered[col + 3]) return 0;
+        if (fabsf(pair->unjittered[col + 3]) > fabsf(pair->unjittered[wcol + 3]))
+            wcol = col;
+    }
+    double w = pair->unjittered[wcol + 3];
+    if (!w) return 0;
+    const uint32_t axis_extent[2] = {render.width, render.height};
+    for (unsigned axis = 0; axis < 2; axis++) {
+        double offset = ((double)pair->jittered[wcol + axis] - pair->unjittered[wcol + axis]) / w;
+        // Projection jitter adds offset * clip.w to clip.x or clip.y. Verify
+        // this for the entire homogeneous transform to reject camera changes.
+        const double tolerance = 2.0 / (1024.0 * axis_extent[axis]);
+        for (unsigned col = 0; col < 16; col += 4) {
+            double clip_w = pair->unjittered[col + 3];
+            double delta = (double)pair->jittered[col + axis] - pair->unjittered[col + axis];
+            if (fabs(delta - offset * clip_w) > tolerance * fabs(clip_w)) return 0;
+        }
+        if (fabs(offset) * 0.5 * axis_extent[axis] > 0.5001) return 0;
+        camera->jitter_ndc[axis] = (float)offset;
+    }
+    memcpy(camera->world_to_clip, pair->jittered, sizeof camera->world_to_clip);
+    return 1;
+}
+
+int vk_gsr2_set_replay_constants(vk_gsr2_inputs *in, VkExtent2D render,
+                                 const vk_gsr2_replay_constants *u) {
+    if (!in || !u || !render.width || !render.height ||
+        (u->clip_y_down != 0 && u->clip_y_down != 1)) return 0;
+
+    const float *p = u->projection;
+    for (unsigned i = 0; i < 16; i++) if (!isfinite(p[i])) return 0;
+    // A separable perspective projection encodes clip.w as +/- view.z.
+    // Asymmetric frustums may carry X/Y offsets in the Z column.
+    if (!p[0] || !p[5] || fabsf(p[11]) != 1.0f || p[1] || p[2] || p[3] ||
+        p[4] || p[6] || p[7] || p[12] || p[13] || p[15]) return 0;
+    const double far_limit = p[10] / p[11];
+    // At distance d in front of the camera, depth is far_limit + p[14]/d.
+    // The reciprocal-distance term establishes the direction independently
+    // of handedness, including a projection with an infinite far plane.
+    const int reversed = p[14] > 0;
+    if (!p[14] || (reversed ? far_limit > 0 : far_limit < 1)) return 0;
+    const unsigned depth = reversed ? VK_GSR2_DEPTH_REVERSED : VK_GSR2_DEPTH_STANDARD;
+    const double near_plane = p[14] / ((reversed ? 1.0 : 0.0) - far_limit);
+    const double tan_half_fov_x = 1.0 / fabs(p[0]);
+    if (!(isfinite(u->current_pre_exposure) && u->current_pre_exposure > 0 &&
+          isfinite(u->previous_pre_exposure) && u->previous_pre_exposure > 0)) return 0;
+    if (!(near_plane >= FLT_MIN && near_plane <= FLT_MAX &&
+          tan_half_fov_x >= FLT_MIN && tan_half_fov_x <= FLT_MAX)) return 0;
+
+    vk_gsr2_camera current, previous;
+    if (!gsr2_read_camera(&u->current, render, &current) ||
+        !gsr2_read_camera(&u->previous, render, &previous)) return 0;
+    vk_gsr2_inputs next = *in;
+    if (!vk_gsr2_set_camera(&next, render, &current, &previous,
+                            u->clip_y_down, depth)) return 0;
+    next.depth_convention = depth;
+    next.near_plane = (float)near_plane;
+    next.tan_half_fov_x = (float)tan_half_fov_x;
+    // The vendor scale parameter is used for both compression and expansion
+    // of this frame's color. Compare the two frames' exposure separately.
+    next.exposure_changed = fabs((double)u->previous_pre_exposure - u->current_pre_exposure) >
+                            1e-4 * fmax(u->previous_pre_exposure, u->current_pre_exposure);
+    *in = next;
+    return 1;
+}
+
 static void gsr2_input_convention(float convention[4], const vk_gsr2_inputs *in,
                                   VkExtent2D render) {
     float scale_x = 1, scale_y = 1;
@@ -600,7 +673,8 @@ int vk_gsr2_record(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
 
     // The fragment shader has no exposure uniform. Start fresh after a change
     // instead of accumulating history that was rendered at another exposure.
-    if (ctx->fragment && fabsf(input->pre_exposure - 1.0f) > 1e-4f) plan.reset = 1;
+    if (input->exposure_changed ||
+        (ctx->fragment && fabsf(input->pre_exposure - 1.0f) > 1e-4f)) plan.reset = 1;
     gsr2_params(ctx, slot, input, plan);
     vk_img_barrier_all(cb);
     gsr2_prepare_images(ctx, cb, plan.reset);
