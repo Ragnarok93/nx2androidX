@@ -153,6 +153,12 @@ typedef struct vk_rs_variant {
 // raster/shader/alias virtualization is implemented; never substitute vk_tex().
 vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t h);
 void vk_rs_variant_clear(VkCommandBuffer cb, vk_rs_variant *v);
+enum { VK_RS_GROUP_SIZE = 9 };
+typedef struct { vk_rs_variant *slot[VK_RS_GROUP_SIZE]; } vk_rs_images;
+// Private group transaction, outside render passes on replay thread. Returns
+// 0 on rejection, 1 on unchanged group, 2 on successful migration.
+int vk_rs_group_migrate(vk_rs_images *group, const vkimg_t *const logical[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
+void vk_rs_group_retire(vk_rs_images *group);
 void vk_rs_variant_retire(vk_rs_variant *v);
 void vk_rs_variant_destroy(vk_rs_variant *v); // only after fence or before any recording
 vkimg_t *vk_tex(const tex_t *t);                                 // the image of a texture object (created, uploaded or refreshed as needed)

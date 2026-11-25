@@ -364,20 +364,20 @@ static void resolution_observe_pass(void) {
         if (g_rs_probe && P_att[8].im && group.n >= 2) {
             g_rs_probe = 0;
             g_rs_observe = g_rs_audit;
-            vk_rs_variant *variants[9] = {0};
-            int ok = 1; uint64_t bytes = 0;
-            for (int i = 0; i < 9; i++) if (P_att[i].im) {
-                variants[i] = vk_rs_variant_create(P_att[i].im, extent.w, extent.h);
-                if (!variants[i]) { ok = 0; break; }
-                bytes += variants[i]->bytes;
-            }
-            for (int i = 0; i < 9; i++) if (variants[i]) {
-                if (ok) { vk_rs_variant_clear(vk_cmd(), variants[i]); vk_rs_variant_retire(variants[i]); }
-                else vk_rs_variant_destroy(variants[i]); // no recording before whole group succeeds
-            }
-            VKLOG("[resolution-probe] %s: %ux%u -> %ux%u, %llu allocated bytes; guest images unchanged",
-                  ok ? "recorded isolated clear" : "allocation rejected, rolled back", group.w, group.h,
-                  extent.w, extent.h, (unsigned long long)bytes);
+            const vkimg_t *logical[VK_RS_GROUP_SIZE] = {0};
+            for (int i = 0; i < VK_RS_GROUP_SIZE; i++) logical[i] = P_att[i].im;
+            vk_rs_images images = {0};
+            int first = vk_rs_group_migrate(&images, logical, extent.w, extent.h);
+            int unchanged = first ? vk_rs_group_migrate(&images, logical, extent.w, extent.h) : 0;
+            nx_rs_extent half;
+            int migrated = first && nx_rs_plan(&group, 50, V.props.limits.maxFramebufferWidth,
+                                                V.props.limits.maxFramebufferHeight, &half) ?
+                vk_rs_group_migrate(&images, logical, half.w, half.h) : 0;
+            uint64_t bytes = 0;
+            for (int i = 0; i < VK_RS_GROUP_SIZE; i++) if (images.slot[i]) bytes += images.slot[i]->bytes;
+            vk_rs_group_retire(&images);
+            VKLOG("[resolution-probe] isolated group: %ux%u -> %ux%u first=%d same=%d half=%d final_bytes=%llu; guest images unchanged",
+                  group.w, group.h, extent.w, extent.h, first, unchanged, migrated, (unsigned long long)bytes);
         }
     }
     for (unsigned i = 0; i < 8; i++) if (group.blockers & (1u << i)) blocked[i]++;

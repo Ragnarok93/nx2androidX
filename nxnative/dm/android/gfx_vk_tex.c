@@ -381,6 +381,84 @@ void vk_rs_variant_clear(VkCommandBuffer cb, vk_rs_variant *v) {
     vk_img_barrier_all(cb);
     v->layout = VK_IMAGE_LAYOUT_GENERAL;
 }
+// Private variants have one authoritative image per attachment. A scale
+// change creates replacements only for changed extents; failure cannot mutate
+// the published group. Guest textures are not yet routed through this API.
+static int rs_can_copy(const vk_rs_variant *src, const vk_rs_variant *dst) {
+    if (src->layout != VK_IMAGE_LAYOUT_GENERAL || src->format != dst->format ||
+        src->aspect != dst->aspect || src->logical_w != dst->logical_w ||
+        src->logical_h != dst->logical_h || src->image == dst->image) return 0;
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(V.pd, src->format, &fp);
+    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    return (fp.optimalTilingFeatures & need) == need;
+}
+static void rs_copy(VkCommandBuffer cb, const vk_rs_variant *src, vk_rs_variant *dst) {
+    // All formats, allocation and source layouts were checked before recording.
+    VkImageSubresourceRange range = {dst->aspect, 0, 1, 0, 1};
+    VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, dst->image, range};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, NULL, 0, NULL, 1, &barrier);
+    // Depth and stencil must be separate regions, with identical formats and
+    // nearest filtering. Do not assume all mobile formats support blitting.
+    const VkImageAspectFlags aspects[] = {VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_ASPECT_STENCIL_BIT};
+    for (unsigned i = 0; i < 3; i++) if (src->aspect & aspects[i]) {
+        VkImageBlit blit = {{aspects[i],0,0,1}, {{0,0,0},{(int32_t)src->physical_w,(int32_t)src->physical_h,1}},
+                            {aspects[i],0,0,1}, {{0,0,0},{(int32_t)dst->physical_w,(int32_t)dst->physical_h,1}}};
+        vkCmdBlitImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+    }
+    dst->layout = VK_IMAGE_LAYOUT_GENERAL;
+}
+int vk_rs_group_migrate(vk_rs_images *group, const vkimg_t *const logical[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h) {
+    if (!group || !logical || !w || !h || w > INT32_MAX || h > INT32_MAX || !vk_sub_open()) return 0;
+    vk_rs_images staged = {0};
+    unsigned live = 0, changed = 0;
+    // Validate slot identity and allocate all changed attachments before
+    // recording any commands. Logical extents do not become physical extents.
+    for (unsigned i = 0; i < VK_RS_GROUP_SIZE; i++) {
+        const vkimg_t *im = logical[i];
+        vk_rs_variant *old = group->slot[i];
+        if (!im) { if (old) goto rollback; continue; }
+        live++;
+        if (old) {
+            if (old->logical_w != im->w || old->logical_h != im->h ||
+                old->format != im->fmt || old->aspect != im->aspect ||
+                old->layout != VK_IMAGE_LAYOUT_GENERAL) goto rollback;
+            if (old->physical_w == w && old->physical_h == h) continue;
+        }
+        staged.slot[i] = vk_rs_variant_create(im, w, h);
+        if (!staged.slot[i] || (old && !rs_can_copy(old, staged.slot[i]))) goto rollback;
+        changed++;
+    }
+    if (!live) return 0;
+    if (!changed) return 1; // no copies, allocations, barriers or retirement
+    VkCommandBuffer cb = vk_cmd();
+    vk_img_barrier_all(cb); // previous uses of all old representations
+    for (unsigned i = 0; i < VK_RS_GROUP_SIZE; i++) if (staged.slot[i]) {
+        if (group->slot[i]) rs_copy(cb, group->slot[i], staged.slot[i]);
+        else vk_rs_variant_clear(cb, staged.slot[i]);
+    }
+    vk_img_barrier_all(cb);
+    for (unsigned i = 0; i < VK_RS_GROUP_SIZE; i++) if (staged.slot[i]) {
+        vk_rs_variant *old = group->slot[i];
+        group->slot[i] = staged.slot[i];
+        if (old) vk_rs_variant_retire(old);
+    }
+    return 2;
+rollback:
+    for (unsigned i = 0; i < VK_RS_GROUP_SIZE; i++) vk_rs_variant_destroy(staged.slot[i]);
+    return 0;
+}
+void vk_rs_group_retire(vk_rs_images *group) {
+    if (!group) return;
+    for (unsigned i = 0; i < VK_RS_GROUP_SIZE; i++) {
+        if (group->slot[i]) vk_rs_variant_retire(group->slot[i]);
+        group->slot[i] = NULL;
+    }
+}
 void vk_tex_prepare(VkCommandBuffer cb, vkimg_t *im) {
     if (im->layout == VK_IMAGE_LAYOUT_GENERAL) return;
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
