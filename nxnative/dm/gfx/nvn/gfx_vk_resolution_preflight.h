@@ -19,4 +19,21 @@ static inline int nx_rs_buffer_span(uint64_t lo,uint64_t hi,uint64_t addr,uint64
     *start=addr-pad; *size=len+pad;
     return 1;
 }
+// All indirect draw argument reads are explicitly bounded. The first
+// count-based record may consume the full array; later records are either
+// skipped by the count path or read individually by the fallback.
+static inline int nx_rs_indirect_span(int indexed,uint64_t ind,uint64_t count,
+                                      int i,int max,int stride,uint64_t *bytes) {
+    if (!bytes) return 0;
+    *bytes=0;
+    if (!ind) return !count;
+    if (ind&3) return 0;
+    unsigned record=indexed?20:16;
+    *bytes=record;
+    if (count) {
+        if ((count&3) || max<=0 || i<0 || i>=max || stride<(int)record || (stride&3)) return 0;
+        if (!i) *bytes=(uint64_t)(unsigned)max*(unsigned)stride;
+    }
+    return *bytes<=UINT64_MAX-ind;
+}
 #endif

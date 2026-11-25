@@ -11,6 +11,7 @@ PREFIX = r"""
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "gfx_vk_resolution_preflight.h"
 #define NVN_MEMORY_POOL_FLAGS_VIRTUAL 0x200
 static struct { struct { uint64_t address,size; } vbuf[16]; } S;
 static int g_tf_on;
@@ -22,25 +23,25 @@ static int vk_rs_preflight_buffer(uint64_t a,uint64_t n) { return a<=owner ? own
 """
 SUFFIX = r"""
 int main(void) {
-    assert(resolution_draw_inputs(0,0,3,0,0,0,0,0));
+    assert(resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
     S.vbuf[0].address=0x1000; S.vbuf[0].size=4;
-    assert(!resolution_draw_inputs(0,0,3,0,0,0,0,0));
+    assert(!resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
     S.vbuf[0].address=0x1900;
-    assert(resolution_draw_inputs(0,0,3,0,0,0,0,0));
+    assert(resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
     S.vbuf[0].address=0;
-    assert(resolution_draw_inputs(0x17f0,1,8,1,0,0,0,0));
-    assert(!resolution_draw_inputs(0x17f0,1,9,1,0,0,0,0));
-    assert(!resolution_draw_inputs(0x1700,1,0,1,0x1900,0,0,0));
-    assert(resolution_draw_inputs(0x1900,2,0,1,0x1920,0,0,0));
-    assert(!resolution_draw_inputs(0,0,0,0,0x17f8,0,0,0));
-    assert(!resolution_draw_inputs(0,0,0,0,0x1900,0x1800,2,16));
-    assert(!resolution_draw_inputs(0,0,0,0,0x17e0,0x1900,3,16));
-    assert(resolution_draw_inputs(0,0,0,0,0x1900,0x1950,2,16));
-    assert(!resolution_draw_inputs(0,0,0,0,0x1900,0x1950,2,15));
-    assert(!resolution_draw_inputs(0,0,0,0,0x1ff8,0,0,0));
-    assert(!resolution_draw_inputs(0x1900,3,3,1,0,0,0,0));
-    g_tf_on=1; assert(!resolution_draw_inputs(0,0,0,0,0,0,0,0)); g_tf_on=0;
-    p.flags=NVN_MEMORY_POOL_FLAGS_VIRTUAL; assert(!resolution_draw_inputs(0,0,0,0,0x1900,0,0,0));
+    assert(resolution_draw_inputs(0x17f0,1,8,1,0,0,0,0,0));
+    assert(!resolution_draw_inputs(0x17f0,1,9,1,0,0,0,0,0));
+    assert(!resolution_draw_inputs(0x1700,1,0,1,0x1900,0,0,0,0));
+    assert(resolution_draw_inputs(0x1900,2,0,1,0x1920,0,0,0,0));
+    assert(!resolution_draw_inputs(0,0,0,0,0x17f8,0,0,0,0));
+    assert(!resolution_draw_inputs(0,0,0,0,0x1900,0x1800,0,2,16));
+    assert(!resolution_draw_inputs(0,0,0,0,0x17e0,0x1900,0,3,16));
+    assert(resolution_draw_inputs(0,0,0,0,0x1900,0x1950,0,2,16));
+    assert(!resolution_draw_inputs(0,0,0,0,0x1900,0x1950,0,2,15));
+    assert(!resolution_draw_inputs(0,0,0,0,0x1ff8,0,0,0,0));
+    assert(!resolution_draw_inputs(0x1900,3,3,1,0,0,0,0,0));
+    g_tf_on=1; assert(!resolution_draw_inputs(0,0,0,0,0,0,0,0,0)); g_tf_on=0;
+    p.flags=NVN_MEMORY_POOL_FLAGS_VIRTUAL; assert(!resolution_draw_inputs(0,0,0,0,0x1900,0,0,0,0));
     puts("raw consumer ranges PASS");
 }
 """
@@ -58,7 +59,7 @@ class ResolutionRawConsumers(unittest.TestCase):
             c = path / 'check.c'
             exe = path / 'check'
             c.write_text(PREFIX + source[start:end] + SUFFIX)
-            subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', str(c), '-o', str(exe)], check=True)
+            subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'nxnative/dm/gfx/nvn'), str(c), '-o', str(exe)], check=True)
             subprocess.run([str(exe)], check=True)
 
     def test_preflight_precedes_cpu_and_snapshot_access(self):

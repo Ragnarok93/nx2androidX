@@ -1,5 +1,5 @@
 // Closed, bounded immutable-replay lifetime proof. This is deliberately a
-// narrow production seam: only disjoint bounded raw transfers, no indirect dispatch/draw, unknown
+// narrow production seam: only disjoint bounded raw and indirect accesses, no unknown
 // descriptors, feedback, conditional rendering or open-ended lifetimes.
 #include "gfx_vk_resolution_scope.h"
 static const uint8_t *g_rs_scope_end;
@@ -121,16 +121,18 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
 // Direct native-grid compute consumers: scaled inputs are sampled only,
 // storage destinations must be provably disjoint native images or explicit
 // bounded native SSBOs. No bindless handles, physical addressing, indirect
-// dispatch or grid changes.
+// grid changes; indirect argument reads are bounded and disjoint.
 static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,int *samples) {
     *samples=0;
     vkshader_t *s=look->sh[5];
-    if (!s || s->stage!=5 || d->ind || d->x<=0 || d->y<=0 || d->z<=0 ||
+    if (!s || s->stage!=5 || s->nbind<0 || s->nbind>96 || (s->nbind && !s->b) ||
+        !nx_rs_compute_logical(s->spv,s->nspv)) return 0;
+    if (d->ind) {
+        if ((d->ind&3) || !rs_scope_raw(g,d->ind,12,0)) return 0;
+    } else if (d->x<=0 || d->y<=0 || d->z<=0 ||
         (uint32_t)d->x>V.props.limits.maxComputeWorkGroupCount[0] ||
         (uint32_t)d->y>V.props.limits.maxComputeWorkGroupCount[1] ||
-        (uint32_t)d->z>V.props.limits.maxComputeWorkGroupCount[2] ||
-        s->nbind<0 || s->nbind>96 || (s->nbind && !s->b) ||
-        !nx_rs_compute_logical(s->spv,s->nspv)) return 0;
+        (uint32_t)d->z>V.props.limits.maxComputeWorkGroupCount[2]) return 0;
     int support=0;
     for (int i=0;i<s->nbind;i++) {
         const dmsv_bind *b=&s->b[i];
@@ -220,6 +222,13 @@ static int rs_scope_rt(const rs_scope_group *g,const p_set_rt *r) {
     }
     if (original==g->mask && !native) return 1;
     return !original && native?0:-1;
+}
+static int rs_scope_indirect(const rs_scope_group *g,int indexed,uint64_t ind,uint64_t count,
+                             int i,int max,int stride) {
+    uint64_t bytes;
+    return nx_rs_indirect_span(indexed,ind,count,i,max,stride,&bytes) &&
+        (!count || rs_scope_raw(g,count,4,0)) &&
+        (!ind || rs_scope_raw(g,ind,bytes,0));
 }
 static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
     __typeof__(S) look=S;
@@ -313,12 +322,14 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
             if (h.op==OP_DRAW) {
                 p_draw tmp;if (n<offsetof(p_draw,ind) || n>sizeof tmp) return NULL;
                 const p_draw *d=draw_rec(a,h.size,&tmp);
-                if (d->ind || d->mdi_cnt || d->count<=0 || d->first<0) return NULL;
+                if ((!d->ind && (d->count<=0 || d->first<0)) ||
+                    !rs_scope_indirect(g,0,d->ind,d->mdi_cnt,d->mdi_i,d->mdi_max,d->mdi_stride)) return NULL;
             } else {
                 p_draw_idx tmp;if (n<offsetof(p_draw_idx,ind) || n>sizeof tmp) return NULL;
                 const p_draw_idx *d=draw_idx_rec(a,h.size,&tmp);
-                if (d->ind || d->mdi_cnt || d->count<=0 || d->itype<0 || d->itype>2 ||
-                    !rs_scope_raw(g,d->ibuf,(uint64_t)(unsigned)d->count<<d->itype,0)) return NULL;
+                if ((!d->ind && d->count<=0) || d->itype<0 || d->itype>2 ||
+                    !rs_scope_indirect(g,1,d->ind,d->mdi_cnt,d->mdi_i,d->mdi_max,d->mdi_stride) ||
+                    !rs_scope_raw(g,d->ibuf,(uint64_t)(unsigned)d->count<<d->itype,d->ind!=0)) return NULL;
             }
             int sampled=0;
             if (!rs_scope_draw_proof(g,&look,life.phase==0,&sampled) || !nx_rs_scope_draw(&life,1,sampled)) return NULL;

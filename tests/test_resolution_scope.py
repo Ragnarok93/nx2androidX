@@ -79,8 +79,10 @@ typedef struct { const tex_t *target[9]; uint64_t addr[9]; unsigned mask; uint32
 typedef struct {int depth,stencil;} vkfmt_t;
 static const vkfmt_t *vk_fmt(int fmt) {static const vkfmt_t f={1,1};(void)fmt;return &f;}
 static int rs_scope_raw(const rs_scope_group *g,uint64_t a,uint64_t n,int tail) {
-    (void)tail;
-    return a && n && !nx_rs_range_overlap(a,n,g->addr[0],g->target[0]->L.size);
+    uint64_t lo=g->addr[0],hi=lo+16384;
+    if (a<lo || a>=hi) return 0;
+    if (tail) n=hi-a;
+    return n && n<=hi-a && !nx_rs_range_overlap(a,n,lo,g->target[0]->L.size);
 }
 static int rs_scope_program_proof(__typeof__(S) *s,const uint8_t *p,const p_bind_program *b) {(void)s;(void)p;(void)b;return 1;}
 /* Isolate the real command walker and range matching from shader/Vulkan
@@ -92,7 +94,7 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,in
 static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,int *sampled) {
     *sampled=s->tex[5][0]==7;
     const p_bind_buf *b=&s->ssbo[5][0];
-    return d->x>0 && d->y>0 && d->z>0 && !d->ind && s->img[5][0]==8 &&
+    return (d->ind?(!(d->ind&3) && rs_scope_raw(g,d->ind,12,0)):(d->x>0 && d->y>0 && d->z>0)) && s->img[5][0]==8 &&
         (!b->addr || rs_scope_raw(g,b->addr,b->size,0));
 }
 """
@@ -121,7 +123,7 @@ static void rt(tex_t *target) {p_set_rt r={.n=1,.color={target}};append(OP_SET_R
 static void clear(unsigned mask) {p_clear_color c={.index=0,.mask=mask};append(OP_CLEAR_COLOR,&c,sizeof c);}
 static void draw(void) {p_draw d={.count=3,.instances=1};append(OP_DRAW,&d,sizeof d);}
 static void bind(unsigned id,int deferred) {p_bind_handles b={.stage=1,.first=0,.n=1,.defer=deferred,.h={id}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);}
-static void compute(int aliased,int indirect) {p_bind_handles b={.stage=5,.first=0,.n=1,.h={7}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);b.h[0]=aliased?7:8;append(OP_BIND_IMG,&b,offsetof(p_bind_handles,h)+8);p_dispatch d={.x=8,.y=8,.z=1,.ind=indirect};append(OP_DISPATCH,&d,sizeof d);}
+static void compute(int aliased,uint64_t indirect) {p_bind_handles b={.stage=5,.first=0,.n=1,.h={7}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);b.h[0]=aliased?7:8;append(OP_BIND_IMG,&b,offsetof(p_bind_handles,h)+8);p_dispatch d={.x=8,.y=8,.z=1,.ind=indirect};append(OP_DISPATCH,&d,sizeof d);}
 static uint8_t *discard(void) {p_rs_discard d={.index=0};return append(OP_RS_DISCARD,&d,sizeof d);}
 static const uint8_t *scan(void) {rs_scope_group g={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};append(OP_END,NULL,0);return rs_scope_scan(commands,&g);}
 static void producer(void) {clear(15);draw();}
@@ -160,6 +162,17 @@ int main(void) {
     compute(0,0);discard();assert(!scan());
     reset();producer();compute(1,0);discard();assert(!scan());
     reset();producer();compute(0,1);discard();assert(!scan());
+    reset();producer();compute(0,(uintptr_t)(storage+8192));end=discard();assert(scan()==end);
+    reset();producer();compute(0,(uintptr_t)storage);discard();assert(!scan());
+    reset();clear(15);p_draw indirect={.ind=(uintptr_t)(storage+8192)};
+    append(OP_DRAW,&indirect,sizeof indirect);consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    reset();clear(15);indirect.ind=(uintptr_t)storage;append(OP_DRAW,&indirect,sizeof indirect);
+    consumer();rt(&t[0]);discard();assert(!scan());
+    reset();clear(15);p_draw_idx ix={.itype=1,.ibuf=(uintptr_t)(storage+4096),.ind=(uintptr_t)(storage+8192),.mdi_cnt=(uintptr_t)(storage+12288),.mdi_max=2,.mdi_stride=20};
+    append(OP_DRAW_IDX,&ix,sizeof ix);ix.mdi_i=1;ix.ind+=20;append(OP_DRAW_IDX,&ix,sizeof ix);
+    consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    reset();clear(15);ix.mdi_i=0;ix.ibuf=(uintptr_t)storage;append(OP_DRAW_IDX,&ix,sizeof ix);
+    consumer();rt(&t[0]);discard();assert(!scan());
     reset();producer();compute(0,0);draw();discard();assert(!scan());
     reset();producer();compute(0,0);clear(15);discard();assert(!scan());
     reset();producer();t[1].off=128;t[1].mem=storage+128;consumer();rt(&t[0]);discard();assert(!scan());

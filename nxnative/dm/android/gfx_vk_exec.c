@@ -3002,7 +3002,7 @@ static int resolution_raw_span(uint64_t addr,uint64_t bytes,int tail) {
     return vk_rs_preflight_buffer(addr,bytes);
 }
 static int resolution_draw_inputs(uint64_t index,int index_type,int count,int indexed,
-                                  uint64_t indirect,uint64_t mdi_count,int mdi_max,int mdi_stride) {
+                                  uint64_t indirect,uint64_t mdi_count,int mdi_i,int mdi_max,int mdi_stride) {
     if (g_tf_on) return 0;
     for (unsigned i=0;i<16;i++) {
         if (S.vbuf[i].address && !resolution_raw_span(S.vbuf[i].address,0,1)) return 0;
@@ -3012,22 +3012,15 @@ static int resolution_draw_inputs(uint64_t index,int index_type,int count,int in
         uint64_t bytes=(uint64_t)(unsigned)count << index_type;
         if (!resolution_raw_span(index,bytes,indirect!=0)) return 0;
     }
-    if (mdi_count && (!indirect || !resolution_raw_span(mdi_count,4,0))) return 0;
-    if (indirect) {
-        unsigned record=indexed?20:16;
-        uint64_t bytes=record;
-        if (mdi_count) {
-            if (mdi_max<=0 || mdi_stride<(int)record || (mdi_stride&3)) return 0;
-            bytes=(uint64_t)(unsigned)mdi_max*(unsigned)mdi_stride;
-        }
-        if (!resolution_raw_span(indirect,bytes,0)) return 0;
-    }
-    return 1;
+    uint64_t bytes;
+    return nx_rs_indirect_span(indexed,indirect,mdi_count,mdi_i,mdi_max,mdi_stride,&bytes) &&
+        (!mdi_count || resolution_raw_span(mdi_count,4,0)) &&
+        (!indirect || resolution_raw_span(indirect,bytes,0));
 }
 static void resolution_draw_preflight(uint64_t index,int index_type,int count,int indexed,
-                                      uint64_t indirect,uint64_t mdi_count,int mdi_max,int mdi_stride) {
+                                      uint64_t indirect,uint64_t mdi_count,int mdi_i,int mdi_max,int mdi_stride) {
     int scaled;
-    if (!resolution_draw_inputs(index,index_type,count,indexed,indirect,mdi_count,mdi_max,mdi_stride) ||
+    if (!resolution_draw_inputs(index,index_type,count,indexed,indirect,mdi_count,mdi_i,mdi_max,mdi_stride) ||
         !resolution_preflight_targets(&scaled) || !resolution_preflight_stages(scaled))
         resolution_restore_before_recording();
 }
@@ -3493,7 +3486,7 @@ static int mdi_group(uint64_t cnt, uint64_t ind, int i, int max, int stride, int
 }
 static void draw(const p_draw *d) {
     if (g_rs_replay && vk_rs_cache_has_scaled())
-        resolution_draw_preflight(0,0,d->count,0,d->ind,d->mdi_cnt,d->mdi_max,d->mdi_stride);
+        resolution_draw_preflight(0,0,d->count,0,d->ind,d->mdi_cnt,d->mdi_i,d->mdi_max,d->mdi_stride);
     graphics_updates_ready();
     graphics_cpu_ready();
     for (int st = 0; st < 3; st++) texel_snapshots(st, S.sh[st]);
@@ -3626,7 +3619,7 @@ static void capture_indexed_inputs(const p_draw_idx *d, VkBuffer arguments, VkDe
 }
 static void draw_idx(const p_draw_idx *d) {
     if (g_rs_replay && vk_rs_cache_has_scaled())
-        resolution_draw_preflight(d->ibuf,d->itype,d->count,1,d->ind,d->mdi_cnt,d->mdi_max,d->mdi_stride);
+        resolution_draw_preflight(d->ibuf,d->itype,d->count,1,d->ind,d->mdi_cnt,d->mdi_i,d->mdi_max,d->mdi_stride);
     graphics_updates_ready();
     graphics_cpu_ready();
     for (int st = 0; st < 3; st++) texel_snapshots(st, S.sh[st]);
@@ -3836,8 +3829,9 @@ static int dispatch_indirect_spans(uint64_t addr, VkBuffer src[3], VkBufferCopy 
 // Retain unrelated scaled images for a narrowly classified direct dispatch.
 // Do not change group counts: no storage-image output grid is virtualized.
 static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *d) {
-    if (!cs || !d || d->ind || cs->stage!=5 || cs->nbind<0 || cs->nbind>96 ||
-        (cs->nbind && !cs->b) || !nx_rs_compute_logical(cs->spv,cs->nspv)) return 0;
+    if (!cs || !d || cs->stage!=5 || cs->nbind<0 || cs->nbind>96 ||
+        (cs->nbind && !cs->b) || !nx_rs_compute_logical(cs->spv,cs->nspv) ||
+        (d->ind && ((d->ind&3) || !resolution_raw_span(d->ind,12,0)))) return 0;
     int support=0, sampled_scaled=0;
     for (int i=0;i<cs->nbind;i++) {
         const dmsv_bind *b=&cs->b[i];

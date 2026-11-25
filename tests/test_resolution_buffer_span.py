@@ -23,6 +23,13 @@ int main(void) {
     assert(nx_rs_buffer_span(0x1003,0x2000,0x1100,4,256,&a,&n));
     assert(a==0x1003 && n==0x101);
     assert(nx_rs_buffer_span(UINT64_MAX-511,UINT64_MAX,UINT64_MAX-15,15,256,&a,&n));
+    assert(nx_rs_indirect_span(1,0x2000,0x3000,0,4,20,&n) && n==80);
+    assert(nx_rs_indirect_span(1,0x203c,0x3000,3,4,20,&n) && n==20);
+    assert(nx_rs_indirect_span(0,0x2000,0,0,0,0,&n) && n==16);
+    assert(!nx_rs_indirect_span(1,0x2000,0x3000,4,4,20,&n));
+    assert(!nx_rs_indirect_span(1,0x2000,0x3000,0,4,16,&n));
+    assert(!nx_rs_indirect_span(1,0x2001,0,0,0,0,&n));
+    assert(!nx_rs_indirect_span(1,0,0x3000,0,4,20,&n));
     return 0;
 }
 """
