@@ -4391,6 +4391,13 @@ static void exec_ops(const uint8_t *p) {
         static uint64_t skip = ~0ull; if (skip == ~0ull) { skip = 0; const char *e = getenv("DM_VK_SKIP_OPS"); for (const char *q = e; q && *q;) { char *n; long v = strtol(q, &n, 10); if (n == q) break; if (v > 0 && v < 64) skip |= 1ull << v; q = *n ? n + 1 : n; } }   // debugging: record ops not replayed
         if (h.op < 64 && h.op > 3 && (skip >> h.op & 1)) { p += h.size; continue; }
         const uint8_t *a = p + 8;
+        if (g_rs_scope_end==p && g_rs_scope_overwrite) {
+            // The complete next clear sequence has already been proved.
+            // Close before recording any overwrite; reauthorize the new
+            // lifetime if possible, otherwise the normal native path runs.
+            rs_scope_close();
+            rs_scope_try_begin(p);
+        }
         switch (h.op) {
         case OP_END:
             if (g_rs_scope_end) {
@@ -4436,10 +4443,7 @@ static void exec_ops(const uint8_t *p) {
         case OP_RS_DISCARD: {
             if (g_rs_scope_end) {
                 if (p==g_rs_scope_end) {
-                    vk_end_pass();
-                    if (!vk_rs_suspend_discarded_group()) die("[vk] resolution: certified discard publication failed");
-                    g_rs_scope_end=NULL; g_rs_scope_program_count=0; g_rs_scope_crossed=0;
-                    vk_rs_scope_freeze_end();
+                    rs_scope_close();
                 }
                 break;
             }

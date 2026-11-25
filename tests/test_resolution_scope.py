@@ -53,7 +53,9 @@ class ScopeTests(unittest.TestCase):
         self.assertIn("!nvn_replaying_job()",scope)
         self.assertIn("vk_rs_scope_freeze_seal();g_rs_scope_end=end",scope)
         self.assertIn("rs_scope_try_begin(p+h.size)",replay)
-        self.assertIn("vk_rs_suspend_discarded_group()",replay)
+        self.assertIn("vk_rs_suspend_discarded_group()",scope)
+        self.assertIn("g_rs_scope_end==p && g_rs_scope_overwrite",replay)
+        self.assertIn("rs_scope_close();\n            rs_scope_try_begin(p);",replay)
 
     def test_actual_replay_scan(self):
         cc=shutil.which("cc") or shutil.which("clang")
@@ -70,6 +72,7 @@ class ScopeTests(unittest.TestCase):
 #include "gfx_vk_resolution_preflight.h"
 static const uint64_t *g_rs_scope_rest;
 static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
+static int g_rs_scope_overwrite;
 static struct {
     p_scissor sc; int sc_set,rast_discard;
     p_bind_buf ubo[6][16],ssbo[6][16]; NVNbufferRange vbuf[16];
@@ -174,11 +177,22 @@ int main(void) {
     reset();clear(15);ix.mdi_i=0;ix.ibuf=(uintptr_t)storage;append(OP_DRAW_IDX,&ix,sizeof ix);
     consumer();rt(&t[0]);discard();assert(!scan());
     reset();producer();compute(0,0);draw();discard();assert(!scan());
-    reset();producer();compute(0,0);clear(15);discard();assert(!scan());
+    reset();producer();compute(0,0);uint8_t *overwrite=commands+at;clear(15);discard();assert(scan()==overwrite && g_rs_scope_overwrite);
     reset();producer();t[1].off=128;t[1].mem=storage+128;consumer();rt(&t[0]);discard();assert(!scan());
     reset();producer();consumer();rt(&t[0]);draw();discard();assert(!scan());
     reset();producer();consumer();rt(&t[0]);append(OP_RS_DISCARD,NULL,0);assert(!scan());
-    reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end && !g_rs_scope_overwrite);
+    reset();producer();consumer();rt(&t[0]);overwrite=commands+at;clear(15);
+    assert(scan()==overwrite && g_rs_scope_overwrite);
+    reset();producer();consumer();rt(&t[0]);clear(7);assert(!scan());
+    // The terminal overwrite proof must cover every member and reject
+    // intervening draws and partial depth/stencil clears.
+    reset();rs_scope_group two={.target={&t[0],NULL,NULL,NULL,NULL,NULL,NULL,NULL,&t[1]},.mask=257,.w=64,.h=64};
+    clear(15);p_clear_ds depth={.depth_mask=1,.stencil_mask=255};append(OP_CLEAR_DS,&depth,sizeof depth);
+    assert(rs_scope_overwrite_run(commands,&two,&S,9,at));
+    assert(!rs_scope_overwrite_run(commands,&two,&S,1,at));
+    reset();clear(15);draw();append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_overwrite_run(commands,&two,&S,9,at));
+    reset();clear(15);depth.stencil_mask=127;append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_overwrite_run(commands,&two,&S,9,at));
     // A lifetime can cross immutable handle boundaries, including between
     // producer and consumer and before the terminal discard.
     reset();producer();append(OP_END,NULL,0);uint8_t *h2=commands+at;

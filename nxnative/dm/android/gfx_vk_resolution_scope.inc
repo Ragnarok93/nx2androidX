@@ -4,6 +4,7 @@
 #include "gfx_vk_resolution_scope.h"
 static const uint8_t *g_rs_scope_end;
 static unsigned g_rs_scope_nested,g_rs_scope_program_count;
+static int g_rs_scope_overwrite;
 static const uint64_t *g_rs_scope_rest;
 static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 enum { RS_SCOPE_PROGRAM_MAX=32, RS_SCOPE_OP_MAX=4096, RS_SCOPE_BYTES_MAX=4*1024*1024, RS_SCOPE_HANDLE_MAX=32 };
@@ -209,6 +210,35 @@ static int rs_scope_full_scissor(const __typeof__(S) *look,const rs_scope_group 
         (int64_t)look->sc.x+look->sc.w>=g->w && (int64_t)look->sc.y+look->sc.h>=g->h);
 }
 // 1 exactly original group, 0 disjoint native group, -1 unsupported.
+// A complete new overwrite is another valid end to the preceding
+// content lifetime. Prove all clears before returning the FIRST one as
+// the replay boundary. No intervening read, draw, state change, partial
+// aspect or cross-handle speculation is allowed in this initial form.
+static int rs_scope_overwrite_run(const uint8_t *p,const rs_scope_group *g,
+                                  const __typeof__(S) *look,unsigned ops,size_t bytes) {
+    if (!rs_scope_full_scissor(look,g)) return 0;
+    unsigned mask=0;
+    for (unsigned i=0;i<9 && i<ops;i++) {
+        op_hdr h;memcpy(&h,p,sizeof h);
+        if (h.size<8 || (h.size&7) || h.size>bytes) return 0;
+        const uint8_t *a=p+8;unsigned bit;
+        if (h.op==OP_CLEAR_COLOR && h.size-8>=sizeof(p_clear_color)) {
+            const p_clear_color *c=(const p_clear_color *)a;
+            if (c->index<0 || c->index>=8 || c->mask!=15) return 0;
+            bit=1u<<c->index;
+        } else if (h.op==OP_CLEAR_DS && h.size-8>=sizeof(p_clear_ds)) {
+            const p_clear_ds *c=(const p_clear_ds *)a;
+            const vkfmt_t *f=g->target[8]?vk_fmt(g->target[8]->d.format):NULL;
+            if (!f || (f->depth && !c->depth_mask) || (f->stencil && (c->stencil_mask&255)!=255)) return 0;
+            bit=1u<<8;
+        } else return 0;
+        if (!(g->mask&bit) || (mask&bit)) return 0;
+        mask|=bit;
+        if (mask==g->mask) return 1;
+        bytes-=h.size;p+=h.size;
+    }
+    return 0;
+}
 static int rs_scope_rt(const rs_scope_group *g,const p_set_rt *r) {
     if (r->n<0 || r->n>8) return -1;
     unsigned original=0,native=0;
@@ -234,7 +264,7 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
     __typeof__(S) look=S;
     nx_rs_scope life; if (!nx_rs_scope_init(&life,g->mask)) return NULL;
     size_t bytes=0;unsigned crossed=0;
-    g_rs_scope_crossed=0;
+    g_rs_scope_crossed=0;g_rs_scope_overwrite=0;
     for (unsigned op=0;op<RS_SCOPE_OP_MAX;op++) {
         op_hdr h;memcpy(&h,p,sizeof h);
         if (h.size<8 || (h.size&7) || h.size>RS_SCOPE_BYTES_MAX-bytes) return NULL;
@@ -246,6 +276,11 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
             p=(const uint8_t *)(uintptr_t)g_rs_scope_rest[crossed++];
             if (!p) return NULL;
             continue;
+        }
+        if (life.original_bound && life.sampled && !life.discarded &&
+            (life.phase==1 || life.phase==2) && (h.op==OP_CLEAR_COLOR || h.op==OP_CLEAR_DS) &&
+            rs_scope_overwrite_run(p,g,&look,RS_SCOPE_OP_MAX-op,RS_SCOPE_BYTES_MAX-(bytes-h.size))) {
+            g_rs_scope_crossed=crossed;g_rs_scope_overwrite=1;return p;
         }
         if (life.phase==2 && h.op!=OP_RS_DISCARD) return NULL;
 #define RS_NEED(T) do { if (n<sizeof(T)) return NULL; } while (0)
@@ -379,10 +414,17 @@ static void rs_scope_try_begin(const uint8_t *next) {
     g_rs_scope_program_count=0;
     const uint8_t *end=rs_scope_scan(next,&group);
     if (!end || !vk_rs_allocate_fresh_group(group.target,ext.w,ext.h)) {
-        g_rs_scope_program_count=0;g_rs_scope_crossed=0;vk_rs_scope_freeze_end();return;
+        g_rs_scope_program_count=0;g_rs_scope_crossed=0;g_rs_scope_overwrite=0;vk_rs_scope_freeze_end();return;
     }
     vk_rs_scope_freeze_seal();g_rs_scope_end=end;
     static unsigned accepted;
     if (++accepted<=16 || accepted%300==0)
-        VKLOG("[resolution-scope] authorized raster/consumer/discard group %ux%u -> %ux%u (%u)",group.w,group.h,ext.w,ext.h,accepted);
+        VKLOG("[resolution-scope] authorized raster/consumer/%s group %ux%u -> %ux%u (%u)",g_rs_scope_overwrite?"overwrite":"discard",group.w,group.h,ext.w,ext.h,accepted);
+}
+
+static void rs_scope_close(void) {
+    vk_end_pass();
+    if (!vk_rs_suspend_discarded_group()) die("[vk] resolution: certified lifetime publication failed");
+    g_rs_scope_end=NULL;g_rs_scope_program_count=0;g_rs_scope_crossed=0;g_rs_scope_overwrite=0;
+    vk_rs_scope_freeze_end();
 }
