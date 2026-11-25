@@ -40,6 +40,9 @@ Checkpoint P2b: exact uniform extent ratios, logical scissor clipping and flippe
 
 ## Phase 3 — compute and coherence
 
+Checkpoint P3a: optional ownership/consumer graph is now wired to real cache owners, render attachment groups, alias discovery (including overlaps beyond the legacy eight-entry list), sampled/storage descriptors (including view-cache hits), raw texture lookups, CPU readback, and presentation. It propagates sticky restrictions across connected attachment groups; expired owners are retired from pointer lookup and pointer reuse starts a new lifetime. A bounded 4096-lifetime capacity fails closed on exhaustion; no graph memory allocated at normal 1x. The audit disables descriptor memo hits only when explicitly enabled, so shader-specific consumer metadata is observed. `DM_VK_RESOLUTION_AUDIT=1` emits ownership summaries every 300 presents. This is observation, not a complete proof of future consumer behavior or production ownership replacement. Compute, raw access, presentation, unclassified metadata, format/special views and host-visible resources remain pinned until their scaled paths exist. Guest memory access via unobserved APIs and aliases created before tracking are not proven safe.
+
+
 - Classify dispatch geometry, storage-image accesses, mip chains, copies, resolves, guest readback and alias groups. Pin or reconcile incompatible connected resource groups at logical resolution. Do not infer workgroup coverage from texture extent alone.
 - Validate representative UE deferred passes and Xclipse D24S8 behavior, including alias and depth-pyramid cases. Preserve the Adreno path.
 

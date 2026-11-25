@@ -1430,7 +1430,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     // without display times (no VK_GOOGLE_display_timing, no window, or none came back) the hand-over time stands in, as before: the governor's late check needs readings
     { int disp = V.has_dtiming && dm_front_window() && (n <= 240 || g_pres_recorded); struct timespec ts; if (!disp) clock_gettime(CLOCK_MONOTONIC, &ts);
       present_time_begin(n, disp ? 0 : (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
-    vkimg_t *im = vk_tex(t);
+    vkimg_t *im = vk_tex_for_present(t);
     static uint64_t no_img, undrawn, shown;
     if (n == 600) { void crash_handlers_check(const char *when); crash_handlers_check("after 600 presents"); }
     if (n % 600 == 0) {

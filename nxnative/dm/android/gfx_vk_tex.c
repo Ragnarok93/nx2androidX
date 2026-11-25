@@ -5,6 +5,7 @@
 //   dirty-page tracker saw a write to its pages; any other texture is the GPU's (render targets, images), filled only by GPU work.
 //   Version 1 keeps every image in VK_IMAGE_LAYOUT_GENERAL after its first use, ordered by whole-pipeline barriers.
 #include "gfx_vk.h"
+#include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_d24_copy.h"
 #include "gfx_vk_resolution_budget.h"
 #include "nvn_tex.h"
@@ -572,6 +573,59 @@ static int packaged_tex(const tex_t *t);
 static int cpu_content_tex(const tex_t *t, const vkfmt_t *f);
 static int uncached_material_storage(const tex_t *t);
 static int lin_copy(vkimg_t *im, const tex_t *t, const vkfmt_t *f);
+// Audit only: sticky lifetime restrictions propagate across attachment groups.
+// Do not use an observed group as proof of future accesses. Pointer identity
+// is removed at image destruction, so reuse does not inherit the old lifetime.
+int g_vk_rs_tracking;
+static nx_ro_graph *g_ro;
+static int g_ro_oom;
+static pthread_mutex_t g_ro_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t ro_note_locked(vkimg_t *im, uint32_t flags) {
+    if (!im || g_ro_oom) return 0;
+    if (!g_ro && !(g_ro=calloc(1,sizeof *g_ro))) { g_ro_oom=1; return 0; }
+    const vkfmt_t *fmt=vk_fmt(im->nvn_format);
+    if (!im->pool || im->target!=NVN_TEXTURE_TARGET_2D || im->d!=1 || im->layers!=1 ||
+        im->levels!=1 || im->samples!=1 || !fmt || fmt->compressed || fmt->is_int ||
+        im->bc_of || im->bc_draw || im->family_closed) flags|=NX_RO_INTRINSIC;
+    if (im->packaged || im->lin_mem || (im->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) flags|=NX_RO_HOST;
+    if (im->flags & NVN_TEXTURE_FLAGS_IMAGE) flags|=NX_RO_STORAGE;
+    if (im->novl) flags|=NX_RO_ALIAS;
+    return nx_ro_note(g_ro,(uintptr_t)im,flags);
+}
+void vk_rs_note(vkimg_t *im, uint32_t flags) {
+    if (!im) return;
+    pthread_mutex_lock(&g_ro_mu); ro_note_locked(im,flags); pthread_mutex_unlock(&g_ro_mu);
+}
+void vk_rs_note_group(vkimg_t *const *images, unsigned count) {
+    pthread_mutex_lock(&g_ro_mu);
+    uint32_t root=0;
+    for (unsigned i=0;i<count;i++) {
+        uint32_t id=ro_note_locked(images[i],NX_RO_ATTACH);
+        if (!id) continue;
+        if (!root) root=id; else nx_ro_merge(g_ro,root,id);
+    }
+    pthread_mutex_unlock(&g_ro_mu);
+}
+static void ro_drop(vkimg_t *im) {
+    pthread_mutex_lock(&g_ro_mu);
+    if (g_ro) nx_ro_drop(g_ro,(uintptr_t)im);
+    pthread_mutex_unlock(&g_ro_mu);
+}
+static void ro_report(void) {
+    unsigned live=0, attachments=0, candidates=0, reasons[11]={0}, exhausted=0;
+    pthread_mutex_lock(&g_ro_mu);
+    exhausted=g_ro_oom || (g_ro && g_ro->exhausted);
+    if (g_ro) for (uint32_t i=0;i<g_ro->count;i++) if (g_ro->nodes[i].live) {
+        live++; uint32_t flags=nx_ro_flags(g_ro,i+1);
+        if (!(g_ro->nodes[i].flags & NX_RO_ATTACH)) continue;
+        attachments++;
+        if (!exhausted && !(flags & NX_RO_BLOCKERS)) candidates++;
+        for (unsigned j=2;j<11;j++) if (flags & (1u<<j)) reasons[j]++;
+    }
+    pthread_mutex_unlock(&g_ro_mu);
+    VKLOG("[resolution-ownership] live=%u attachment_owners=%u observed_candidates=%u exhausted=%u blockers alias=%u raw=%u host=%u storage=%u view=%u unknown=%u compute=%u present=%u intrinsic=%u (not authorization)",
+          live,attachments,candidates,exhausted,reasons[2],reasons[3],reasons[4],reasons[5],reasons[6],reasons[7],reasons[8],reasons[9],reasons[10]);
+}
 static void vk_tex_view_drop_all(vkimg_t *im);
 // Images over the same memory with different descriptions (the storage key differs) are separate Vulkan images: on the Switch a texture sees what another
 // one over its memory rendered, here it does not. They are linked both ways at creation (up to 8 each), and a sampled image older than an overlapping
@@ -584,6 +638,8 @@ void vk_tex_mark_written(vkimg_t *im) {
 static void alias_link(vkimg_t *im) {
     for (uint32_t i = 0; i < g_by_key.cap; i++) {
         vkimg_t *o = g_by_key.vals[i]; if (!o || o == im || o->pool != im->pool || o->off >= im->off + im->size || im->off >= o->off + o->size) continue;
+        // Observe ALL overlaps, even when the legacy eight-neighbor list is full.
+        if (vk_rs_tracking()) { vk_rs_note(im,NX_RO_ALIAS); vk_rs_note(o,NX_RO_ALIAS); }
         if (im->novl < 8 && o->novl < 8) { im->ovl[im->novl++] = o; o->ovl[o->novl++] = im; }
     }
 }
@@ -642,7 +698,7 @@ extern uint64_t g_tex_frame;   // presents so far, for the packaged textures' la
 // last EVICT_KEEP presents go (their memory now holds another texture; one drawn again is made and filled again). Called with g_img_mu held
 enum { EVICT_KEEP = 60 };
 static uint64_t g_img_n, g_img_bytes, g_img_evicted;   // live images and their bytes, images evicted so far (vk_tex_sweep's line)
-static void img_drop(vkimg_t *im) { if (im->bc_draw) { vkimg_t *d = im->bc_draw; vk_lrz_forget(d); vk_tex_view_drop_all(d); if (d->sub) vk_defer_free_image_sub(d->img, d->sub); else vk_defer_free_image(d->img, d->mem); free(d); }
+static void img_drop(vkimg_t *im) { if (vk_rs_tracking()) { ro_drop(im); if (im->bc_draw) ro_drop(im->bc_draw); } if (im->bc_draw) { vkimg_t *d = im->bc_draw; vk_lrz_forget(d); vk_tex_view_drop_all(d); if (d->sub) vk_defer_free_image_sub(d->img, d->sub); else vk_defer_free_image(d->img, d->mem); free(d); }
     vk_lrz_forget(im); if (im->lin_mem) nvn_dirty_release(im->lin_mem, im->lin_len); if (im->packaged && !im->pkg_released && im->pkg_mem) nvn_dirty_release(im->pkg_mem, im->pkg_len); g_img_n--; g_img_bytes -= im->size > 0 ? (uint64_t)im->size : 0; alias_unlink(im); vk_tex_view_drop_all(im); if (im->sub) vk_defer_free_image_sub(im->img, im->sub); else vk_defer_free_image(im->img, im->mem); free(im); }
 static void evict_overlaps(uint64_t pool, int64_t off, int64_t size) {
     akey ks[64]; int n = 0;
@@ -655,7 +711,16 @@ static void evict_overlaps(uint64_t pool, int64_t off, int64_t size) {
 static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled);
 static vkimg_t *vk_tex_get(const tex_t *t, int sampled) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
     vkimg_t *im = vk_tex_lookup(t, sampled); if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[1] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } return im; }
-vkimg_t *vk_tex(const tex_t *t) { return vk_tex_get(t, 0); }
+vkimg_t *vk_tex(const tex_t *t) {
+    vkimg_t *im=vk_tex_get(t,0);
+    if (vk_rs_tracking()) vk_rs_note(im,NX_RO_RAW);
+    return im;
+}
+vkimg_t *vk_tex_for_present(const tex_t *t) {
+    vkimg_t *im=vk_tex_get(t,0);
+    if (vk_rs_tracking()) vk_rs_note(im,NX_RO_PRESENT);
+    return im;
+}
 static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     if (!t || !t->serial || t->magic != MAGIC('T', 'E', 'X', 0)) return NULL;
     const vkfmt_t *f = vk_fmt(t->d.format);
@@ -749,6 +814,7 @@ typedef struct { uint64_t used; vkimg_t *im; } pkg_age;
 static int pkg_age_cmp(const void *a, const void *b) { uint64_t x = ((const pkg_age *)a)->used, y = ((const pkg_age *)b)->used; return x < y ? -1 : x > y; }
 void vk_tex_sweep(void) {
     if (++g_tex_frame % 300) return;
+    if (vk_rs_tracking()) ro_report();
     uint64_t idle = 0, lru = 0, before = nvn_dirty_released();
     pthread_mutex_lock(&g_img_mu);
     pkg_age *v = NULL; size_t nv = 0, cap = 0;
@@ -1037,6 +1103,12 @@ VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arraye
     // image allows it: its format list (fixed_fmt) names it, else the image is MUTABLE_FORMAT
     if (vfmt && !as_attachment && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && (!im->fixed_fmt || vfmt == im->fmt_cls[0] || vfmt == im->fmt_cls[1])) { fmt = vfmt; swz = (VkComponentMapping){0}; }
     if (im->fixed_fmt && fmt != im->fmt && fmt != srgb_twin(im->fmt) && fmt != im->fmt_cls[0] && fmt != im->fmt_cls[1]) { fmt = im->fmt; static int n; if (n++ < 8) VKLOG("[RED] view format %d of a format-listed image (%d, DM_VK_UBWC): the image's own used", f->vk, im->fmt); }
+    if (vk_rs_tracking()) {
+        uint32_t flags=as_attachment ? NX_RO_ATTACH : 0;
+        if (type!=VK_IMAGE_VIEW_TYPE_2D || lv0 || ly0 || nlv!=1 || nly!=1 ||
+            fmt!=im->fmt || block_view || vfmt || swz.r || swz.g || swz.b || swz.a) flags|=NX_RO_VIEW;
+        vk_rs_note(im,flags);
+    }
     pthread_mutex_lock(&g_view_mu);
     vview *head = nvn_hm_get(&g_views, &im);
     for (vview *v = head; v; v = v->next)
@@ -1391,6 +1463,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     void mtl_sub_begin(void); uint64_t mtl_sub_commit(void); int mtl_wait(uint64_t, uint64_t);
     mtl_sub_begin();
     vkimg_t *im = vk_tex(t); const vkfmt_t *f = vk_fmt(t->d.format);
+    if (vk_rs_tracking()) vk_rs_note(im,NX_RO_HOST);
     size_t depth = r->depth ? r->depth : 1;
     if (!im || !f) { mtl_sub_commit(); for (size_t z = 0; z < depth; z++) for (int y = 0; y < r->height; y++) memset(dst + z * img + (size_t)y * row, 0, row); return; }
     if (f->dec) { VKRED_ONCE(17, "ReadTexels of a BC texture decoded on the CPU: zeros returned"); mtl_sub_commit(); for (size_t z = 0; z < depth; z++) for (int y = 0; y < (r->height + 3) / 4; y++) memset(dst + z * img + (size_t)y * row, 0, row); return; }

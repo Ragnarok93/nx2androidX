@@ -8,6 +8,8 @@
 #include "gfx_vk_passdump_plan.h"
 #include "gfx_vk_resolution_plan.h"
 #include "gfx_vk_resolution_raster.h"
+#include "gfx_vk_resolution_ownership.h"
+#include "gfx_vk_resolution_support.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -239,6 +241,7 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         inited = 1;
         const char *audit = getenv("DM_VK_RESOLUTION_AUDIT"), *probe = getenv("DM_VK_RESOLUTION_PROBE");
         g_rs_audit = audit && atoi(audit) != 0;
+        __atomic_store_n(&g_vk_rs_tracking,g_rs_audit,__ATOMIC_RELAXED);
         g_rs_probe = probe && atoi(probe) != 0;
         g_rs_observe = g_rs_audit || g_rs_probe;
         state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start();
@@ -369,6 +372,11 @@ static int resolution_probe_raster(vk_rs_images *images) {
     return 1;
 }
 static void resolution_observe_pass(void) {
+    if (g_rs_audit) {
+        vkimg_t *owners[9];
+        for (int i=0;i<9;i++) owners[i]=P_att[i].im;
+        vk_rs_note_group(owners,9);
+    }
     static uint64_t total, eligible, blocked[8], pixels, planned_pixels;
     nx_rs_group group = {0};
     for (int i = 0; i < 9; i++) {
@@ -2090,6 +2098,15 @@ static void compute_images_written(void) {
 // Each bit is an index in the shader binding table.
 static uint64_t g_num_um, g_num_im, g_num_r32;
 extern uint64_t g_tex_gen;
+static void resolution_note_binding(int st, const dmsv_bind *b, vkimg_t *im, int storage) {
+    uint32_t flags=storage ? NX_RO_STORAGE : NX_RO_SAMPLE;
+    unsigned slot=0, usage=0;
+    if (st==5) flags|=NX_RO_COMPUTE;
+    if (st<0 || st>=6 || !S.sh[st] || !vk_shader_resolution_binding(S.sh[st],b->binding,&slot,&usage) ||
+        slot==NX_RS_REF_UNKNOWN || (usage & (NX_RS_REF_UNSUPPORTED | NX_RS_REF_WRITES)) ||
+        b->count!=1 || b->dim!=1 || (b->flags & 3)) flags|=NX_RO_UNKNOWN;
+    vk_rs_note(im,flags);
+}
 static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *ii, unsigned element, int storage) {   // the view's view_num
     int tid = (int)(h & 0xfffff); const view_t *v = NULL; const tex_t *t = NULL;
     ii->imageLayout = VK_IMAGE_LAYOUT_GENERAL; ii->sampler = VK_NULL_HANDLE; ii->imageView = VK_NULL_HANDLE;
@@ -2105,6 +2122,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
     if (tid && g_var_now != 3 && !g_tracing && !logfs && !trace_alias && !trace_surface && g_tvc[ck].epoch == g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == cache_class) {
         ii->imageView = g_tvc[ck].v; if (g_tvc[ck].im) g_tvc[ck].im->last_use = mtl_last_fence() + 1; vk_texdump_note(g_tvc[ck].im);
         if (storage) note_storage_image(st, g_tvc[ck].im);
+        if (vk_rs_tracking()) resolution_note_binding(st,b,g_tvc[ck].im,storage);
         if (!storage) ii->sampler = samp_for(st, b, h, g_tvc[ck].num != 0);
         return g_tvc[ck].num;
     }
@@ -2158,6 +2176,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         if (g_tracing || logfs) VKLOG("  %stexture binding %d handle %#llx id %d: %ux%u nvn format %#x target %d serial %llu pool %p+%#llx size %#llx (mem %p, flags %#x, pool flags %#x, packaged layout %d) → image %p (%ux%u fmt %d layers %u levels %u, gpu-written %d) view %p", logfs ? "logfs " : "", b->binding, (unsigned long long)h, tid, t->d.width, t->d.height, t->d.format, t->d.target,
                              (unsigned long long)t->serial, (const void *)t->pool, (unsigned long long)t->off, (unsigned long long)t->L.size, (const void *)t->mem, (unsigned)t->d.flags, t->pool ? (unsigned)t->pool->flags : 0u, (int)t->has_layout, (void *)im, im ? im->w : 0, im ? im->h : 0, im ? im->fmt : 0, im ? im->layers : 0, im ? im->levels : 0, im ? (int)im->gpu_w : -1, (void *)ii->imageView);
         if (im) im->last_use = mtl_last_fence() + 1;
+        if (vk_rs_tracking()) resolution_note_binding(st,b,im,storage);
         if (ii->imageView) num = view_num(t, v);
         if (ii->imageView) { g_tvc[ck].epoch = g_set_epoch; g_tvc[ck].gen = g_tex_gen; g_tvc[ck].tid = tid; g_tvc[ck].dim = b->dim; g_tvc[ck].arr = b->flags & 1; g_tvc[ck].v = ii->imageView; g_tvc[ck].im = im; g_tvc[ck].num = num; g_tvc[ck].sc = cache_class; }
     }
@@ -2301,7 +2320,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         if (k == RK_SBUF || k == RK_SBUF_UBO || k == RK_IMG || k == RK_IMG_UBO || k == RK_IMG_TBUF) { vk_readback_unknown(); break; }
         if (d != RD_UBO && d != RD_SAMPLED && d != RD_TBUF && d != RD_IMAGE && d != RD_SAMPLER) { vk_readback_unknown(); break; }
     }
-    int memo = st < 3 && !g_texel_snapshots[st].have_snapshot && !(g_pd_state == 1 && (g_pd_effects || g_pd_full)) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
+    int memo = !vk_rs_tracking() && st < 3 && !g_texel_snapshots[st].have_snapshot && !(g_pd_state == 1 && (g_pd_effects || g_pd_full)) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
     uint32_t vd[96]; uint64_t vum = 0, vim = 0;   // verify: what the memo gave
     if (memo && set_memo_get(st, s, dofs)) { static unsigned nv; if (!g_x_setverify || ++nv % 64) { g_set_memo++; return g_smemo[st].set; }
         verify = 1; memcpy(vd, dofs, sizeof *dofs * (size_t)s->ndyn); vum = g_num_um; vim = g_num_im; }
