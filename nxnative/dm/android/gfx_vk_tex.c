@@ -585,6 +585,30 @@ static int rs_exchange_live_locked(vkimg_t *const owners[VK_RS_GROUP_SIZE],uint3
         }
         if (matches!=1 || !nx_rs_active_update(&staged,(uintptr_t)im,w!=im->w || h!=im->h)) return 0;
     }
+    // Do not admit a scaled set whose eventual native restore is already
+    // impossible under the explicit restore ceiling. Charge the original
+    // dedicated requirements (upper bounds), plus still-live and fence-retired
+    // restoration allocations. This is accounting, not a Vulkan OOM guarantee.
+    int downscale=0;
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (owners[i] &&
+        (w!=owners[i]->w || h!=owners[i]->h)) { downscale=1; break; }
+    if (downscale) {
+        uint64_t needed=atomic_load(&g_rs_restore_budget.bytes);
+        for (unsigned i=0;i<staged.n;i++) {
+            vkimg_t *im=(vkimg_t *)staged.owner[i];
+            uint64_t bytes=0;
+            if (!im->img || !im->mem || im->sub) return 0;
+            if (im->rs_backing) bytes=im->rs_backing->native_bytes;
+            else {
+                VkMemoryRequirements req;
+                vkGetImageMemoryRequirements(V.dev,im->img,&req);
+                bytes=req.size;
+            }
+            if (!bytes || needed>NX_RS_RESTORE_BUDGET_BYTES ||
+                bytes>NX_RS_RESTORE_BUDGET_BYTES-needed) return 0;
+            needed+=bytes;
+        }
+    }
     nx_rs_active *allocated=NULL;
     if (!g_rs_live && staged.n && !(allocated=malloc(sizeof *allocated))) return 0;
     int result=vk_rs_cache_exchange(owners,w,h);
