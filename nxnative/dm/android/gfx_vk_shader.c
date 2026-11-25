@@ -4,6 +4,7 @@
 // The translator numbers every stage's bindings from 0 in set 0; at module creation each stage's bindings move to a set of its own (vertex 0, fragment 1,
 // geometry 2, tessellation 3 / 4; compute 0) by rewriting the DescriptorSet decorations, so a program's stages never collide.
 #include "gfx_vk.h"
+#include "gfx_vk_resolution_support.h"
 #include "nvn_hmap.h"
 #include "zstd.h"
 #include <CommonCrypto/CommonDigest.h>
@@ -296,6 +297,7 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     s = calloc(1, sizeof *s); s->key = key; s->stage = stage; s->set = set_of(stage);
     s->nbind = (int)hdr[0]; s->c1_len = hdr[1]; memcpy(s->local, hdr + 2, 12);
     s->b = (const dmsv_bind *)(r + 20); s->c1 = r + 20 + (size_t)20 * s->nbind;
+    s->refl_extra_len = (uint32_t)(e->refl_len - (20 + 20ull * hdr[0] + hdr[1]));
     // SPIR-V with the stage's set
     int f64_used = 0; uint32_t xb = 4;
     for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n) break; if (op == 71 && n >= 4 && w[i + 2] == 34) w[i + 3] = (uint32_t)s->set;   // OpDecorate DescriptorSet
@@ -583,7 +585,7 @@ static VkBuffer static_buf(int which) {
         VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0)};
         VkDeviceMemory m; VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &m)); VKCHK(vkBindBufferMemory(V.dev, nb, m, 0));
         void *p; VKCHK(vkMapMemory(V.dev, m, 0, VK_WHOLE_SIZE, 0, &p)); memset(p, 0, 65536);
-        if (which == 0) for (int i = 0; i < 73; i++) *(float *)((uint8_t *)p + 192 + 16 * i) = 1.0f;   // render_scale[i].x (SupportBuffer.cs layout)
+        if (which == 0) nx_rs_support_init(p); // identical native support buffer contents
         if (which == 2) ((float *)p)[3] = 1.0f;   // Odyssey's depth pre-pass reads an absent attribute's .w as its flower displacement weight; zero disagrees with the material pass and leaves stale colour.
         __atomic_store_n(&b[which], nb, __ATOMIC_RELEASE);   // published once filled
     }
@@ -591,6 +593,10 @@ static VkBuffer static_buf(int which) {
     return b[which];
 }
 VkBuffer vk_support_buffer(void) { return static_buf(0); }
+int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned *slot, unsigned *flags) {
+    if (!s || !slot || !flags || !s->refl_extra_len) return 0;
+    return nx_rs_ref_lookup(s->c1 + s->c1_len, s->refl_extra_len, binding, slot, flags);
+}
 VkBuffer vk_zero_buffer(void) { return static_buf(1); }
 VkBuffer vk_default_attribute_buffer(void) { return static_buf(2); }
 // a shader's c1 constants: copied once into a buffer of their own (the bundle bytes do not change; the reflection is never compressed)

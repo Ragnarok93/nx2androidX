@@ -29,6 +29,9 @@ Checkpoint P1b: private attachment groups support transactional migration, one p
 
 ## Phase 2 — raster and shader semantics
 
+Checkpoint P2a: the vendored Ryujinx translator already emits fragment-coordinate division, integer texel-fetch correction and texture-size unscaling through its 73-slot SupportBuffer. Reuse this ABI rather than introduce a new shader pass. Shader recompilation appends optional RSCL v1 metadata to DMSV reflection (original 20-byte records and C1 unchanged), preserving translator descriptor order and usage flags. Old bundles have no metadata and must remain native for unproven bindings. Per-stage support-buffer initialization and bounded slot writes are implemented; vertex stage-local buffers use fragment scale count zero. Array, storage, multisampled, unsupported and unknown bindings must remain unscaled. Actual per-draw support-buffer binding, extent rounding validation, and raster integration remain gated. Native rendering continues to use its immutable all-ones buffer; no new per-draw work at 1x.
+
+
 - Transform render areas, viewport/scissor and clear rectangles using per-image physical extents. Retain guest-coordinate semantics in shader translation, with descriptor-local scaling metadata for integer fetches, texture queries and offsets.
 - Index shader coordinate dependencies during recompilation, keep unmodified 1x modules available, and validate SPIR-V. Reject unresolved coordinate provenance and shader writes until proved safe.
 - Compare identity-scale outputs and test odd dimensions, fractional factors, depth/stencil and multiple attachments.

@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 TOOLS = HERE.parent.parent / 'gfx/tools'
 sys.path[:0] = [str(TOOLS), str(HERE)]
 import dmsh_facts, dmsh_chain, dmsv, shader_products   # noqa: E402  (DM_GAME picks the profile)
+from resolution_meta import encode_resolution_meta
 from shader_stage import glslc_stage   # a code area's stage: the package reader's rule (headerless compute code included), in a module of its own
 
 ap = argparse.ArgumentParser()
@@ -502,7 +503,7 @@ def main(w):
             for e in cl: kinds_all[e['kind']] += 1
             # header words 2-4: a compute shader's local size; a vertex shader's input locations (all, signed int, unsigned int); a pixel shader's output locations
             hdr3 = (local or jobs[k].get('local') or [1, 1, 1]) if st == 'cs' else io[1] if st == 'vs' else io[3] if st == 'ps' else [0, 0, 0]
-            entries.append((gs_var[k] if k in gs_var else int(k, 16), STAGES.get(st, 0), spv_path, refl_bin(cl, c1s[k], hdr3)))
+            entries.append((gs_var[k] if k in gs_var else int(k, 16), STAGES.get(st, 0), spv_path, refl_bin(cl, c1s[k], hdr3) + encode_resolution_meta(st, cl, res)))
             del spv
         except Exception as e:
             reason = str(e)

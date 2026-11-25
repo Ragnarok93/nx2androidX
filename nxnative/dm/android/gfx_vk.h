@@ -194,7 +194,7 @@ typedef struct {
     VkShaderModule mod;
     VkDescriptorSetLayout dsl; int set;   // the set this stage's bindings were moved to (vertex 0, fragment 1, geometry 2, compute 0)
     int nbind; const dmsv_bind *b;
-    const uint8_t *c1; uint32_t c1_len; VkBuffer c1_buf; VkDeviceSize c1_off;
+    const uint8_t *c1; uint32_t c1_len, refl_extra_len; VkBuffer c1_buf; VkDeviceSize c1_off;
     uint32_t local[3];
     uint8_t dyn[96]; int ndyn;          // bindings of uniform buffers bound with a dynamic offset (gfx_vk_exec.c stage_set), and their count
     int xfb; uint32_t xfb_stride[4];    // a vertex shader that captures transform feedback (its SPIR-V has the Xfb execution mode), and each buffer's stride
@@ -212,6 +212,8 @@ vkshader_t *vk_shader_gs_topo(vkshader_t *gs, VkPrimitiveTopology topo);   // th
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint64_t r32, uint32_t xo, int fd);   // the module, or its variant (integer views; extra outputs; fragment depth written)
 void vk_shaders_open(const char *path);
 VkBuffer vk_support_buffer(void);
+// Optional trailer is absent in old bundles. Lookup is used only by scaled path.
+int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned *slot, unsigned *flags);
 VkBuffer vk_zero_buffer(void);
 VkBuffer vk_default_attribute_buffer(void);
 
