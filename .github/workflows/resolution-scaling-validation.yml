@@ -1,0 +1,35 @@
+name: Resolution scaling validation
+on:
+  push:
+    branches:
+      - android
+      - feature/universal-gsr2-20261124
+    paths:
+      - 'nxnative/dm/android/gfx_vk*'
+      - 'nxnative/dm/gfx/nvn/**'
+      - 'tests/**'
+      - '.github/workflows/resolution-scaling-validation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-and-spirv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install independent SPIR-V validator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y spirv-tools
+          spirv-val --version
+      - name: Run resolution host regression suite
+        run: python3 -m unittest discover -s tests -p 'test_resolution*.py' -v
+      - name: Extract and independently validate embedded shaders
+        run: |
+          set -eux
+          mkdir -p "${RUNNER_TEMP}/resolution-spv"
+          cc -std=c11 -Wall -Wextra -Werror -I nxnative/dm/gfx/nvn tests/dump_resolution_compute_spv.c -o "${RUNNER_TEMP}/resolution-spv/dump"
+          "${RUNNER_TEMP}/resolution-spv/dump" "${RUNNER_TEMP}/resolution-spv/fill.spv" "${RUNNER_TEMP}/resolution-spv/transform.spv"
+          spirv-val --target-env vulkan1.0 "${RUNNER_TEMP}/resolution-spv/fill.spv"
+          spirv-val --target-env vulkan1.0 "${RUNNER_TEMP}/resolution-spv/transform.spv"
