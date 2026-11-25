@@ -34,7 +34,7 @@ class TextureTransfers(unittest.TestCase):
         c = Path(cls.tmp.name) / 'test.c'
         c.write_text(harness.replace('/* TYPES */', types).replace('/* FUNCTIONS */', functions), encoding='utf-8')
         cls.program = c.with_suffix('.exe' if os.name == 'nt' else '')
-        subprocess.run([cls.cc, '-std=c11', '-I'+str(ROOT), '-I'+str(ROOT/'nxnative/dm/gfx/nvn/include'), '-I'+str(ROOT/'nxnative/dm/gfx/tex'), '-idirafter', str(headers), str(c), '-lm', '-o', str(cls.program)], check=True, text=True)
+        subprocess.run([cls.cc, '-std=c11', '-I'+str(ROOT), '-I'+str(ROOT/'nxnative/dm/gfx/nvn'), '-I'+str(ROOT/'nxnative/dm/gfx/nvn/include'), '-I'+str(ROOT/'nxnative/dm/gfx/tex'), '-idirafter', str(headers), str(c), '-lm', '-o', str(cls.program)], check=True, text=True)
 
     def check_case(self, name):
         p = subprocess.run([str(self.program), name], capture_output=True, text=True, timeout=15)
@@ -66,3 +66,6 @@ class TextureTransfers(unittest.TestCase):
 
     def test_temporary_allocation_failures_skip_transfers(self):
         self.check_case('memory_failure')
+
+    def test_direct_physical_display_transfer(self):
+        self.check_case('physical_display')

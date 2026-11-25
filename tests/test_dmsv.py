@@ -220,6 +220,7 @@ class HostReader(unittest.TestCase):   # native bundle reader and vk_shader_q th
 #include <unistd.h>
 #include "zstd.h"
 #include "nvn_hmap.h"
+#include "gfx_vk_resolution_support.h"
 #define VKLOG(...) (fprintf(stderr, __VA_ARGS__), fputc('\n', stderr))
 // Guard all pages after the index before vk_shaders_open can touch them.
 // Fixtures place both SPIR-V and reflection entirely on those pages.

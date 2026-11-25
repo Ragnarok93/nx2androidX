@@ -7,6 +7,7 @@
 #include <string.h>
 #include <math.h>
 #include "nxnative/dm/gfx/nvn/nvn_obj.h"
+#include "gfx_vk_resolution_draw.h"
 /* TYPES */
 #define VKCHK(x) assert((x)==VK_SUCCESS)
 static int red_calls;
@@ -22,6 +23,7 @@ static int nimages, copies, blits, resolves, retired, barriers, same_image;
 static VkImageCopy last_copy, last_stencil_copy;
 static VkImageResolve last_resolve;
 static VkImageBlit last_blit;
+static VkFilter last_filter;
 static VkClearColorValue last_clear;
 static VkImage last_copy_src, last_copy_dst, last_resolve_src, last_resolve_dst;
 static VkFormat blit_src_fmt, blit_dst_fmt;
@@ -39,9 +41,21 @@ static const vkfmt_t *vk_fmt(int n) {
     default:abort();
     }
 }
-static vkimg_t *vk_tex(const tex_t *t) { return &images[same_image || t==&src?0:1]; }
-static int g_rs_replay;
-static int vk_rs_cache_has_scaled(void) { return 0; }
+static int g_rs_replay,scaled_active,scaled_lookups;
+static vk_rs_variant physical;
+static vkimg_t *vk_tex(const tex_t *t) {
+    assert(!scaled_active || t!=&src); // direct copy must not request native source
+    return &images[same_image || t==&src?0:1];
+}
+static int vk_rs_cache_has_scaled(void) { return scaled_active; }
+static int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent) {
+    assert(scaled_active && !v);assert(supported==(t==&src));
+    *extent=(nx_rs_draw_extent){t->d.width,t->d.height,t==&src?physical.physical_w:t->d.width,t==&src?physical.physical_h:t->d.height,1};
+    return t==&src?1:0;
+}
+static vkimg_t *vk_rs_copy_source(const tex_t *t) {
+    assert(scaled_active && t==&src);scaled_lookups++;return &images[0];
+}
 static vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c) { (void)c; abort(); }
 static void vk_end_pass(void) {}
 static void vk_watch(const vkimg_t *im,const char *why) {(void)im;(void)why;}
@@ -80,7 +94,7 @@ static void vkCmdResolveImage(VkCommandBuffer cb,VkImage s,VkImageLayout sl,VkIm
     resolves++;last_resolve=*r;last_resolve_src=s;last_resolve_dst=d;
 }
 static void vkCmdBlitImage(VkCommandBuffer cb,VkImage s,VkImageLayout sl,VkImage d,VkImageLayout dl,uint32_t n,const VkImageBlit *r,VkFilter filter) {
-    (void)cb;(void)sl;(void)dl;(void)filter;assert(n==1);blits++;last_blit=*r;blit_src_fmt=by_handle(s)->fmt;blit_dst_fmt=by_handle(d)->fmt;
+    (void)cb;(void)sl;(void)dl;assert(n==1);blits++;last_blit=*r;last_filter=filter;blit_src_fmt=by_handle(s)->fmt;blit_dst_fmt=by_handle(d)->fmt;
 }
 static void vkCmdClearColorImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearColorValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)r;assert(n==1);last_clear=*v;}
 static void vkCmdClearDepthStencilImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearDepthStencilValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)v;(void)n;(void)r;abort();}
@@ -102,6 +116,25 @@ static p_copy_t2t setup(int fmt,VkFormat sf,VkFormat df) {
 }
 int main(int argc,char **argv) {
     assert(argc==2);
+    if (!strcmp(argv[1],"physical_display")) {
+        for (unsigned scale=50;scale<=75;scale+=25) for(int linear=0;linear<2;linear++) {
+            p_copy_t2t c=setup(NVN_FORMAT_RGBA8,VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_R8G8B8A8_UNORM);
+            src.d.target=dst.d.target=NVN_TEXTURE_TARGET_2D;
+            src.d.width=dst.d.width=32;src.d.height=dst.d.height=32;
+            src.d.depth=dst.d.depth=src.d.levels=dst.d.levels=1;dst.d.flags=NVN_TEXTURE_FLAGS_DISPLAY;
+            c.has_sv=c.has_dv=0;c.sr=c.dr=(NVNcopyRegion){0,0,0,32,32,1};c.flags=linear;
+            images[0].levels=images[1].levels=images[0].layers=images[1].layers=1;
+            images[0].usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;images[1].usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            physical=(vk_rs_variant){.physical_w=32*scale/100,.physical_h=32*scale/100,.logical_w=32,.logical_h=32,.image=images[0].img};
+            images[0].rs_backing=&physical;g_rs_replay=scaled_active=1;scaled_lookups=0;
+            copy_t2t(&c);
+            assert(blits==1 && !copies && !resolves && !retired && !create_calls && scaled_lookups==1);
+            assert(last_blit.srcOffsets[1].x==(int32_t)physical.physical_w && last_blit.srcOffsets[1].y==(int32_t)physical.physical_h);
+            assert(last_blit.dstOffsets[1].x==32 && last_blit.dstOffsets[1].y==32);
+            assert(last_filter==(linear?VK_FILTER_LINEAR:VK_FILTER_NEAREST) && images[1].gpu_w);
+            scaled_active=g_rs_replay=0;
+        }
+    }
     if (!strcmp(argv[1], "depth_stencil_copy")) {
         p_copy_t2t c = setup(NVN_FORMAT_DEPTH24_STENCIL8, VK_FORMAT_D32_SFLOAT_S8_UINT,
                             VK_FORMAT_D32_SFLOAT_S8_UINT);
