@@ -47,7 +47,7 @@ int main(void) {
             run = subprocess.run([str(out)],capture_output=True,text=True)
             self.assertEqual(run.returncode,0,run.stderr)
 
-    def test_real_hook_is_required_and_status_is_truthful(self):
+    def test_legacy_scaling_uses_verified_hooks_and_menu_uses_renderer(self):
         loader=(HOST/'loader.c').read_text()
         nvn=(GFX/'hle_nvn.c').read_text()
         fps=(HOST/'hle_fpslock.c').read_text()
@@ -58,7 +58,8 @@ int main(void) {
         self.assertIn('if (!dm_render_scale_supported())',nvn)
         self.assertIn('DM_UE_SCREENPCT_OFF',fps)
         self.assertIn('b7f965b9d7227db8e29f04e84ea7331b',fps)
-        self.assertIn('if (!dm_menu_drs_supported())',front)
+        self.assertIn('int dm_menu_drs_supported(void) { return dm_menu_rs_live(); }',front)
+        self.assertIn('if (dm_menu_rs_live()) menu_rs_mode_step(1);',front)
         self.assertIn('dyn_min=%d',front)
 
     def test_fps_switch_writes_engine_and_presentation_policy(self):
