@@ -27,6 +27,8 @@ class ResolutionBudgetTests(unittest.TestCase):
         self.assertIn("d->kind == 5) vk_rs_variant_destroy", core)
         self.assertIn("DM_VK_RESOLUTION_PROBE", replay)
         self.assertIn("else vk_rs_variant_destroy(variants[i])", replay)
-        self.assertIn("resolution_observe_pass(); // before opening", replay)
+        self.assertIn("if (g_rs_observe) resolution_observe_pass(); // before opening", replay)
+        self.assertIn("g_rs_observe = g_rs_audit || g_rs_probe;", replay)
+        self.assertIn("g_rs_observe = g_rs_audit;", replay)
 if __name__ == "__main__":
     unittest.main()

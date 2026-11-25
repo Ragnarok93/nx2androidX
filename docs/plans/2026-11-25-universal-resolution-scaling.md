@@ -2,6 +2,14 @@
 
 Baseline: f02ceda. This first checkpoint is intentionally observation-only in the Vulkan backend. It does not enable the universal scaling option or claim a lower physical render resolution.
 
+## Performance and memory acceptance requirements
+
+- At 100% with diagnostics disabled, preserve original Vulkan image allocation, shader modules, descriptor and pipeline keys, draw/dispatch recording, transfers and synchronization. Select the native path once per frame/transaction where possible; no per-image scaling metadata allocation, no per-draw shader scaling work, no image variants and no periodic conversion. A predictable dispatch check is not a measured guarantee of identical CPU cost.
+- For adaptive mode at 100%, reuse existing GPU timestamps; controller work must be bounded and evaluated separately from rendering. Do not add GPU timestamps solely to measure the scaling controller when existing queries suffice.
+- Below 100%, prefer a single authoritative physical allocation for eligible GPU-only images. Keep logical metadata independent of physical allocation; materialize a logical-size image only at an unavoidable guest-visible boundary, then release unneeded copies after their final GPU consumer. Never automatically allocate a native-sized twin for every render target or copy every target every frame.
+- On scale transitions, charge both old and new live allocations until actual fence retirement, with a bounded transient peak and failure rollback. Avoid global idle waits, per-frame image recreation and permanent duplicate histories. If correctness requires frequent conversion or the working set does not decrease, pin that resource/group to native instead.
+- Test native vs fixed 100% vs adaptive 100% (diagnostics off), then 75% and 50% on identical scenes: actual Vulkan allocated bytes including temporary/retired images, render GPU time, CPU replay p50/p95, frame pacing, and conversion counts. Require no material 100% regression and lower steady-state memory/work for eligible scaled workloads; report exceptions and reconstruction costs separately.
+
 ## Phase 0 — eligibility and timing (this checkpoint)
 
 - Use `DM_VK_RESOLUTION_AUDIT=1` to collect aggregate attachment-group eligibility and reason flags. Candidate counts are necessary, not sufficient evidence for scaling.

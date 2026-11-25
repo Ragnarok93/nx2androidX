@@ -231,8 +231,17 @@ static void render_cond(const p_render_cond *rc) {
             (unsigned long long)*(const volatile uint64_t *)(uintptr_t)rc->addr, (unsigned long long)*(const volatile uint64_t *)(uintptr_t)(rc->addr + 16), rc_occ_has(rc->addr), rc_occ_has(rc->addr + 16), k0, k1); }
 }
 
+// Startup-only diagnostic switches; the native path bypasses the classifier.
+static int g_rs_audit, g_rs_probe, g_rs_observe;
 static void exec_begin(int continuing) {   // internal segments retain the current logical NVN and conditional state
-    static int inited; if (!inited) { inited = 1; state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start(); }
+    static int inited; if (!inited) {
+        inited = 1;
+        const char *audit = getenv("DM_VK_RESOLUTION_AUDIT"), *probe = getenv("DM_VK_RESOLUTION_PROBE");
+        g_rs_audit = audit && atoi(audit) != 0;
+        g_rs_probe = probe && atoi(probe) != 0;
+        g_rs_observe = g_rs_audit || g_rs_probe;
+        state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start();
+    }
     if (!continuing) { g_rc_npend = 0; g_rc_skip = 0; }
     { void vk_tex_release_drain(void); vk_tex_release_drain(); }   // Finalized textures' CPU-written marks that no queued job needs any more (gfx_vk_tex.c)
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_cb_draws = 0; g_ord_parts = 0; g_psplit_now = 0; g_set_epoch++; x_read();
@@ -328,11 +337,7 @@ static struct { vkimg_t *im; VkImageView v; uint32_t fmt, layers, w, h, bc_lv, b
 // A candidate is NOT a proven scalable pass; shader and later resource consumers
 // must also be classified before allocating any physical-size variant.
 static void resolution_observe_pass(void) {
-    static int enabled = -1, probe = -1, probed;
     static uint64_t total, eligible, blocked[8], pixels, planned_pixels;
-    if (enabled < 0) { const char *env = getenv("DM_VK_RESOLUTION_AUDIT"); enabled = env && atoi(env) != 0; }
-    if (probe < 0) { const char *env = getenv("DM_VK_RESOLUTION_PROBE"); probe = env && atoi(env) != 0; }
-    if (!enabled && (!probe || probed)) return;
     nx_rs_group group = {0};
     for (int i = 0; i < 9; i++) {
         const vkimg_t *im = P_att[i].im;
@@ -356,8 +361,9 @@ static void resolution_observe_pass(void) {
         planned_pixels += (uint64_t)extent.w * extent.h;
         // One opt-in offscreen allocation/clear transaction. No guest image
         // is read, written or replaced, and all allocations retire by fence.
-        if (probe && !probed && P_att[8].im && group.n >= 2) {
-            probed = 1;
+        if (g_rs_probe && P_att[8].im && group.n >= 2) {
+            g_rs_probe = 0;
+            g_rs_observe = g_rs_audit;
             vk_rs_variant *variants[9] = {0};
             int ok = 1; uint64_t bytes = 0;
             for (int i = 0; i < 9; i++) if (P_att[i].im) {
@@ -375,7 +381,7 @@ static void resolution_observe_pass(void) {
         }
     }
     for (unsigned i = 0; i < 8; i++) if (group.blockers & (1u << i)) blocked[i]++;
-    if (enabled && ++total % 300 == 0)
+    if (g_rs_audit && ++total % 300 == 0)
         VKLOG("[resolution-audit] passes=%llu candidates=%llu logical_pixels=%llu planned_75pct_pixels=%llu blockers mixed=%llu alias=%llu storage=%llu non2d=%llu msaa=%llu guest=%llu view=%llu invalid=%llu; observation only",
               (unsigned long long)total, (unsigned long long)eligible, (unsigned long long)pixels, (unsigned long long)planned_pixels,
               (unsigned long long)blocked[0], (unsigned long long)blocked[1], (unsigned long long)blocked[2], (unsigned long long)blocked[3],
@@ -418,7 +424,7 @@ static int pass_commit(void) {
     if (dim) g_lrz_prev = dim;
     if ((g_lrz_touch & LRZ_READ) && dim && P_da.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) lrz_touch(dim, 0);
     void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(0, 0, 0, 0, 0);
-    resolution_observe_pass(); // before opening either kind of Vulkan render pass
+    if (g_rs_observe) resolution_observe_pass(); // before opening either kind of Vulkan render pass
     if (rp_on()) {
         rpkey k; memset(&k, 0, sizeof k); k.ncol = P_ri.colorAttachmentCount; k.samples = S.samples ? S.samples : 1;
         fbkey fk; memset(&fk, 0, sizeof fk); VkImageView views[9]; VkClearValue cv[9]; uint32_t na = 0;
