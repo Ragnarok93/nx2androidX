@@ -3692,6 +3692,36 @@ static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *
     }
     return !sampled_scaled || support;
 }
+// Observation only. A dispatch matching the output extent is NOT proof of
+// pixel-coordinate provenance or freedom from non-image side effects.
+// Record a bounded set of candidates for later translator validation.
+static void resolution_audit_compute_grid(const vkshader_t *cs,const p_dispatch *d) {
+    if (!cs || !d || d->ind || d->x<=0 || d->y<=0 || d->z!=1 ||
+        cs->nbind<=0 || cs->nbind>96 || !cs->b) return;
+    static uint64_t seen[24]; static unsigned count;
+    if (count>=sizeof seen/sizeof seen[0]) return;
+    for (unsigned i=0;i<count;i++) if (seen[i]==cs->key) return;
+    const tex_t *output=NULL;
+    for (int i=0;i<cs->nbind;i++) {
+        const dmsv_bind *b=&cs->b[i];
+        if (b->kind==RK_SUPPORT || b->kind==RK_C1 || b->kind==RK_DRV || b->kind==RK_CBUF ||
+            b->kind==RK_TEX) continue;
+        if (output || b->kind!=RK_IMG || b->desc!=RD_STORAGE || b->count!=1 ||
+            b->dim!=1 || (b->flags&3) || b->reg<0 || b->reg>=32) return;
+        int tid=(int)(S.img[5][b->reg]&0xfffff);
+        const view_t *v=NULL;
+        if (!tid || !vk_tex_by_id(tid,&v,&output) || !output || v ||
+            output->d.target!=NVN_TEXTURE_TARGET_2D || output->d.levels!=1 ||
+            output->d.samples>1) return;
+    }
+    if (!output || !nx_rs_compute_logical(cs->spv,cs->nspv)) return;
+    uint32_t w=output->d.width,h=output->d.height;
+    uint32_t groups[3]={(uint32_t)d->x,(uint32_t)d->y,(uint32_t)d->z},half[3];
+    if ((w&1) || (h&1) || !nx_rs_compute_grid(groups,cs->local,w,h,w/2,h/2,half)) return;
+    seen[count++]=cs->key;
+    VKLOG("[resolution-compute-grid] shader=%016llx image=%ux%u local=%ux%u logical_groups=%ux%u half_groups=%ux%u geometry_only=1",
+          (unsigned long long)cs->key,w,h,cs->local[0],cs->local[1],groups[0],groups[1],half[0],half[1]);
+}
 static void dispatch(const p_dispatch *d) {
     g_compute_attempts++;
     vkshader_t *cs = S.sh[5];
@@ -3700,6 +3730,7 @@ static void dispatch(const p_dispatch *d) {
     VkBuffer src[3]; VkBufferCopy spans[3]; int nspans = 0;
     if (d->ind && !(nspans = dispatch_indirect_spans(d->ind, src, spans))) { g_compute_failed++; VKRED_ONCE(61, "indirect dispatch arguments are not a valid aligned memory pool range: %#llx", (unsigned long long)d->ind); return; }
     vk_end_pass_land();
+    if (g_rs_audit) resolution_audit_compute_grid(cs,d);
     // Only proven native storage outputs and compatible sampled inputs
     // can coexist with scaled owners. All unknown access restores first.
     if (g_rs_replay && vk_rs_cache_has_scaled() && !resolution_preflight_compute(cs,d))
