@@ -222,11 +222,13 @@ A replay adapter that can identify both jittered and unjittered transforms
 can derive jitter without a separate shader field. The backend checks that
 their difference is a subpixel homogeneous XY shift with unchanged Z and W.
 It derives depth direction, near plane and horizontal FOV from the verified
-view projection. A change between the two frames' pre-exposure uniforms
-resets history. The sampled depth must match projected Z with a zero-to-one
-viewport range. Jitter is expressed in actual render pixels. Shader semantics and
-the live bindings must establish the matrix roles and shared world origin
-before replay supplies those values.
+view projection. It also accepts a shader's precomposed current-to-previous
+clip transform, normalizing axis orientation, depth and jitter based on the
+proven source conventions. Jitter uses actual render pixels. The sampled
+depth must match projected Z with a zero-to-one viewport range. The exposure
+ratio follows the [Qualcomm integration contract](https://github.com/SnapdragonGameStudios/snapdragon-gsr/blob/main/sgsr/v2/README.md#common-settings).
+The fragment variant resets history when exposure changes. Replay must prove
+the uniform roles and resource bindings before supplying these inputs.
 
 The backend owns its bounded intermediates and ping-pong history. The replay
 caller owns command submission, slot retirement, image lifetimes and the

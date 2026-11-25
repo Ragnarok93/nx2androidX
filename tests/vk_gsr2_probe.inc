@@ -164,9 +164,11 @@ static void check_input_formats(vk_gsr2 *ctx, dm_temporal_frame frame, vk_gsr2_i
     vk_gsr2_camera prev = test_camera(-0.2f, -0.3f / TEST_IW, 0.1f / TEST_IH);
     prev.world_to_clip[0] = 2.5f;
     vk_gsr2_replay_constants replay = {
-        .projection = {2, 0, 0, 0, 0, -3, 0, 0, 0, 0, -0.125f, 1, 0, 0, 0.125f, 0},
-        .current_pre_exposure = 2, .previous_pre_exposure = 3,
-        .clip_y_down = 1,
+        .view = {
+            .projection = {2, 0, 0, 0, 0, -3, 0, 0, 0, 0, -0.125f, 1, 0, 0, 0.125f, 0},
+            .current_pre_exposure = 2, .previous_pre_exposure = 3,
+            .clip_y_down = 1,
+        },
     };
     vk_gsr2_camera base_cur = test_camera(0, 0, 0), base_prev = test_camera(-0.2f, 0, 0);
     base_prev.world_to_clip[0] = 2.5f;
@@ -181,7 +183,7 @@ static void check_input_formats(vk_gsr2 *ctx, dm_temporal_frame frame, vk_gsr2_i
     assert(fabsf(half.jitter[0] - 0.25f * 8 / TEST_IW) < 1e-6f);
     assert(vk_gsr2_set_replay_constants(&in, render_size, &replay));
     assert(fabsf(in.near_plane - (1.0f / 9)) < 1e-6f);
-    assert(in.tan_half_fov_x == 0.5f && in.pre_exposure == 1 && in.exposure_changed);
+    assert(in.tan_half_fov_x == 0.5f && in.pre_exposure == 1.5f);
     assert(in.depth_convention == VK_GSR2_DEPTH_REVERSED);
     vk_gsr2_replay_constants invalid_replay = replay;
     invalid_replay.current.jittered[12] += 0.01f; // off-axis translation, no matching W
@@ -190,15 +192,15 @@ static void check_input_formats(vk_gsr2 *ctx, dm_temporal_frame frame, vk_gsr2_i
     invalid_replay.current.jittered[10] *= 2;
     assert(!vk_gsr2_set_replay_constants(&in, render_size, &invalid_replay));
     invalid_replay = replay;
-    invalid_replay.projection[14] *= -1; // contradictory depth coefficients
+    invalid_replay.view.projection[14] *= -1; // contradictory depth coefficients
     assert(!vk_gsr2_set_replay_constants(&in, render_size, &invalid_replay));
     invalid_replay = replay;
-    invalid_replay.current_pre_exposure = 0;
+    invalid_replay.view.current_pre_exposure = 0;
     assert(!vk_gsr2_set_replay_constants(&in, render_size, &invalid_replay));
-    assert(in.depth_convention == VK_GSR2_DEPTH_REVERSED && in.exposure_changed);
+    assert(in.depth_convention == VK_GSR2_DEPTH_REVERSED && in.pre_exposure == 1.5f);
     vk_gsr2_replay_constants forward = replay;
-    forward.projection[10] = 1 - replay.projection[10];
-    forward.projection[14] = -replay.projection[14];
+    forward.view.projection[10] = 1 - replay.view.projection[10];
+    forward.view.projection[14] = -replay.view.projection[14];
     vk_gsr2_replay_camera *frames[] = {&forward.current, &forward.previous};
     for (unsigned f = 0; f < 2; f++)
         for (unsigned c = 0; c < 16; c += 4) {
@@ -211,11 +213,25 @@ static void check_input_formats(vk_gsr2 *ctx, dm_temporal_frame frame, vk_gsr2_i
     assert(fabsf(forward_inputs.near_plane - in.near_plane) < 1e-6f);
     // The rest of this test compares motion encodings, with exposure held
     // constant across its two independent test sequences.
-    replay.previous_pre_exposure = replay.current_pre_exposure;
+    replay.view.previous_pre_exposure = replay.view.current_pre_exposure;
     assert(vk_gsr2_set_replay_constants(&in, render_size, &replay));
-    assert(!in.exposure_changed);
     assert(fabsf(in.jitter[0] - 0.25f) < 1e-6f && fabsf(in.jitter[1] + 0.125f) < 1e-6f);
     assert(!in.same_camera);
+    float guest_clip[16] = {1.25f, 0, 0, 0, 0, 1, 0, 0, -1.6f, 0, 1, 0, -0.2f, 0, 0, 1};
+    vk_gsr2_inputs direct = in;
+    assert(vk_gsr2_set_replay_clip(&direct, render_size, &replay.view, guest_clip,
+                                   cur.jitter_ndc, prev.jitter_ndc, 0));
+    for (unsigned i = 0; i < 16; i++) assert(fabsf(direct.clip_to_prev[i] - in.clip_to_prev[i]) < 1e-6f);
+    guest_clip[12] += prev.jitter_ndc[0] - 1.25f * cur.jitter_ndc[0];
+    guest_clip[13] += prev.jitter_ndc[1] - cur.jitter_ndc[1];
+    assert(vk_gsr2_set_replay_clip(&direct, render_size, &replay.view, guest_clip,
+                                   cur.jitter_ndc, prev.jitter_ndc, 1));
+    for (unsigned i = 0; i < 16; i++) assert(fabsf(direct.clip_to_prev[i] - in.clip_to_prev[i]) < 1e-6f);
+    assert(direct.jitter[0] == in.jitter[0] && direct.jitter[1] == in.jitter[1]);
+    in = direct;
+    guest_clip[15] = 0; // singular transform
+    assert(!vk_gsr2_set_replay_clip(&direct, render_size, &replay.view, guest_clip,
+                                    cur.jitter_ndc, prev.jitter_ndc, 1));
     // At W=0.5, standard depth is 0.875 and previous X is 1.25*X - 0.2/W.
     float point[4] = {0.2f, 0.4f, 0.875f, 1};
     float expected[4] = {-0.15f, 0.4f, 0.875f, 1};
@@ -314,21 +330,15 @@ static void check_variant(uint32_t variant) {
 
     frame.ticket = 4;
     frame.cut = 0;
-    in.exposure_changed = 1;
-    draw_temporal(ctx, &frame, &in, queries, first);
-    assert(ctx->pending_plan.reset && ctx->history.ticket == 4 && !memcmp(first, cut, sizeof first));
-    in.exposure_changed = 0;
-
-    frame.ticket = 5;
     begin();
     assert(vk_gsr2_record(ctx, test_cb, 1, &frame, &in, NULL, &unused));
     CHECK(vkEndCommandBuffer(test_cb));   // staged commands are deliberately not submitted
     vk_gsr2_commit(ctx, 0);
     assert(!ctx->history.valid);
-    frame.ticket = 6;
+    frame.ticket = 5;
     draw_temporal(ctx, &frame, &in, queries, first);
     assert(ctx->pending_plan.reset && !memcmp(first, cut, sizeof first));
-    frame.ticket = 7;
+    frame.ticket = 6;
     frame.memory_ok = 0;
     assert(!vk_gsr2_record(ctx, test_cb, 0, &frame, &in, NULL, &unused));
     assert(!ctx->history.valid);

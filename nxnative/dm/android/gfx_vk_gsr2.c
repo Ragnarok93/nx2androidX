@@ -470,10 +470,8 @@ static int gsr2_read_camera(const vk_gsr2_replay_camera *pair, VkExtent2D render
     return 1;
 }
 
-int vk_gsr2_set_replay_constants(vk_gsr2_inputs *in, VkExtent2D render,
-                                 const vk_gsr2_replay_constants *u) {
-    if (!in || !u || !render.width || !render.height ||
-        (u->clip_y_down != 0 && u->clip_y_down != 1)) return 0;
+static int gsr2_replay_projection(vk_gsr2_inputs *out, const vk_gsr2_replay_view *u) {
+    if (u->clip_y_down != 0 && u->clip_y_down != 1) return 0;
 
     const float *p = u->projection;
     for (unsigned i = 0; i < 16; i++) if (!isfinite(p[i])) return 0;
@@ -492,22 +490,72 @@ int vk_gsr2_set_replay_constants(vk_gsr2_inputs *in, VkExtent2D render,
     const double tan_half_fov_x = 1.0 / fabs(p[0]);
     if (!(isfinite(u->current_pre_exposure) && u->current_pre_exposure > 0 &&
           isfinite(u->previous_pre_exposure) && u->previous_pre_exposure > 0)) return 0;
+    const double exposure = (double)u->previous_pre_exposure / u->current_pre_exposure;
     if (!(near_plane >= FLT_MIN && near_plane <= FLT_MAX &&
-          tan_half_fov_x >= FLT_MIN && tan_half_fov_x <= FLT_MAX)) return 0;
+          tan_half_fov_x >= FLT_MIN && tan_half_fov_x <= FLT_MAX &&
+          exposure >= FLT_MIN && exposure <= FLT_MAX)) return 0;
+    out->depth_convention = depth;
+    out->near_plane = (float)near_plane;
+    out->tan_half_fov_x = (float)tan_half_fov_x;
+    out->pre_exposure = (float)exposure;
+    return 1;
+}
 
-    vk_gsr2_camera current, previous;
-    if (!gsr2_read_camera(&u->current, render, &current) ||
-        !gsr2_read_camera(&u->previous, render, &previous)) return 0;
+int vk_gsr2_set_replay_constants(vk_gsr2_inputs *in, VkExtent2D render,
+                                 const vk_gsr2_replay_constants *u) {
+    if (!in || !u || !render.width || !render.height) return 0;
     vk_gsr2_inputs next = *in;
-    if (!vk_gsr2_set_camera(&next, render, &current, &previous,
-                            u->clip_y_down, depth)) return 0;
-    next.depth_convention = depth;
-    next.near_plane = (float)near_plane;
-    next.tan_half_fov_x = (float)tan_half_fov_x;
-    // The vendor scale parameter is used for both compression and expansion
-    // of this frame's color. Compare the two frames' exposure separately.
-    next.exposure_changed = fabs((double)u->previous_pre_exposure - u->current_pre_exposure) >
-                            1e-4 * fmax(u->previous_pre_exposure, u->current_pre_exposure);
+    vk_gsr2_camera current, previous;
+    if (!gsr2_replay_projection(&next, &u->view) ||
+        !gsr2_read_camera(&u->current, render, &current) ||
+        !gsr2_read_camera(&u->previous, render, &previous) ||
+        !vk_gsr2_set_camera(&next, render, &current, &previous, u->view.clip_y_down,
+                            next.depth_convention)) return 0;
+    *in = next;
+    return 1;
+}
+
+int vk_gsr2_set_replay_clip(vk_gsr2_inputs *in, VkExtent2D render,
+                            const vk_gsr2_replay_view *view, const float clip_to_prev[16],
+                            const float current_jitter[2], const float previous_jitter[2],
+                            int jittered) {
+    if (!in || !view || !clip_to_prev || !current_jitter || !previous_jitter ||
+        !render.width || !render.height || (jittered != 0 && jittered != 1)) return 0;
+    vk_gsr2_inputs next = *in;
+    if (!gsr2_replay_projection(&next, view)) return 0;
+    double scale[2] = {0.5 * render.width, (view->clip_y_down ? 0.5 : -0.5) * render.height};
+    for (unsigned axis = 0; axis < 2; axis++) {
+        const double now = current_jitter[axis] * scale[axis];
+        const double previous = previous_jitter[axis] * scale[axis];
+        if (!(fabs(now) <= 0.5001 && fabs(previous) <= 0.5001)) return 0;
+        next.jitter[axis] = (float)now;
+    }
+
+    // Apply the previous frame's clip conversion on the left. Then map
+    // canonical input coordinates into the current frame's clip convention
+    // and add its jitter on the right if the shader matrix expects it.
+    const int reversed = next.depth_convention == VK_GSR2_DEPTH_REVERSED;
+    vk_gsr2_camera matrix = {0};
+    memcpy(matrix.world_to_clip, clip_to_prev, sizeof matrix.world_to_clip);
+    if (jittered) memcpy(matrix.jitter_ndc, previous_jitter, sizeof matrix.jitter_ndc);
+    double transform[16], inverse[16];
+    gsr2_camera_matrix(&matrix, view->clip_y_down, reversed, transform);
+    for (unsigned row = 0; row < 4; row++) {
+        if (jittered) transform[12 + row] +=
+            current_jitter[0] * transform[row] + current_jitter[1] * transform[4 + row];
+        if (view->clip_y_down) transform[4 + row] = -transform[4 + row];
+        if (reversed) {
+            transform[12 + row] += transform[8 + row];
+            transform[8 + row] = -transform[8 + row];
+        }
+    }
+    if (!gsr2_camera_inverse(transform, inverse)) return 0;
+    next.same_camera = 1;
+    for (unsigned i = 0; i < 16; i++) {
+        if (!(fabs(transform[i]) <= FLT_MAX)) return 0;
+        next.clip_to_prev[i] = (float)transform[i];
+        next.same_camera &= fabs(transform[i] - (i % 5 == 0)) <= 1e-7;
+    }
     *in = next;
     return 1;
 }
@@ -673,8 +721,7 @@ int vk_gsr2_record(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
 
     // The fragment shader has no exposure uniform. Start fresh after a change
     // instead of accumulating history that was rendered at another exposure.
-    if (input->exposure_changed ||
-        (ctx->fragment && fabsf(input->pre_exposure - 1.0f) > 1e-4f)) plan.reset = 1;
+    if (ctx->fragment && fabsf(input->pre_exposure - 1.0f) > 1e-4f) plan.reset = 1;
     gsr2_params(ctx, slot, input, plan);
     vk_img_barrier_all(cb);
     gsr2_prepare_images(ctx, cb, plan.reset);
