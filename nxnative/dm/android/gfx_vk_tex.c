@@ -11,6 +11,7 @@
 #include "ownership_exchange.h"
 #include "gfx_vk_resolution_restore.h"
 #include "gfx_vk_resolution_preflight.h"
+#include "gfx_vk_resolution_active.h"
 #include "nvn_tex.h"
 #include "../gfx/tex/nvn_deswizzle.h"
 #include "nvn_hmap.h"
@@ -195,6 +196,19 @@ typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; uint8_t family; } ak
 static nvn_hmap g_by_key = {.klen = sizeof(akey)};     // akey → vkimg_t*
 static nvn_hmap g_by_serial = {.klen = sizeof(uint64_t)};  // serial → vkimg_t* (images with no storage key: no pool memory)
 static pthread_mutex_t g_img_mu = PTHREAD_MUTEX_INITIALIZER;
+// Allocated only for the first actual nonnative cache exchange. All mutations
+// occur under g_img_mu. The published count is an O(1) replay fast path.
+static nx_rs_active *g_rs_live;
+static unsigned g_rs_live_count;
+static void rs_active_publish(void) {
+    __atomic_store_n(&g_rs_live_count,g_rs_live?g_rs_live->n:0,__ATOMIC_RELEASE);
+}
+static void rs_active_drop(vkimg_t *im) {
+    if (!g_rs_live) return;
+    nx_rs_active_update(g_rs_live,(uintptr_t)im,0);
+    rs_active_publish();
+    if (!g_rs_live->n) { free(g_rs_live); g_rs_live=NULL; }
+}
 // Each owning key remains unique. Exact descriptions win, including packaged/plain
 // peers. A family admits a metadata peer only after that exact format has joined;
 // metadata then closes membership, while existing aliases keep their shared data.
@@ -547,31 +561,67 @@ static int rs_is_scaled(const vkimg_t *im) {
     return im && im->rs_backing &&
         (im->rs_backing->physical_w!=im->w || im->rs_backing->physical_h!=im->h);
 }
-int vk_rs_require_native(vkimg_t *im) {
+// Explicit bridge into cache ownership. Private probes do not enter this
+// index. The caller still needs a complete consumer/lifetime proof.
+static int rs_exchange_live_locked(vkimg_t *const owners[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h) {
+    if (!owners || !vk_sub_open() || !vk_rs_pass_idle()) return 0;
+    nx_rs_active staged={0};
+    if (g_rs_live) staged=*g_rs_live;
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) {
+        vkimg_t *im=owners[i]; if (!im) continue;
+        unsigned matches=0;
+        // Slow membership/alias check only during an exchange, not a draw.
+        for (uint32_t j=0;j<g_by_key.cap;j++) {
+            vkimg_t *o=g_by_key.vals[j]; if (!o) continue;
+            if (o==im) { matches++; continue; }
+            if ((w!=im->w || h!=im->h) && o->pool==im->pool &&
+                (o->off<0 || im->off<0 || o->size<=0 || im->size<=0 ||
+                nx_rs_range_overlap((uint64_t)o->off,(uint64_t)o->size,(uint64_t)im->off,(uint64_t)im->size))) return 0;
+        }
+        if (matches!=1 || !nx_rs_active_update(&staged,(uintptr_t)im,w!=im->w || h!=im->h)) return 0;
+    }
+    nx_rs_active *allocated=NULL;
+    if (!g_rs_live && staged.n && !(allocated=malloc(sizeof *allocated))) return 0;
+    int result=vk_rs_cache_exchange(owners,w,h);
+    if (!result) { free(allocated); return 0; }
+    if (allocated) g_rs_live=allocated;
+    if (g_rs_live) *g_rs_live=staged;
+    rs_active_publish();
+    if (g_rs_live && !g_rs_live->n) { free(g_rs_live); g_rs_live=NULL; }
+    return result;
+}
+int vk_rs_cache_exchange_live(vkimg_t *const owners[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h) {
+    pthread_mutex_lock(&g_img_mu);
+    int result=rs_exchange_live_locked(owners,w,h);
+    pthread_mutex_unlock(&g_img_mu);
+    return result;
+}
+static int rs_require_native_locked(vkimg_t *im) {
     if (!rs_is_scaled(im)) return 1;
-    // No render-pass split from inside view collection or a pending clear.
     if (!vk_sub_open() || !vk_rs_pass_idle()) return 0;
     vkimg_t *owners[VK_RS_GROUP_SIZE]={im};
-    if (!vk_rs_cache_exchange(owners,im->w,im->h)) return 0;
+    if (!rs_exchange_live_locked(owners,im->w,im->h)) return 0;
     if (rs_is_scaled(im) || !im->rs_backing) return 0;
     im->rs_backing->native_only=1;
     return 1;
 }
-// Inspect actual cache membership, not the private probe's generations.
-int vk_rs_cache_has_scaled(void) {
-    int found=0;
+int vk_rs_require_native(vkimg_t *im) {
+    if (!rs_is_scaled(im)) return 1;
     pthread_mutex_lock(&g_img_mu);
-    for (uint32_t i=0;i<g_by_key.cap && !found;i++) found=rs_is_scaled(g_by_key.vals[i]);
+    int result=rs_require_native_locked(im);
     pthread_mutex_unlock(&g_img_mu);
-    return found;
+    return result;
+}
+int vk_rs_cache_has_scaled(void) {
+    return __atomic_load_n(&g_rs_live_count,__ATOMIC_ACQUIRE)!=0;
 }
 int vk_rs_cache_restore_all(void) {
     if (!vk_sub_open() || !vk_rs_pass_idle()) return 0;
     int ok=1;
     pthread_mutex_lock(&g_img_mu);
-    for (uint32_t i=0;i<g_by_key.cap;i++) {
-        vkimg_t *im=g_by_key.vals[i];
-        if (rs_is_scaled(im) && !vk_rs_require_native(im)) { ok=0; break; }
+    while (g_rs_live && g_rs_live->n) {
+        vkimg_t *im=(vkimg_t *)g_rs_live->owner[g_rs_live->n-1];
+        if (!rs_is_scaled(im) || !rs_require_native_locked(im)) { ok=0; break; }
     }
     pthread_mutex_unlock(&g_img_mu);
     return ok;
@@ -814,7 +864,7 @@ extern uint64_t g_tex_frame;   // presents so far, for the packaged textures' la
 // last EVICT_KEEP presents go (their memory now holds another texture; one drawn again is made and filled again). Called with g_img_mu held
 enum { EVICT_KEEP = 60 };
 static uint64_t g_img_n, g_img_bytes, g_img_evicted;   // live images and their bytes, images evicted so far (vk_tex_sweep's line)
-static void img_drop(vkimg_t *im) { if (vk_rs_tracking()) { ro_drop(im); if (im->bc_draw) ro_drop(im->bc_draw); } if (im->bc_draw) { vkimg_t *d = im->bc_draw; vk_lrz_forget(d); vk_tex_view_drop_all(d); if (d->sub) vk_defer_free_image_sub(d->img, d->sub); else vk_defer_free_image(d->img, d->mem); free(d); }
+static void img_drop(vkimg_t *im) { if (im->rs_backing) rs_active_drop(im); if (vk_rs_tracking()) { ro_drop(im); if (im->bc_draw) ro_drop(im->bc_draw); } if (im->bc_draw) { vkimg_t *d = im->bc_draw; vk_lrz_forget(d); vk_tex_view_drop_all(d); if (d->sub) vk_defer_free_image_sub(d->img, d->sub); else vk_defer_free_image(d->img, d->mem); free(d); }
     vk_lrz_forget(im); if (im->lin_mem) nvn_dirty_release(im->lin_mem, im->lin_len); if (im->packaged && !im->pkg_released && im->pkg_mem) nvn_dirty_release(im->pkg_mem, im->pkg_len); g_img_n--; g_img_bytes -= im->size > 0 ? (uint64_t)im->size : 0; alias_unlink(im); vk_tex_view_drop_all(im); if (im->rs_backing) vk_rs_variant_retire(im->rs_backing); else if (im->sub) vk_defer_free_image_sub(im->img, im->sub); else vk_defer_free_image(im->img, im->mem); free(im); }
 static void evict_overlaps(uint64_t pool, int64_t off, int64_t size) {
     akey ks[64]; int n = 0;
@@ -862,11 +912,13 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     if (t->has_layout || t->has_pkg_data || (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) supported=0;
     int result=0;
     pthread_mutex_lock(&g_img_mu);
-    for (uint32_t i=0;i<g_by_key.cap;i++) {
-        vkimg_t *im=g_by_key.vals[i];
-        if (!rs_is_scaled(im) || im->pool!=k.pool) continue;
+    vkimg_t *exact_owner=nvn_hm_get(&g_by_key,&k);
+    for (unsigned i=0;g_rs_live && i<g_rs_live->n;i++) {
+        vkimg_t *im=(vkimg_t *)g_rs_live->owner[i];
+        if (!rs_is_scaled(im)) { result=2; break; }
+        if (im->pool!=k.pool) continue;
         if (im->off<0 || im->size<=0) { result=2; break; }
-        int exact=!memcmp(g_by_key.keys+(size_t)i*g_by_key.klen,&k,sizeof k) &&
+        int exact=im==exact_owner &&
             im->off==k.off && (uint64_t)im->size==(uint64_t)t->L.size &&
             im->w==t->d.width && im->h==t->d.height && im->nvn_format==t->d.format &&
             !im->novl && !im->packaged && !im->lin_mem && !im->family_closed &&

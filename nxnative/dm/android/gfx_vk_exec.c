@@ -1507,7 +1507,7 @@ static int begin_pass(void) {
     P_da = da; P_sa = sa; P_cleared = 0;
     P_ri = (VkRenderingInfo){VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, {w, h}}, layers, 0, (uint32_t)ncol, P_ca,
                              (S.daspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? &P_da : NULL, (S.daspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? &P_sa : NULL};
-    if (g_rs_replay && !resolution_configure_pass()) { VKLOG("[resolution] incompatible physical attachment group; replay refused"); return 0; }
+    if (g_rs_replay && vk_rs_cache_has_scaled() && !resolution_configure_pass()) { VKLOG("[resolution] incompatible physical attachment group; replay refused"); return 0; }
     S.pass_open = 2; S.pass_w = w; S.pass_h = h; S.samples = samples; S.ncol = ncol; S.bound_pipe = VK_NULL_HANDLE;
     return 1;
 }
@@ -2419,7 +2419,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         if (k == RK_SBUF || k == RK_SBUF_UBO || k == RK_IMG || k == RK_IMG_UBO || k == RK_IMG_TBUF) { vk_readback_unknown(); break; }
         if (d != RD_UBO && d != RD_SAMPLED && d != RD_TBUF && d != RD_IMAGE && d != RD_SAMPLER) { vk_readback_unknown(); break; }
     }
-    int memo = !g_rs_replay && !vk_rs_tracking() && st < 3 && !g_texel_snapshots[st].have_snapshot && !(g_pd_state == 1 && (g_pd_effects || g_pd_full)) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
+    int memo = !(g_rs_replay && vk_rs_cache_has_scaled()) && !vk_rs_tracking() && st < 3 && !g_texel_snapshots[st].have_snapshot && !(g_pd_state == 1 && (g_pd_effects || g_pd_full)) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
     uint32_t vd[96]; uint64_t vum = 0, vim = 0;   // verify: what the memo gave
     if (memo && set_memo_get(st, s, dofs)) { static unsigned nv; if (!g_x_setverify || ++nv % 64) { g_set_memo++; return g_smemo[st].set; }
         verify = 1; memcpy(vd, dofs, sizeof *dofs * (size_t)s->ndyn); vum = g_num_um; vim = g_num_im; }
@@ -2427,7 +2427,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
     VkDescriptorSet set = VK_NULL_HANDLE; struct { uint32_t b, o; int i; } dp[96]; int nd = 0; uint64_t tb0 = tick();
     VkWriteDescriptorSet w[96]; VkDescriptorBufferInfo bi[96]; VkDescriptorImageInfo ii[96 * 4]; VkBufferView bv[128]; uint32_t nw = 0, nii = 0, nbv = 0;
     rs_stage_collect rs; int rs_support=-1;
-    if (g_rs_replay) { memset(&rs,0,sizeof rs); g_rs_collect=&rs; }
+    if (g_rs_replay && vk_rs_cache_has_scaled()) { memset(&rs,0,sizeof rs); g_rs_collect=&rs; }
     int ncb = 0; uint8_t mci[MEMO_CB]; VkDescriptorBufferInfo mcd[MEMO_CB];   // the constant buffers, for the memo
     g_num_um = g_num_im = g_num_r32 = 0;
     int dynslots = 0;

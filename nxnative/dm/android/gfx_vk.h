@@ -166,6 +166,8 @@ void vk_rs_group_retire(vk_rs_images *group);
 // future consumers using physical extents. Currently called ONLY by probe
 // on detached owners. Native-only consumers are not yet routed.
 int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
+// For pre-authorized real cache owners only; does not authorize scaling by itself.
+int vk_rs_cache_exchange_live(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
 int vk_rs_pass_idle(void);
 int vk_rs_require_native(vkimg_t *im); // explicit native-only boundary, outside a pass
 int vk_rs_cache_has_scaled(void);

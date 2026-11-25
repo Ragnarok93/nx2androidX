@@ -29,14 +29,15 @@ on:
       - 'packaging/android-apk/**'
       - 'nxnative/dm/android/**'
       - 'nxnative/dm/gfx/tools/**'
+      - 'nxnative/dm/gfx/nvn/**'
       - 'nxnative/dm/tools/**'
       - 'nxnative/scripts/**'
       - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/android-apk.yml'
   push:
-    # Trusted android-branch changes build an upgradeable APK. Tags also attach it to the release.
-    branches: [android]
+    # Trusted android and resolution development branch changes build upgradeable APKs.
+    branches: [android, feature/universal-gsr2-20261124]
     tags: ['v*']
     paths:
       - 'android/**'
@@ -44,6 +45,7 @@ on:
       - 'packaging/android-apk/**'
       - 'nxnative/dm/android/**'
       - 'nxnative/dm/gfx/tools/**'
+      - 'nxnative/dm/gfx/nvn/**'
       - 'nxnative/dm/tools/**'
       - 'nxnative/scripts/**'
       - 'tests/**'
