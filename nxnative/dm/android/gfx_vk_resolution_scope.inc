@@ -23,7 +23,7 @@ static uint64_t rs_scope_addr(const tex_t *t) {
 }
 // -1 unknown/alias, 0 disjoint, 1..9 exact original attachment.
 static int rs_scope_match(const rs_scope_group *g,const tex_t *t,const view_t *v) {
-    uint64_t a=rs_scope_addr(t); if (!a) return -1;
+    uint64_t a=rs_scope_addr(t); if (!a || !vk_fmt(t->d.format)) return -1;
     int hit=0;
     for (unsigned i=0;i<9;i++) if (g->target[i] &&
         nx_rs_range_overlap(a,t->L.size,g->addr[i],g->target[i]->L.size)) {
@@ -94,6 +94,12 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
             case RK_CBUF:
                 if (b->desc!=RD_UBO || b->reg<0 || b->reg>=16 || !rs_scope_uniform(g,&look->ubo[st][b->reg])) return 0;
                 break;
+            case RK_SBUF: case RK_UBO_PTR:
+                // The shader_wmem guard above excludes graphics memory
+                // writes; only explicit, disjoint native read spans qualify.
+                if (b->desc!=RD_SSBO || b->reg<0 || b->reg>=16 ||
+                    !rs_scope_storage_buffer(g,b->kind==RK_SBUF?&look->ssbo[st][b->reg]:&look->ubo[st][b->reg])) return 0;
+                break;
             case RK_TEX: {
                 if (b->desc!=RD_SAMPLED || b->reg<0 || b->reg>=256) return 0;
                 uint64_t h=vk_tex_slot_handle(look->tex[st],look->img[st],(unsigned)b->reg);
@@ -114,7 +120,7 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
             default: return 0;
             }
         }
-        if ((stage_samples || (scaled && st==1)) && !support) return 0;
+        if ((stage_samples || (scaled && st==1)) && (!support || !s->refl_extra_len)) return 0;
         *samples|=stage_samples;
     }
     return 1;
@@ -176,7 +182,7 @@ static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *l
         default:return 0;
         }
     }
-    return !*samples || support;
+    return !*samples || (support && s->refl_extra_len);
 }
 static int rs_scope_program_proof(__typeof__(S) *look,const uint8_t *record,const p_bind_program *bp) {
     if (g_rs_scope_program_count==RS_SCOPE_PROGRAM_MAX) return 0;

@@ -11,5 +11,14 @@ int main(void) {
     unsigned slot,flags; assert(nx_rs_ref_lookup(p,sizeof p,19,&slot,&flags) && slot==1 && flags==2);
     assert(nx_rs_ref_lookup(p,sizeof p,3,&slot,&flags) && slot==255 && flags==1);
     assert(!nx_rs_ref_lookup(p,sizeof p-1,19,&slot,&flags)); assert(!nx_rs_ref_lookup(p,sizeof p,7,&slot,&flags));
+    const uint8_t duplicate_slot[]={'R','S','C','L',1,0,2,0,19,0,1,2,3,0,1,0};
+    const uint8_t duplicate_binding[]={'R','S','C','L',1,0,2,0,19,0,1,2,19,0,2,0};
+    const uint8_t malformed_peer[]={'R','S','C','L',1,0,2,0,19,0,1,2,3,0,73,0};
+    const uint8_t empty[]={'R','S','C','L',1,0,0,0};
+    assert(nx_rs_ref_valid(empty,sizeof empty) && nx_rs_ref_valid(p,sizeof p));
+    assert(!nx_rs_ref_lookup(duplicate_slot,sizeof duplicate_slot,19,&slot,&flags));
+    assert(!nx_rs_ref_lookup(duplicate_binding,sizeof duplicate_binding,19,&slot,&flags));
+    assert(!nx_rs_ref_lookup(malformed_peer,sizeof malformed_peer,19,&slot,&flags));
+    assert(!nx_rs_ref_lookup(p,sizeof p,19,NULL,&flags));
     return 0;
 }

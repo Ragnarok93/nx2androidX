@@ -2962,7 +2962,7 @@ static int resolution_preflight_stages(int target_scaled) {
                 if (b->count!=1 || b->desc!=RD_UBO) return 0;
                 if (b->kind==RK_SUPPORT) support=1;
                 break;
-            case RK_CBUF:
+            case RK_CBUF: case RK_SBUF: case RK_UBO_PTR:
                 if (b->count!=1 || !resolution_preflight_buffer_binding(st,b)) return 0;
                 break;
             case RK_TEX: {
@@ -2986,7 +2986,7 @@ static int resolution_preflight_stages(int target_scaled) {
             default: return 0; // storage, texel buffers and unresolved descriptors
             }
         }
-        if ((sample_scaled || (target_scaled && st==1)) && !support) return 0;
+        if ((sample_scaled || (target_scaled && st==1)) && (!support || !s->refl_extra_len)) return 0;
     }
     return 1;
 }
@@ -3866,7 +3866,7 @@ static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *
         if (r==2) return 0;
         sampled_scaled|=r==1;
     }
-    return !sampled_scaled || support;
+    return !sampled_scaled || (support && cs->refl_extra_len);
 }
 // Observation only. A dispatch matching the output extent is NOT proof of
 // pixel-coordinate provenance or freedom from non-image side effects.

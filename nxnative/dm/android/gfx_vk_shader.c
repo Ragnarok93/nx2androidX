@@ -306,6 +306,10 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     s->nbind = (int)hdr[0]; s->c1_len = hdr[1]; memcpy(s->local, hdr + 2, 12);
     s->b = (const dmsv_bind *)(r + 20); s->c1 = r + 20 + (size_t)20 * s->nbind;
     s->refl_extra_len = (uint32_t)(e->refl_len - (20 + 20ull * hdr[0] + hdr[1]));
+    // Bad or legacy optional metadata disables scaling, never the original
+    // shader. The immutable trailer is checked once, not on every draw.
+    if (s->refl_extra_len && !nx_rs_ref_valid(s->c1+s->c1_len,s->refl_extra_len))
+        s->refl_extra_len=0;
     // SPIR-V with the stage's set
     int f64_used = 0; uint32_t xb = 4;
     for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n) break; if (op == 71 && n >= 4 && w[i + 2] == 34) w[i + 3] = (uint32_t)s->set;   // OpDecorate DescriptorSet
@@ -603,7 +607,7 @@ static VkBuffer static_buf(int which) {
 VkBuffer vk_support_buffer(void) { return static_buf(0); }
 int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned *slot, unsigned *flags) {
     if (!s || !slot || !flags || !s->refl_extra_len) return 0;
-    return nx_rs_ref_lookup(s->c1 + s->c1_len, s->refl_extra_len, binding, slot, flags);
+    return nx_rs_ref_find(s->c1 + s->c1_len, s->refl_extra_len, binding, slot, flags);
 }
 int vk_shader_resolution_support(const vkshader_t *s, float target_scale,
                                  const vk_rs_sample_scale *samples, unsigned count,
@@ -616,7 +620,7 @@ int vk_shader_resolution_support(const vkshader_t *s, float target_scale,
         scaled |= samples[i].scale != 1.0f;
     }
     if (!scaled) { *out = (VkDescriptorBufferInfo){vk_support_buffer(), 0, 65536}; return 1; }
-    if (!vk_sub_open() || (s->stage != 0 && s->stage != 1 && s->stage != 5) ||
+    if (!s->refl_extra_len || !vk_sub_open() || (s->stage != 0 && s->stage != 1 && s->stage != 5) ||
         (target_scale != 1.0f && s->stage != 1)) return 0;
     int support = 0;
     for (int i=0; i<s->nbind; i++) if (s->b[i].kind == RK_SUPPORT) support = 1;
