@@ -176,6 +176,9 @@ int vk_rs_cache_exchange_live(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t 
 int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h);
 int vk_rs_suspend_discarded_group(void); // only after complete certified discard
 void vk_rs_release_dormant(void); // retire discarded variants at target change
+int vk_rs_scope_freeze_begin(void);
+void vk_rs_scope_freeze_seal(void);
+void vk_rs_scope_freeze_end(void);
 // Immediately followed by the same complete clear on the replay thread.
 vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c);
 int vk_rs_discard_target(const tex_t *t); // exact full unviewed target, outside a pass

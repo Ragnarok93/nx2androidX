@@ -254,6 +254,14 @@ static VkDescriptorSetLayout shader_layout(const VkDescriptorSetLayoutBinding *b
 }
 static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet);
 vkshader_t *vk_shader(uint64_t key, int stage) { return vk_shader_q(key, stage, 0); }
+// Lookahead must not compile shaders or populate the module cache.
+vkshader_t *vk_shader_cached(uint64_t key,int stage) {
+    struct { uint64_t key,stage; } hk={key,(uint64_t)stage};
+    pthread_mutex_lock(&g_sh_mu);
+    vkshader_t *s=nvn_hm_get(&g_shaders,&hk);
+    pthread_mutex_unlock(&g_sh_mu);
+    return s==(void *)1?NULL:s;
+}
 // A geometry shader's input primitive is fixed when it is translated, and Maxwell's shader header doesn't give it: shader_vk.py translates each geometry shader for
 // triangles under its own key and for the other four kinds under derived keys. Read as triangles, the points Xenoblade Chronicles 3's particle updates draw were taken
 // three at a time (Vulkan leaves a mismatch undefined), and the particles' records came out wrong: no husk particles, send-off particles or item orbs

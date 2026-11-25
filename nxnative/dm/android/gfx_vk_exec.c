@@ -239,7 +239,7 @@ static void render_cond(const p_render_cond *rc) {
 }
 
 // Startup-only diagnostic switches; the native path bypasses the classifier.
-static int g_rs_audit, g_rs_probe, g_rs_observe, g_rs_replay;
+static int g_rs_audit, g_rs_probe, g_rs_observe, g_rs_replay, g_rs_scopes;
 // Only the present producer publishes frame epochs. The replay thread owns
 // the latch; internal submission cuts never change its target.
 static unsigned g_rs_frame_request; // 0 disables the experimental coordinator
@@ -286,6 +286,8 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         g_rs_observe = g_rs_audit || g_rs_probe;
         const char *replay = getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
         g_rs_replay = replay && atoi(replay) != 0;
+        const char *scopes=getenv("DM_VK_RESOLUTION_LIFETIME_SCOPES");
+        g_rs_scopes=g_rs_replay && g_rs_audit && scopes && atoi(scopes)!=0;
         const char *target=getenv("DM_VK_RESOLUTION_TARGET_PERCENT");
         if (g_rs_replay && target && *target) {
             char *end=NULL; long p=strtol(target,&end,10);
@@ -4244,6 +4246,7 @@ static void bind_handles_rec(uint32_t op, const void *a) {
     }
 }
 uint32_t g_sub_ops[64];   // record ops replayed in the open submission, by op (logged when the driver refuses it)
+#include "gfx_vk_resolution_scope.inc"
 static void exec_ops(const uint8_t *p);
 // DM_VK_PROF=1 (start-up): a 1 ms CPU-time timer on the replay thread samples where it is; every 20 s the most frequent places are logged: offsets in this library,
 // time in other libraries charged to the first caller of ours ("via:"), or with =2 the place itself (libc, the driver). Resolve offsets with llvm-symbolizer
@@ -4301,10 +4304,10 @@ static void exec_ops(const uint8_t *p) {
         if (h.op < 64 && h.op > 3 && (skip >> h.op & 1)) { p += h.size; continue; }
         const uint8_t *a = p + 8;
         switch (h.op) {
-        case OP_END: return;
+        case OP_END: if (g_rs_scope_end) die("[vk] resolution: certified scope did not close"); return;
         case OP_BEGIN: break;
         case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
-        case OP_CALL: { uint64_t t; memcpy(&t, a, 8); exec_ops((const uint8_t *)(uintptr_t)t); break; }
+        case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (g_rs_scopes) g_rs_scope_nested++; exec_ops((const uint8_t *)(uintptr_t)t); if (g_rs_scopes) g_rs_scope_nested--; break; }
         case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4);
             if (g_rs_replay && vk_rs_cache_has_scaled() &&
                 !vk_rs_preflight_buffer((uintptr_t)val,4)) resolution_restore_before_recording();
@@ -4333,8 +4336,20 @@ static void exec_ops(const uint8_t *p) {
                 !resolution_raw_span(d,n,0)) resolution_restore_before_recording();
             vk_sub_update(d, a + 16, n);
             if (g_x_tracepass == -2) VKLOG("--- uniform update %#llx, %llu bytes, after pass %d", (unsigned long long)d, (unsigned long long)n, g_sub_pass - 1); break; }
-        case OP_SET_RT: set_rt((const p_set_rt *)a); break;
+        case OP_SET_RT: set_rt((const p_set_rt *)a);
+            if (g_rs_scopes && !skip && !g_rs_scope_nested && !g_rs_scope_end && g_rs_frame.target<100)
+                rs_scope_try_begin(p+h.size);
+            break;
         case OP_RS_DISCARD: {
+            if (g_rs_scope_end) {
+                if (p==g_rs_scope_end) {
+                    vk_end_pass();
+                    if (!vk_rs_suspend_discarded_group()) die("[vk] resolution: certified discard publication failed");
+                    g_rs_scope_end=NULL; g_rs_scope_program_count=0;
+                    vk_rs_scope_freeze_end();
+                }
+                break;
+            }
             if (g_rc_skip || !g_rs_replay || !vk_rs_cache_has_scaled()) break;
             int i=((const p_rs_discard *)a)->index;
             const tex_t *t=NULL;
@@ -4353,7 +4368,7 @@ static void exec_ops(const uint8_t *p) {
         case OP_VIEWPORTS: { const p_viewports *v = (const p_viewports *)a; for (int i = 0; i < v->n && v->first + i < 16; i++) memcpy(S.vp[v->first + i], v->v[i], 16); break; }
         case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.sc_set = 1; break;
         case OP_DEPTH_RANGE: { const p_depth_range *d = (const p_depth_range *)a; S.dnear = d->n; S.dfar = d->f; break; }
-        case OP_BIND_PROGRAM: bind_program((const p_bind_program *)a); break;
+        case OP_BIND_PROGRAM: if (g_rs_scope_end) rs_scope_replay_program(p); else bind_program((const p_bind_program *)a); break;
         case OP_BIND_STATE: { const p_bind_state *s = (const p_bind_state *)a;
             switch (s->kind) {
             case 0: { blend_st b; memcpy(&b, s->bytes, sizeof b); if (b.target < 8) S.blend[b.target] = b; break; }

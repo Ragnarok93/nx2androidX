@@ -1849,14 +1849,48 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
 }
 void mtl_set_tex_pool_n(int n) { (void)n; }
 static __thread treg_ver t_treg;   // the version a lookup found, copied (the table may be rewritten or grow meanwhile)
+// Only the replay thread uses this bounded scratch. Snapshot all shader
+// texture IDs used by a candidate scope before publishing scaled owners.
+enum { RS_FREEZE_MAX=96 };
+typedef struct { unsigned n; int active,sealed; struct { int tid; treg_ver ver; } e[RS_FREEZE_MAX]; } rs_freeze_table;
+static __thread rs_freeze_table *t_rs_freeze;
+int vk_rs_scope_freeze_begin(void) {
+    if (!t_rs_freeze) t_rs_freeze=calloc(1,sizeof *t_rs_freeze);
+    if (!t_rs_freeze || t_rs_freeze->active) return 0;
+    t_rs_freeze->n=0; t_rs_freeze->sealed=0; t_rs_freeze->active=1; return 1;
+}
+void vk_rs_scope_freeze_seal(void) {
+    t_rs_freeze->sealed=1;
+    pthread_mutex_lock(&g_rmu); g_tex_gen++; pthread_mutex_unlock(&g_rmu);
+}
+void vk_rs_scope_freeze_end(void) {
+    if (!t_rs_freeze || !t_rs_freeze->active) return;
+    if (t_rs_freeze->sealed) { pthread_mutex_lock(&g_rmu); g_tex_gen++; pthread_mutex_unlock(&g_rmu); }
+    t_rs_freeze->active=t_rs_freeze->sealed=0; t_rs_freeze->n=0;
+}
 vkimg_t *vk_tex_by_id(int tid, const view_t **view_out, const tex_t **tex_out) {
+    rs_freeze_table *freeze=t_rs_freeze;
+    if (freeze && freeze->active) {
+        for (unsigned i=0;i<freeze->n;i++) if (freeze->e[i].tid==tid) {
+            t_treg=freeze->e[i].ver;
+            if (view_out) *view_out=t_treg.has_v?&t_treg.v:NULL;
+            if (tex_out) *tex_out=&t_treg.t;
+            return (vkimg_t *)1;
+        }
+        if (freeze->sealed || freeze->n==RS_FREEZE_MAX) return NULL;
+    }
     uint64_t job = nvn_replaying_job();
     pthread_mutex_lock(&g_rmu);
     const treg_ver *r = tid > 0 && tid < g_ntreg ? &g_treg[tid].cur : NULL;
     if (r && job && r->seq >= job && g_treg[tid].old)   // registered after this job was queued: the newest earlier one
         for (int k = 0; k < TREG_OLD; k++) { const treg_ver *o = &g_treg[tid].old[k]; if (!o->ok) break; r = o; if (o->seq < job) break; }
-    int ok = r && r->ok; if (ok) t_treg = *r;
+    int ok = r && r->ok;
+    if (freeze && freeze->active && (!job || (r && r->seq>=job))) ok=0;
+    if (ok) t_treg = *r;
     pthread_mutex_unlock(&g_rmu);
+    if (ok && freeze && freeze->active) {
+        unsigned i=freeze->n++; freeze->e[i].tid=tid; freeze->e[i].ver=t_treg;
+    }
     if (!ok) return NULL;
     if (view_out) *view_out = t_treg.has_v ? &t_treg.v : NULL; if (tex_out) *tex_out = &t_treg.t;
     return (vkimg_t *)1;   // presence only: the caller makes the view with vk_tex_view
