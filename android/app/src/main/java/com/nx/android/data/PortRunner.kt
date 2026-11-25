@@ -29,10 +29,11 @@ class PortRunner(
         aliasHeadroom: Int,
         sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
         vulkanDriver: String = "",
+        allowDamagedMedia: Boolean = false,
         onEnd: () -> Unit,
     ): Thread {
         val args = portArgs(gameFile, keys, touch, fps60, experimental, aliasHeadroom, !BuildConfig.NX_LSFG,
-            sharedFont, firmware, mtReplay, deviceLanguage(), vulkanDriver)
+            sharedFont, firmware, mtReplay, deviceLanguage(), vulkanDriver, allowDamagedMedia)
         // A file in a netdisk's folder is not there yet in its middle: the port would read it as a broken dump
         GameSource.cloudFolder(gameFile)?.let { onLine(locale.str(R.string.runner_cloud_folder, it)) }
         return start(args, onEnd)
@@ -62,11 +63,12 @@ class PortRunner(
         fun portArgs(gameFile: String, keys: String, touch: Boolean, fps60: Boolean,
                      experimental: Boolean, aliasHeadroom: Int, noLsfg: Boolean,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
-                     deviceLanguage: String = "", vulkanDriver: String = ""): List<String> {
+                     deviceLanguage: String = "", vulkanDriver: String = "", allowDamagedMedia: Boolean = false): List<String> {
             val args = mutableListOf("-m", "porter", "port", gameFile, "-k", keys, "--progress", "json", "--game-apk")
             if (touch) args += "--touch"
             if (fps60) args += "--fps60"
             if (experimental) args += "--experimental"
+            if (allowDamagedMedia) args += "--allow-damaged-media"
             if (aliasHeadroom >= 0) args += listOf("--alias-headroom", aliasHeadroom.toString())
             if (sharedFont.isNotBlank()) args += listOf("--shared-font", sharedFont.trim())
             if (firmware.isNotBlank()) args += listOf("--firmware", firmware.trim())

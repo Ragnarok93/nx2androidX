@@ -66,13 +66,13 @@ class PortService : Service() {
             ctx: Context, game: String, keys: String,
             touch: Boolean, fps60: Boolean, exp: Boolean, aliasHeadroom: Int,
             sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
-            vulkanDriver: String = ""
+            vulkanDriver: String = "", allowDamagedMedia: Boolean = false
         ) {
             val i = Intent(ctx, PortService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(GAME, game).putExtra(KEYS, keys)
                 .putExtra(TOUCH, touch).putExtra(FPS60, fps60).putExtra(EXP, exp)
-                .putExtra(ALIAS, aliasHeadroom)
+                .putExtra(ALIAS, aliasHeadroom).putExtra("allowDamagedMedia", allowDamagedMedia)
             if (sharedFont.isNotBlank()) i.putExtra(FONT, sharedFont)
             if (firmware.isNotBlank()) i.putExtra(FIRMWARE, firmware)
             if (mtReplay) i.putExtra(MT, true)
@@ -154,6 +154,7 @@ class PortService : Service() {
             aliasHeadroom = intent.getIntExtra(ALIAS, ALIAS_AUTO),
             sharedFont = intent.getStringExtra(FONT) ?: "",
             mtReplay = intent.getBooleanExtra(MT, false),
+            allowDamagedMedia = intent.getBooleanExtra("allowDamagedMedia", false),
         )
         val began = try { operations.beginBuild(game, cfg) } catch (e: Exception) {
             AppLog.line("[RED] Build history could not be saved: ${e.message}")
@@ -186,6 +187,7 @@ class PortService : Service() {
                 intent.getStringExtra(FONT) ?: "", intent.getStringExtra(FIRMWARE) ?: "",
                 intent.getBooleanExtra(MT, false),
                 intent.getStringExtra(DRIVER) ?: "",
+                intent.getBooleanExtra("allowDamagedMedia", false),
             ) {
                 handler.post {
                     if (runner === taskRunner) {

@@ -31,14 +31,19 @@ static class IntegrityFixture {
     static byte[] Payload() { var b = new byte[8192]; for (int i = 0; i < b.Length; i++) b[i] = (byte)(i * 17 + 3); return b; }
     static int CopyCase(string mode, string output) {
         var builder = new RomFsBuilder();
-        builder.AddFile("/sample.bin", new StorageFile(new MemoryStorage(Payload()), OpenMode.Read));
+        string filename = mode == "copy-media" ? "/Movie/sample.webm" : "/sample.bin";
+        builder.AddFile(filename, new StorageFile(new MemoryStorage(Payload()), OpenMode.Read));
         using var image = builder.Build(); image.GetSize(out long size).ThrowIfFailure();
         var raw = new byte[(size + 511) & ~511L]; image.Read(0, raw.AsSpan(0, (int)size)).ThrowIfFailure();
         var hashes = new byte[raw.Length / 512 * 32];
         using (var writer = Checked(raw, hashes))
             for (int i = 0; i < raw.Length; i += 512) writer.Write(i, raw.AsSpan(i, 512)).ThrowIfFailure();
+        var clean = (byte[])raw.Clone();
         if (mode != "copy") raw[BitConverter.ToInt64(raw, 0x48) + 4096] ^= 1; // file data only; header and directory tables remain verified
         Set("g_allow", mode == "copy-allow");
+        Set("g_allowMedia", mode == "copy-media" || mode == "copy-nonmedia");
+        if (mode == "copy-retry") Set("g_retry", (Func<LibHac.Fs.Fsa.IFileSystem>)(() => new RomFsFileSystem(new CachedStorage(Checked(clean, hashes), 4, true))));
+        if (mode == "copy-media" || mode == "copy-nonmedia") Set("g_retry", (Func<LibHac.Fs.Fsa.IFileSystem>)(() => new RomFsFileSystem(new CachedStorage(Checked(raw, hashes), 4, true))));
         Set("g_lenient", (Func<LibHac.Fs.Fsa.IFileSystem>)(() => new RomFsFileSystem(new MemoryStorage(raw))));
         using var storage = Checked(raw, hashes); using var cache = new CachedStorage(storage, 4, true);
         using var fs = new RomFsFileSystem(cache);

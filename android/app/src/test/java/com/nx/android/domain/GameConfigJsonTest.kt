@@ -10,6 +10,13 @@ import org.junit.Test
 class GameConfigJsonTest {
 
     @Test
+    fun `media recovery defaults off and round trips`() {
+        assertFalse(GameConfigJson.decode(JSONObject()).allowDamagedMedia)
+        val c = GameConfig(allowDamagedMedia = true)
+        assertEquals(c, GameConfigJson.decode(GameConfigJson.encode(c)))
+    }
+
+    @Test
     fun `the config survives the round trip`() {
         val c = GameConfig(touch = true, fps60 = false, experimental = true, aliasHeadroom = 16)
         val back = GameConfigJson.decode(GameConfigJson.encode(c))

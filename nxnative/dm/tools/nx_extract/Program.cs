@@ -114,6 +114,7 @@ static class P {
     static int Extract(string[] a) {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
+        g_allowMedia = Array.IndexOf(a, "--allow-damaged-media") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged-media");
         string verifyRomfs = null;
         int verifyIdx = Array.IndexOf(a, "--verify-romfs");
         if (verifyIdx >= 0) {
@@ -127,7 +128,7 @@ static class P {
             parsed.RemoveAt(verifyIdx);
             a = parsed.ToArray();
         }
-        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir>\n       nx_extract <prod.keys> --sysdata <firmware dir> <title id> <out dir>"); return 2; }
+        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest] [--allow-damaged] [--allow-damaged-media]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir>\n       nx_extract <prod.keys> --sysdata <firmware dir> <title id> <out dir>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3]);
         if (a[1] == "--sysdata") { if (a.Length < 5) { Console.Error.WriteLine("usage: nx_extract <prod.keys> --sysdata <firmware dir> <title id> <out dir>"); return 2; } return SysData(ks, a[2], Convert.ToUInt64(a[3], 16), a[4]); }
@@ -156,6 +157,7 @@ static class P {
         // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
         IFileSystem exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
         Copy(exefs, Path.Combine(outDir, "ExeFS"), null);
+        if (g_damaged.Count != 0) return Damaged(); // executable integrity is always strict
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);
         foreach (string p in mods) {   // build ID of every NSO module (main, sdk, subsdk*, rtld...)
             if (new FileInfo(p).Length < 0x50) continue;
@@ -173,23 +175,37 @@ static class P {
             return Damaged();
         }
         IStorage romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
-        // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
+        g_retry = () => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid));
+        // the same RomFS without hash checks, used only on explicit recovery requests
         g_lenient = () => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
         if (verifyRomfs != null) VerifyRomFS(new RomFsFileSystem(romfs), verifyRomfs);
         else if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));
         else Copy(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS"), cmpDir);
-        return Damaged();
+        int status = Damaged();
+        if (status == 0 && g_mediaWarnings.Count != 0) File.WriteAllLines(Path.Combine(outDir, "romfs_integrity_warnings.txt"), g_mediaWarnings);
+        return status;
     }
 
     // Files whose data failed the hash check: listed at the end; exit code 3 unless --allow-damaged
-    static readonly List<string> g_damaged = new List<string>(); static bool g_allow; static Func<IFileSystem> g_lenient; static IFileSystem g_lenientFs;
+    static readonly List<string> g_damaged = new List<string>();
+    static readonly List<string> g_mediaWarnings = new List<string>();
+    static bool g_allow, g_allowMedia, g_unrecovered;
+    static Func<IFileSystem> g_lenient, g_retry; static IFileSystem g_lenientFs;
+    static bool IsRecoverableMedia(string path) {
+        string ext = Path.GetExtension(path);
+        return (path.StartsWith("/Movie/", StringComparison.OrdinalIgnoreCase) && ext.Equals(".webm", StringComparison.OrdinalIgnoreCase)) ||
+               (path.StartsWith("/Sound/", StringComparison.OrdinalIgnoreCase) && ext.Equals(".bfstm", StringComparison.OrdinalIgnoreCase));
+    }
     static bool HashError(HorizonResultException e) => e.ResultValue.Module == 2 && e.ResultValue.Description >= 4600 && e.ResultValue.Description < 4700;   // fs: integrity verification failures (2002-46xx)
     static int Damaged() {
         if (g_damaged.Count == 0) return 0;
-        foreach (string p in g_damaged) Console.WriteLine($"[RED] hash check failed: {p}");
-        if (g_allow) { Console.WriteLine($"[RED] the NSP is damaged: {g_damaged.Count} files written as read (--allow-damaged)"); return 0; }
+        foreach (string p in g_damaged) Console.WriteLine($"[{(g_mediaWarnings.Contains(p) ? "WARN" : "RED")}] hash check failed: {p}");
+        if (!g_unrecovered && (g_allow || g_allowMedia)) {
+            Console.WriteLine($"[WARN] {g_damaged.Count} files written as read; integrity NOT verified ({(g_allow ? "--allow-damaged" : "--allow-damaged-media")})"); return 0;
+        }
         Console.WriteLine($"[RED] the NSP is damaged: " +
-                          $"{g_damaged.Count} files fail the NCA's hash check (an incomplete copy or a broken download); copy or download it again, or pass --allow-damaged to write them as read");
+                          $"{g_damaged.Count} files fail the NCA hash check; source corruption or a verification/read error is possible. " +
+                          "Verify the source independently; for unverified movie/music data only, explicitly enable media recovery.");
         return 3;
     }
 
@@ -201,7 +217,7 @@ static class P {
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
         Directory.CreateDirectory(outDir);
         Copy(new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid)), outDir, null);
-        return 0;
+        return Damaged();
     }
 
     // System data from a firmware dump: every .nca in the folder (a file, or a folder of 00, 01... parts as the NAND keeps large ones), the data NCA whose title ID matches
@@ -219,7 +235,7 @@ static class P {
         Console.WriteLine($"system data {id:x16} ({n} NCAs read)");
         Directory.CreateDirectory(outDir);
         Copy(new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid)), outDir, null);
-        return 0;
+        return Damaged();
     }
 
     // Open an NSP (PFS0) or the secure partition of an XCI, import the common tickets, list all NCAs
@@ -271,10 +287,17 @@ static class P {
     // The game itself, not its update: a cartridge dump rebuilt with the update merged in holds the game's card NCA
     // (card distribution) beside the update's download NCA, and both carry the game's title ID, so the title ID alone
     // does not tell them apart. The card NCA is the game's; the download one is a patch (BKTR) over it.
+    // Upstream: distinguish the actual patch section from the base program.
+    static bool IsPatch(Nca n) {
+        for (int i = 0; i < 4; i++) if (n.Header.IsSectionEnabled(i) && n.Header.GetFsHeader(i).IsPatchSection()) return true;
+        return false;
+    }
     static Nca PickGame(List<Nca> l) {
         Nca r = null;
-        foreach (Nca n in l) if (n.Header.ContentType == NcaContentType.Program && n.Header.DistributionType == DistributionType.GameCard && (r == null || n.Header.TitleId < r.Header.TitleId)) r = n;
-        return r ?? Pick(l, NcaContentType.Program);   // an NSP: its program NCA is the game (downloaded, but not a patch)
+        foreach (Nca n in l) if (n.Header.ContentType == NcaContentType.Program && !IsPatch(n) &&
+            (r == null || (n.Header.DistributionType == DistributionType.GameCard && r.Header.DistributionType != DistributionType.GameCard) ||
+             (n.Header.DistributionType == r.Header.DistributionType && n.Header.TitleId < r.Header.TitleId))) r = n;
+        return r;   // an NSP: its program NCA is the game (downloaded, but not a patch)
     }
 
     // The update inside the same package, when there is one (a cartridge dump rebuilt with the update merged in): its
@@ -344,19 +367,46 @@ static class P {
             using var f = new UniqueRef<IFile>();
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
-            if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
-                if (File.Exists(op)) File.Delete(op);
-                if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");
-                cloned++; continue;
-            }
-            try { Write(f.Get, op, e.Size, buf); }
-            catch (HorizonResultException x) when (HashError(x)) {
-                g_damaged.Add(e.FullPath);
-                if (!g_allow || g_lenient == null) { File.Delete(op); continue; }
-                g_lenientFs ??= g_lenient();
-                using var lf = new UniqueRef<IFile>();
-                g_lenientFs.OpenFile(ref lf.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-                Write(lf.Get, op, e.Size, buf);
+            try {
+                if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
+                    if (File.Exists(op)) File.Delete(op);
+                    if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");
+                    cloned++; continue;
+                }
+                Write(f.Get, op, e.Size, buf);
+            } catch (HorizonResultException x) when (HashError(x)) {
+                File.Delete(op);
+                Console.WriteLine($"[WARN] integrity read failed: {e.FullPath}: {x.Message}");
+                bool retried = false;
+                if (g_retry != null) {
+                    using var retryFs = g_retry();
+                    using var rf = new UniqueRef<IFile>();
+                    retryFs.OpenFile(ref rf.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                    rf.Get.GetSize(out long retrySize).ThrowIfFailure();
+                    if (retrySize != e.Size) throw new InvalidDataException($"retry size changed: {e.FullPath}");
+                    try {
+                        Write(rf.Get, op, e.Size, new byte[64 << 10]);
+                        retried = true;
+                        Console.WriteLine($"[INFO] integrity verified on retry: {e.FullPath}");
+                    } catch (HorizonResultException again) when (HashError(again)) {
+                        File.Delete(op);
+                        Console.WriteLine($"[WARN] verified retry failed: {e.FullPath}: {again.Message}");
+                    }
+                }
+                if (!retried) {
+                    g_damaged.Add(e.FullPath);
+                    if (g_lenient == null || !(g_allow || (g_allowMedia && IsRecoverableMedia(e.FullPath)))) {
+                        g_unrecovered = true; continue;
+                    }
+                    g_lenientFs ??= g_lenient();
+                    using var lf = new UniqueRef<IFile>();
+                    g_lenientFs.OpenFile(ref lf.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                    lf.Get.GetSize(out long lenientSize).ThrowIfFailure();
+                    if (lenientSize != e.Size) throw new InvalidDataException($"recovery size changed: {e.FullPath}");
+                    Write(lf.Get, op, e.Size, buf);
+                    g_mediaWarnings.Add(e.FullPath);
+                    Console.WriteLine($"[WARN] unverified media/data retained by explicit override: {e.FullPath}");
+                }
             }
             written += e.Size;
         }
@@ -382,7 +432,7 @@ static class P {
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             long got = 0; int want = (int)Math.Min(h.Length, e.Size);
             try { if (want > 0) f.Get.Read(out got, 0, h.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
-            catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); got = 0; }   // the survey goes on; the file is listed as damaged
+            catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); g_unrecovered = !g_allow; got = 0; }   // the survey goes on; the file is listed as damaged
             o.WriteLine($"{e.FullPath}\t{e.Size}\t{Convert.ToHexString(h, 0, (int)got).ToLowerInvariant()}");
             n++; bytes += e.Size;
         }

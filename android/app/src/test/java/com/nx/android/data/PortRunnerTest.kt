@@ -16,6 +16,13 @@ class PortRunnerTest {
             experimental, aliasHeadroom, noLsfg, sharedFont, firmware, mtReplay, deviceLanguage, vulkanDriver)
 
     @Test
+    fun `media recovery is explicitly opt in`() {
+        assertFalse(args(-1).contains("--allow-damaged-media"))
+        val a = PortRunner.portArgs("/sdcard/game.nsp", "/keys/prod.keys", false, false, false, -1, false, allowDamagedMedia = true)
+        assertTrue(a.contains("--allow-damaged-media"))
+    }
+
+    @Test
     fun `Auto passes no address space at all`() {
         val a = args(-1)
         assertFalse("no --alias-headroom on Auto", a.contains("--alias-headroom"))

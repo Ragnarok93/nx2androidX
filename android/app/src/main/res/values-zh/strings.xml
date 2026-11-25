@@ -615,4 +615,6 @@
     <string name="upgrade_export">将 APK 保存到其他位置</string>
     <string name="upgrade_interrupted">升级已中断，原 APK 未更改。必要时选择数据文件夹后重试。</string>
     <string name="upgrade_failed">升级失败，原 APK 未更改。</string>
+    <string name="builds_allow_damaged_media">允许恢复未验证的影音文件</string>
+    <string name="builds_allow_damaged_media_hint">默认关闭。校验重试失败后保留 WebM 影片或 BFSTM 音频原始数据，播放可能异常。可执行文件及其他数据仍严格校验。</string>
 </resources>

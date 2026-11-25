@@ -616,4 +616,6 @@
     <string name="drawer_players_note">Player 1 is the phone: the on-screen gamepad and the motion are its, and it takes the controllers nobody else plays (automatic). Lock it to one controller and the others sit out. A controller plays one player only.</string>
     <string name="pad_center_player">Player %1$d</string>
     <string name="pad_center_idle">Idle</string>
+    <string name="builds_allow_damaged_media">Allow unverified movie/music recovery</string>
+    <string name="builds_allow_damaged_media_hint">Off by default. After a verified retry fails, retain movie WebM or streamed BFSTM audio as read. Playback may be damaged. Executable and other data remain strict.</string>
 </resources>

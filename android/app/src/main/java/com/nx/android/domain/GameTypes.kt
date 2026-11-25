@@ -61,6 +61,7 @@ data class GameConfig(
     /** 多线程回放：游戏的 Vulkan 命令录到自己的线程上（热闹场景里更快；要关掉得重新移植） */
     val mtReplay: Boolean = false,
     val vulkanDriver: String = "", // selected imported .so for standalone APK, empty = system
+    val allowDamagedMedia: Boolean = false,
 )
 
 /**
@@ -75,11 +76,11 @@ object GameConfigJson {
         .put("touch", c.touch).put("fps60", c.fps60).put("exp", c.experimental)
         .put("alias", c.aliasHeadroom)
         .put("font", c.sharedFont).put("mt", c.mtReplay)
-        .put("driver", c.vulkanDriver)
+        .put("driver", c.vulkanDriver).put("allowDamagedMedia", c.allowDamagedMedia)
 
     fun decode(o: JSONObject): GameConfig = GameConfig(
         o.optBoolean("touch"), o.optBoolean("fps60"), o.optBoolean("exp"), o.optInt("alias", ALIAS_AUTO),
-        o.optString("font", ""), o.optBoolean("mt", false), o.optString("driver", ""))
+        o.optString("font", ""), o.optBoolean("mt", false), o.optString("driver", ""), o.optBoolean("allowDamagedMedia", false))
 }
 
 /** Moves filename-keyed legacy options to title IDs once the library can identify their games. */

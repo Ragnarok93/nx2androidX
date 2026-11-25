@@ -33,6 +33,7 @@ def _parser():
     po.add_argument('--device', default='', help='adb serial of the device to install on')
     po.add_argument('--replace-signer', action='store_true', help='uninstall an app of the same package signed with another key first (deletes its saves)')
     po.add_argument('--debug', action='store_true', help='a development build: debug information, debuggable, DM_CTL key presses')
+    po.add_argument('--allow-damaged-media', action='store_true', help='explicitly retain unverified Movie/*.webm or Sound/*.bfstm after a verified retry; may cause playback defects')
     po.add_argument('--experimental', action='store_true', help='try a game not ported to Android yet (a profile guessed from a survey of its files; it may not start)')
     po.add_argument('--package', default='', help="the app's package instead of the profile's (a test install beside another build of the game) (with --game-apk or --self-contained-apk)")
     po.add_argument('--native-keyboard', action='store_true', help='use the Android Unicode keyboard (requires JDK and Android SDK platform/build-tools)')
@@ -208,7 +209,7 @@ def cmd_port(a):
         except BuildError as e: print(e, file=sys.stderr); return 2
     opts = pipeline.Options(folder=Path(a.folder), keys=Path(a.keys) if a.keys else None, firmware=Path(a.firmware) if a.firmware else None, out=Path(a.out) if a.out else None, version=a.version, language=a.language,
                                 language_preferred=a.language_preferred,
-                                app_name=a.app_name, app=a.app and not a.self_contained, self_contained=a.self_contained, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver,
+                                app_name=a.app_name, app=a.app and not a.self_contained, self_contained=a.self_contained, install=a.install, device=a.device, replace_signer=a.replace_signer, debug=a.debug, experimental=a.experimental, package=a.package, fps60=a.fps60, allow_damaged_media=a.allow_damaged_media, touch=a.touch, mt_replay=a.mt_replay, vulkan_driver=a.vulkan_driver,
                                 vulkan_driver_dir=a.vulkan_driver_dir, shared_font=a.shared_font,
                                 vercode_offset=offset, alias_headroom=a.alias_headroom, romfs_at=a.romfs_at, romfs_push=a.romfs_push, external_display=a.external_display, native_keyboard=a.native_keyboard, jobs=a.jobs, no_lsfg=a.no_lsfg)
     return _with_progress(a.progress, lambda: pipeline.emit_result(pipeline.Port(opts).run()))

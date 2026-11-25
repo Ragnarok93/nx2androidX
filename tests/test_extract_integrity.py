@@ -134,6 +134,21 @@ class ExtractIntegrity(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn('2002-4644', r.stderr)   # an invalid PFS0, never an out-of-range optional card-header read
 
+    def test_verified_retry_recovers_only_after_successful_hash_check(self):
+        r, out = self.run_case('copy-retry')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('integrity verified on retry', r.stdout)
+        self.assertEqual((out / 'sample.bin').read_bytes(), bytes((i * 17 + 3) & 255 for i in range(8192)))
+
+    def test_media_override_is_limited_and_does_not_accept_other_files(self):
+        r, out = self.run_case('copy-media')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('integrity NOT verified', r.stdout)
+        self.assertTrue((out / 'Movie/sample.webm').is_file())
+        r, out = self.run_case('copy-nonmedia')
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertFalse((out / 'sample.bin').exists())
+
     def test_file_data_integrity_keeps_existing_allow_damaged_behavior(self):
         r, out = self.run_case('copy-bad')
         self.assertEqual(r.returncode, 3, r.stderr)

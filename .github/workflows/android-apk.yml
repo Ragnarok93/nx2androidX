@@ -126,6 +126,7 @@ jobs:
       - name: the tests
         run: |
           python -m pip install -r requirements.txt
+          dotnet restore nxnative/dm/tools/nx_extract/nx_extract.csproj
           python -m unittest discover tests
       - name: native host link smoke (prevent game APK loader crashes)
         run: |

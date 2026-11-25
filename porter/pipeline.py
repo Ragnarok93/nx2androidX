@@ -73,6 +73,7 @@ class Options:
     debug: bool = False                # a development build: debug information, debuggable, DM_CTL
     experimental: bool = False         # a game not ported to Android yet: a provisional profile from upstream's survey (or a copy of its iOS profile), status experimental
     package: str = ''                  # the app's package instead of the profile's (a test install beside another build of the game)
+    allow_damaged_media: bool = False  # explicit opt-in; executable/other data remain strict
     fps60: bool = False                # 60 fps: the profile's own frame-rate cap, else the build's FPSLocker-Warehouse config (porter/fpslocker.py)
     vulkan_driver: Path = None         # an arm64 Vulkan driver (Mesa's Turnip) packed in the APK and used instead of the system's (DM_VK_DRIVER, dm/android/gfx_vk_core.c)
     vulkan_driver_dir: Path = None     # a folder of arm64 Vulkan drivers: the APK carries them all and the game's launcher lets the player pick one (drivers.txt)
@@ -772,7 +773,7 @@ class Port:
         ex = self.work / 'extract'; ex.mkdir(parents=True, exist_ok=True)
         # NSZ / XCZ: only what a missing version will read is decompressed.
         # A previous successful extraction takes no new full-game allocation.
-        fresh = lambda v: (ex / v / 'ExeFS/main').exists() and (ex / v / 'RomFS' / g.get('romfs_marker')).exists()   # nsp.extract's reuse test
+        fresh = lambda v: (ex / v / 'ExeFS/main').exists() and (ex / v / 'RomFS' / g.get('romfs_marker')).exists() and (o.allow_damaged_media or not (ex / v / 'romfs_integrity_warnings.txt').exists())   # nsp.extract's reuse test
         missing = [v for v in self.versions if not fresh(v)]
         # A prior companion needs only its ExeFS and a streaming full-byte
         # comparison of RomFS, not a second physical extraction of that tree.
@@ -804,7 +805,7 @@ class Port:
             for ver in self.versions:
                 if ver == self.pkg_ver and not fresh(ver):
                     self.restore_companion_romfs(nx, ex, ver, *picks[ver])
-        self.dirs = {ver: nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g) for ver in self.versions}
+        self.dirs = {ver: nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g, allow_damaged_media=o.allow_damaged_media) for ver in self.versions}
         for d in self.dirs.values(): nsp.require_64bit(d / 'ExeFS', f'{g.get("name", g.id)} ({g.id})')
         bad = [] if self.derived else [f'{v}: {x}' for v in self.versions for x in nsp.build_mismatch(self.dirs[v], v, g)]
         if bad and self.provisional: raise BuildError(f'not the builds the provisional profile registers: {"; ".join(bad)}')
@@ -1243,6 +1244,10 @@ class Port:
             if m := re.match(r'(translating|compressing) (\d+) shaders', s): PROG.set(step=f'{m.group(1)} {int(m.group(2)):,} shaders')   # compressing: the bundle's SPIR-V (dmsv.py)
             elif s.startswith('Vulkan translation: '): PROG.set(step=s)
             elif s.startswith('[RED] '): say(s)
+        # Upstream rechecks memory at translation start; retain our stricter governor.
+        self.o.jobs = min(self.o.jobs, resources.safe_jobs(self.o.jobs))
+        self.env['J'] = str(self.o.jobs)
+        say(f'shader translation: {self.o.jobs} worker(s) after memory recheck')
         command = [PY, DM / 'android/tools/shader_vk.py', pkg, tmp, '--jobs', str(self.o.jobs),
                    '--dotnet', self.tools['dotnet'], '--xlate', xlate, '--capture', cap, '--report', report]
         if resources.is_android():

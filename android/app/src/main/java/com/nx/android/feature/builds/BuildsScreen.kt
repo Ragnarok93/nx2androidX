@@ -289,6 +289,8 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
                 ConfigRow(stringResource(R.string.builds_touch_game), cfg.touch) { cfg = cfg.copy(touch = it); lib.setConfig(f, cfg) }
                 ConfigRow(stringResource(R.string.builds_60fps), cfg.fps60) { cfg = cfg.copy(fps60 = it); lib.setConfig(f, cfg) }
                 ConfigRow(stringResource(R.string.builds_experimental), cfg.experimental) { cfg = cfg.copy(experimental = it); lib.setConfig(f, cfg) }
+                ConfigRow(stringResource(R.string.builds_allow_damaged_media), cfg.allowDamagedMedia) { cfg = cfg.copy(allowDamagedMedia = it); lib.setConfig(f, cfg) }
+                Hint(stringResource(R.string.builds_allow_damaged_media_hint), size = 11.sp)
                 AliasRow(cfg.aliasHeadroom) { cfg = cfg.copy(aliasHeadroom = it); lib.setConfig(f, cfg) }
                 Hint(stringResource(R.string.builds_alias_hint), size = 11.sp)
                 // 玩家自己的覆盖：系统字体、固件 dump、多线程回放

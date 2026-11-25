@@ -167,7 +167,7 @@ class MainActivity : ComponentActivity() {
                 // Export a standalone APK beside the source game; no library pack directory is created.
                 PortService.start(this, file.absolutePath, prefs.keys,
                                   cfg.touch, cfg.fps60, cfg.experimental, cfg.aliasHeadroom,
-                                  cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay)
+                                  cfg.sharedFont, firmwareRepo.folder ?: "", cfg.mtReplay, allowDamagedMedia = cfg.allowDamagedMedia)
             } else {
                 toast(locale.str(R.string.builds_needs_storage)); askStorage()
             }
