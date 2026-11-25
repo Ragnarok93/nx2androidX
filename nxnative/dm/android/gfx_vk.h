@@ -171,6 +171,9 @@ void vk_rs_group_retire(vk_rs_images *group);
 int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
 // Real cache entry: native restoration only until future consumer/lifetime proof.
 int vk_rs_cache_exchange_live(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
+// Fresh real cache owners, no native memory allocation. Requires full lifetime
+// authorization and immediate full overwrite; not yet called by gameplay.
+int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h);
 // Immediately followed by the same complete clear on the replay thread.
 vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c);
 int vk_rs_discard_target(const tex_t *t); // exact full unviewed target, outside a pass

@@ -273,8 +273,9 @@ VkFormat vk_int_fmt(uint32_t bytes, int sint) {
 // size, for storage views that read or write their raw bits (tex_desc_for). A cross-class list may make Adreno / Turnip drop UBWC on those images, which was not
 // measured, so only a profile that needs it turns it on (DM_VK_UBWC=7); without it such a view falls back to the image's own format (vk_tex_view_as)
 static int ubwc_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UBWC"); v = e ? atoi(e) : 3; } return v; }
-static vkimg_t *img_new(const tex_t *t, const vkfmt_t *f) {
+static vkimg_t *img_new_description(const tex_t *t, const vkfmt_t *f, int unbound) {
     vkimg_t *im = calloc(1, sizeof *im);
+    if (!im) return NULL;
     const nvn_texdesc *d = &t->d;
     im->w = d->width ? d->width : 1; im->h = d->target == 0 || d->target == 3 ? 1 : (d->height ? d->height : 1);
     im->d = d->target == 2 ? (d->depth ? d->depth : 1) : 1; im->layers = layers_of(d);
@@ -315,6 +316,10 @@ static vkimg_t *img_new(const tex_t *t, const vkfmt_t *f) {
         VKRED_ONCE(96, "compressed image format %#x refused colour-attachment usage (%d): created without it", d->format, r);
         ci.usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; im->usage = ci.usage; r = vkCreateImage(V.dev, &ci, NULL, &im->img); }
     if (r) { VKRED_ONCE(10, "vkCreateImage failed (%d): %ux%ux%u format %#x (vk %d) target %d levels %u layers %u samples %u", r, im->w, im->h, im->d, d->format, f->vk, d->target, im->levels, im->layers, im->samples); free(im); return NULL; }
+    // An unbound native description provides the exact native memory
+    // requirement to the fresh scaled allocator without allocating it.
+    im->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (unbound) return im;
     VkMemoryRequirements req; vkGetImageMemoryRequirements(V.dev, im->img, &req);
     if ((ci.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) && im->w >= 256) { static int n; if (n++ < 16)   // UBWC check: a compressed target takes room for its metadata
         VKLOG("target %ux%u format %d%s: %llu bytes", im->w, im->h, f->vk, im->fixed_fmt ? " (format-listed)" : "", (unsigned long long)req.size); }
@@ -324,6 +329,9 @@ static vkimg_t *img_new(const tex_t *t, const vkfmt_t *f) {
     VKCHK(vkBindImageMemory(V.dev, im->img, im->mem, moff));
     im->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     return im;
+}
+static vkimg_t *img_new(const tex_t *t,const vkfmt_t *f) {
+    return img_new_description(t,f,0);
 }
 // P1: allocate isolated physical variants. Dedicated allocations make the
 // budget equal to actual Vulkan allocation sizes, including deferred frees.
@@ -776,6 +784,7 @@ void vk_tex_prepare(VkCommandBuffer cb, vkimg_t *im) {
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, im->img, {im->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
     im->layout = VK_IMAGE_LAYOUT_GENERAL;
+    if (im->rs_backing) im->rs_backing->layout=im->layout;
     // A new image's contents are undefined in Vulkan, where new Switch memory reads 0 (nxnative's Metal backend zeroes new textures too). Xenoblade Chronicles 3's water keeps
     // a texture that builds on its previous frame: made again by the switch to docked mode, it started from leftover memory, and blocks of it stayed on the water from then on.
     // So an image starts as zeros, before an upload or a draw replaces them. Block-compressed images can't be cleared; they are always uploaded
@@ -1156,6 +1165,103 @@ int vk_rs_discard_target(const tex_t *t) {
         im->nvn_format==t->d.format && !im->novl && !im->packaged && !im->lin_mem &&
         !im->family_closed && !im->full && im->rs_backing->image==im->img &&
         rs_discard_native_locked(im,0);
+    pthread_mutex_unlock(&g_img_mu);
+    return ok;
+}
+// Stage a fresh owner using an unbound native description only for
+// requirements. No native VkDeviceMemory is allocated or retained.
+static vkimg_t *rs_fresh_owner(const tex_t *t,const vkfmt_t *fmt,uint32_t w,uint32_t h,uint64_t guest) {
+    vkimg_t *im=img_new_description(t,fmt,1);
+    if (!im) return NULL;
+    im->pool=(uint64_t)(uintptr_t)t->pool; im->off=t->off;
+    im->size=(int64_t)t->L.size; im->flags=t->d.flags; im->rs_guest_addr=guest;
+    vk_rs_variant *v=vk_rs_variant_create(im,w,h);
+    vkDestroyImage(V.dev,im->img,NULL);
+    if (!v || !v->native_bytes || v->bytes>=v->native_bytes) {
+        vk_rs_variant_destroy(v); free(im); return NULL;
+    }
+    im->img=v->image; im->mem=v->memory; im->layout=v->layout; im->rs_backing=v;
+    return im;
+}
+// The real cache allocation transaction. Caller MUST prove the full overwrite
+// and all consumers through the end of the lifetime before using this entry.
+// No gameplay caller is authorized yet. In particular a clean observed graph
+// or CPU_NO_ACCESS alone is not a certificate of future GPU accesses.
+int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h) {
+    if (!targets || !vk_sub_open() || !vk_rs_pass_idle() || !vk_rs_tracking() || !w || !h) return 0;
+    akey keys[VK_RS_GROUP_SIZE]={0};
+    vkimg_t *fresh[VK_RS_GROUP_SIZE]={0};
+    uint64_t addr[VK_RS_GROUP_SIZE]={0};
+    const vkfmt_t *formats[VK_RS_GROUP_SIZE]={0};
+    nx_rs_draw_extent ext[VK_RS_GROUP_SIZE]={0},chosen;
+    unsigned n=0;
+    int nvn_ft_written(const tex_t *);
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) {
+        const tex_t *t=targets[i]; if (!t) continue;
+        if (!t->serial || t->magic!=MAGIC('T','E','X',0) || !t->pool ||
+            !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+            t->has_layout || t->has_pkg_data || t->d.target!=NVN_TEXTURE_TARGET_2D ||
+            t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
+            (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) ||
+            t->L.size>INT64_MAX || !(addr[i]=rs_guest_address(t)) ||
+            packaged_tex(t) || nvn_ft_written(t)) return 0;
+        const vkfmt_t *fmt=vk_fmt(t->d.format);
+        // Exact storage-key families need their own coherent lookup proof.
+        if (!fmt || fmt->compressed || fmt->dec || fmt->is_int || texture_family_bit(t->d.format)) return 0;
+        formats[i]=fmt;
+        ext[i]=(nx_rs_draw_extent){t->d.width,t->d.height,w,h,1};
+        if (w>=ext[i].lw || h>=ext[i].lh) return 0;
+        keys[i].pool=(uint64_t)(uintptr_t)t->pool; keys[i].off=t->off; keys[i].d=t->d;
+        keys[i].d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (fmt->depth || fmt->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
+        for (unsigned j=0;j<i;j++) if (targets[j] &&
+            nx_rs_range_overlap(addr[i],t->L.size,addr[j],targets[j]->L.size)) return 0;
+        n++;
+    }
+    if (!n || !nx_rs_draw_group(ext,VK_RS_GROUP_SIZE,&chosen)) return 0;
+    pthread_mutex_lock(&g_img_mu);
+    nx_rs_active staged={0},*allocated=NULL;
+    int ok=0;
+    if (g_rs_live) staged=*g_rs_live;
+    // Avoid fallible/aborting hash growth during publication. Native lookup
+    // handles cache growth normally if the transaction is rejected.
+    if (staged.n>NX_RS_ACTIVE_MAX || n>NX_RS_ACTIVE_MAX-staged.n ||
+        (uint64_t)(g_by_key.n+n)*4>(uint64_t)g_by_key.cap*3) goto done;
+    uint64_t needed=atomic_load(&g_rs_restore_budget.bytes);
+    for (unsigned i=0;i<staged.n;i++) {
+        vkimg_t *im=(vkimg_t *)staged.owner[i];
+        if (!rs_is_scaled(im) || !im->rs_backing->native_bytes ||
+            needed>NX_RS_RESTORE_BUDGET_BYTES ||
+            im->rs_backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed) goto done;
+        needed+=im->rs_backing->native_bytes;
+    }
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (targets[i]) {
+        if (nvn_hm_get(&g_by_key,&keys[i])) goto done;
+        for (uint32_t j=0;j<g_by_key.cap;j++) {
+            vkimg_t *o=g_by_key.vals[j]; if (!o) continue;
+            if (!o->rs_guest_addr || o->size<=0 ||
+                nx_rs_range_overlap(addr[i],targets[i]->L.size,o->rs_guest_addr,(uint64_t)o->size)) goto done;
+        }
+        fresh[i]=rs_fresh_owner(targets[i],formats[i],w,h,addr[i]);
+        if (!fresh[i] || needed>NX_RS_RESTORE_BUDGET_BYTES ||
+            fresh[i]->rs_backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed ||
+            !nx_rs_active_update(&staged,(uintptr_t)fresh[i],1)) goto done;
+        needed+=fresh[i]->rs_backing->native_bytes;
+    }
+    if (!g_rs_live && !(allocated=malloc(sizeof *allocated))) goto done;
+    // All native descriptions have been destroyed, physical allocation
+    // and index capacity validated; no Vulkan calls or allocations remain.
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (fresh[i]) {
+        vkimg_t *im=fresh[i];
+        im->used=g_tex_frame; g_img_n++; g_img_bytes+=(uint64_t)im->size;
+        nvn_hm_put(&g_by_key,&keys[i],im); fresh[i]=NULL;
+    }
+    if (allocated) g_rs_live=allocated;
+    *g_rs_live=staged; rs_active_publish();
+    ok=1;
+done:
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (fresh[i]) {
+        vk_rs_variant_destroy(fresh[i]->rs_backing); free(fresh[i]);
+    }
     pthread_mutex_unlock(&g_img_mu);
     return ok;
 }
