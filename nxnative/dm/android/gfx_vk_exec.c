@@ -11,6 +11,7 @@
 #include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_resolution_support.h"
 #include "gfx_vk_resolution_compute.h"
+#include "gfx_vk_resolution_compute_proof.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
@@ -3702,12 +3703,14 @@ static void resolution_audit_compute_grid(const vkshader_t *cs,const p_dispatch 
     if (count>=sizeof seen/sizeof seen[0]) return;
     for (unsigned i=0;i<count;i++) if (seen[i]==cs->key) return;
     const tex_t *output=NULL;
+    unsigned output_binding=0;
     for (int i=0;i<cs->nbind;i++) {
         const dmsv_bind *b=&cs->b[i];
         if (b->kind==RK_SUPPORT || b->kind==RK_C1 || b->kind==RK_DRV || b->kind==RK_CBUF ||
             b->kind==RK_TEX) continue;
         if (output || b->kind!=RK_IMG || b->desc!=RD_STORAGE || b->count!=1 ||
             b->dim!=1 || (b->flags&3) || b->reg<0 || b->reg>=32) return;
+        output_binding=b->binding;
         int tid=(int)(S.img[5][b->reg]&0xfffff);
         const view_t *v=NULL;
         if (!tid || !vk_tex_by_id(tid,&v,&output) || !output || v ||
@@ -3719,8 +3722,9 @@ static void resolution_audit_compute_grid(const vkshader_t *cs,const p_dispatch 
     uint32_t groups[3]={(uint32_t)d->x,(uint32_t)d->y,(uint32_t)d->z},half[3];
     if ((w&1) || (h&1) || !nx_rs_compute_grid(groups,cs->local,w,h,w/2,h/2,half)) return;
     seen[count++]=cs->key;
-    VKLOG("[resolution-compute-grid] shader=%016llx image=%ux%u local=%ux%u logical_groups=%ux%u half_groups=%ux%u geometry_only=1",
-          (unsigned long long)cs->key,w,h,cs->local[0],cs->local[1],groups[0],groups[1],half[0],half[1]);
+    int fill_proof=cs->nbind==1 && nx_rs_compute_constant_fill(cs->spv,cs->nspv,output_binding,cs->local);
+    VKLOG("[resolution-compute-grid] shader=%016llx image=%ux%u local=%ux%u logical_groups=%ux%u half_groups=%ux%u constant_fill_proof=%d audit_only=1",
+          (unsigned long long)cs->key,w,h,cs->local[0],cs->local[1],groups[0],groups[1],half[0],half[1],fill_proof);
 }
 static void dispatch(const p_dispatch *d) {
     g_compute_attempts++;
