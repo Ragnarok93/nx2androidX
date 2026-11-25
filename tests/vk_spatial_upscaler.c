@@ -226,15 +226,18 @@ static void run_spatial(void) {
     spatial_image_drop(&src);
 }
 
-static void run_physical(void) {
+static void run_physical(VkFormat source_format) {
     static uint64_t ticket = 100;
     int raw[] = {0, 0, OUT, OUT};
     for (unsigned scale = 50; scale <= 75; scale += 25) {
         int size = OUT * scale / 100;
         int actual[] = {0, 0, size, size};
+        VkFormat output_format = g_sfmt;
+        g_sfmt = source_format;
         spatial_image src = source_image(size);
+        g_sfmt = output_format;
         vk_rs_variant backing = {.image = src.texture.img, .view = src.view, .refs = 1};
-        vkimg_t guest = {.w = OUT, .h = OUT, .fmt = g_sfmt, .layout = VK_IMAGE_LAYOUT_GENERAL};
+        vkimg_t guest = {.w = OUT, .h = OUT, .fmt = source_format, .layout = VK_IMAGE_LAYOUT_GENERAL};
         for (int mode = SP_BILINEAR; mode <= SP_SGSR1; mode++) {
             selected_mode = mode;
             spatial_image *ref = spatial_reconstruct(&src.texture, actual, 0, OUT, OUT, ++ticket, NULL);
@@ -254,14 +257,15 @@ static void run_physical(void) {
                 .logical = {OUT, OUT},
                 .valid = {{0, 0}, {size, size}},
                 .sampled = src.view,
-                .format = g_sfmt,
+                .format = source_format,
                 .layout = VK_IMAGE_LAYOUT_GENERAL,
                 .ticket = ++ticket,
             };
             spatial_image *out = spatial_reconstruct(&guest, raw, 0, OUT, OUT, ticket, &input);
             assert(out && spatial_active == mode && backing.refs > 1);
-            if (mode == SP_BILINEAR || g_sfmt == VK_FORMAT_R8G8B8A8_UNORM)
-                assert(!g_spatial.image[SP_SOURCE].texture.img);
+            int staged = mode != SP_BILINEAR &&
+                (source_format != g_sfmt || g_sfmt != VK_FORMAT_R8G8B8A8_UNORM);
+            assert((g_spatial.image[SP_SOURCE].texture.img != VK_NULL_HANDLE) == staged);
             begin();
             vkCmdCopyImageToBuffer(test_cb, out->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &region);
             vk_img_barrier_all(test_cb);
@@ -319,10 +323,12 @@ int main(void) {
     check_temporal();
 #else
     run_spatial();
-    run_physical();
+    run_physical(g_sfmt);
     g_sfmt = VK_FORMAT_R8G8B8A8_SRGB;
     run_spatial();
-    run_physical();
+    run_physical(g_sfmt);
+    // Surfaces may select an sRGB swapchain even for an UNORM window image.
+    run_physical(VK_FORMAT_R8G8B8A8_UNORM);
 #endif
     CHECK(vkDeviceWaitIdle(V.dev));
     spatial_drop_images();

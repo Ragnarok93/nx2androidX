@@ -393,7 +393,10 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     // A matching encoded view can feed the raster filters directly. Cropped,
     // flipped and incompatible encodings still use a physical-size staging
     // image to preserve clamp, orientation and color behavior.
-    int direct = raster && physical && !isolated && !flip_y && format == sample_fmt &&
+    // Blitting to a different swapchain encoding would convert the values
+    // before filtering. Direct sampling is equivalent only in the same encoding.
+    int direct = raster && physical && !isolated && !flip_y &&
+        format == g_sfmt && format == sample_fmt &&
         physical->sampled && (src_features & sampling) == sampling;
     VkDescriptorSet *source_set = &g_spatial.direct_set[slot];
     if (direct && !*source_set) {
