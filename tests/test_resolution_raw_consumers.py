@@ -51,7 +51,7 @@ class ResolutionRawConsumers(unittest.TestCase):
         if not cc:
             self.skipTest('C compiler required')
         source = REPLAY.read_text()
-        start = source.index('static int resolution_raw_span(')
+        start = source.index('static int resolution_raw_span(uint64_t addr,uint64_t bytes,int tail) {')
         end = source.index('static void resolution_draw_preflight(', start)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
