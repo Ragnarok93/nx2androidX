@@ -84,6 +84,8 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         self.assertLess(src.index("r = vkQueuePresentKHR"), src.index("if (period >= 0)"))
         self.assertIn("if (r >= 0)", src)
         self.assertIn("hud_count(with_meta, period", src)
+        hud = self.gfx.split("static void hud_count(", 1)[1].split("uint64_t vk_refresh_cycle_ns", 1)[0]
+        self.assertLess(hud.index("if (period < 0) return"), hud.index("atomic_fetch_add_explicit(&g_hud_gen"))
         self.assertIn("atomic_fetch_add_explicit(&g_fps_frames, 1, memory_order_relaxed)", src)
         self.assertNotIn("if (with_meta && period >= 0)", src)
 

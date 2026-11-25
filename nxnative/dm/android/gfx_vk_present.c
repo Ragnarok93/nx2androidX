@@ -1045,17 +1045,18 @@ static int window_rate_changed(double fps, double *rate_fps, double *want_fps, u
 static _Atomic uint64_t g_hud_game, g_hud_gen, g_hud_span_ns, g_hud_span_n;
 static _Atomic uint64_t g_hud_last_ns;   // the last game's frame's present time (the present thread's own clock)
 static void hud_count(int with_meta, double period, uint64_t now) {
-    if (with_meta) {
-        if (period >= 0) {   // the game's own frame (a redraw presents the last one again — that is not a frame)
-            atomic_fetch_add_explicit(&g_hud_game, 1, memory_order_relaxed);
-            uint64_t last = atomic_load_explicit(&g_hud_last_ns, memory_order_relaxed);
-            atomic_store_explicit(&g_hud_last_ns, now, memory_order_relaxed);
-            if (last && now > last && now - last < 2000000000ull) {   // the interval to the last frame: the frame time (a pause is not one)
-                atomic_fetch_add_explicit(&g_hud_span_ns, now - last, memory_order_relaxed);
-                atomic_fetch_add_explicit(&g_hud_span_n, 1, memory_order_relaxed);
-            }
-        }
-    } else atomic_fetch_add_explicit(&g_hud_gen, 1, memory_order_relaxed);
+    if (period < 0) return;   // Paused redraws are neither real nor generated frames.
+    if (!with_meta) {
+        atomic_fetch_add_explicit(&g_hud_gen, 1, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_add_explicit(&g_hud_game, 1, memory_order_relaxed);
+    uint64_t last = atomic_load_explicit(&g_hud_last_ns, memory_order_relaxed);
+    atomic_store_explicit(&g_hud_last_ns, now, memory_order_relaxed);
+    if (last && now > last && now - last < 2000000000ull) {
+        atomic_fetch_add_explicit(&g_hud_span_ns, now - last, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_hud_span_n, 1, memory_order_relaxed);
+    }
 }
 uint64_t vk_refresh_cycle_ns(void);
 void dm_present_sample(uint64_t out[5]) {
@@ -1323,7 +1324,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     const int *rect = reconstructed ? full : raw;
     if (reconstructed) flip_y = 0;
     if (redraw || period < 0) {
-        present_one(source, source->img, rect, picture, flip_y, -1, 0, 0);
+        present_one(source, source->img, rect, picture, flip_y, -1, 0, 1);
         return;
     }
 
