@@ -156,6 +156,8 @@ typedef struct vk_rs_variant {
 // Replay thread, outside any render pass. Variants are private scratch until
 // raster/shader/alias virtualization is implemented; never substitute vk_tex().
 vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t h);
+// Isolated compute diagnostic only; never publishes a guest owner.
+vk_rs_variant *vk_rs_storage_variant_create_private(uint32_t lw,uint32_t lh,uint32_t w,uint32_t h);
 void vk_rs_variant_clear(VkCommandBuffer cb, vk_rs_variant *v);
 enum { VK_RS_GROUP_SIZE = 9 };
 typedef struct { vk_rs_variant *slot[VK_RS_GROUP_SIZE]; } vk_rs_images;
