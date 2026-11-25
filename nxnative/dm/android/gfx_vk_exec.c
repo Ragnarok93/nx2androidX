@@ -11,6 +11,7 @@
 #include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_resolution_support.h"
 #include "gfx_vk_resolution_compute.h"
+#include "gfx_vk_resolution_preflight.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -3635,8 +3636,25 @@ static int dispatch_indirect_spans(uint64_t addr, VkBuffer src[3], VkBufferCopy 
 }
 // Retain unrelated scaled images for a narrowly classified direct dispatch.
 // Do not change group counts: no storage-image output grid is virtualized.
-// Raw guest buffers and indirect arguments are deliberately excluded until
-// their memory ranges can be proven disjoint from every active owner.
+// Descriptor ranges must include the actual alignment prefix. Cross-chunk,
+// unknown-size and virtual pool bindings still require native restoration.
+static int resolution_preflight_compute_buffer(const dmsv_bind *b) {
+    if (b->reg<0 || b->reg>=16) return 0;
+    int uniform=b->kind==RK_CBUF;
+    if (uniform ? b->desc!=RD_UBO : b->desc!=RD_SSBO) return 0;
+    const p_bind_buf *u=b->kind==RK_SBUF?&S.ssbo[5][b->reg]:&S.ubo[5][b->reg];
+    if (!u->addr) return 1; // stage_set uses its zero-buffer fallback
+    uint64_t n=u->size;
+    if (uniform) n=!n || n>65536?65536:n;
+    if (!n) return 0;
+    vkpool_t *p=vk_pool_of(u->addr,1);
+    uint64_t align=uniform?V.props.limits.minUniformBufferOffsetAlignment:SB_ALIGN;
+    if (!p || !align || (p->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) || p->boff%align ||
+        (!uniform && V.props.limits.minStorageBufferOffsetAlignment>SB_ALIGN)) return 0;
+    uint64_t start,size;
+    return nx_rs_buffer_span(p->lo,p->hi,u->addr,n,align,&start,&size) &&
+        vk_rs_preflight_buffer(start,size);
+}
 static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *d) {
     if (!cs || !d || d->ind || cs->stage!=5 || cs->nbind<0 || cs->nbind>96 ||
         (cs->nbind && !cs->b) || !nx_rs_compute_logical(cs->spv,cs->nspv)) return 0;
@@ -3647,6 +3665,10 @@ static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *
         if (b->kind==RK_SUPPORT || b->kind==RK_C1 || b->kind==RK_DRV) {
             if (b->desc!=RD_UBO) return 0;
             if (b->kind==RK_SUPPORT) support=1;
+            continue;
+        }
+        if (b->kind==RK_CBUF || b->kind==RK_SBUF || b->kind==RK_UBO_PTR) {
+            if (!resolution_preflight_compute_buffer(b)) return 0;
             continue;
         }
         int storage=b->kind==RK_IMG;
