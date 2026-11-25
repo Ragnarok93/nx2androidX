@@ -566,6 +566,7 @@ static int rs_is_scaled(const vkimg_t *im) {
     return im && im->rs_backing &&
         (im->rs_backing->physical_w!=im->w || im->rs_backing->physical_h!=im->h);
 }
+static int ro_live_group_admit(vkimg_t *const owners[VK_RS_GROUP_SIZE]);
 // Explicit bridge into cache ownership. Private probes do not enter this
 // index. The caller still needs a complete consumer/lifetime proof.
 static int rs_exchange_live_locked(vkimg_t *const owners[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h) {
@@ -593,6 +594,7 @@ static int rs_exchange_live_locked(vkimg_t *const owners[VK_RS_GROUP_SIZE],uint3
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (owners[i] &&
         (w!=owners[i]->w || h!=owners[i]->h)) { downscale=1; break; }
     if (downscale) {
+        if (!ro_live_group_admit(owners)) return 0;
         uint64_t needed=atomic_load(&g_rs_restore_budget.bytes);
         for (unsigned i=0;i<staged.n;i++) {
             vkimg_t *im=(vkimg_t *)staged.owner[i];
@@ -840,6 +842,17 @@ void vk_rs_note_group(vkimg_t *const *images, unsigned count) {
     }
     pthread_mutex_unlock(&g_ro_mu);
 }
+// Called only at nonnative exchange, with g_img_mu held. Never promote an
+// observed candidate on its own: this is an additional rejection gate.
+static int ro_live_group_admit(vkimg_t *const owners[VK_RS_GROUP_SIZE]) {
+    if (!vk_rs_tracking()) return 0;
+    uintptr_t keys[VK_RS_GROUP_SIZE];
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) keys[i]=(uintptr_t)owners[i];
+    pthread_mutex_lock(&g_ro_mu);
+    int ok=!g_ro_oom && nx_ro_group_admit(g_ro,keys,VK_RS_GROUP_SIZE);
+    pthread_mutex_unlock(&g_ro_mu);
+    return ok;
+}
 static void ro_drop(vkimg_t *im) {
     pthread_mutex_lock(&g_ro_mu);
     if (g_ro) nx_ro_drop(g_ro,(uintptr_t)im);
@@ -952,6 +965,20 @@ vkimg_t *vk_tex(const tex_t *t) {
     return im;
 }
 vkimg_t *vk_tex_for_present(const tex_t *t) {
+    // Presentation can resolve a new wrapper outside a replay submission.
+    // Restore before lookup so the overlap guard cannot see an unprepared
+    // alias and so an asynchronous present never receives scaled storage.
+    if (vk_rs_cache_has_scaled() && t) {
+        nx_rs_draw_extent extent;
+        if (vk_rs_preflight_view(t,NULL,0,&extent)==2) {
+            void mtl_sub_begin(void); uint64_t mtl_sub_commit(void); int mtl_wait(uint64_t,uint64_t);
+            int own=!vk_sub_open();
+            if (own) mtl_sub_begin();
+            int ok=vk_rs_cache_restore_all();
+            if (own) mtl_wait(mtl_sub_commit(),~0ull);
+            if (!ok) die("[vk] resolution: presentation overlap could not restore native backing");
+        }
+    }
     vkimg_t *im=vk_tex_get(t,0);
     if (vk_rs_tracking()) vk_rs_note(im,NX_RO_PRESENT);
     // Presentation currently expects logical-sized images and may queue a
@@ -1018,6 +1045,27 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     // CPU-write marks affect uploads below, never storage identity. Packaged
     // initialization metadata may close a family but cannot split existing peers.
     pthread_mutex_lock(&g_img_mu);
+    // Last-line guard for callers that bypass draw preflight. In particular,
+    // never create/evict an overlapping owner or mutate a format family
+    // while its storage is represented by a scaled backing.
+    if (g_rs_live && keyed) {
+        int restore=t->off<0 || !t->L.size;
+        vkimg_t *exact=nvn_hm_get(&g_by_key,&k);
+        for (unsigned i=0;!restore && i<g_rs_live->n;i++) {
+            vkimg_t *o=(vkimg_t *)g_rs_live->owner[i];
+            if (!rs_is_scaled(o)) { restore=1; break; }
+            if (o->pool!=k.pool) continue;
+            if (o->off<0 || o->size<=0) { restore=1; break; }
+            if (!nx_rs_range_overlap((uint64_t)t->off,t->L.size,(uint64_t)o->off,(uint64_t)o->size)) continue;
+            if (o!=exact || o->off!=t->off || (uint64_t)o->size!=(uint64_t)t->L.size ||
+                o->family_closed || t->has_layout || t->has_pkg_data) restore=1;
+        }
+        if (restore && (!vk_sub_open() || !vk_rs_pass_idle() || !rs_restore_all_locked())) {
+            pthread_mutex_unlock(&g_img_mu);
+            die("[vk] resolution: overlapping storage lookup requires native backing before cache mutation");
+            return NULL;
+        }
+    }
     vkimg_t *im = keyed ? texture_storage_lookup(&k, t) : nvn_hm_get(&g_by_serial, &t->serial);
     // A sampled wrapper can use an already-written storage image when the
     // guest describes exactly the same layout with only IMAGE cleared.
