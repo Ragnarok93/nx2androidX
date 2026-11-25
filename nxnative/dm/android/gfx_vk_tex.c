@@ -566,6 +566,16 @@ static int rs_is_scaled(const vkimg_t *im) {
     return im && im->rs_backing &&
         (im->rs_backing->physical_w!=im->w || im->rs_backing->physical_h!=im->h);
 }
+// Snapshot direct storage while the texture and pool objects are available.
+// Never dereference an old pool pointer from an active cache owner.
+static uint64_t rs_guest_address(const tex_t *t) {
+    if (!t || !t->pool || !t->pool->mem || !t->mem || t->off<0 || !t->L.size ||
+        (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;
+    uint64_t base=(uint64_t)(uintptr_t)t->pool->mem, off=(uint64_t)t->off, n=t->L.size;
+    if (off>t->pool->size || n>t->pool->size-off || off>UINT64_MAX-base) return 0;
+    uint64_t addr=base+off;
+    return addr && addr==(uint64_t)(uintptr_t)t->mem && n<=UINT64_MAX-addr ? addr : 0;
+}
 static int ro_live_group_admit(vkimg_t *const owners[VK_RS_GROUP_SIZE]);
 // Explicit bridge into cache ownership. Private probes do not enter this
 // index. The caller still needs a complete consumer/lifetime proof.
@@ -576,13 +586,14 @@ static int rs_exchange_live_locked(vkimg_t *const owners[VK_RS_GROUP_SIZE],uint3
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) {
         vkimg_t *im=owners[i]; if (!im) continue;
         unsigned matches=0;
+        int nonnative=w!=im->w || h!=im->h;
+        if (nonnative && (!im->rs_guest_addr || im->size<=0)) return 0;
         // Slow membership/alias check only during an exchange, not a draw.
         for (uint32_t j=0;j<g_by_key.cap;j++) {
             vkimg_t *o=g_by_key.vals[j]; if (!o) continue;
             if (o==im) { matches++; continue; }
-            if ((w!=im->w || h!=im->h) && o->pool==im->pool &&
-                (o->off<0 || im->off<0 || o->size<=0 || im->size<=0 ||
-                nx_rs_range_overlap((uint64_t)o->off,(uint64_t)o->size,(uint64_t)im->off,(uint64_t)im->size))) return 0;
+            if (nonnative && (!o->rs_guest_addr || o->size<=0 ||
+                nx_rs_range_overlap(o->rs_guest_addr,(uint64_t)o->size,im->rs_guest_addr,(uint64_t)im->size))) return 0;
         }
         if (matches!=1 || !nx_rs_active_update(&staged,(uintptr_t)im,w!=im->w || h!=im->h)) return 0;
     }
@@ -645,6 +656,21 @@ int vk_rs_require_native(vkimg_t *im) {
 }
 int vk_rs_cache_has_scaled(void) {
     return __atomic_load_n(&g_rs_live_count,__ATOMIC_ACQUIRE)!=0;
+}
+// Absolute guest address comparison also catches separate pool objects that
+// map overlapping memory. Missing range provenance fails closed.
+int vk_rs_preflight_buffer(uint64_t addr,uint64_t size) {
+    if (!vk_rs_cache_has_scaled()) return 1;
+    if (!addr || !size || size>UINT64_MAX-addr) return 0;
+    int ok=1;
+    pthread_mutex_lock(&g_img_mu);
+    for (unsigned i=0;g_rs_live && i<g_rs_live->n;i++) {
+        vkimg_t *im=(vkimg_t *)g_rs_live->owner[i];
+        if (!rs_is_scaled(im) || !im->rs_guest_addr || im->size<=0 ||
+            nx_rs_range_overlap(addr,size,im->rs_guest_addr,(uint64_t)im->size)) { ok=0; break; }
+    }
+    pthread_mutex_unlock(&g_img_mu);
+    return ok;
 }
 // Native-only consumers may require unrelated image sizes. Stage the entire
 // active set before any copy or publication, rather than calling the
@@ -997,7 +1023,8 @@ vkimg_t *vk_tex_for_present(const tex_t *t) {
 int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent) {
     if (!t || !extent) return 2;
     *extent=(nx_rs_draw_extent){t->d.width,t->d.height,t->d.width,t->d.height,1};
-    if (!t->pool) return 0;
+    uint64_t guest=rs_guest_address(t);
+    if (!guest) return 2;
     if (t->off<0 || !t->L.size) return 2;
     const vkfmt_t *f=vk_fmt(t->d.format);
     if (!f) return 2;
@@ -1011,14 +1038,13 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     for (unsigned i=0;g_rs_live && i<g_rs_live->n;i++) {
         vkimg_t *im=(vkimg_t *)g_rs_live->owner[i];
         if (!rs_is_scaled(im)) { result=2; break; }
-        if (im->pool!=k.pool) continue;
-        if (im->off<0 || im->size<=0) { result=2; break; }
-        int exact=im==exact_owner &&
+        if (!im->rs_guest_addr || im->off<0 || im->size<=0) { result=2; break; }
+        int exact=im==exact_owner && im->pool==k.pool && im->rs_guest_addr==guest &&
             im->off==k.off && (uint64_t)im->size==(uint64_t)t->L.size &&
             im->w==t->d.width && im->h==t->d.height && im->nvn_format==t->d.format &&
             !im->novl && !im->packaged && !im->lin_mem && !im->family_closed &&
             im->rs_backing->image==im->img;
-        int access=nx_rs_preflight_overlap((uint64_t)k.off,t->L.size,(uint64_t)im->off,(uint64_t)im->size,exact,supported);
+        int access=nx_rs_preflight_overlap(guest,t->L.size,im->rs_guest_addr,(uint64_t)im->size,exact,supported);
         if (access==2 || (access==1 && result==1)) { result=2; break; }
         if (access==1) {
             result=1; extent->pw=im->rs_backing->physical_w; extent->ph=im->rs_backing->physical_h;
@@ -1048,16 +1074,16 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     // Last-line guard for callers that bypass draw preflight. In particular,
     // never create/evict an overlapping owner or mutate a format family
     // while its storage is represented by a scaled backing.
-    if (g_rs_live && keyed) {
-        int restore=t->off<0 || !t->L.size;
+    if (g_rs_live) {
+        uint64_t guest=rs_guest_address(t);
+        int restore=!guest;
         vkimg_t *exact=nvn_hm_get(&g_by_key,&k);
         for (unsigned i=0;!restore && i<g_rs_live->n;i++) {
             vkimg_t *o=(vkimg_t *)g_rs_live->owner[i];
             if (!rs_is_scaled(o)) { restore=1; break; }
-            if (o->pool!=k.pool) continue;
-            if (o->off<0 || o->size<=0) { restore=1; break; }
-            if (!nx_rs_range_overlap((uint64_t)t->off,t->L.size,(uint64_t)o->off,(uint64_t)o->size)) continue;
-            if (o!=exact || o->off!=t->off || (uint64_t)o->size!=(uint64_t)t->L.size ||
+            if (!o->rs_guest_addr || o->off<0 || o->size<=0) { restore=1; break; }
+            if (!nx_rs_range_overlap(guest,t->L.size,o->rs_guest_addr,(uint64_t)o->size)) continue;
+            if (o!=exact || o->pool!=k.pool || o->rs_guest_addr!=guest || o->off!=t->off || (uint64_t)o->size!=(uint64_t)t->L.size ||
                 o->family_closed || t->has_layout || t->has_pkg_data) restore=1;
         }
         if (restore && (!vk_sub_open() || !vk_rs_pass_idle() || !rs_restore_all_locked())) {
@@ -1083,6 +1109,7 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
         im = img_new(t, vk_fmt(k.d.format)); if (!im) { pthread_mutex_unlock(&g_img_mu); return NULL; }
         if (k.family) im->family_formats = texture_family_bit(t->d.format);
         im->pool = k.pool; im->off = t->off; im->size = (int64_t)t->L.size; im->flags = t->d.flags; g_img_n++; g_img_bytes += t->L.size;
+        if (vk_rs_tracking()) im->rs_guest_addr=rs_guest_address(t);
         if (keyed) { alias_link(im); nvn_hm_put(&g_by_key, &k, im); } else nvn_hm_put(&g_by_serial, &t->serial, im);
     }
     im->used = g_tex_frame;
