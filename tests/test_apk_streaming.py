@@ -9,6 +9,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
@@ -154,6 +155,42 @@ class StreamingApkTests(unittest.TestCase):
                     build(**args)
                     with self.assertRaisesRegex(BuildError, error):
                         metadata(path, None)
+
+    def test_runtime_upgrade_builds_at_the_fingerprinted_profile_location(self):
+        from porter import host, upgrade_apk
+        from porter.paths import DM
+
+        title = "0100606026F12000"
+        registered = DM / "games" / title
+        fingerprint = host.profile_hash(title)
+        manifest = {"title_id": title, "profile_h": fingerprint}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            key = root / "key.json"
+            key.touch()
+            run = subprocess.run
+
+            def build_or_package(args, **kwargs):
+                if "--out" not in args:
+                    return
+                env = kwargs["env"]
+                output = Path(args[args.index("--out") + 1])
+                header_dir = output / "gen" / title
+                header_dir.mkdir(parents=True)
+                run([sys.executable, str(DM / "games/game.py"),
+                     "header", title, str(header_dir / "game_profile.h")], env=env, check=True)
+                ident = b"\x7fELF\x02\x01\x01".ljust(16, b"\0")
+                (output / "libdmhost.so").write_bytes(ident + struct.pack("<HH", 3, 183))
+
+            with (patch.object(upgrade_apk, "metadata", return_value=(manifest, "record", [])),
+                  patch.object(upgrade_apk, "activity_dex", return_value=root / "classes.dex"),
+                  patch.object(upgrade_apk.runtime_update, "find_profile", return_value=(registered, fingerprint, True)),
+                  patch.object(upgrade_apk.host, "stale_sources", return_value=[]),
+                  patch.object(upgrade_apk.toolchain, "find_ndk", return_value=(root, "fixture")),
+                  patch.object(upgrade_apk.subprocess, "run", side_effect=build_or_package)):
+                result = upgrade_apk.upgrade(root / "old.apk", root / "updated.apk", key=key)
+                self.assertEqual(result, root / "updated.apk")
 
     def test_v2_signed_apk_keeps_zip_entries_readable(self):
         with tempfile.TemporaryDirectory() as temp:

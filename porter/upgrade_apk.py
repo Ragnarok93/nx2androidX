@@ -133,11 +133,9 @@ def upgrade(apk, output, *, data=None, key=None, jobs=None, no_lsfg=False, debug
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='apk-upgrade-', dir=root) as tmp:
         scratch = Path(tmp)
-        target = scratch/'profile'/title
-        target.mkdir(parents=True)
-        for name in ('game.tsv', 'android.tsv'):
-            shutil.copyfile(profile/name, target/name)
-        env = dict(os.environ, DM_GAME=title, DM_GAMES_DIR=str(target.parent), DM_GAMES_FIRST='1')
+        # The header includes the profile source path. Use the same profile
+        # location for both compatibility checks and the compiler invocation.
+        env = dict(os.environ, DM_GAME=title, DM_GAMES_DIR=str(profile.parent), DM_GAMES_FIRST='1')
         tc_lib = DM.parent.parent/'toolchain/lib'
         if tc_lib.is_dir(): env['LD_LIBRARY_PATH'] = str(tc_lib) + os.pathsep + env.get('LD_LIBRARY_PATH', '')
         dex = activity_dex(apk, scratch)
