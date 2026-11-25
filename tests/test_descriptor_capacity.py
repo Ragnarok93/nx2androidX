@@ -69,6 +69,7 @@ static void die(const char *fmt, ...) {
 static uint64_t vk_tex_slot_handle(const uint64_t *t, const uint64_t *i, unsigned n) {
     (void)t; (void)i; (void)n; return 11;
 }
+''' + between((ROOT / 'nxnative/dm/android/gfx_vk_slot.h').read_text(), 'static inline uint64_t vk_dyn_tex_slot_handle(', '\n}') + '\n}\n' + r'''
 static uint32_t ubo_word(int st, int r, int o) { (void)st; (void)r; (void)o; return 11; }
 static uint64_t mem_handle(uint64_t h) { return h; }
 static uint64_t c2_handle(int st, int o) { (void)st; (void)o; return 11; }

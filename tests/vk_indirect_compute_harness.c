@@ -48,6 +48,12 @@ int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned
 int vk_shader_resolution_support(const vkshader_t *s, float target, const vk_rs_sample_scale *samples, unsigned count, VkDescriptorBufferInfo *out) { abort(); }
 static int resolution_preflight_buffer_binding(int st, const dmsv_bind *b) { abort(); }
 static void resolution_restore_before_recording(void) { abort(); }
+// The native-only fixture must never enter these scaled-only checks.
+typedef int (*rs_native_check)(const tex_t *,const view_t *,int,void *);
+static int resolution_native_binding(const dmsv_bind *b,const uint64_t *tex,const uint64_t *img,
+                                     int compute,int dynamic,rs_native_check check,void *ctx) { abort(); }
+static int resolution_native_preflight(const tex_t *t,const view_t *v,int texel,void *ctx) { abort(); }
+static int resolution_raw_span(uint64_t addr,uint64_t bytes,int tail) { abort(); }
 static void compute_images_written(void) {}
 static void surface_dispatch(void) { abort(); }
 static void surface_uniform_queue(uint64_t shader, int binding, int reg, VkDescriptorBufferInfo source) { abort(); }
