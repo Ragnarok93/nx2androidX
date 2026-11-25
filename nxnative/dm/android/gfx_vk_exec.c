@@ -2835,7 +2835,8 @@ static void texbind(const pkey *k) {
     }
 }
 static pkey g_input_key; // last prepared indexed draw, only while input diagnostics are armed
-// Never discover a required backing exchange after binding descriptor sets.
+// Descriptor ranges include the alignment prefix. Unknown, cross-chunk
+// and virtual bindings require restoration before descriptor collection.
 static int resolution_preflight_buffer_binding(int st,const dmsv_bind *b) {
     if (b->reg<0 || b->reg>=16) return 0;
     int uniform=b->kind==RK_CBUF;
@@ -2847,7 +2848,7 @@ static int resolution_preflight_buffer_binding(int st,const dmsv_bind *b) {
     if (!n) return 0;
     vkpool_t *p=vk_pool_of(u->addr,1);
     uint64_t align=uniform?V.props.limits.minUniformBufferOffsetAlignment:SB_ALIGN;
-    if (!p || !align || (p->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) || p->boff%align ||
+    if (!p || !p->buf || !align || (p->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) || p->boff%align ||
         (!uniform && V.props.limits.minStorageBufferOffsetAlignment>SB_ALIGN)) return 0;
     uint64_t start,size;
     return nx_rs_buffer_span(p->lo,p->hi,u->addr,n,align,&start,&size) &&
@@ -2857,19 +2858,22 @@ static int resolution_preflight_stages(int target_scaled) {
     for (int st=0;st<3;st++) {
         vkshader_t *s=S.sh[st];
         if (!s || (st==1 && S.rast_discard)) continue;
-        if (st==2 || shader_wmem(s) || !nx_rs_compute_logical(s->spv,s->nspv)) return 0;
+        if (st==2 || s->nbind<0 || s->nbind>96 || (s->nbind && !s->b) ||
+            shader_wmem(s) || !nx_rs_compute_logical(s->spv,s->nspv)) return 0;
         int support=0, sample_scaled=0;
         for (unsigned i=0;i<s->nbind;i++) {
             const dmsv_bind *b=&s->b[i];
             switch (b->kind) {
-            case RK_SUPPORT: support=1; break;
-            case RK_C1: case RK_DRV: break;
+            case RK_SUPPORT: case RK_C1: case RK_DRV:
+                if (b->count!=1 || b->desc!=RD_UBO) return 0;
+                if (b->kind==RK_SUPPORT) support=1;
+                break;
             case RK_CBUF:
                 if (b->count!=1 || !resolution_preflight_buffer_binding(st,b)) return 0;
                 break;
             case RK_TEX: {
                 // Dynamic handles may themselves read aliased guest bytes.
-                if (b->count!=1 || b->reg<0 || b->reg>=256) return 0;
+                if (b->count!=1 || b->desc!=RD_SAMPLED || b->reg<0 || b->reg>=256) return 0;
                 uint64_t handle=vk_tex_slot_handle(S.tex[st],S.img[st],(unsigned)b->reg);
                 int tid=(int)(handle&0xfffff);
                 const view_t *v=NULL; const tex_t *t=NULL;
@@ -3697,8 +3701,6 @@ static int dispatch_indirect_spans(uint64_t addr, VkBuffer src[3], VkBufferCopy 
 }
 // Retain unrelated scaled images for a narrowly classified direct dispatch.
 // Do not change group counts: no storage-image output grid is virtualized.
-// Descriptor ranges must include the actual alignment prefix. Cross-chunk,
-// unknown-size and virtual pool bindings still require native restoration.
 static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *d) {
     if (!cs || !d || d->ind || cs->stage!=5 || cs->nbind<0 || cs->nbind>96 ||
         (cs->nbind && !cs->b) || !nx_rs_compute_logical(cs->spv,cs->nspv)) return 0;
