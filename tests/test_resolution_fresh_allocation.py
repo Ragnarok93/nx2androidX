@@ -47,9 +47,37 @@ class FreshAllocationTests(unittest.TestCase):
         if not cc:self.skipTest("C compiler required")
         source=(ROOT/"nxnative/dm/android/gfx_vk_tex.c").read_text()
         start=source.index("static vkimg_t *rs_fresh_owner(")
-        end=source.index("// The real cache allocation transaction.",start)
+        end=source.index("// Prepare hash capacity in a private map",start)
         with tempfile.TemporaryDirectory() as d:
             c=Path(d)/"fresh.c"; exe=Path(d)/"fresh"
             c.write_text(STUB+source[start:end]+MAIN)
             subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror",str(c),"-o",str(exe)],check=True)
+            subprocess.run([str(exe)],check=True)
+
+    def test_private_cache_capacity_preserves_entries(self):
+        cc=shutil.which("cc") or shutil.which("clang")
+        if not cc:self.skipTest("C compiler required")
+        source=(ROOT/"nxnative/dm/android/gfx_vk_tex.c").read_text()
+        start=source.index("static int rs_stage_cache_capacity(")
+        end=source.index("// The real cache allocation transaction.",start)
+        main=r"""
+#include <assert.h>
+int main(void) {
+    nvn_hmap old={.klen=sizeof(unsigned)}, next={0};
+    assert(rs_stage_cache_capacity(&old,9,&next) && !old.cap && next.cap==64);
+    free(next.keys);free(next.vals);next=(nvn_hmap){0};
+    unsigned values[49]={0};
+    for(unsigned i=0;i<48;i++)nvn_hm_put(&old,&i,&values[i]);
+    assert(old.cap==64 && old.n==48);
+    assert(rs_stage_cache_capacity(&old,1,&next) && next.cap==128 && next.n==48);
+    for(unsigned i=0;i<48;i++)assert(nvn_hm_get(&next,&i)==&values[i] && nvn_hm_get(&old,&i)==&values[i]);
+    unsigned i=48;nvn_hm_put(&next,&i,&values[i]);
+    assert(next.n==49 && old.n==48 && !nvn_hm_get(&old,&i));
+    free(old.keys);free(old.vals);free(next.keys);free(next.vals);
+}
+"""
+        with tempfile.TemporaryDirectory() as d:
+            c=Path(d)/"map.c"; exe=Path(d)/"map"
+            c.write_text('#include "nvn_hmap.h"\\n'.replace('\\n','\n')+source[start:end]+main)
+            subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I",str(ROOT/"nxnative/dm/gfx/nvn"),str(c),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)

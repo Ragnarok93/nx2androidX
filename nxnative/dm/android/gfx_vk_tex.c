@@ -239,6 +239,17 @@ static vkimg_t *texture_storage_lookup(akey *k, const tex_t *t) {
     if (!im && !metadata) *k = family;
     return NULL;
 }
+// Read-only exact lookup for scaling preflight. Canonical family storage
+// is eligible only before another interpretation has joined; never mutate
+// a family while determining whether its current scaled owner is safe.
+static vkimg_t *rs_exact_owner(const akey *k) {
+    vkimg_t *im=nvn_hm_get(&g_by_key,k);
+    if (im) return im;
+    if (k->d.format!=NVN_FORMAT_RGBA8 && k->d.format!=NVN_FORMAT_BGRA8) return NULL;
+    akey family=*k; family.family=1;
+    im=nvn_hm_get(&g_by_key,&family);
+    return im && im->family_formats==1 && !im->family_closed ? im : NULL;
+}
 // The sRGB / UNORM twin of a format (the one reinterpretation games make of uncompressed colour targets), VK_FORMAT_UNDEFINED when it has none
 static VkFormat srgb_twin(VkFormat f) {
     switch (f) {
@@ -1091,7 +1102,7 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     if (t->has_layout || t->has_pkg_data || (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) supported=0;
     int result=0;
     pthread_mutex_lock(&g_img_mu);
-    vkimg_t *exact_owner=nvn_hm_get(&g_by_key,&k);
+    vkimg_t *exact_owner=rs_exact_owner(&k);
     for (unsigned i=0;g_rs_live && i<g_rs_live->n;i++) {
         vkimg_t *im=(vkimg_t *)g_rs_live->owner[i];
         if (!rs_is_scaled(im)) { result=2; break; }
@@ -1132,7 +1143,7 @@ vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c) {
     akey k={0}; k.pool=(uint64_t)(uintptr_t)t->pool; k.off=t->off; k.d=t->d;
     k.d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | NVN_TEXTURE_FLAGS_IMAGE;
     pthread_mutex_lock(&g_img_mu);
-    vkimg_t *im=nvn_hm_get(&g_by_key,&k);
+    vkimg_t *im=rs_exact_owner(&k);
     // Recheck cache identity after reacquiring the lock. No lookup or owner
     // creation is allowed between publication and the caller's clear.
     if (!guest || !rs_is_scaled(im) || im->rs_guest_addr!=guest ||
@@ -1158,7 +1169,7 @@ int vk_rs_discard_target(const tex_t *t) {
     akey k={0}; k.pool=(uint64_t)(uintptr_t)t->pool; k.off=t->off; k.d=t->d;
     k.d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (fmt->depth || fmt->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
     pthread_mutex_lock(&g_img_mu);
-    vkimg_t *im=nvn_hm_get(&g_by_key,&k);
+    vkimg_t *im=rs_exact_owner(&k);
     int ok=guest && rs_is_scaled(im) && im->rs_guest_addr==guest &&
         im->off==t->off && im->size>0 && (uint64_t)im->size==(uint64_t)t->L.size &&
         im->pool==k.pool && im->w==(uint32_t)t->d.width && im->h==(uint32_t)t->d.height &&
@@ -1183,6 +1194,27 @@ static vkimg_t *rs_fresh_owner(const tex_t *t,const vkfmt_t *fmt,uint32_t w,uint
     im->img=v->image; im->mem=v->memory; im->layout=v->layout; im->rs_backing=v;
     return im;
 }
+// Prepare hash capacity in a private map, preserving the original on
+// allocation failure. nvn_hm_put cannot grow while the load bound holds.
+static int rs_stage_cache_capacity(const nvn_hmap *old,unsigned extra,nvn_hmap *next) {
+    uint64_t count=(uint64_t)old->n+extra;
+    if (count*4<=(uint64_t)old->cap*3) return 1;
+    uint32_t cap=old->cap?old->cap:64;
+    while (count*4>(uint64_t)cap*3) {
+        if (cap>UINT32_MAX/2) return 0;
+        cap*=2;
+    }
+    if (!old->klen || (size_t)cap>SIZE_MAX/old->klen) return 0;
+    next->keys=malloc((size_t)cap*old->klen);
+    next->vals=calloc(cap,sizeof *next->vals);
+    if (!next->keys || !next->vals) {
+        free(next->keys); free(next->vals); *next=(nvn_hmap){0}; return 0;
+    }
+    next->cap=cap; next->klen=old->klen;
+    for (uint32_t i=0;i<old->cap;i++) if (old->vals[i])
+        nvn_hm_put(next,old->keys+(size_t)i*old->klen,old->vals[i]);
+    return 1;
+}
 // The real cache allocation transaction. Caller MUST prove the full overwrite
 // and all consumers through the end of the lifetime before using this entry.
 // No gameplay caller is authorized yet. In particular a clean observed graph
@@ -1206,12 +1238,14 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
             t->L.size>INT64_MAX || !(addr[i]=rs_guest_address(t)) ||
             packaged_tex(t) || nvn_ft_written(t)) return 0;
         const vkfmt_t *fmt=vk_fmt(t->d.format);
-        // Exact storage-key families need their own coherent lookup proof.
-        if (!fmt || fmt->compressed || fmt->dec || fmt->is_int || texture_family_bit(t->d.format)) return 0;
+        // Only canonical UNORM family members are admitted. Any later
+        // sRGB/X reinterpretation still requires native preflight.
+        unsigned family=texture_family_bit(t->d.format);
+        if (!fmt || fmt->compressed || fmt->dec || fmt->is_int || (family && family!=1)) return 0;
         formats[i]=fmt;
         ext[i]=(nx_rs_draw_extent){t->d.width,t->d.height,w,h,1};
         if (w>=ext[i].lw || h>=ext[i].lh) return 0;
-        keys[i].pool=(uint64_t)(uintptr_t)t->pool; keys[i].off=t->off; keys[i].d=t->d;
+        keys[i].pool=(uint64_t)(uintptr_t)t->pool; keys[i].off=t->off; keys[i].d=t->d; keys[i].family=family!=0;
         keys[i].d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (fmt->depth || fmt->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
         for (unsigned j=0;j<i;j++) if (targets[j] &&
             nx_rs_range_overlap(addr[i],t->L.size,addr[j],targets[j]->L.size)) return 0;
@@ -1220,12 +1254,10 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
     if (!n || !nx_rs_draw_group(ext,VK_RS_GROUP_SIZE,&chosen)) return 0;
     pthread_mutex_lock(&g_img_mu);
     nx_rs_active staged={0},*allocated=NULL;
+    nvn_hmap next_map={0};
     int ok=0;
     if (g_rs_live) staged=*g_rs_live;
-    // Avoid fallible/aborting hash growth during publication. Native lookup
-    // handles cache growth normally if the transaction is rejected.
-    if (staged.n>NX_RS_ACTIVE_MAX || n>NX_RS_ACTIVE_MAX-staged.n ||
-        (uint64_t)(g_by_key.n+n)*4>(uint64_t)g_by_key.cap*3) goto done;
+    if (staged.n>NX_RS_ACTIVE_MAX || n>NX_RS_ACTIVE_MAX-staged.n) goto done;
     uint64_t needed=atomic_load(&g_rs_restore_budget.bytes);
     for (unsigned i=0;i<staged.n;i++) {
         vkimg_t *im=(vkimg_t *)staged.owner[i];
@@ -1246,8 +1278,14 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
             fresh[i]->rs_backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed ||
             !nx_rs_active_update(&staged,(uintptr_t)fresh[i],1)) goto done;
         needed+=fresh[i]->rs_backing->native_bytes;
+        if (keys[i].family) fresh[i]->family_formats=1;
     }
+    if (!rs_stage_cache_capacity(&g_by_key,n,&next_map)) goto done;
     if (!g_rs_live && !(allocated=malloc(sizeof *allocated))) goto done;
+    if (next_map.cap) {
+        free(g_by_key.keys); free(g_by_key.vals);
+        g_by_key=next_map; next_map=(nvn_hmap){0};
+    }
     // All native descriptions have been destroyed, physical allocation
     // and index capacity validated; no Vulkan calls or allocations remain.
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (fresh[i]) {
@@ -1259,6 +1297,7 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
     *g_rs_live=staged; rs_active_publish();
     ok=1;
 done:
+    free(next_map.keys); free(next_map.vals);
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (fresh[i]) {
         vk_rs_variant_destroy(fresh[i]->rs_backing); free(fresh[i]);
     }
@@ -1286,7 +1325,7 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     if (g_rs_live) {
         uint64_t guest=rs_guest_address(t);
         int restore=!guest;
-        vkimg_t *exact=nvn_hm_get(&g_by_key,&k);
+        vkimg_t *exact=rs_exact_owner(&k);
         for (unsigned i=0;!restore && i<g_rs_live->n;i++) {
             vkimg_t *o=(vkimg_t *)g_rs_live->owner[i];
             if (!rs_is_scaled(o)) { restore=1; break; }

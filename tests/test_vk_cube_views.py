@@ -107,11 +107,11 @@ static VkImageView vk_dummy_view(int dim, int arr, int ms, int storage, int is_i
 '''
         code += between(tex, 'static VkImageAspectFlags aspect_of(', '// ---------------- images')
         code += between(tex, 'static unsigned layers_of(', '// storage key:')
-        code += between(tex, 'static VkFormat srgb_twin(', 'static vkimg_t *img_new(')
+        code += between(tex, 'static VkFormat srgb_twin(', 'static vkimg_t *img_new_description(')
         # Execute the actual image setup through its saved creation flags; GPU
         # allocation/upload is outside this host-only compatibility regression.
-        setup = between(tex, 'static vkimg_t *img_new(', '    VkResult r = vkCreateImage(')
-        code += setup + '    return im;\n}\n'
+        setup = between(tex, 'static vkimg_t *img_new_description(', '    VkResult r = vkCreateImage(')
+        code += setup + '    (void)unbound; return im;\n}\n' + between(tex, 'static vkimg_t *img_new(', '// P1: allocate isolated physical variants.')
         code += between(tex, 'typedef struct vview', '// ---------------- texture / sampler ID tables')
         code += between(exe, 'enum { TVC =', 'static uint64_t g_num_um')
         code += between(exe, 'static int tex_desc_for(', '// Reuse within a submission')
