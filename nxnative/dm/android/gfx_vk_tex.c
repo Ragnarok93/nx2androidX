@@ -504,6 +504,17 @@ void vk_rs_group_retire(vk_rs_images *group) {
     }
 }
 static void vk_tex_view_drop_all(vkimg_t *im);
+// Shared publication step: called only after every replacement is allocated,
+// validated and recorded. Old backing and descriptor views retire by fence.
+static void rs_publish_backing(vkimg_t *im, vk_rs_variant *next) {
+    vk_rs_variant *old=im->rs_backing;
+    vk_lrz_forget(im); vk_tex_view_drop_all(im);
+    if (old) vk_rs_variant_retire(old);
+    else vk_defer_free_image(im->img,im->mem);
+    im->img=next->image; im->mem=next->memory; im->layout=next->layout;
+    im->rs_backing=next; im->depth_sub=im->depth_cut=im->fdz_frame=0;
+    // Guest storage keys, logical extents and content provenance are unchanged.
+}
 // Publish a replacement backing into the existing cache-owner object.
 // The caller must have proved ALL consumers and hold exclusive ownership;
 // the current only caller uses detached copies, never live guest storage.
@@ -544,13 +555,7 @@ int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, ui
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (staged.slot[i]) rs_copy(cb,&sources[i],staged.slot[i]);
     vk_img_barrier_all(cb);
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (staged.slot[i]) {
-        vkimg_t *im=owners[i]; vk_rs_variant *old=im->rs_backing,*next=staged.slot[i];
-        vk_lrz_forget(im); vk_tex_view_drop_all(im);
-        if (old) vk_rs_variant_retire(old);
-        else vk_defer_free_image(im->img,im->mem);
-        im->img=next->image; im->mem=next->memory; im->layout=next->layout;
-        im->rs_backing=next; im->depth_sub=im->depth_cut=im->fdz_frame=0;
-        // im->w/h, storage key, flags, wseq and GPU content provenance stay logical.
+        rs_publish_backing(owners[i],staged.slot[i]);
     }
     return 2;
 rollback:
@@ -615,14 +620,53 @@ int vk_rs_require_native(vkimg_t *im) {
 int vk_rs_cache_has_scaled(void) {
     return __atomic_load_n(&g_rs_live_count,__ATOMIC_ACQUIRE)!=0;
 }
-int vk_rs_cache_restore_all(void) {
-    if (!vk_sub_open() || !vk_rs_pass_idle()) return 0;
-    int ok=1;
-    pthread_mutex_lock(&g_img_mu);
-    while (g_rs_live && g_rs_live->n) {
-        vkimg_t *im=(vkimg_t *)g_rs_live->owner[g_rs_live->n-1];
-        if (!rs_is_scaled(im) || !rs_require_native_locked(im)) { ok=0; break; }
+// Native-only consumers may require unrelated image sizes. Stage the entire
+// active set before any copy or publication, rather than calling the
+// equal-extent attachment transaction repeatedly. The cache lock protects
+// membership and ownership for the full transaction.
+static int rs_restore_all_locked(void) {
+    if (!g_rs_live || !g_rs_live->n) return 1;
+    unsigned n=g_rs_live->n;
+    if (n>NX_RS_ACTIVE_MAX) return 0;
+    vk_rs_variant *staged[NX_RS_ACTIVE_MAX]={0};
+    vk_rs_variant sources[NX_RS_ACTIVE_MAX]={0};
+    for (unsigned i=0;i<n;i++) {
+        vkimg_t *im=(vkimg_t *)g_rs_live->owner[i];
+        if (!rs_is_scaled(im) || !im->img || !im->mem || im->sub || im->full ||
+            im->layout!=VK_IMAGE_LAYOUT_GENERAL || !im->w || !im->h ||
+            im->w>INT32_MAX || im->h>INT32_MAX) goto rollback;
+        vk_rs_variant *old=im->rs_backing;
+        if (old->image!=im->img || old->memory!=im->mem ||
+            old->logical_w!=im->w || old->logical_h!=im->h ||
+            old->format!=im->fmt || old->aspect!=im->aspect ||
+            old->layout!=im->layout || !old->physical_w || !old->physical_h ||
+            old->physical_w>INT32_MAX || old->physical_h>INT32_MAX) goto rollback;
+        for (unsigned j=0;j<i;j++) if (g_rs_live->owner[j]==g_rs_live->owner[i]) goto rollback;
+        sources[i]=*old;
+        staged[i]=vk_rs_variant_create(im,im->w,im->h);
+        if (!staged[i] || !rs_can_copy(&sources[i],staged[i])) goto rollback;
+        staged[i]->native_only=1;
     }
+    // Every allocation and format check succeeded. Do not mutate any owner
+    // or the active index before this point.
+    VkCommandBuffer cb=vk_cmd();
+    vk_img_barrier_all(cb);
+    for (unsigned i=0;i<n;i++) rs_copy(cb,&sources[i],staged[i]);
+    vk_img_barrier_all(cb);
+    for (unsigned i=0;i<n;i++)
+        rs_publish_backing((vkimg_t *)g_rs_live->owner[i],staged[i]);
+    free(g_rs_live); g_rs_live=NULL;
+    rs_active_publish();
+    return 1;
+rollback:
+    for (unsigned i=0;i<n;i++) vk_rs_variant_destroy(staged[i]);
+    return 0;
+}
+int vk_rs_cache_restore_all(void) {
+    if (!vk_rs_cache_has_scaled()) return 1;
+    if (!vk_sub_open() || !vk_rs_pass_idle()) return 0;
+    pthread_mutex_lock(&g_img_mu);
+    int ok=rs_restore_all_locked();
     pthread_mutex_unlock(&g_img_mu);
     return ok;
 }
