@@ -1482,7 +1482,9 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
         pthread_create(&th, &a, (void *(*)(void *))(void *)vk_pipeline_cache_save, NULL); pthread_attr_destroy(&a);
     }
-    return present_enqueue(im, crop, n, period);
+    uint64_t ticket=present_enqueue(im, crop, n, period);
+    vk_rs_publish_source_frame(n);
+    return ticket;
 }
 // OpenGL ES games (gl_android.c): their frames are AHardwareBuffers the device's GL driver drew, imported as images and shown as an NVN window texture is
 vkimg_t *vk_image_from_ahb(AHardwareBuffer *ahb, uint32_t w, uint32_t h) {
