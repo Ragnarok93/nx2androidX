@@ -11,6 +11,7 @@
 #include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_resolution_support.h"
 #include "gfx_vk_resolution_compute.h"
+#include "gfx_vk_resolution_frame.h"
 #include "gfx_vk_resolution_compute_proof.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "nvn_hmap.h"
@@ -239,6 +240,38 @@ static void render_cond(const p_render_cond *rc) {
 
 // Startup-only diagnostic switches; the native path bypasses the classifier.
 static int g_rs_audit, g_rs_probe, g_rs_observe, g_rs_replay;
+// Only the present producer publishes frame epochs. The replay thread owns
+// the latch; internal submission cuts never change its target.
+static unsigned g_rs_frame_request; // 0 disables the experimental coordinator
+static uint64_t g_rs_frame_packet; // present id in upper 57 bits, percent in low 7
+static nx_rs_frame_state g_rs_frame={0,100};
+int vk_rs_set_scale_request(unsigned percent) {
+    if (percent<50 || percent>100 || !__atomic_load_n(&g_rs_frame_request,__ATOMIC_ACQUIRE)) return 0;
+    __atomic_store_n(&g_rs_frame_request,percent,__ATOMIC_RELEASE);
+    return 1;
+}
+void vk_rs_publish_source_frame(uint64_t present) {
+    unsigned p=__atomic_load_n(&g_rs_frame_request,__ATOMIC_ACQUIRE);
+    if (!p || !present || present>(UINT64_MAX>>7)) return;
+    __atomic_store_n(&g_rs_frame_packet,(present<<7)|p,__ATOMIC_RELEASE);
+}
+static void resolution_latch_frame(void) {
+    uint64_t packet=__atomic_load_n(&g_rs_frame_packet,__ATOMIC_ACQUIRE);
+    uint64_t epoch=packet>>7;
+    if (epoch<=g_rs_frame.epoch) return;
+    unsigned p=(unsigned)(packet&127), old=g_rs_frame.target;
+    int active=vk_rs_cache_has_scaled();
+    int action=nx_rs_frame_latch(&g_rs_frame,epoch,p,active,0);
+    if(action==NX_RS_FRAME_RESTORE) {
+        if(!vk_rs_cache_restore_all()) {
+            VKLOG("[resolution-frame] epoch=%llu requested=%u target=%u restore failed; prior state retained",(unsigned long long)epoch,p,old);
+            return;
+        }
+        action=nx_rs_frame_latch(&g_rs_frame,epoch,p,0,0);
+    }
+    if(action==NX_RS_FRAME_ACCEPT && (old!=p || epoch==1))
+        VKLOG("[resolution-frame] epoch=%llu target=%u backing=%s; target is not effective scale",(unsigned long long)epoch,p,vk_rs_cache_has_scaled()?"mixed/physical":"native");
+}
 #include "gfx_vk_resolution_compute_probe.inc"
 static nx_rs_raster g_rs_raster;
 static int g_rs_pass_scaled;
@@ -252,6 +285,11 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         g_rs_observe = g_rs_audit || g_rs_probe;
         const char *replay = getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
         g_rs_replay = replay && atoi(replay) != 0;
+        const char *target=getenv("DM_VK_RESOLUTION_TARGET_PERCENT");
+        if (g_rs_replay && target && *target) {
+            char *end=NULL; long p=strtol(target,&end,10);
+            if (end && !*end && p>=50 && p<=100) __atomic_store_n(&g_rs_frame_request,(unsigned)p,__ATOMIC_RELEASE);
+        }
         const char *compute_probe=getenv("DM_VK_RESOLUTION_COMPUTE_PROBE");
         if (compute_probe && atoi(compute_probe)) resolution_probe_compute();
         state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start();
@@ -260,6 +298,7 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
     { void vk_tex_release_drain(void); vk_tex_release_drain(); }   // Finalized textures' CPU-written marks that no queued job needs any more (gfx_vk_tex.c)
     g_rs_pass_scaled = 0;
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_cb_draws = 0; g_ord_parts = 0; g_psplit_now = 0; g_set_epoch++; x_read();
+    if (!continuing && g_rs_replay && __atomic_load_n(&g_rs_frame_request,__ATOMIC_ACQUIRE)) resolution_latch_frame();
     if (g_prof_on) { extern uint64_t g_pkg_ns, g_pkg_n; memset(g_prof_ns, 0, sizeof g_prof_ns); g_prof_t0 = tick(); g_prof_pkg0 = g_pkg_ns; g_prof_npkg0 = g_pkg_n; g_prof_pipes0 = g_vkst.pipes_built; }
     { extern volatile int g_vk_samp_log; if (g_vk_samp_log > 0) VKLOG("submission begins (present %llu, thread %d)", (unsigned long long)g_tex_frame, (int)gettid()); }
 }
