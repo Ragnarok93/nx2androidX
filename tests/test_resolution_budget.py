@@ -29,7 +29,7 @@ class ResolutionBudgetTests(unittest.TestCase):
         self.assertIn("vk_rs_variant_destroy(staged.slot[i])", tex)
         self.assertIn("if (!changed) return 1;", tex)
         self.assertIn("if (old) vk_rs_variant_retire(old);", tex)
-        self.assertIn("vk_rs_group_migrate(&images, logical, half.w, half.h)", replay)
+        self.assertIn("vk_rs_cache_exchange(owners, half.w, half.h)", replay)
         self.assertIn("if (g_rs_observe) resolution_observe_pass(); // before opening", replay)
         self.assertIn("g_rs_observe = g_rs_audit || g_rs_probe;", replay)
         self.assertIn("g_rs_observe = g_rs_audit;", replay)

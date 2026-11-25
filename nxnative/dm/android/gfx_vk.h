@@ -135,6 +135,7 @@ struct vkimg {
     int bc_tried;                   // a block-compressed image: a stand-in was tried for it (one attempt: one log line, no image made at every pass)
     uint64_t pool; int64_t off, size; int flags;   // its storage (pool, offset, layout size) and NVN texture flags: images over the same memory find each other
     struct vkimg *ovl[8]; int novl;   // the other images over some of the same memory (a texture of another description over it: on the Switch it sees these texels)
+    struct vk_rs_variant *rs_backing; // only populated by explicit backing exchange; logical dimensions/key stay unchanged
     uint64_t wseq, rseen;             // when it was last rendered to (gfx_vk_tex.c g_wseq); the newest overlapping write already reported
 };
 // Physical resolution variants are deliberately separate from guest storage keys.
@@ -159,6 +160,10 @@ typedef struct { vk_rs_variant *slot[VK_RS_GROUP_SIZE]; } vk_rs_images;
 // 0 on rejection, 1 on unchanged group, 2 on successful migration.
 int vk_rs_group_migrate(vk_rs_images *group, const vkimg_t *const logical[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
 void vk_rs_group_retire(vk_rs_images *group);
+// Requires exclusive ownership of the group, closed render pass and all
+// future consumers using physical extents. Currently called ONLY by probe
+// on detached owners. Native-only consumers are not yet routed.
+int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
 void vk_rs_variant_retire(vk_rs_variant *v);
 void vk_rs_variant_destroy(vk_rs_variant *v); // only after fence or before any recording
 // Opt-in lifetime graph. No graph storage is allocated on the native path.

@@ -627,6 +627,7 @@ int vk_shader_resolution_support(const vkshader_t *s, float target_scale,
     }
     VkBuffer buf; VkDeviceSize off;
     void *dst = vk_scratch(sizeof data, V.props.limits.minUniformBufferOffsetAlignment, &buf, &off);
+    if (!dst) return 0;
     memcpy(dst, data, sizeof data);
     *out = (VkDescriptorBufferInfo){buf, off, sizeof data};
     return 1;

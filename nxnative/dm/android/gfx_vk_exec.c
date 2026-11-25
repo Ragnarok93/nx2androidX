@@ -409,16 +409,30 @@ static void resolution_observe_pass(void) {
             vk_rs_images images = {0};
             int first = vk_rs_group_migrate(&images, logical, extent.w, extent.h);
             int unchanged = first ? vk_rs_group_migrate(&images, logical, extent.w, extent.h) : 0;
+            // Exercise the real owner-handle exchange on detached owners.
+            // No guest image or guest cache mapping is ever modified by this probe.
+            vkimg_t detached[VK_RS_GROUP_SIZE] = {0};
+            vkimg_t *owners[VK_RS_GROUP_SIZE] = {0};
+            if (first) for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (images.slot[i]) {
+                vk_rs_variant *v=images.slot[i];
+                detached[i]=*logical[i];
+                detached[i].img=v->image; detached[i].mem=v->memory;
+                detached[i].sub=NULL; detached[i].full=VK_NULL_HANDLE;
+                detached[i].layout=v->layout; detached[i].rs_backing=v;
+                owners[i]=&detached[i]; images.slot[i]=NULL;
+            }
             nx_rs_extent half;
             int migrated = first && nx_rs_plan(&group, 50, V.props.limits.maxFramebufferWidth,
                                                 V.props.limits.maxFramebufferHeight, &half) ?
-                vk_rs_group_migrate(&images, logical, half.w, half.h) : 0;
+                vk_rs_cache_exchange(owners, half.w, half.h) : 0;
+            int native = first ? vk_rs_cache_exchange(owners,group.w,group.h) : 0;
+            for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (owners[i]) images.slot[i]=owners[i]->rs_backing;
             int raster = first ? resolution_probe_raster(&images) : 0;
             uint64_t bytes = 0;
             for (int i = 0; i < VK_RS_GROUP_SIZE; i++) if (images.slot[i]) bytes += images.slot[i]->bytes;
             vk_rs_group_retire(&images);
-            VKLOG("[resolution-probe] isolated group: %ux%u -> %ux%u first=%d same=%d half=%d raster=%d final_bytes=%llu; guest images unchanged",
-                  group.w, group.h, extent.w, extent.h, first, unchanged, migrated, raster, (unsigned long long)bytes);
+            VKLOG("[resolution-probe] isolated group: %ux%u -> %ux%u first=%d same=%d half=%d native=%d raster=%d final_bytes=%llu; guest images unchanged",
+                  group.w, group.h, extent.w, extent.h, first, unchanged, migrated, native, raster, (unsigned long long)bytes);
         }
     }
     for (unsigned i = 0; i < 8; i++) if (group.blockers & (1u << i)) blocked[i]++;

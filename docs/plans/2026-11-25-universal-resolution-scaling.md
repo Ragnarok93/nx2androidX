@@ -46,6 +46,8 @@ Checkpoint P3a: optional ownership/consumer graph is now wired to real cache own
 - Classify dispatch geometry, storage-image accesses, mip chains, copies, resolves, guest readback and alias groups. Pin or reconcile incompatible connected resource groups at logical resolution. Do not infer workgroup coverage from texture extent alone.
 - Validate representative UE deferred passes and Xclipse D24S8 behavior, including alias and depth-pyramid cases. Preserve the Adreno path.
 
+Checkpoint P3b: actual cache-owner backing exchange API preserves the logical storage identity while staging and publishing replacement image/memory handles, invalidating cached image views and retiring old backing after the submission fence. It uses the native creation flags/format list, excludes pooled allocations and rejects lower-resolution replacements that do not reduce dedicated allocation requirements. Duplicate owners, mixed logical extents and nonuniform scale ratios are rejected; same-extent requests return before new allocations/copies. It can attempt native-size restoration under the experimental allocation budget. The isolated probe now calls the same owner exchange on detached copies (75% -> 50% -> 100%); no live cache owner is switched yet. Production activation still requires consumer routing, preflight/guaranteed restoration capacity, descriptor and render-pass integration, and hardware tests. The native draw path has no calls to this API.
+
 ## Phase 4 — adaptive integration
 
 - Only advertise the universal backend when workload coverage is proven. Preserve the verified game-engine path as an alternative, never multiply the two scales.

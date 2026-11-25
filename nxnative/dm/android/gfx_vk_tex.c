@@ -8,6 +8,7 @@
 #include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_d24_copy.h"
 #include "gfx_vk_resolution_budget.h"
+#include "ownership_exchange.h"
 #include "nvn_tex.h"
 #include "../gfx/tex/nvn_deswizzle.h"
 #include "nvn_hmap.h"
@@ -322,10 +323,19 @@ vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t
     if (!fmt || fmt->compressed || fmt->is_int || !logical->aspect) return NULL;
     VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     usage |= logical->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    if ((logical->usage & usage) != usage) return NULL;
+    if ((logical->usage & usage) != usage || (logical->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return NULL;
+    // Match the original creation contract, including view format list. A
+    // backing can only replace the cache image if its view capabilities match.
+    usage = logical->usage;
+    VkImageCreateFlags flags = logical->cflags;
+    VkFormat list[4] = {logical->fmt,0,0,0};
+    uint32_t nfmt=1;
+    if (logical->fmt2) list[nfmt++]=logical->fmt2;
+    for (unsigned i=0;i<2;i++) if (logical->fmt_cls[i]) list[nfmt++]=logical->fmt_cls[i];
+    VkImageFormatListCreateInfo fli = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,NULL,nfmt,list};
     VkImageFormatProperties props;
     if (vkGetPhysicalDeviceImageFormatProperties(V.pd, logical->fmt, VK_IMAGE_TYPE_2D,
-            VK_IMAGE_TILING_OPTIMAL, usage, 0, &props) != VK_SUCCESS ||
+            VK_IMAGE_TILING_OPTIMAL, usage, flags, &props) != VK_SUCCESS ||
         w > props.maxExtent.width || h > props.maxExtent.height ||
         w > V.props.limits.maxFramebufferWidth || h > V.props.limits.maxFramebufferHeight ||
         !(props.sampleCounts & VK_SAMPLE_COUNT_1_BIT)) return NULL;
@@ -334,7 +344,7 @@ vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t
     v->logical_w = logical->w; v->logical_h = logical->h;
     v->physical_w = w; v->physical_h = h; v->format = logical->fmt; v->aspect = logical->aspect;
     v->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D,
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, logical->fixed_fmt ? &fli : NULL, flags, VK_IMAGE_TYPE_2D,
         v->format, {w,h,1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
         usage, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
     if (vkCreateImage(V.dev, &ci, NULL, &v->image) != VK_SUCCESS) goto fail;
@@ -459,6 +469,59 @@ void vk_rs_group_retire(vk_rs_images *group) {
         if (group->slot[i]) vk_rs_variant_retire(group->slot[i]);
         group->slot[i] = NULL;
     }
+}
+static void vk_tex_view_drop_all(vkimg_t *im);
+// Publish a replacement backing into the existing cache-owner object.
+// The caller must have proved ALL consumers and hold exclusive ownership;
+// the current only caller uses detached copies, never live guest storage.
+int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h) {
+    if (!owners || !vk_sub_open()) return 0;
+    nx_rs_backing_state states[VK_RS_GROUP_SIZE] = {0};
+    vk_rs_variant sources[VK_RS_GROUP_SIZE] = {0};
+    vk_rs_images staged = {0};
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) {
+        vkimg_t *im=owners[i]; if (!im) continue;
+        if (!im->img || !im->mem || im->sub || im->full || im->layout!=VK_IMAGE_LAYOUT_GENERAL ||
+            im->novl || im->packaged || im->lin_mem || im->bc_draw || im->bc_of ||
+            im->target!=NVN_TEXTURE_TARGET_2D || im->levels!=1 || im->layers!=1 || im->samples!=1 || im->d!=1) return 0;
+        vk_rs_variant *old=im->rs_backing;
+        if (old && (old->image!=im->img || old->memory!=im->mem || old->logical_w!=im->w ||
+                    old->logical_h!=im->h || old->format!=im->fmt || old->aspect!=im->aspect ||
+                    old->layout!=im->layout)) return 0;
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(V.dev,im->img,&req);
+        states[i]=(nx_rs_backing_state){(uintptr_t)im,im->w,im->h,old?old->physical_w:im->w,old?old->physical_h:im->h,req.size};
+        sources[i]=(vk_rs_variant){.image=im->img,.memory=im->mem,.layout=im->layout,.format=im->fmt,.aspect=im->aspect,
+            .logical_w=im->w,.logical_h=im->h,.physical_w=states[i].pw,.physical_h=states[i].ph};
+    }
+    unsigned changed=0;
+    if (!nx_rs_exchange_plan(states,VK_RS_GROUP_SIZE,w,h,&changed)) return 0;
+    if (!changed) return 1;
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (changed & (1u<<i)) {
+        vk_rs_variant *next=vk_rs_variant_create(owners[i],w,h);
+        staged.slot[i]=next;
+        if (!next || !nx_rs_exchange_benefit(&states[i],w,h,next->bytes) ||
+            !rs_can_copy(&sources[i],next)) goto rollback;
+    }
+    // No failures after recording begins. Retired generations keep their
+    // budget until fence retirement, and old descriptors remain alive.
+    VkCommandBuffer cb=vk_cmd();
+    vk_img_barrier_all(cb);
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (staged.slot[i]) rs_copy(cb,&sources[i],staged.slot[i]);
+    vk_img_barrier_all(cb);
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (staged.slot[i]) {
+        vkimg_t *im=owners[i]; vk_rs_variant *old=im->rs_backing,*next=staged.slot[i];
+        vk_lrz_forget(im); vk_tex_view_drop_all(im);
+        if (old) vk_rs_variant_retire(old);
+        else vk_defer_free_image(im->img,im->mem);
+        im->img=next->image; im->mem=next->memory; im->layout=next->layout;
+        im->rs_backing=next; im->depth_sub=im->depth_cut=im->fdz_frame=0;
+        // im->w/h, storage key, flags, wseq and GPU content provenance stay logical.
+    }
+    return 2;
+rollback:
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) vk_rs_variant_destroy(staged.slot[i]);
+    return 0;
 }
 void vk_tex_prepare(VkCommandBuffer cb, vkimg_t *im) {
     if (im->layout == VK_IMAGE_LAYOUT_GENERAL) return;
@@ -699,7 +762,7 @@ extern uint64_t g_tex_frame;   // presents so far, for the packaged textures' la
 enum { EVICT_KEEP = 60 };
 static uint64_t g_img_n, g_img_bytes, g_img_evicted;   // live images and their bytes, images evicted so far (vk_tex_sweep's line)
 static void img_drop(vkimg_t *im) { if (vk_rs_tracking()) { ro_drop(im); if (im->bc_draw) ro_drop(im->bc_draw); } if (im->bc_draw) { vkimg_t *d = im->bc_draw; vk_lrz_forget(d); vk_tex_view_drop_all(d); if (d->sub) vk_defer_free_image_sub(d->img, d->sub); else vk_defer_free_image(d->img, d->mem); free(d); }
-    vk_lrz_forget(im); if (im->lin_mem) nvn_dirty_release(im->lin_mem, im->lin_len); if (im->packaged && !im->pkg_released && im->pkg_mem) nvn_dirty_release(im->pkg_mem, im->pkg_len); g_img_n--; g_img_bytes -= im->size > 0 ? (uint64_t)im->size : 0; alias_unlink(im); vk_tex_view_drop_all(im); if (im->sub) vk_defer_free_image_sub(im->img, im->sub); else vk_defer_free_image(im->img, im->mem); free(im); }
+    vk_lrz_forget(im); if (im->lin_mem) nvn_dirty_release(im->lin_mem, im->lin_len); if (im->packaged && !im->pkg_released && im->pkg_mem) nvn_dirty_release(im->pkg_mem, im->pkg_len); g_img_n--; g_img_bytes -= im->size > 0 ? (uint64_t)im->size : 0; alias_unlink(im); vk_tex_view_drop_all(im); if (im->rs_backing) vk_rs_variant_retire(im->rs_backing); else if (im->sub) vk_defer_free_image_sub(im->img, im->sub); else vk_defer_free_image(im->img, im->mem); free(im); }
 static void evict_overlaps(uint64_t pool, int64_t off, int64_t size) {
     akey ks[64]; int n = 0;
     for (uint32_t i = 0; i < g_by_key.cap && n < 64; i++) {
