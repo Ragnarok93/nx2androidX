@@ -17,7 +17,7 @@ class StandaloneRuntimeControlsTest(unittest.TestCase):
         front = (DM / "front_android.c").read_text()
         draw = (DM / "gfx_vk_present.c").read_text()
         self.assertIn("#define OVM_TABS 4", header)
-        self.assertIn("OVM_FG, OVM_FG_MULT, OVM_FG_FLOW, OVM_DRIVER", header)
+        self.assertIn("OVM_RATE, OVM_FG, OVM_FG_MULT, OVM_FG_FLOW", header)
         self.assertIn('"Graphics"', header)
         self.assertNotIn('"Performance"', header)
         self.assertIn("OVM_FSR, OVM_FSR_SHARP", header)

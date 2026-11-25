@@ -42,14 +42,18 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         self.assertIn("chooseSaveExport()", external)
         self.assertIn("chooseSaveImport()", external)
 
-    def test_graphics_tab_contains_no_duplicate_fps(self):
+    def test_graphics_and_pacing_tab_controls(self):
         self.assertIn('{"Gamepad", "Game", "Graphics", "Pacing"}', self.menu)
         # Check the actual tab membership, independent of padding or new controls.
         import re
         table = self.menu.split("OVM_TAB_ITEMS[OVM_PAGES][OVM_PER_TAB] = {", 1)[1].split("};", 1)[0]
         rows = [re.findall(r"OVM_\w+", row) for row in re.findall(r"\{([^{}]+)\}", table)]
         self.assertEqual(rows[1], ["OVM_FPS", "OVM_MODE", "OVM_EXPORT", "OVM_IMPORT", "OVM_AUDIO"])
-        self.assertEqual(rows[2], ["OVM_FSR", "OVM_FSR_SHARP", "OVM_FG", "OVM_FG_MULT", "OVM_FG_FLOW", "OVM_DRIVER", "OVM_VIVID"])
+        self.assertEqual(rows[2], ["OVM_VIVID", "OVM_FSR", "OVM_FSR_SHARP", "OVM_DRS",
+                                   "OVM_DRS_MIN", "OVM_RS_MAX", "OVM_DRS_NOW", "OVM_DRS_HOOK", "OVM_DRIVER"])
+        self.assertEqual(rows[3], ["OVM_RATE", "OVM_FG", "OVM_FG_MULT", "OVM_FG_FLOW", "OVM_DIAG_OPEN"])
+        self.assertIn('[OVM_VIVID]="HDR"', self.gfx)
+        self.assertIn("vivid=%d", self.front)
         self.assertEqual(sum(row.count("OVM_FPS") for row in rows), 1)
         self.assertIn("ov_menu_sharp_value", self.menu)
         self.assertIn("fsr_sharp=%d", self.front)

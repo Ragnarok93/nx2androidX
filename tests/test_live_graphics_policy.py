@@ -76,7 +76,7 @@ int main(void) {
         front=(ANDROID/'front_android.c').read_text()
         layout=(ANDROID/'overlay_layout.h').read_text()
         present=(ANDROID/'gfx_vk_present.c').read_text()
-        self.assertIn('OVM_RATE, OVM_DRS, OVM_DRS_MIN, OVM_DRS_NOW, OVM_DRS_HOOK',layout)
+        self.assertIn('OVM_DRS, OVM_DRS_MIN, OVM_RS_MAX, OVM_DRS_NOW, OVM_DRS_HOOK',layout)
         self.assertIn('ov_menu_dyn_min_value',layout)
         self.assertIn('OVM_DRS_MIN) menu_drs_min(',front)
         self.assertIn('OVM_RATE) { menu_rate_step(',front)

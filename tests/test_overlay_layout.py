@@ -21,6 +21,8 @@ class OverlayLayout(unittest.TestCase):
 #include "overlay_layout.h"
 static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available;
 int dm_menu_audio_available(void) { return audio_available; }
+static int renderer_scaling;
+int dm_menu_rs_live(void) { return renderer_scaling; }
 float dm_overlay_scale(void) { return 1; }
 int dm_overlay_off(int l, int c) { return l == 1 && c == hidden_ctl; }
 int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) {
@@ -88,17 +90,24 @@ int main(void) {
     assert(ov_drag_pos(1100, 600, 1013, 50) == 506.5f);
     assert(ov_drag_pos(1100, 505, 1013, 50) == 508);
 
-    // Graphics has six controls; the other tabs retain their original five,
-    // with a blank sixth row to keep the panel's height stable.
+    // All tabs use the same panel. Padding must stay noninteractive.
     assert(ov_menu_item(0, 5) == OVM_PAD && ov_menu_item(1, 5) == -1);
     assert(ov_menu_item(0, OVM_ROWS - 2) == -1);
-    assert(ov_menu_item(2, 6) == OVM_DRIVER);
-    assert(ov_menu_item(2, 7) == OVM_VIVID);
+    assert(ov_menu_item(2, 1) == OVM_VIVID);
+    assert(ov_menu_item(2, 4) == OVM_DRS);
+    assert(ov_menu_item(2, 5) == OVM_DRS_MIN);
+    assert(ov_menu_item(2, 6) == -1);
+    renderer_scaling = 1;
+    assert(ov_menu_item(2, 6) == OVM_RS_MAX);
+    assert(ov_menu_item(2, 7) == OVM_DRS_NOW);
+    assert(ov_menu_item(2, 8) == OVM_DRS_HOOK);
+    assert(ov_menu_item(2, 9) == OVM_DRIVER);
     assert(ov_menu_item(3, 1) == OVM_RATE);
-    assert(ov_menu_item(3, 2) == OVM_DRS);
-    assert(ov_menu_item(3, 3) == OVM_DRS_MIN);
-    assert(ov_menu_item(3, 4) == OVM_DRS_NOW);
-    assert(ov_menu_item(3, 5) == OVM_DRS_HOOK);
+    assert(ov_menu_item(3, 2) == OVM_FG);
+    assert(ov_menu_item(3, 3) == OVM_FG_MULT);
+    assert(ov_menu_item(3, 4) == OVM_FG_FLOW);
+    assert(ov_menu_item(3, 5) == OVM_DIAG_OPEN);
+    assert(ov_menu_item(3, 6) == -1);
     assert(ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     audio_available = 1;
     assert(ov_menu_item(1, 5) == OVM_AUDIO);
@@ -146,7 +155,7 @@ int main(void) {
             (tmp / 'android_profile.h').write_text(android_profile.header(None), encoding='utf-8')
             c, exe = tmp / 'check.c', tmp / 'check'
             c.write_text(harness, encoding='utf-8')
-            result = subprocess.run([cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',
+            result = subprocess.run([cc, '-std=gnu11', '-D__ANDROID__', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',
                                      f'-I{DM / "android"}', f'-I{DM / "host"}', str(c), '-lm', '-o', str(exe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             result = subprocess.run([str(exe)], capture_output=True, text=True)
