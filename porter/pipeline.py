@@ -23,8 +23,11 @@ SHARED_CJK = DM / 'tools/shared_cjk.ttf'
 def ui_font_assets():   # {name under assets/: file}: the overlay's font and its license files (Port.ui_font; porter host puts them in an APK ported before them)
     d = UI_FONT.parent
     return {'font/ui.bin': UI_FONT, **{f'font/{f.relative_to(d).as_posix()}': f for f in sorted(p for p in d.rglob('*.txt'))}}
-def spatial_shader_license_assets():
-    return {'licenses/sgsr1.txt': DM / 'android/shaders/licenses/sgsr1.txt'}
+def runtime_shader_license_assets():
+    return {
+        'licenses/sgsr1.txt': DM / 'android/shaders/licenses/sgsr1.txt',
+        'licenses/sgsr2.txt': DM / 'third_party/sgsr2/LICENSE',
+    }
 
 
 # The letters of the button-icon font (make_ext_font.py knocks them out of the icons): a bold system font of the machine that ports, never shipped in the repository
@@ -1462,7 +1465,7 @@ class Port:
         cmd += (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
         cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
         cmd += [a for lib in vulkan_libs for a in ('--extra-so', str(lib))]
-        cmd += [a for name, path in spatial_shader_license_assets().items() for a in ('--asset', f'{name}={path}')]
+        cmd += [a for name, path in runtime_shader_license_assets().items() for a in ('--asset', f'{name}={path}')]
         try:
             nsp.run(cmd, self.logs / 'android_apk.log', env=self.env)
         finally:

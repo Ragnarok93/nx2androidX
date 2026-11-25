@@ -71,15 +71,20 @@ if NX2A_ARM_HOST and host_dir('shader-tools', 'glslc') != 'linux-aarch64':   # t
     _glslc = _sh.which('glslc')
     if not _glslc: sys.exit('aarch64 host: glslc not found (install the shaderc tools, or put glslc on PATH)')
     GLSLC = Path(_glslc)
-for sh in sorted((DM / 'android/shaders').glob('*.*')):
+sys.path.insert(0, str(DM / 'android/tools'))
+from sgsr2_shaders import shader_sources
+backend_shaders = sorted((DM / 'android/shaders').glob('*.*'))
+if a.gfx == 'vk':
+    backend_shaders += shader_sources(DM / 'third_party/sgsr2/include', gen / a.game / 'sgsr2')
+for sh in backend_shaders:
     hdr = gen / a.game / f'{sh.stem}_{sh.suffix[1:]}.spv.h'
     if hdr.exists() and hdr.stat().st_mtime >= max([sh.stat().st_mtime] + [h.stat().st_mtime for h in (DM / 'android/shaders/include').glob('*.h')]): continue
-    spv = gen / f'{sh.name}.spv'
+    spv = gen / a.game / f'{sh.name}.spv'
     subprocess.run([str(GLSLC), '--target-env=vulkan1.1', '-O', '-I' + str(DM / 'android/shaders/include'), str(sh), '-o', str(spv)], check=True)
     words = spv.read_bytes(); n = len(words) // 4
     import struct as _st
     body = ', '.join(f'{w:#010x}' for w in _st.unpack(f'<{n}I', words))
-    hdr.write_text(f'// generated from dm/android/shaders/{sh.name} by build.py (glslc)\nstatic const uint32_t {sh.stem}_{sh.suffix[1:]}_spv[] = {{{body}}};\n')
+    hdr.write_text(f'// generated for {sh.name} by build.py (glslc)\nstatic const uint32_t {sh.stem}_{sh.suffix[1:]}_spv[] = {{{body}}};\n')
 
 def srcs(*globs): return [p for g in globs for p in sorted(DM.glob(g))]
 HOST = [p for p in srcs('host/*.c') if p.name not in ('hle_movie_avc.c',)]   # VideoToolbox: dm/android/movie_avc.c instead

@@ -101,8 +101,8 @@ def rewrite_runtime(src, out, key, host, dex, assets=None):
     crt = bytes.fromhex(kj['cert'])
     replace = {ABI+'libdmhost.so': host, 'classes.dex': dex}
     for name, path in (assets or {}).items():
-        if not name.startswith('font/') and name != 'licenses/sgsr1.txt':
-            raise ValueError('only runtime fonts and the GSR 1 license can be added')
+        if not name.startswith('font/') and name not in ('licenses/sgsr1.txt', 'licenses/sgsr2.txt'):
+            raise ValueError('only runtime fonts and GSR licenses can be added')
         replace['assets/'+name] = path
     with zipfile.ZipFile(src) as archive:
         cert, public = source_certificate(src, archive.start_dir)

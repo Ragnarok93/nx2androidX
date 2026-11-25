@@ -80,7 +80,7 @@ static VkDeviceMemory host_memory;
 static uint8_t *mapped;
 
 static void setup_buffers(void) {
-    VkBufferCreateInfo buf = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, OUT * OUT * 4,
+    VkBufferCreateInfo buf = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, OUT * OUT * 8,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     CHECK(vkCreateBuffer(V.dev, &buf, NULL, &pixels));
     VkMemoryRequirements req;
@@ -211,6 +211,10 @@ static void run_spatial(void) {
     spatial_image_drop(&src);
 }
 
+#ifdef SGSR2_HOST_PROBE
+#include "vk_gsr2_probe.inc"
+#endif
+
 int main(void) {
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "nx2androidX spatial test",
         1, NULL, 0, VK_API_VERSION_1_3};
@@ -236,15 +240,21 @@ int main(void) {
     if (V.qf >= count) return 77;
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queue = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, V.qf, 1, &priority};
-    VkDeviceCreateInfo device = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &dynamic, 0, 1, &queue};
+    VkPhysicalDeviceFeatures enabled = {.shaderImageGatherExtended = features.features.shaderImageGatherExtended};
+    VkDeviceCreateInfo device = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &dynamic, 0, 1, &queue,
+        0, NULL, 0, NULL, &enabled};
     CHECK(vkCreateDevice(V.pd, &device, NULL, &V.dev));
     vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     V.has_dynrender = 1;
     setup_buffers();
 
+#ifdef SGSR2_HOST_PROBE
+    check_temporal();
+#else
     run_spatial();
     g_sfmt = VK_FORMAT_R8G8B8A8_SRGB;
     run_spatial();
+#endif
     CHECK(vkDeviceWaitIdle(V.dev));
     spatial_drop_images();
     if (g_spatial.queries) vkDestroyQueryPool(V.dev, g_spatial.queries, NULL);
@@ -262,5 +272,7 @@ int main(void) {
     vkFreeMemory(V.dev, host_memory, NULL);
     vkDestroyDevice(V.dev, NULL);
     vkDestroyInstance(instance, NULL);
+#ifndef SGSR2_HOST_PROBE
     puts("spatial reconstruction passed (UNORM and sRGB)");
+#endif
 }

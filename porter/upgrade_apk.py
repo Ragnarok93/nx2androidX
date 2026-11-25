@@ -151,9 +151,9 @@ def upgrade(apk, output, *, data=None, key=None, jobs=None, no_lsfg=False, debug
         library = built/'libdmhost.so'
         with library.open('rb') as lib:
             check_runtime_abi(lib.read(20))
-        from porter.pipeline import ui_font_assets, spatial_shader_license_assets
+        from porter.pipeline import ui_font_assets, runtime_shader_license_assets
         runtime_assets = {name: path for name, path in ui_font_assets().items() if path.is_file()}
-        runtime_assets.update(spatial_shader_license_assets())
+        runtime_assets.update(runtime_shader_license_assets())
         assets = [arg for name, path in runtime_assets.items() for arg in ('--asset', f'{name}={path}')]
         subprocess.run([sys.executable, str(DM/'android/apk/apkdriver.py'), str(apk), str(output),
                         str(key), '--host', str(library), '--dex', str(dex), *assets], check=True)

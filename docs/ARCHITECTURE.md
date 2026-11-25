@@ -194,6 +194,21 @@ LSFG outputs and pause-menu redraws use the reconstructed images already availab
 
 The Upgrade tab and `python -m porter upgrade-apk` reuse existing rewritten modules, game data, and compatible shader bundles. The upgrade verifies the original signer, runtime ABI, profile and rewrite inputs, and replaces the standalone runtime and its display assets. The package identity, save directory, and imported driver files remain in place.
 
+### Temporal Vulkan backend
+
+The GSR 2 backend accepts replay-certified scene color, standard-Z depth,
+encoded motion, a current-to-previous clip transform, jitter and exposure.
+Three-pass compute also requires opaque-only color. The backend owns its
+bounded intermediates and ping-pong history. The replay caller owns
+command submission, slot retirement, image lifetimes and the output consumer.
+Each successful real-frame submission advances history once.
+
+The FFR rolling capture contains sampled and storage bindings, shader hashes,
+render areas and the final presentation source. It does not certify the
+semantic input bindings or camera constants needed for a GSR 2 adapter. The
+backend is exercised by the Vulkan probe and remains outside the gameplay
+path until a replay adapter can certify those inputs.
+
 Legacy packs without saved profiles cannot use this path and receive a clear suggestion to port again. Compilation failure offers retry or a full re-port; load failures and identifiable native crashes also suggest a full re-port without claiming that old data caused the error. Full re-port still requires source game files and keys, so keeping a backup is useful. Saves, user settings and selected drivers are retained during runtime updates.
 
 

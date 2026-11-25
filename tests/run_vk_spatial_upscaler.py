@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import struct
+import sys
 import subprocess
 import tempfile
 
@@ -17,11 +18,18 @@ def main():
     parser.add_argument("--spirv-val", default="spirv-val")
     parser.add_argument("--vulkan-lib", default="-lvulkan")
     parser.add_argument("--vulkan-include", type=Path)
+    parser.add_argument("--gsr2", action="store_true", help="run the temporal reconstruction probe")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="nx2-spatial-") as tmp:
         build = Path(tmp)
-        for name in SHADERS:
-            shader = ANDROID / "shaders" / name
+        shaders = [ANDROID / "shaders" / name for name in SHADERS]
+        if args.gsr2:
+            sys.path.insert(0, str(ANDROID / "tools"))
+            from sgsr2_shaders import shader_sources
+            shaders += shader_sources(ANDROID.parent / "third_party/sgsr2/include", build / "sgsr2")
+            shaders.append(ANDROID / "shaders/sgsr2_fullscreen.vert")
+        for shader in shaders:
+            name = shader.name
             spv = build / (name + ".spv")
             subprocess.run([args.glslc, "--target-env=vulkan1.1", "-O",
                             f"-I{shader.parent / 'include'}", shader, "-o", spv], check=True)
@@ -33,8 +41,9 @@ def main():
                 f"static const uint32_t {symbol}[] = {{{words}}};\n")
         probe = build / "spatial-probe"
         headers = ["-idirafter", args.vulkan_include] if args.vulkan_include else []
+        defines = ["-DSGSR2_HOST_PROBE"] if args.gsr2 else []
         subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-O2", "-pthread",
-                        f"-I{ANDROID}", f"-I{build}", *headers,
+                        f"-I{ANDROID}", f"-I{build}", *headers, *defines,
                         ROOT / "tests/vk_spatial_upscaler.c", args.vulkan_lib, "-lm", "-o", probe], check=True)
         result = subprocess.run([probe], text=True, capture_output=True)
         print(result.stdout, end="")

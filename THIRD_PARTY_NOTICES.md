@@ -24,6 +24,7 @@ describes what every one of them is, which version it is and where it is used.
 | `bcdec/` | MIT or the Unlicense (your choice) | 0.985 | https://github.com/iOrange/bcdec | `bcdec/LICENSE` |
 | `stb_vorbis/` | MIT or public domain (your choice) | 1.22 | https://github.com/nothings/stb | `stb_vorbis/LICENSE` |
 | `flip/` | BSD 3-Clause | — | https://github.com/NVlabs/flip | `flip/LICENSE` |
+| `sgsr2/` | BSD 3-Clause | d926f074bcb9d714e179f1ce0fcb9ee2eeb5074e | https://github.com/SnapdragonGameStudios/snapdragon-gsr | `sgsr2/LICENSE` and `assets/licenses/sgsr2.txt` in standalone APKs |
 | `macnativegames/` | MIT | — | MacNativeGames contributors | `macnativegames/LICENSE` |
 
 ## In the source tree, outside `third_party/`

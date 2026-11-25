@@ -2,13 +2,20 @@
 
 Upstream: https://github.com/SnapdragonGameStudios/snapdragon-gsr/tree/d926f074bcb9d714e179f1ce0fcb9ee2eeb5074e/sgsr/v2
 
-The eight shader files under include/ and the repository LICENSE are imported
-from that revision (BSD-3-Clause). Keep the binary redistribution notice when
-the shaders begin shipping in APKs. The original integration guide is linked above.
+The eight GLSL shader files under `include/` are byte-identical to the pinned
+revision. The BSD-3-Clause notice includes the shader files' 2024 copyright.
+Standalone APKs include the notice as `assets/licenses/sgsr2.txt`.
 
-Status: shader source and temporal eligibility/history policy only. No runtime
-dispatch or user-facing GSR 2 setting is enabled by this commit. The current
-FSR 1 / Vivid / frame generation present path is intentionally unchanged.
+The Android build generates Vulkan copies with unique descriptor bindings for
+the two-pass compute variant, positive-up NDC Y, and dispatch bounds checks.
+The two-pass fragment variant uses the runtime's fullscreen triangle. Use
+`python tests/run_vk_spatial_upscaler.py --gsr2` to validate SPIR-V and run
+all supported variants on a host Vulkan ICD. The probe uses odd image sizes,
+moving geometry, jitter, camera cuts and recorded but rejected submissions.
+
+The runtime implements all three variants for validated inputs. Gameplay
+integration requires a replay adapter that supplies those inputs, so the
+spatial controls are the only modes exposed to players at this checkpoint.
 
 ## Runtime integration requirements
 
@@ -17,9 +24,10 @@ FSR 1 / Vivid / frame generation present path is intentionally unchanged.
 - Validate same-frame resolved color, depth convention, encoded velocity,
   current-to-previous clip transform, jitter, exposure, near plane and FOV.
   Three-pass also needs opaque-only color. No synthetic zero-motion substitute.
-- Compile GLSL with explicit shader stage and verify descriptor formats and
-  UBO offsets against the pinned source. Validate reverse-Z and NDC-Y variants
-  before enabling on a title. Keep per-driver pipeline selection capability-gated.
+- Normalize reverse-Z, coordinate conventions and resource semantics in the
+  adapter before enabling a title. The current shaders consume standard-Z and
+  positive-up clip Y. The dispatched variants use separate reflected fragment
+  and compute UBO layouts.
 - Allocate history and intermediates from a bounded GPU budget, account for
   allocations and retirement, and use explicit barriers and fence retirement.
   Commit the policy only on successful real-frame submission with ordered
