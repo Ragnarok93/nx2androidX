@@ -96,6 +96,12 @@ static void vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage im, VkImageLayout
     captured[copies++] = *r;
     memset(memory + r->bufferOffset, 0x50 + copies, 4);
 }
+static unsigned uniform_copies;
+static void vkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, unsigned n, const VkBufferCopy *r) {
+    assert(n == 1 && r->srcOffset == 256 && r->size == 4096);
+    memset(memory + r->dstOffset, 0xa8, r->size);
+    uniform_copies++;
+}
 static const char *vk_pass_dump_root(void) { return getenv("DM_ROOT"); }
 #include "gfx_vk_surface_capture.inc"
 ''' + dump_type + r'''
@@ -129,6 +135,10 @@ int main(int argc, char **argv) {
     im.samples = 4;
     surface_read("color", &im, surface_binding(&im, NULL, bc.vk, range, 2, -1, 0), NULL, NULL);
     assert(copies == 3 && invalidates == 0);
+    surface_uniform_queue(0x1234, 8, 2, (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)2, 256, 8192});
+    surface_uniform_queue(0x1234, 9, 3, (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)2, 1, 4096});
+    surface_compute_uniforms(vk_cmd());
+    assert(uniform_copies == 1 && g_sc.uniform_count == 0);
     surface_capture_write();
     assert(invalidates == 1);
 
@@ -196,9 +206,11 @@ int main(int argc, char **argv) {
             usage = (root / "surface_usage.tsv").read_text()
             self.assertIn("tile:0:1024:16:4:16:16", usage)
             self.assertIn("multisampled", usage)
-            self.assertIn("completed_samples=3", usage)
+            self.assertIn("completed_samples=4", usage)
+            self.assertIn("compute-uniform", usage)
+            self.assertIn("ubo:2176:4096", usage)
             raw = (root / "surface_samples.raw").read_bytes()
             self.assertEqual(raw[:4], b"QQQQ")
             self.assertEqual(raw[1024:1028], b"RRRR")
             self.assertEqual(raw[2048:2052], b"SSSS")
-            self.assertEqual(len(raw), 2176)
+            self.assertEqual(raw[2176:], b"\xa8" * 4096)

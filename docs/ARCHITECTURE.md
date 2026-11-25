@@ -203,11 +203,15 @@ bounded intermediates and ping-pong history. The replay caller owns
 command submission, slot retirement, image lifetimes and the output consumer.
 Each successful real-frame submission advances history once.
 
-The FFR rolling capture contains sampled and storage bindings, shader hashes,
-render areas and the final presentation source. It does not certify the
-semantic input bindings or camera constants needed for a GSR 2 adapter. The
-backend is exercised by the Vulkan probe and remains outside the gameplay
-path until a replay adapter can certify those inputs.
+Older FFR captures contain image bindings, render areas and presentation
+sources. The rolling replay capture now also includes exact prefixes of the
+GPU constant buffers bound to compute shaders. Copies are scheduled before
+dispatch, after replay has resolved the actual descriptor and any shadow,
+and share the existing diagnostic allocation. Compute-uniform rows join to
+image bindings by present, submission, dispatch ordinal and shader key.
+These samples support validation of camera matrices, jitter and exposure
+for an FFR adapter. Gameplay uses the spatial pipeline while the adapter's
+input semantics are being established.
 
 Legacy packs without saved profiles cannot use this path and receive a clear suggestion to port again. Compilation failure offers retry or a full re-port; load failures and identifiable native crashes also suggest a full re-port without claiming that old data caused the error. Full re-port still requires source game files and keys, so keeping a backup is useful. Saves, user settings and selected drivers are retained during runtime updates.
 

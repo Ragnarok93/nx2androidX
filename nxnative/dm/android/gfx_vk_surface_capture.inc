@@ -1,6 +1,7 @@
 // Included by gfx_vk_exec.c. Full-frame capture uses one packed readback
 // allocation and records every replay surface binding, even without pixels.
 enum { SC_BYTES = 16 * 1024 * 1024, SC_TILE = 16, SC_ROWS = 128 * 1024, SC_SAMPLES = 8192 };
+enum { SC_UNIFORM_PREFIX = 4096, SC_UNIFORM_BUDGET = 2 * 1024 * 1024 };
 typedef struct {
     uint64_t present, submission, draws, dispatches, shader, image, view;
     uint64_t pool, write_sequence;
@@ -19,6 +20,9 @@ static struct {
     size_t used;
     unsigned rows, dropped, count;
     struct { size_t offset, size; } samples[SC_SAMPLES];
+    size_t uniform_bytes;
+    unsigned uniform_count;
+    struct { VkDescriptorBufferInfo source; uint64_t shader; int binding, reg; } uniforms[96];
     unsigned storage_count;
     struct { const vkimg_t *im; surface_binding_t binding; } storage[96];
     unsigned alias_count;
@@ -152,6 +156,63 @@ failed:
     g_sc.alloc_failed = 1;
     VKLOG("[diagnostics] surface readback allocation unavailable");
     return 0;
+}
+
+static void surface_uniform_queue(uint64_t shader, int binding, int reg, VkDescriptorBufferInfo source) {
+    if (g_sc.uniform_count >= sizeof g_sc.uniforms / sizeof g_sc.uniforms[0]) return;
+    unsigned i = g_sc.uniform_count++;
+    g_sc.uniforms[i].source = source;
+    g_sc.uniforms[i].shader = shader;
+    g_sc.uniforms[i].binding = binding;
+    g_sc.uniforms[i].reg = reg;
+}
+
+// Snapshot the effective descriptor before dispatch, including any uniform
+// shadow produced by replay. The dispatch may itself change the original bytes.
+static void surface_compute_uniforms(VkCommandBuffer cb) {
+    int copied = 0;
+    for (unsigned i = 0; i < g_sc.uniform_count; i++) {
+        const VkDescriptorBufferInfo *src = &g_sc.uniforms[i].source;
+        surface_binding_t b = surface_binding(NULL, VK_NULL_HANDLE, VK_FORMAT_UNDEFINED,
+            (VkImageSubresourceRange){0}, g_sc.uniforms[i].binding, 5, g_sc.uniforms[i].shader);
+        b.element = (unsigned)g_sc.uniforms[i].reg;
+        b.size = (int64_t)src->range;
+        size_t bytes = src->range < SC_UNIFORM_PREFIX ? (size_t)src->range : SC_UNIFORM_PREFIX;
+        bytes &= ~(size_t)3;
+        size_t at = (g_sc.used + 3) & ~(size_t)3;
+        if (!src->buffer || src->offset % 4 || !bytes) {
+            surface_usage("compute-uniform", &b, -1, -1, NULL, "unavailable");
+            continue;
+        }
+        if (at > SC_BYTES || bytes > SC_BYTES - at ||
+            bytes > SC_UNIFORM_BUDGET - g_sc.uniform_bytes ||
+            g_sc.rows >= SC_ROWS || g_sc.count >= SC_SAMPLES) {
+            surface_usage("compute-uniform", &b, -1, -1, NULL, "readback-budget");
+            continue;
+        }
+        if (!surface_capture_allocate()) {
+            surface_usage("compute-uniform", &b, -1, -1, NULL, "readback-unavailable");
+            break;
+        }
+        if (!copied) vk_img_barrier_all(cb);
+        copied = 1;
+        VkBufferCopy copy = {src->offset, at, bytes};
+        vkCmdCopyBuffer(cb, src->buffer, g_sc.buffer, 1, &copy);
+        g_sc.samples[g_sc.count].offset = at;
+        g_sc.samples[g_sc.count++].size = bytes;
+        g_sc.used = at + bytes;
+        g_sc.uniform_bytes += bytes;
+        char sample[80];
+        snprintf(sample, sizeof sample, "ubo:%zu:%zu", at, bytes);
+        surface_usage("compute-uniform", &b, -1, -1, NULL, sample);
+    }
+    g_sc.uniform_count = 0;
+    if (copied) {
+        VkMemoryBarrier host = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+            0, 1, &host, 0, NULL, 0, NULL);
+    }
 }
 
 static unsigned surface_block_bytes(const vkimg_t *im, VkImageAspectFlags aspect,

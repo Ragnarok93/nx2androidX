@@ -28,10 +28,12 @@ int g_pool_slots = 1;   // gfx_vk_exec.c's (vk_pool_of reads it)
 static int g_x_tracepass = -1, g_sub_pass, g_prof_on, g_prereset = 1;
 static uint64_t g_prof_ns[8], g_fence, g_tex_frame;
 static int g_pd_state, g_pd_effects, g_pd_full, g_ch_enabled;
-static struct { unsigned storage_count; } g_sc;
+static struct { FILE *usage; unsigned storage_count, uniform_count; } g_sc;
 static unsigned g_compute_image_count;
 static void compute_images_written(void) {}
 static void surface_dispatch(void) { abort(); }
+static void surface_uniform_queue(uint64_t shader, int binding, int reg, VkDescriptorBufferInfo source) { abort(); }
+static void surface_compute_uniforms(VkCommandBuffer cb) { abort(); }
 static void pass_dump_aliases(void) { abort(); }
 static void surface_texel_buffer(const tex_t *t, VkBufferView view, int st, int binding, int storage, int snapshot) { abort(); }
 static void compute_record(const uint64_t key[4], int slow) { (void)key; (void)slow; }
@@ -70,7 +72,7 @@ static void shader_cpu_ready(const vkshader_t *s,int stage) {
     for(int i=0;i<s->nbind;i++) assert(s->b[i].kind!=RK_SBUF_UBO && s->b[i].kind!=RK_TEX_UBO && s->b[i].samp!=RS_UBO);
 }
 static uint32_t ubo_word(int a, int b, int c) { abort(); }
-static void cbuf_desc(int a, const vkshader_t *s, const dmsv_bind *b, VkDescriptorBufferInfo *d) { abort(); }
+static int cbuf_desc(int a, const vkshader_t *s, const dmsv_bind *b, VkDescriptorBufferInfo *d) { abort(); }
 void vk_shader_c1(vkshader_t *s, VkBuffer *b, VkDeviceSize *o, VkDeviceSize *n) { abort(); }
 VkBuffer vk_support_buffer(void) { abort(); }
 VkBuffer vk_zero_buffer(void) { abort(); }
