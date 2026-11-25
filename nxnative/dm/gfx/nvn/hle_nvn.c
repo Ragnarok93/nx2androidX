@@ -16,6 +16,9 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_dynres_policy.h"
+#ifdef __ANDROID__
+#include "gfx_vk_resolution_adaptive.h"
+#endif
 #include "gfx_vk_resolution_plan.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
@@ -1648,7 +1651,7 @@ __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac)
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup; } lf_rec;
+typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, rs_cpu_us; } lf_rec;
 static lf_rec g_lf[LFN];
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
@@ -2046,6 +2049,49 @@ static void dyn_scale_tick(uint64_t presents) {
             state.scale, state.last_p90_us / 1000.0, 840.0 / target, target);
     }
 }
+#ifdef __ANDROID__
+// Present producer only. Never use generated presents or create new queries.
+static int rs_adaptive_on(void) {
+    static int on=-1;
+    if (on<0) { const char *a=getenv("DM_VK_RESOLUTION_ADAPTIVE"), *r=getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
+        on=a && atoi(a)!=0 && r && atoi(r)!=0; }
+    return on;
+}
+static unsigned rs_adaptive_env(const char *key,unsigned fallback) {
+    const char *v=getenv(key); if (!v || !*v) return fallback;
+    char *end=NULL; long p=strtol(v,&end,10);
+    return end && !*end && p>=50 && p<=100 && nx_rs_scale_step((unsigned)p)?(unsigned)p:fallback;
+}
+static void rs_adaptive_tick(uint64_t frame,double gpu,const lf_rec *r) {
+    static nx_rs_adaptive policy;
+    static int configured, last_fps;
+    static unsigned min,max;
+    // Do not compound with a known game-side internal resolution hook.
+    if (dm_render_scale_supported()) return;
+    int fps=dm_graphics_target_fps();
+    if (!fps) fps=nvn_game_fps();
+    extern int vk_rs_set_scale_request(unsigned);
+    if (!configured) {
+        min=rs_adaptive_env("DM_VK_RESOLUTION_ADAPTIVE_MIN",50);
+        max=rs_adaptive_env("DM_VK_RESOLUTION_ADAPTIVE_MAX",100);
+        if (min>max) { min=50; max=100; }
+    }
+    if (!configured || last_fps!=fps) {
+        if (!vk_rs_set_scale_request(max)) return;
+        nx_rs_adaptive_reset(&policy,min,max,(unsigned)fps,frame);
+        configured=1; last_fps=fps;
+        return;
+    }
+    unsigned gpu_us=gpu>0 && gpu<=500? (unsigned)(gpu*1000+0.5):0;
+    unsigned cpu=r->f==frame-8?r->rs_cpu_us:0;
+    unsigned old=policy.scale;
+    if (nx_rs_adaptive_sample(&policy,frame-8,gpu_us,cpu)) {
+        if (!vk_rs_set_scale_request(policy.scale)) { policy.scale=old; return; }
+        nx_rs_adaptive_requested(&policy,frame);
+        LOG("[resolution] adaptive target %u%% (source GPU %.2f ms, conservative CPU %.2f ms, cap %d); not effective scale",policy.scale,gpu,cpu/1000.0,fps);
+    }
+}
+#endif
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++; SEQ("present %d", idx);
     dm_fps_lock_tick();
@@ -2141,6 +2187,19 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         {   // long-frame log: this frame's items are first recorded into the ring; whether to print is decided 8 frames later, once the GPU time has arrived (see below)
             static uint64_t plns, ppns, pup, prup, pub; uint64_t lns, pns, up, rup, ub; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes();
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
+            #ifdef __ANDROID__
+            if (rs_adaptive_on()) {
+                // Same source frame identity as the delayed GPU query.
+                // Treat replay/submit wall time as a conservative floor;
+                // missing or inconsistent pacing accounting is unknown.
+                double cpu=wk-(g_acq_wait_ns+g_pq_wait_ns)/1e6;
+                r->rs_cpu_us=0;
+                if (cpu>0 && cpu<=500 && nv>=0 && nv<=500) {
+                    if (nv>cpu) cpu=nv;
+                    r->rs_cpu_us=(unsigned)(cpu*1000+0.5);
+                }
+            }
+#endif
             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
             plns = lns; ppns = pns; pup = up; prup = rup; pub = ub;
         }
@@ -2151,7 +2210,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     } else atomic_store(&g_nvn_ns, 0);
     g_acq_wait_ns = g_pq_wait_ns = 0;
     if (f >= 8) { double g = mtl_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_hr[g_hn++ % HRN] = g; }   // GPU time is taken 8 frames late (already completed)
-        { lf_rec *r = &g_lf[(f - 8) % LFN];   // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions
+        { lf_rec *r = &g_lf[(f - 8) % LFN];
+#ifdef __ANDROID__
+          if (rs_adaptive_on()) rs_adaptive_tick(f,g,r);
+#endif
+          // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions
           static int on = -1; if (on < 0) { const char *e = getenv("DM_LONGFRAME"); on = !(e && !strcmp(e, "0")); }
           // "Long" is relative to recent conditions: when running steadily at 30 fps (menus / windowless host) or under sustained overload, every frame is > 20 ms; those are not long frames and must not flood the log - a frame has to be 40% above the sliding mean of the last 16 frames to count
           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;

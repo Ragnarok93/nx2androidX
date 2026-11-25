@@ -290,6 +290,9 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
             char *end=NULL; long p=strtol(target,&end,10);
             if (end && !*end && p>=50 && p<=100) __atomic_store_n(&g_rs_frame_request,(unsigned)p,__ATOMIC_RELEASE);
         }
+        const char *adaptive=getenv("DM_VK_RESOLUTION_ADAPTIVE");
+        if (g_rs_replay && adaptive && atoi(adaptive))
+            __atomic_store_n(&g_rs_frame_request,100u,__ATOMIC_RELEASE);
         const char *compute_probe=getenv("DM_VK_RESOLUTION_COMPUTE_PROBE");
         if (compute_probe && atoi(compute_probe)) resolution_probe_compute();
         state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start();
