@@ -83,6 +83,7 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,in
     (void)g;*sampled=s->tex[1][0]==7;return !s->rast_discard && (!scaled || !*sampled);
 }
 """
+        code+=part("enum { RS_SCOPE_PROGRAM_MAX=", "typedef struct { const uint8_t *record;")
         code+=part("static uint64_t rs_scope_addr(","static int rs_scope_raw(")
         code+=part("static int rs_scope_full_scissor(","static void rs_scope_try_begin(")
         code+=r"""
