@@ -1284,6 +1284,7 @@ static void bc_draw_back(void) {
         vkCmdCopyBufferToImage(cb, sb, p->img, VK_IMAGE_LAYOUT_GENERAL, 1, &rp); vk_img_barrier_all(cb);
         p->gpu_w = 1; }
 }
+int vk_rs_pass_idle(void) { return S.pass_open==0; }
 void vk_end_pass(void) {
     if (g_x_listpasses && S.pass_open == 1) { Dl_info di; void *ra = __builtin_return_address(0); uintptr_t base = dladdr((void *)vk_end_pass, &di) ? (uintptr_t)di.dli_fbase : 0; VKLOG("    ended from %#llx (%llu draws)", (unsigned long long)((uintptr_t)ra - base), (unsigned long long)g_pass_draws); list_reads("it"); }   // (DM_VK_TRACE_PASS=-2: who ends each pass)
     if (S.pass_open == 1 && g_pass_draws >= 8 && P_ri.pDepthAttachment &&

@@ -144,7 +144,8 @@ typedef struct vk_rs_variant {
     VkImage image;
     VkImageView view;
     VkDeviceMemory memory;
-    VkDeviceSize bytes;
+    VkDeviceSize bytes, native_bytes;
+    uint8_t restore_budget, native_only;
     VkImageLayout layout;
     VkFormat format;
     VkImageAspectFlags aspect;
@@ -165,6 +166,8 @@ void vk_rs_group_retire(vk_rs_images *group);
 // future consumers using physical extents. Currently called ONLY by probe
 // on detached owners. Native-only consumers are not yet routed.
 int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
+int vk_rs_pass_idle(void);
+int vk_rs_require_native(vkimg_t *im); // explicit native-only boundary, outside a pass
 void vk_rs_variant_retire(vk_rs_variant *v);
 void vk_rs_variant_destroy(vk_rs_variant *v); // only after fence or before any recording
 // Opt-in lifetime graph. No graph storage is allocated on the native path.

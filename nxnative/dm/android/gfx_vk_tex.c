@@ -9,6 +9,7 @@
 #include "gfx_vk_d24_copy.h"
 #include "gfx_vk_resolution_budget.h"
 #include "ownership_exchange.h"
+#include "gfx_vk_resolution_restore.h"
 #include "nvn_tex.h"
 #include "../gfx/tex/nvn_deswizzle.h"
 #include "nvn_hmap.h"
@@ -310,9 +311,10 @@ static vkimg_t *img_new(const tex_t *t, const vkfmt_t *f) {
 }
 // P1: allocate isolated physical variants. Dedicated allocations make the
 // budget equal to actual Vulkan allocation sizes, including deferred frees.
-static nx_rs_budget g_rs_budget;
+static nx_rs_budget g_rs_budget, g_rs_restore_budget;
 static uint64_t g_rs_generation;
 #define NX_RS_BUDGET_BYTES (64ull * 1024 * 1024)
+#define NX_RS_RESTORE_BUDGET_BYTES (64ull * 1024 * 1024)
 vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t h) {
     if (!logical || !w || !h || !vk_sub_open() || logical->novl || logical->packaged ||
         logical->lin_mem || logical->target != NVN_TEXTURE_TARGET_2D ||
@@ -351,7 +353,20 @@ vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(V.dev, v->image, &req);
     uint32_t type = vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-    if (type == UINT32_MAX || !nx_rs_reserve(&g_rs_budget, req.size, NX_RS_BUDGET_BYTES)) goto fail;
+    if (type == UINT32_MAX) goto fail;
+    if (logical->rs_backing) v->native_bytes=logical->rs_backing->native_bytes;
+    else if (logical->img && !logical->sub) {
+        VkMemoryRequirements native_req;
+        vkGetImageMemoryRequirements(V.dev,logical->img,&native_req);
+        v->native_bytes=native_req.size;
+    }
+    int restore=logical->rs_backing && w==logical->w && h==logical->h &&
+        (logical->rs_backing->physical_w!=logical->w || logical->rs_backing->physical_h!=logical->h);
+    if (restore) {
+        if (!nx_rs_restore_admit(v->native_bytes,req.size) ||
+            !nx_rs_reserve(&g_rs_restore_budget,req.size,NX_RS_RESTORE_BUDGET_BYTES)) goto fail;
+        v->restore_budget=1;
+    } else if (!nx_rs_reserve(&g_rs_budget, req.size, NX_RS_BUDGET_BYTES)) goto fail;
     v->bytes = req.size;
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, type};
     if (vkAllocateMemory(V.dev, &ai, NULL, &v->memory) != VK_SUCCESS) { v->memory = VK_NULL_HANDLE; goto fail; }
@@ -371,7 +386,10 @@ void vk_rs_variant_destroy(vk_rs_variant *v) {
     if (v->view) vkDestroyImageView(V.dev, v->view, NULL);
     if (v->image) vkDestroyImage(V.dev, v->image, NULL);
     if (v->memory) vkFreeMemory(V.dev, v->memory, NULL);
-    if (v->bytes) nx_rs_release(&g_rs_budget, v->bytes);
+    if (v->bytes) {
+        if (v->restore_budget) nx_rs_release(&g_rs_restore_budget,v->bytes);
+        else nx_rs_release(&g_rs_budget, v->bytes);
+    }
     free(v);
 }
 void vk_rs_variant_clear(VkCommandBuffer cb, vk_rs_variant *v) {
@@ -485,6 +503,7 @@ int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, ui
             im->novl || im->packaged || im->lin_mem || im->bc_draw || im->bc_of ||
             im->target!=NVN_TEXTURE_TARGET_2D || im->levels!=1 || im->layers!=1 || im->samples!=1 || im->d!=1) return 0;
         vk_rs_variant *old=im->rs_backing;
+        if (old && old->native_only && (w!=im->w || h!=im->h)) return 0;
         if (old && (old->image!=im->img || old->memory!=im->mem || old->logical_w!=im->w ||
                     old->logical_h!=im->h || old->format!=im->fmt || old->aspect!=im->aspect ||
                     old->layout!=im->layout)) return 0;
@@ -522,6 +541,20 @@ int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, ui
 rollback:
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) vk_rs_variant_destroy(staged.slot[i]);
     return 0;
+}
+static int rs_is_scaled(const vkimg_t *im) {
+    return im && im->rs_backing &&
+        (im->rs_backing->physical_w!=im->w || im->rs_backing->physical_h!=im->h);
+}
+int vk_rs_require_native(vkimg_t *im) {
+    if (!rs_is_scaled(im)) return 1;
+    // No render-pass split from inside view collection or a pending clear.
+    if (!vk_sub_open() || !vk_rs_pass_idle()) return 0;
+    vkimg_t *owners[VK_RS_GROUP_SIZE]={im};
+    if (!vk_rs_cache_exchange(owners,im->w,im->h)) return 0;
+    if (rs_is_scaled(im) || !im->rs_backing) return 0;
+    im->rs_backing->native_only=1;
+    return 1;
 }
 void vk_tex_prepare(VkCommandBuffer cb, vkimg_t *im) {
     if (im->layout == VK_IMAGE_LAYOUT_GENERAL) return;
@@ -777,11 +810,22 @@ static vkimg_t *vk_tex_get(const tex_t *t, int sampled) { extern int g_prof_on; 
 vkimg_t *vk_tex(const tex_t *t) {
     vkimg_t *im=vk_tex_get(t,0);
     if (vk_rs_tracking()) vk_rs_note(im,NX_RO_RAW);
+    if (rs_is_scaled(im) && !vk_rs_require_native(im)) die("[vk] resolution: native-only texture access could not restore backing");
     return im;
 }
 vkimg_t *vk_tex_for_present(const tex_t *t) {
     vkimg_t *im=vk_tex_get(t,0);
     if (vk_rs_tracking()) vk_rs_note(im,NX_RO_PRESENT);
+    // Presentation currently expects logical-sized images and may queue a
+    // pointer for asynchronous use. Restore before handing it to that queue.
+    if (rs_is_scaled(im)) {
+        void mtl_sub_begin(void); uint64_t mtl_sub_commit(void); int mtl_wait(uint64_t,uint64_t);
+        int own=!vk_sub_open();
+        if (own) mtl_sub_begin();
+        int ok=vk_rs_require_native(im);
+        if (own) mtl_wait(mtl_sub_commit(),~0ull);
+        if (!ok) die("[vk] resolution: native presentation backing could not be restored");
+    }
     return im;
 }
 static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
@@ -833,6 +877,11 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     int material = sampled && keyed && uncached_material_storage(t);
     int tracked_cpu_storage = im->packaged && im->pkg_mem == t->mem &&
         im->pkg_len == t->L.size && (((f->compressed || f->dec) && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) || material);
+    if (rs_is_scaled(im) && t->mem && (tracked_cpu_storage || packaged_tex(t) || nvn_ft_written(t) ||
+        (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)))) {
+        if (vk_rs_tracking()) vk_rs_note(im,NX_RO_HOST);
+        if (!vk_rs_require_native(im)) die("[vk] resolution: host upload requires native backing");
+    }
     if (t->mem && lin_copy(im, t, f)) {}
     else if (t->mem && (tracked_cpu_storage || packaged_tex(t) ||
                         (first && (material || nvn_ft_written(t) || cpu_content_tex(t, f))))) {
