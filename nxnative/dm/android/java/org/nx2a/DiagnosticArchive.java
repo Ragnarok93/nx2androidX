@@ -170,6 +170,8 @@ final class DiagnosticArchive {
                     "A blank preview column means the attachment is exported as exact raw bytes.\n" +
                     "Tile status encodes offset:bytes:x:y:width:height in surface_samples.raw,\n" +
                     "indexed by offset and hash in surface_samples.tsv. Metadata-only and skipped rows give their status.\n" +
+                    "Compute-uniform rows record shader, descriptor binding (slot), NVN register (element), and effective descriptor size (guest_bytes).\n" +
+                    "ubo:offset:bytes points to the prefix copied before dispatch, up to 4096 bytes. Match sampled bindings by their dispatch ordinal.\n" +
                     "The last three prior runtime logs are retained across app launches.\n" +
                     "No game ROM, shaders, saves or user DLLs are included.\n" +
                     "Logs may contain device identifiers, filesystem paths, shader keys and GPU addresses.\n" +

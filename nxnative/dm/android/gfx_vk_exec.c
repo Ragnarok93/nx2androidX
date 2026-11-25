@@ -2138,11 +2138,11 @@ static void vk_cross(int k, uint64_t a, uint64_t n, const vkpool_t *p) {
                                                            (unsigned long long)a, (unsigned long long)n, (unsigned long long)p->hi);
 }
 // a constant buffer binding's descriptor (stage_set, set_memo_get): its pool's buffer from the alignment boundary below it, or the shadow of the deferred updates over it
-static void cbuf_desc(int st, const vkshader_t *s, const dmsv_bind *b, VkDescriptorBufferInfo *bi) {
+static int cbuf_desc(int st, const vkshader_t *s, const dmsv_bind *b, VkDescriptorBufferInfo *bi) {
     const p_bind_buf *u = b->reg >= 0 && b->reg < 16 ? &S.ubo[st][b->reg] : NULL;
     uint64_t n = u && u->size ? (u->size > 65536 ? 65536 : u->size) : 65536; VkBuffer buf; VkDeviceSize off;
     vkpool_t *p = g_var_now != 9 && u && u->addr ? vk_pool_of(u->addr, 1) : NULL;
-    if (!p) { *bi = (VkDescriptorBufferInfo){vk_zero_buffer(), 0, 65536}; return; }
+    if (!p) { *bi = (VkDescriptorBufferInfo){vk_zero_buffer(), 0, 65536}; return 0; }
     buf = p->buf; off = u->addr - p->lo;
     if (off + n > p->hi - p->lo) {
         if (p->hi < p->end && u->addr + n <= p->end) {   // into the pool's next chunk (vk_cross): the whole range from CPU memory, one copy per submission
@@ -2151,14 +2151,15 @@ static void cbuf_desc(int st, const vkshader_t *s, const dmsv_bind *b, VkDescrip
                 uint8_t *d = vk_scratch(n, V.props.limits.minUniformBufferOffsetAlignment, &buf, &off); vk_ubd_read(u->addr, n, d); vk_cross(0, u->addr, n, p);
                 cc[k].a = u->addr; cc[k].n = n; cc[k].ep = g_set_epoch; cc[k].gen = g_ubd_gen; cc[k].b = buf; cc[k].o = off;
             } else { buf = cc[k].b; off = cc[k].o; }
-            ubo_log(s, st, b->reg, u->addr, n); *bi = (VkDescriptorBufferInfo){buf, off, n}; return;
+            ubo_log(s, st, b->reg, u->addr, n); *bi = (VkDescriptorBufferInfo){buf, off, n}; return 1;
         }
         n = p->hi - p->lo - off;
     }
     ubo_log(s, st, b->reg, u->addr, n);
-    if (vk_ubd_shadow(u->addr, n, &buf, &off)) { *bi = (VkDescriptorBufferInfo){buf, off, n}; return; }   // deferred updates in it: their shadow
+    if (vk_ubd_shadow(u->addr, n, &buf, &off)) { *bi = (VkDescriptorBufferInfo){buf, off, n}; return 1; }   // deferred updates in it: their shadow
     VkDeviceSize al = V.props.limits.minUniformBufferOffsetAlignment; if (off % al) VKRED_ONCE(40, "uniform buffer at an offset not aligned to %llu", (unsigned long long)al);
     *bi = (VkDescriptorBufferInfo){buf, p->boff + off - off % al, n + off % al};   // (off is from the pool's start, its buffer starts boff before it)
+    return 1;
 }
 // The set a stage's last draw got, and what it was built from. Between two draws most stages change no texture, sampler, image or storage buffer, only
 // the offsets of their constant buffers, which go to the bind (dynamic uniform buffers). Then nothing is collected or hashed: the constant buffers alone are
@@ -2221,7 +2222,13 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         switch (b->kind) {
         case RK_SUPPORT: bi[nw] = (VkDescriptorBufferInfo){vk_support_buffer(), 0, 65536}; break;
         case RK_C1: vk_shader_c1(s, &buf, &off, &len); bi[nw] = (VkDescriptorBufferInfo){buf, off, len}; break;
-        case RK_CBUF: cbuf_desc(st, s, b, &bi[nw]); if (ncb < MEMO_CB) { mci[ncb] = (uint8_t)i; mcd[ncb++] = bi[nw]; } break;
+        case RK_CBUF: {
+            int bound = cbuf_desc(st, s, b, &bi[nw]);
+            if (bound && st == 5 && g_sc.usage)
+                surface_uniform_queue(s->key, b->binding, b->reg, bi[nw]);
+            if (ncb < MEMO_CB) { mci[ncb] = (uint8_t)i; mcd[ncb++] = bi[nw]; }
+            break;
+        }
         case RK_DRV: {
             if (indirect_c0 && st == 5 && b->reg == 0) {
                 if (!indirect_c0->buffer) {   // several bindings of c0 in one shader share this dispatch's segment
@@ -3364,7 +3371,7 @@ static void dispatch(const p_dispatch *d) {
     // tiles it wrote only 0-61. Indirect counts are copied on the GPU into a fresh c0 segment below
     g_dispatch[0] = (uint32_t)d->x; g_dispatch[1] = (uint32_t)d->y; g_dispatch[2] = (uint32_t)d->z;
     VkDescriptorBufferInfo indirect_c0 = {0};
-    if (g_pd_state == 1 && g_pd_full) g_sc.storage_count = 0;
+    if (g_sc.usage) g_sc.storage_count = g_sc.uniform_count = 0;
     g_compute_image_count = 0;
     uint32_t dofs[96]; VkDescriptorSet set = stage_set(5, cs, dofs, d->ind ? &indirect_c0 : NULL);
     uint64_t ck[4] = {cs->key, g_num_um, g_num_im, g_num_r32};
@@ -3407,6 +3414,7 @@ static void dispatch(const p_dispatch *d) {
         g_compute_failed++;
         return;
     }
+    if (g_sc.usage) surface_compute_uniforms(cb);
     g_vkst.dispatches++;
     vk_img_barrier_all(cb);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
