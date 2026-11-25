@@ -26,15 +26,21 @@ static void rs_active_drop(vkimg_t *im) { assert(g_rs_live->owner[0]==(uintptr_t
 MAIN = r"""
 int main(void) {
     vk_rs_variant old={0}; vkimg_t im={800,600,&old}, other={800,600,&old};
-    assert(!rs_discard_native_locked(&im) && !allocations);
+    assert(!rs_discard_native_locked(&im,1) && !allocations);
     active.n=1; active.owner[0]=(uintptr_t)&im;
-    assert(!rs_discard_native_locked(&other) && !allocations);
+    assert(!rs_discard_native_locked(&other,1) && !allocations);
     active.n=2; active.owner[1]=(uintptr_t)&im;
-    assert(!rs_discard_native_locked(&im) && !allocations);
+    assert(!rs_discard_native_locked(&im,1) && !allocations);
     active.n=1; fail_alloc=1;
-    assert(!rs_discard_native_locked(&im) && allocations==1 && !transitions && !publishes && !drops && im.rs_backing==&old && active.n==1);
+    assert(!rs_discard_native_locked(&im,1) && allocations==1 && !transitions && !publishes && !drops && im.rs_backing==&old && active.n==1);
     fail_alloc=0;
-    assert(rs_discard_native_locked(&im) && allocations==2 && transitions==1 && publishes==1 && drops==1 && active.n==0 && im.rs_backing!=&old);
+    assert(rs_discard_native_locked(&im,1) && allocations==2 && transitions==1 && publishes==1 && drops==1 && active.n==0 && im.rs_backing!=&old);
+    free(im.rs_backing);
+    im.rs_backing=&old; active.n=1; active.owner[0]=(uintptr_t)&im;
+    fail_alloc=1;
+    assert(!rs_discard_native_locked(&im,0) && im.rs_backing==&old && active.n==1 && transitions==1 && publishes==1);
+    fail_alloc=0;
+    assert(rs_discard_native_locked(&im,0) && transitions==1 && publishes==2 && drops==2 && active.n==0);
     free(im.rs_backing);
 }
 """

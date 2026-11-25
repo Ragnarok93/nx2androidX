@@ -671,7 +671,7 @@ static void rs_prepare_overwrite(vk_rs_variant *v) {
 }
 // No blit, source layout dependency, or zero-fill. Allocation failure must
 // leave the old cache owner and active index untouched.
-static int rs_discard_native_locked(vkimg_t *im) {
+static int rs_discard_native_locked(vkimg_t *im,int overwrite) {
     if (!rs_is_scaled(im) || !g_rs_live || g_rs_live->n>NX_RS_ACTIVE_MAX) return 0;
     unsigned matches=0;
     for (unsigned i=0;i<g_rs_live->n;i++) matches+=g_rs_live->owner[i]==(uintptr_t)im;
@@ -679,7 +679,9 @@ static int rs_discard_native_locked(vkimg_t *im) {
     vk_rs_variant *next=vk_rs_variant_create(im,im->w,im->h);
     if (!next) return 0;
     next->native_only=1;
-    rs_prepare_overwrite(next);
+    // A clear follows immediately only for the overwrite case. Explicit
+    // discard leaves the new image undefined until normal preparation.
+    if (overwrite) rs_prepare_overwrite(next);
     rs_publish_backing(im,next);
     rs_active_drop(im);
     return 1;
@@ -1129,11 +1131,33 @@ vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c) {
         im->pool!=k.pool || im->w!=(uint32_t)t->d.width || im->h!=(uint32_t)t->d.height ||
         im->nvn_format!=t->d.format || im->aspect!=VK_IMAGE_ASPECT_COLOR_BIT ||
         im->novl || im->packaged || im->lin_mem || im->family_closed || im->full ||
-        im->rs_backing->image!=im->img || !rs_discard_native_locked(im)) im=NULL;
+        im->rs_backing->image!=im->img || !rs_discard_native_locked(im,1)) im=NULL;
     if (im) { extern uint64_t g_tex_frame; im->used=g_tex_frame; }
     pthread_mutex_unlock(&g_img_mu);
     if (im && vk_rs_tracking()) vk_rs_note(im,NX_RO_RAW);
     return im;
+}
+int vk_rs_discard_target(const tex_t *t) {
+    if (!t || !t->serial || t->magic!=MAGIC('T','E','X',0) ||
+        !vk_sub_open() || !vk_rs_pass_idle() || !vk_rs_cache_has_scaled() ||
+        t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1) return 0;
+    const vkfmt_t *fmt=vk_fmt(t->d.format);
+    if (!fmt || fmt->compressed || fmt->is_int) return 0;
+    nx_rs_draw_extent extent;
+    if (vk_rs_preflight_view(t,NULL,1,&extent)!=1) return 0;
+    uint64_t guest=rs_guest_address(t);
+    akey k={0}; k.pool=(uint64_t)(uintptr_t)t->pool; k.off=t->off; k.d=t->d;
+    k.d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (fmt->depth || fmt->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
+    pthread_mutex_lock(&g_img_mu);
+    vkimg_t *im=nvn_hm_get(&g_by_key,&k);
+    int ok=guest && rs_is_scaled(im) && im->rs_guest_addr==guest &&
+        im->off==t->off && im->size>0 && (uint64_t)im->size==(uint64_t)t->L.size &&
+        im->pool==k.pool && im->w==(uint32_t)t->d.width && im->h==(uint32_t)t->d.height &&
+        im->nvn_format==t->d.format && !im->novl && !im->packaged && !im->lin_mem &&
+        !im->family_closed && !im->full && im->rs_backing->image==im->img &&
+        rs_discard_native_locked(im,0);
+    pthread_mutex_unlock(&g_img_mu);
+    return ok;
 }
 static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     if (!t || !t->serial || t->magic != MAGIC('T', 'E', 'X', 0)) return NULL;

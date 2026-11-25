@@ -173,6 +173,7 @@ int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, ui
 int vk_rs_cache_exchange_live(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
 // Immediately followed by the same complete clear on the replay thread.
 vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c);
+int vk_rs_discard_target(const tex_t *t); // exact full unviewed target, outside a pass
 int vk_rs_pass_idle(void);
 int vk_rs_require_native(vkimg_t *im); // explicit native-only boundary, outside a pass
 int vk_rs_cache_has_scaled(void);

@@ -2739,9 +2739,29 @@ NVN(nvnCommandBufferSetSampleMask, void, NVNcommandBuffer *c, int m) { (void)c; 
 NVN(nvnCommandBufferSetConservativeRasterEnable, void, NVNcommandBuffer *c, uint32_t en) { (void)c; if (en & 0xff) ONCE_LOG("SetConservativeRasterEnable on: ignored by the host for now"); }
 NVN(nvnCommandBufferSetTiledCacheAction, void, NVNcommandBuffer *c, NVNtiledCacheAction a) { (void)c; (void)a; }        // Tegra tiled cache hint, no Metal equivalent
 // A bound target's contents may be discarded: they are undefined afterwards, so keeping them is correct (The Great Ace Attorney Chronicles discards colour target 0)
-uint64_t g_nvn_discards[2];   // calls of DiscardColor / DiscardDepthStencil (counted for the Android backend's log; the replay ignores them)
-NVN(nvnCommandBufferDiscardColor, void, NVNcommandBuffer *c, int i) { (void)c; (void)i; g_nvn_discards[0]++; }
-NVN(nvnCommandBufferDiscardDepthStencil, void, NVNcommandBuffer *c) { (void)c; g_nvn_discards[1]++; }
+uint64_t g_nvn_discards[2];   // calls of DiscardColor / DiscardDepthStencil (counted for Android logs; experimental replay records full-target discards)
+#ifdef __ANDROID__
+// Recording and replay use the same process-start experimental gate. Do not
+// allocate command records on the existing native path.
+static int rs_record_discards(void) {
+    static atomic_int cached=ATOMIC_VAR_INIT(-1);
+    int on=atomic_load_explicit(&cached,memory_order_relaxed);
+    if (on<0) { const char *e=getenv("DM_VK_RESOLUTION_REPLAY_CHECK"); on=e && atoi(e)!=0; atomic_store_explicit(&cached,on,memory_order_relaxed); }
+    return on;
+}
+#endif
+NVN(nvnCommandBufferDiscardColor, void, NVNcommandBuffer *c, int i) {
+    (void)c; (void)i; g_nvn_discards[0]++;
+#ifdef __ANDROID__
+    if (i>=0 && i<8 && rs_record_discards()) REC(c, OP_RS_DISCARD, p_rs_discard)->index=i;
+#endif
+}
+NVN(nvnCommandBufferDiscardDepthStencil, void, NVNcommandBuffer *c) {
+    (void)c; g_nvn_discards[1]++;
+#ifdef __ANDROID__
+    if (rs_record_discards()) REC(c, OP_RS_DISCARD, p_rs_discard)->index=-1;
+#endif
+}
 NVN(nvnCommandBufferSetTiledCacheTileSize, void, NVNcommandBuffer *c, int w, int h) { (void)c; (void)w; (void)h; }
 NVN_NOPROTO(nvnCommandBufferSetColorReductionEnable, void, NVNcommandBuffer *c, uint32_t en) { (void)c; (void)en; }   // color compression hints
 NVN_NOPROTO(nvnCommandBufferSetColorReductionThresholds, void, NVNcommandBuffer *c, int cls, const int *t) { (void)c; (void)cls; (void)t; }

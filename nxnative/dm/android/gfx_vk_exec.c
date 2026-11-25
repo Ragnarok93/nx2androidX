@@ -4330,6 +4330,20 @@ static void exec_ops(const uint8_t *p) {
             vk_sub_update(d, a + 16, n);
             if (g_x_tracepass == -2) VKLOG("--- uniform update %#llx, %llu bytes, after pass %d", (unsigned long long)d, (unsigned long long)n, g_sub_pass - 1); break; }
         case OP_SET_RT: set_rt((const p_set_rt *)a); break;
+        case OP_RS_DISCARD: {
+            if (g_rc_skip || !g_rs_replay || !vk_rs_cache_has_scaled()) break;
+            int i=((const p_rs_discard *)a)->index;
+            const tex_t *t=NULL;
+            if (i==-1 && S.rt_has_dep && !S.rt_has_dview) t=&S.rt_dep;
+            else if (i>=0 && i<8 && i<S.rt_n && S.rt_has_col[i] && !S.rt_has_cview[i]) t=&S.rt_col[i];
+            if (t) {
+                nx_rs_draw_extent ext;
+                if (vk_rs_preflight_view(t,NULL,1,&ext)==1) {
+                    vk_end_pass();
+                    (void)vk_rs_discard_target(t);
+                }
+            }
+            break; }
         case OP_CLEAR_COLOR: if (!g_rc_skip) clear_color((const p_clear_color *)a); break;
         case OP_CLEAR_DS: if (!g_rc_skip) clear_ds((const p_clear_ds *)a); break;
         case OP_VIEWPORTS: { const p_viewports *v = (const p_viewports *)a; for (int i = 0; i < v->n && v->first + i < 16; i++) memcpy(S.vp[v->first + i], v->v[i], 16); break; }
