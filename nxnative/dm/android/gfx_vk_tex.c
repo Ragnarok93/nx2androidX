@@ -1264,7 +1264,7 @@ static int rs_stage_cache_capacity(const nvn_hmap *old,unsigned extra,nvn_hmap *
 // No gameplay caller is authorized yet. In particular a clean observed graph
 // or CPU_NO_ACCESS alone is not a certificate of future GPU accesses.
 int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h) {
-    if (!targets || !vk_sub_open() || !vk_rs_pass_idle() || !vk_rs_tracking() || !w || !h) return 0;
+    if (!targets || !vk_sub_open() || !vk_rs_pass_idle() || !vk_rs_provenance() || !w || !h) return 0;
     akey keys[VK_RS_GROUP_SIZE]={0};
     vkimg_t *fresh[VK_RS_GROUP_SIZE]={0},*reuse[VK_RS_GROUP_SIZE]={0};
     uint64_t addr[VK_RS_GROUP_SIZE]={0};
@@ -1427,7 +1427,7 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
         im = img_new(t, vk_fmt(k.d.format)); if (!im) { pthread_mutex_unlock(&g_img_mu); return NULL; }
         if (k.family) im->family_formats = texture_family_bit(t->d.format);
         im->pool = k.pool; im->off = t->off; im->size = (int64_t)t->L.size; im->flags = t->d.flags; g_img_n++; g_img_bytes += t->L.size;
-        if (vk_rs_tracking()) im->rs_guest_addr=rs_guest_address(t);
+        if (vk_rs_provenance()) im->rs_guest_addr=rs_guest_address(t);
         if (keyed) { alias_link(im); nvn_hm_put(&g_by_key, &k, im); } else nvn_hm_put(&g_by_serial, &t->serial, im);
     }
     im->used = g_tex_frame;

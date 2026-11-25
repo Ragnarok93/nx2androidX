@@ -132,3 +132,15 @@ int main(void) {
             inc=ROOT/"nxnative/dm/gfx/nvn"
             subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-Wno-misleading-indentation","-I",str(inc),"-I",str(inc/"include"),"-I",str(ROOT/"nxnative/dm/gfx/tex"),str(c),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)
+
+    def test_scope_does_not_require_diagnostic_graph(self):
+        base=ROOT/"nxnative/dm/android"
+        replay=(base/"gfx_vk_exec.c").read_text()
+        header=(base/"gfx_vk.h").read_text()
+        tex=(base/"gfx_vk_tex.c").read_text()
+        self.assertIn("g_rs_scopes=g_rs_replay && scopes",replay)
+        self.assertIn("g_rs_scopes?VK_RS_TRACK_PROVENANCE:0",replay)
+        self.assertIn("&VK_RS_TRACK_GRAPH",header)
+        self.assertIn("if (vk_rs_provenance()) im->rs_guest_addr",tex)
+        self.assertIn("!vk_rs_provenance() || !w || !h",tex)
+        self.assertIn("g_rs_frame.target<100",replay)

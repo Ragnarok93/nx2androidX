@@ -281,21 +281,29 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         inited = 1;
         const char *audit = getenv("DM_VK_RESOLUTION_AUDIT"), *probe = getenv("DM_VK_RESOLUTION_PROBE");
         g_rs_audit = audit && atoi(audit) != 0;
-        __atomic_store_n(&g_vk_rs_tracking,g_rs_audit,__ATOMIC_RELAXED);
         g_rs_probe = probe && atoi(probe) != 0;
         g_rs_observe = g_rs_audit || g_rs_probe;
         const char *replay = getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
         g_rs_replay = replay && atoi(replay) != 0;
         const char *scopes=getenv("DM_VK_RESOLUTION_LIFETIME_SCOPES");
-        g_rs_scopes=g_rs_replay && g_rs_audit && scopes && atoi(scopes)!=0;
+        g_rs_scopes=g_rs_replay && scopes && atoi(scopes)!=0;
         const char *target=getenv("DM_VK_RESOLUTION_TARGET_PERCENT");
         if (g_rs_replay && target && *target) {
             char *end=NULL; long p=strtol(target,&end,10);
             if (end && !*end && p>=50 && p<=100) __atomic_store_n(&g_rs_frame_request,(unsigned)p,__ATOMIC_RELEASE);
         }
         const char *adaptive=getenv("DM_VK_RESOLUTION_ADAPTIVE");
-        if (g_rs_replay && adaptive && atoi(adaptive))
+        int adaptive_on=g_rs_replay && adaptive && atoi(adaptive);
+        if (adaptive_on)
             __atomic_store_n(&g_rs_frame_request,100u,__ATOMIC_RELEASE);
+        // Scope authorization is independent of the historical graph.
+        // Capture addresses at cache insertion when a subnative target is
+        // possible, including the native warmup of adaptive mode.
+        g_rs_scopes=g_rs_scopes && (adaptive_on ||
+            (__atomic_load_n(&g_rs_frame_request,__ATOMIC_ACQUIRE)>0 &&
+             __atomic_load_n(&g_rs_frame_request,__ATOMIC_RELAXED)<100));
+        __atomic_store_n(&g_vk_rs_tracking,
+            (g_rs_audit?VK_RS_TRACK_GRAPH:0)|(g_rs_scopes?VK_RS_TRACK_PROVENANCE:0),__ATOMIC_RELAXED);
         const char *compute_probe=getenv("DM_VK_RESOLUTION_COMPUTE_PROBE");
         if (compute_probe && atoi(compute_probe)) resolution_probe_compute();
         state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start();

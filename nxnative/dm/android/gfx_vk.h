@@ -195,8 +195,10 @@ int vk_rs_cache_restore_all(void); // replay thread, closed pass; diagnostic fai
 void vk_rs_variant_retire(vk_rs_variant *v);
 void vk_rs_variant_destroy(vk_rs_variant *v); // only after fence or before any recording
 // Opt-in lifetime graph. No graph storage is allocated on the native path.
+enum { VK_RS_TRACK_GRAPH=1, VK_RS_TRACK_PROVENANCE=2 };
 extern int g_vk_rs_tracking;
-static inline int vk_rs_tracking(void) { return __atomic_load_n(&g_vk_rs_tracking, __ATOMIC_RELAXED); }
+static inline int vk_rs_tracking(void) { return (__atomic_load_n(&g_vk_rs_tracking, __ATOMIC_RELAXED)&VK_RS_TRACK_GRAPH)!=0; }
+static inline int vk_rs_provenance(void) { return __atomic_load_n(&g_vk_rs_tracking, __ATOMIC_RELAXED)!=0; }
 void vk_rs_note(vkimg_t *im, uint32_t flags);
 void vk_rs_note_group(vkimg_t *const *images, unsigned count);
 vkimg_t *vk_tex_for_present(const tex_t *t);

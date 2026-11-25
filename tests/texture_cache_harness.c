@@ -61,6 +61,7 @@ static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uin
 static void nvn_dirty_protect(const void *mem,size_t size) {(void)mem;(void)size;}
 /* This native-only fixture has no Vulkan scaling backend. Unexpected use fails. */
 static int vk_rs_tracking(void) { return 0; }
+static int vk_rs_provenance(void) { return 0; }
 static void ro_drop(vkimg_t *im) { (void)im; abort(); }
 static void vk_rs_variant_retire(struct vk_rs_variant *v) { (void)v; abort(); }
 static int vk_rs_pass_idle(void) { abort(); }
