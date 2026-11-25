@@ -214,6 +214,12 @@ void vk_shaders_open(const char *path);
 VkBuffer vk_support_buffer(void);
 // Optional trailer is absent in old bundles. Lookup is used only by scaled path.
 int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned *slot, unsigned *flags);
+typedef struct { unsigned binding; float scale; } vk_rs_sample_scale;
+// Only for the scaled replay path. Identity returns the original immutable
+// support buffer. Nonidentity data is submission-owned, not mutable globally.
+int vk_shader_resolution_support(const vkshader_t *s, float target_scale,
+                                 const vk_rs_sample_scale *samples, unsigned count,
+                                 VkDescriptorBufferInfo *out);
 VkBuffer vk_zero_buffer(void);
 VkBuffer vk_default_attribute_buffer(void);
 

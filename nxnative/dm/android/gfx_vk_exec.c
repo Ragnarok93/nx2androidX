@@ -7,6 +7,7 @@
 #include "gfx_vk_slot.h"
 #include "gfx_vk_passdump_plan.h"
 #include "gfx_vk_resolution_plan.h"
+#include "gfx_vk_resolution_raster.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -336,6 +337,37 @@ static struct { vkimg_t *im; VkImageView v; uint32_t fmt, layers, w, h, bc_lv, b
 // Phase 0: inspect attachment groups without changing image sizes or GPU work.
 // A candidate is NOT a proven scalable pass; shader and later resource consumers
 // must also be classified before allocating any physical-size variant.
+// Opt-in private raster exercise. Never bind a guest image or change cached
+// viewport/scissor state. Clear rectangles and render area use physical extents.
+static int resolution_probe_raster(vk_rs_images *images) {
+    if (!V.has_dynrender) return 0;
+    vk_rs_variant *color = NULL, *depth = images->slot[8];
+    for (int i=0; i<8; i++) if (images->slot[i]) { color=images->slot[i]; break; }
+    if (!color || !depth || color->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+        color->layout != VK_IMAGE_LAYOUT_GENERAL || depth->layout != VK_IMAGE_LAYOUT_GENERAL ||
+        color->physical_w != depth->physical_w || color->physical_h != depth->physical_h ||
+        color->logical_w != depth->logical_w || color->logical_h != depth->logical_h) return 0;
+    nx_rs_raster r;
+    if (!nx_rs_raster_init(&r,color->logical_w,color->logical_h,color->physical_w,color->physical_h)) return 0;
+    nx_rs_raster_rect rect;
+    if (!nx_rs_clip_scissor(&r, (int32_t)(r.lw/4), (int32_t)(r.lh/4), r.lw/2, r.lh/2, 0, &rect)) return 0;
+    VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, color->view,
+        VK_IMAGE_LAYOUT_GENERAL, 0, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingAttachmentInfo da = ca; da.imageView = depth->view;
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0,0},{r.pw,r.ph}}, 1, 0, 1, &ca,
+        (depth->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? &da : NULL,
+        (depth->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? &da : NULL};
+    VkClearAttachment clears[2] = {{VK_IMAGE_ASPECT_COLOR_BIT,0,{.color={{0.25f,0.5f,0.75f,1.0f}}}},
+        {depth->aspect,0,{.depthStencil={0.375f,3}}}};
+    VkClearRect cr = {{{(int32_t)rect.x,(int32_t)rect.y},{rect.w,rect.h}},0,1};
+    VkCommandBuffer cb = vk_cmd();
+    vk_img_barrier_all(cb);
+    vkCmdBeginRendering(cb, &ri);
+    vkCmdClearAttachments(cb, 2, clears, 1, &cr);
+    vkCmdEndRendering(cb);
+    vk_img_barrier_all(cb);
+    return 1;
+}
 static void resolution_observe_pass(void) {
     static uint64_t total, eligible, blocked[8], pixels, planned_pixels;
     nx_rs_group group = {0};
@@ -373,11 +405,12 @@ static void resolution_observe_pass(void) {
             int migrated = first && nx_rs_plan(&group, 50, V.props.limits.maxFramebufferWidth,
                                                 V.props.limits.maxFramebufferHeight, &half) ?
                 vk_rs_group_migrate(&images, logical, half.w, half.h) : 0;
+            int raster = first ? resolution_probe_raster(&images) : 0;
             uint64_t bytes = 0;
             for (int i = 0; i < VK_RS_GROUP_SIZE; i++) if (images.slot[i]) bytes += images.slot[i]->bytes;
             vk_rs_group_retire(&images);
-            VKLOG("[resolution-probe] isolated group: %ux%u -> %ux%u first=%d same=%d half=%d final_bytes=%llu; guest images unchanged",
-                  group.w, group.h, extent.w, extent.h, first, unchanged, migrated, (unsigned long long)bytes);
+            VKLOG("[resolution-probe] isolated group: %ux%u -> %ux%u first=%d same=%d half=%d raster=%d final_bytes=%llu; guest images unchanged",
+                  group.w, group.h, extent.w, extent.h, first, unchanged, migrated, raster, (unsigned long long)bytes);
         }
     }
     for (unsigned i = 0; i < 8; i++) if (group.blockers & (1u << i)) blocked[i]++;

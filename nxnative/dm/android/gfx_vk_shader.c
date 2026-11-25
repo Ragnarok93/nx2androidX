@@ -597,6 +597,40 @@ int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned
     if (!s || !slot || !flags || !s->refl_extra_len) return 0;
     return nx_rs_ref_lookup(s->c1 + s->c1_len, s->refl_extra_len, binding, slot, flags);
 }
+int vk_shader_resolution_support(const vkshader_t *s, float target_scale,
+                                 const vk_rs_sample_scale *samples, unsigned count,
+                                 VkDescriptorBufferInfo *out) {
+    if (!s || !out || (count && !samples) || count > 72 ||
+        !(target_scale >= 0.5f && target_scale <= 2.0f)) return 0;
+    int scaled = target_scale != 1.0f;
+    for (unsigned i=0; i<count; i++) {
+        if (!(samples[i].scale >= 0.5f && samples[i].scale <= 2.0f)) return 0;
+        scaled |= samples[i].scale != 1.0f;
+    }
+    if (!scaled) { *out = (VkDescriptorBufferInfo){vk_support_buffer(), 0, 65536}; return 1; }
+    if (!vk_sub_open() || (s->stage != 0 && s->stage != 1 && s->stage != 5) ||
+        (target_scale != 1.0f && s->stage != 1)) return 0;
+    int support = 0;
+    for (int i=0; i<s->nbind; i++) if (s->b[i].kind == RK_SUPPORT) support = 1;
+    if (!support) return 0;
+    uint8_t data[NX_RS_SUPPORT_BYTES], occupied[NX_RS_SCALE_SLOTS] = {0};
+    nx_rs_support_init(data);
+    if (!nx_rs_support_set(data, 0, target_scale)) return 0;
+    for (unsigned i=0; i<count; i++) {
+        unsigned slot, flags;
+        if (samples[i].scale == 1.0f) continue;
+        if (!vk_shader_resolution_binding(s, samples[i].binding, &slot, &flags) ||
+            slot >= NX_RS_SCALE_SLOTS || !slot || occupied[slot] ||
+            (flags & (NX_RS_REF_UNSUPPORTED | NX_RS_REF_WRITES)) ||
+            !nx_rs_support_set(data, slot, samples[i].scale)) return 0;
+        occupied[slot] = 1;
+    }
+    VkBuffer buf; VkDeviceSize off;
+    void *dst = vk_scratch(sizeof data, V.props.limits.minUniformBufferOffsetAlignment, &buf, &off);
+    memcpy(dst, data, sizeof data);
+    *out = (VkDescriptorBufferInfo){buf, off, sizeof data};
+    return 1;
+}
 VkBuffer vk_zero_buffer(void) { return static_buf(1); }
 VkBuffer vk_default_attribute_buffer(void) { return static_buf(2); }
 // a shader's c1 constants: copied once into a buffer of their own (the bundle bytes do not change; the reflection is never compressed)
