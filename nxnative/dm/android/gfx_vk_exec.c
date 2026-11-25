@@ -12,6 +12,7 @@
 #include "gfx_vk_resolution_support.h"
 #include "gfx_vk_resolution_compute.h"
 #include "gfx_vk_resolution_frame.h"
+#include "gfx_vk_resolution_live.h"
 #include "gfx_vk_resolution_compute_proof.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "nvn_hmap.h"
@@ -245,6 +246,24 @@ static int g_rs_audit, g_rs_probe, g_rs_observe, g_rs_replay, g_rs_scopes;
 static unsigned g_rs_frame_request; // 0 disables the experimental coordinator
 static uint64_t g_rs_frame_packet; // present id in upper 57 bits, percent in low 7
 static nx_rs_frame_state g_rs_frame={0,100};
+static unsigned g_rs_recorded_passes,g_rs_recorded_frame;
+// Explicit development opt-in; do not override engine-side env scaling.
+int vk_rs_live_available(void) {
+    static int cached=-1;
+    int v=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);
+    if (v<0) {
+        const char *e=getenv("DM_VK_RESOLUTION_LIVE"),*a=getenv("DM_NVN_ASYNC");
+        const char *m=getenv("DM_RENDER_SCALE"),*d=getenv("DM_DYN_SCALE");
+        char *end=NULL; double manual=m&&*m?strtod(m,&end):1.0;
+        v=e && atoi(e)!=0 && a && atoi(a)!=0 && (!d || !*d || !strcmp(d,"0")) &&
+            manual==1.0 && (!end || !*end);
+        __atomic_store_n(&cached,v,__ATOMIC_RELEASE);
+    }
+    return v;
+}
+// Upper bits: scaled passes actually recorded; lower 7: latched target.
+// This is not the effective scale of the entire frame.
+unsigned vk_rs_live_recorded(void) {return __atomic_load_n(&g_rs_recorded_frame,__ATOMIC_ACQUIRE);}
 int vk_rs_set_scale_request(unsigned percent) {
     if (percent<50 || percent>100 || !__atomic_load_n(&g_rs_frame_request,__ATOMIC_ACQUIRE)) return 0;
     __atomic_store_n(&g_rs_frame_request,percent,__ATOMIC_RELEASE);
@@ -252,6 +271,10 @@ int vk_rs_set_scale_request(unsigned percent) {
 }
 void vk_rs_publish_source_frame(uint64_t present) {
     unsigned p=__atomic_load_n(&g_rs_frame_request,__ATOMIC_ACQUIRE);
+    if (g_rs_scopes) {
+        __atomic_store_n(&g_rs_recorded_frame,(g_rs_recorded_passes<<7)|g_rs_frame.target,__ATOMIC_RELEASE);
+        g_rs_recorded_passes=0;
+    }
     if (!p || !present || present>(UINT64_MAX>>7)) return;
     __atomic_store_n(&g_rs_frame_packet,(present<<7)|p,__ATOMIC_RELEASE);
 }
@@ -284,9 +307,11 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         g_rs_probe = probe && atoi(probe) != 0;
         g_rs_observe = g_rs_audit || g_rs_probe;
         const char *replay = getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
-        g_rs_replay = replay && atoi(replay) != 0;
+        int live=vk_rs_live_available();
+        g_rs_replay = live || (replay && atoi(replay) != 0);
         const char *scopes=getenv("DM_VK_RESOLUTION_LIFETIME_SCOPES");
-        g_rs_scopes=g_rs_replay && scopes && atoi(scopes)!=0;
+        g_rs_scopes=g_rs_replay && scopes && atoi(scopes)!=0; // explicit replay experiment
+        if (live) g_rs_scopes=1;
         const char *target=getenv("DM_VK_RESOLUTION_TARGET_PERCENT");
         if (g_rs_replay && target && *target) {
             char *end=NULL; long p=strtol(target,&end,10);
@@ -294,12 +319,12 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         }
         const char *adaptive=getenv("DM_VK_RESOLUTION_ADAPTIVE");
         int adaptive_on=g_rs_replay && adaptive && atoi(adaptive);
-        if (adaptive_on)
+        if (adaptive_on || live)
             __atomic_store_n(&g_rs_frame_request,100u,__ATOMIC_RELEASE);
         // Scope authorization is independent of the historical graph.
         // Capture addresses at cache insertion when a subnative target is
         // possible, including the native warmup of adaptive mode.
-        g_rs_scopes=g_rs_scopes && (adaptive_on ||
+        g_rs_scopes=g_rs_scopes && (live || adaptive_on ||
             (__atomic_load_n(&g_rs_frame_request,__ATOMIC_ACQUIRE)>0 &&
              __atomic_load_n(&g_rs_frame_request,__ATOMIC_RELAXED)<100));
         __atomic_store_n(&g_vk_rs_tracking,
@@ -1353,6 +1378,8 @@ void vk_end_pass(void) {
     if (S.pass_open == 1) { if (S.rp_pass) vkCmdEndRenderPass(vk_cmd()); else vkCmdEndRendering(vk_cmd()); if (g_input_pending) input_capture_end_pass(); bc_draw_back(); void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(1, S.pass_w, S.pass_h, (uint32_t)S.cfmt[0], (uint32_t)g_pass_draws | (g_pass_draws ? (uint32_t)((g_pass_bb[2] - g_pass_bb[0]) & 0xffff) << 16 : 0));  pass_dump(); if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) { setenv("DM_VK_TRACE_PASS", "-1", 1); g_x_tracepass = -1; } }
     if (S.pass_open == 1 && g_lin_back && g_pass_draws) lin_back();
     if (S.pass_open == 1) crumb_mark(0);
+    if (g_rs_pass_scaled && S.pass_open==1 && g_pass_draws && g_rs_recorded_passes<(UINT32_MAX>>7))
+        g_rs_recorded_passes++;
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_tf_in_pass = 0;
     g_rs_pass_scaled = 0;
 }

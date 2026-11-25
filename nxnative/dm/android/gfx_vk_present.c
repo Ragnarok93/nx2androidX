@@ -456,7 +456,7 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver",
     [OVM_VIVID]="Vivid", [OVM_FSR]="Upscaler", [OVM_FSR_SHARP]="Sharpness", [OVM_RATE]="Frame rate",
     [OVM_DRS]="Dynamic resolution", [OVM_DRS_MIN]="Minimum scale",
-    [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling",
+    [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling", [OVM_RS_MAX]="Maximum / fixed scale",
     [OVM_DIAG_OPEN]="Diagnostics", [OVM_DIAG_CAPTURE]="Capture graphics",
     [OVM_DIAG_EXPORT]="Export diagnostics", [OVM_DIAG_STATUS]="Capture status",
     [OVM_DIAG_DELAY]="Delayed capture", [OVM_DIAG_FLAGS]="RADV test flags",
@@ -483,6 +483,10 @@ __attribute__((weak)) int dm_menu_drs_supported(void) { return 0; }
 __attribute__((weak)) int dm_menu_drs_enabled(void) { return 0; }
 __attribute__((weak)) int dm_menu_drs_actual(void) { return 100; }
 __attribute__((weak)) int dm_menu_drs_min(void) { return 70; }
+__attribute__((weak)) int dm_menu_rs_live(void) {return 0;}
+__attribute__((weak)) int dm_menu_rs_mode(void) {return 0;}
+__attribute__((weak)) int dm_menu_rs_max(void) {return 100;}
+__attribute__((weak)) unsigned dm_menu_rs_recorded(void) {return 0;}
 __attribute__((weak)) int dm_vivid_enabled(void) { return 0; }
 __attribute__((weak)) int dm_spatial_mode(void) { return SP_NATIVE; }
 __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
@@ -510,7 +514,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                      ov_flag_item(i) ? m3_text_w("Default on restart", is) :
                      (i == OVM_FSR || i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_RATE || i == OVM_DRS_NOW || i == OVM_DRS_HOOK || i == OVM_DIAG_STATUS) ? m3_text_w("System (fallback)", is) :
                      OVM_BUTTONS[i] ? m3_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + m3_text_w("OFF", is);
-            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP || i == OVM_DRS_MIN) ? fmaxf(lw / 0.38f, m3_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
+            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP || i == OVM_DRS_MIN || i==OVM_RS_MAX) ? fmaxf(lw / 0.38f, m3_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
         }
         int names_fit = 1;
         for (int tabname = 0; tabname < OVM_TABS; tabname++)
@@ -550,10 +554,11 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
         }
         float x0 = r[0]+rh*0.18f;
         if (row != sel) cv_rrect(cv,r[0],r[1]+rh*0.055f,r[0]+rw,r[1]+rh*0.945f,rh*0.18f,M3_HIGH);
-        m3_text(cv,x0,cy,OVM_LABELS[it],is,M3_ON_SURFACE);
-        if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
-            int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : dm_fsr_sharpness();
-            float t[3]; ov_menu_track(p, row, t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : it == OVM_DRS_MIN ? (float)(value - 50) / 45.0f : (float)value / 100.0f, th = fmaxf(2, rh * 0.14f), kr = rh * 0.18f;
+        const char *label=it==OVM_DRS && dm_menu_rs_live()?"Resolution mode":it==OVM_DRS_NOW && dm_menu_rs_live()?"Recorded scale":OVM_LABELS[it];
+        m3_text(cv,x0,cy,label,is,M3_ON_SURFACE);
+        if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN || it==OVM_RS_MAX) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
+            int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : it==OVM_RS_MAX?dm_menu_rs_max():dm_fsr_sharpness();
+            float t[3]; ov_menu_track(p, row, t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : (it == OVM_DRS_MIN || it==OVM_RS_MAX) ? (float)(value - 50) / (dm_menu_rs_live()?50.0f:45.0f) : (float)value / 100.0f, th = fmaxf(2, rh * 0.14f), kr = rh * 0.18f;
             f = f < 0 ? 0 : f > 1 ? 1 : f;
             cv_rrect(cv, t[0], t[1] - th / 2, t[0] + t[2], t[1] + th / 2, th / 2, M3_SECONDARY);
             if (f * t[2] >= th) cv_rrect(cv, t[0], t[1] - th / 2, t[0] + f * t[2], t[1] + th / 2, th / 2, M3_PRIMARY);
@@ -566,9 +571,12 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             while (vs > 1 && m3_text_w(v, vs) > room) vs--;
             while (v[0] && m3_text_w(v,vs) > room) pf_chop(v,strlen(v));
             m3_text(cv, x1 - m3_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? M3_ERROR : M3_ON_SURFACE);
-        } else if (it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
+        } else if ((it==OVM_DRS && dm_menu_rs_live()) || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
             char value[128];
-            if (it == OVM_FSR) {
+            if (it==OVM_DRS) {
+                int mode=dm_menu_rs_mode();
+                snprintf(value,sizeof value,"%s",mode==1?"Fixed":mode==2?"Adaptive":"Off");
+            } else if (it == OVM_FSR) {
                 int requested = dm_spatial_mode();
                 if (requested == SP_NATIVE) snprintf(value, sizeof value, "Native");
                 else if (requested != spatial_requested)
@@ -587,16 +595,20 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                 else if (dm_menu_rate() == 0) snprintf(value, sizeof value, "Profile");
                 else snprintf(value, sizeof value, "%d FPS", dm_menu_rate());
             } else if (it == OVM_DRS_NOW) {
-                if (!dm_menu_drs_supported()) snprintf(value, sizeof value, "Unavailable");
+                if (dm_menu_rs_live()) {
+                    unsigned recorded=dm_menu_rs_recorded(),passes=recorded>>7;
+                    if (passes) snprintf(value,sizeof value,"%u%% / %u passes",recorded&127,passes);
+                    else snprintf(value,sizeof value,"No scaled passes");
+                } else if (!dm_menu_drs_supported()) snprintf(value, sizeof value, "Unavailable");
                 else snprintf(value, sizeof value, "%d%%", dm_menu_drs_actual());
             } else if (it == OVM_DRS_HOOK) {
-                snprintf(value, sizeof value, "%s", dm_menu_drs_supported() ? "Game engine" : "Not supported");
+                snprintf(value, sizeof value, "%s", dm_menu_rs_live()?"Vulkan (experimental)":dm_menu_drs_supported() ? "Game engine" : "Not supported");
             } else if (it == OVM_DIAG_STATUS) dm_menu_diag_note(value, sizeof value);
             else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
-            const int action = it == OVM_DRIVER || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
-            float trailing = action ? rh*0.30f : 0, room = rw - m3_text_w(OVM_LABELS[it],is)-gap-rh*0.36f-trailing;
+            const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
+            float trailing = action ? rh*0.30f : 0, room = rw - m3_text_w(label,is)-gap-rh*0.36f-trailing;
             while (vs > 1 && m3_text_w(value, vs) > room) vs--;
             while (value[0] && m3_text_w(value,vs) > room) pf_chop(value,strlen(value));
             m3_text(cv,x1-trailing-m3_text_w(value,vs),cy,value,vs,action?M3_PRIMARY:M3_VARIANT);

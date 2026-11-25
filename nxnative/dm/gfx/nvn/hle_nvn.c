@@ -18,6 +18,7 @@
 #include "nvn_dynres_policy.h"
 #ifdef __ANDROID__
 #include "gfx_vk_resolution_adaptive.h"
+#include "gfx_vk_resolution_live.h"
 #endif
 #include "gfx_vk_resolution_plan.h"
 #include "../../host/front.h"
@@ -2051,7 +2052,22 @@ static void dyn_scale_tick(uint64_t presents) {
 }
 #ifdef __ANDROID__
 // Present producer only. Never use generated presents or create new queries.
+int vk_rs_live_available(void);
+__attribute__((weak)) unsigned dm_rs_live_config(void) {return 0;}
+static nx_rs_live_policy g_rs_live_policy;
+static void rs_live_tick(uint64_t frame,double gpu,const lf_rec *r) {
+    unsigned target;
+    int fps=dm_graphics_target_fps(); if(!fps)fps=nvn_game_fps();
+    unsigned gpu_us=gpu>0 && gpu<=500?(unsigned)(gpu*1000+0.5):0;
+    unsigned cpu=r && frame>=8 && r->f==frame-8?r->rs_cpu_us:0;
+    nx_rs_live_policy next=g_rs_live_policy;
+    int changed=nx_rs_live_update(&next,dm_rs_live_config(),(unsigned)fps,frame,
+                                  r && frame>=8?frame-8:0,gpu_us,cpu,&target);
+    int vk_rs_set_scale_request(unsigned);
+    if (!changed || vk_rs_set_scale_request(target)) g_rs_live_policy=next;
+}
 static int rs_adaptive_on(void) {
+    if (vk_rs_live_available()) return 1;
     static int on=-1;
     if (on<0) { const char *a=getenv("DM_VK_RESOLUTION_ADAPTIVE"), *r=getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
         on=a && atoi(a)!=0 && r && atoi(r)!=0; }
@@ -2063,6 +2079,7 @@ static unsigned rs_adaptive_env(const char *key,unsigned fallback) {
     return end && !*end && p>=50 && p<=100 && nx_rs_scale_step((unsigned)p)?(unsigned)p:fallback;
 }
 static void rs_adaptive_tick(uint64_t frame,double gpu,const lf_rec *r) {
+    if (vk_rs_live_available()) {rs_live_tick(frame,gpu,r);return;}
     static nx_rs_adaptive policy;
     static int configured, last_fps;
     static unsigned min,max;
@@ -2097,6 +2114,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     dm_fps_lock_tick();
     if (dm_fps_state) { static int was; int c = fps_step_cap(); if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? " (prerendered movie)" : ""); was = c; } }
     dyn_scale_tick(o->presents);
+#ifdef __ANDROID__
+    // Apply changed preferences before the next source present is queued.
+    // Delayed GPU samples are processed below; do not count this as a sample.
+    if (vk_rs_live_available()) rs_live_tick(g_frame,0,NULL);
+#endif
     if (dm_fps_state && o->presents % 30 == 0 && !g_dyn_active) {   // DM_RENDER_SCALE changed while the game runs (a DM_CTL "env" line): the render-scale stubs read the state page every frame
         static char last[16] = "-"; const char *rs = getenv("DM_RENDER_SCALE"); if (!rs) rs = "";
         if (last[0] == '-') snprintf(last, sizeof last, "%s", rs);   // the value loader.c applied at start
@@ -2809,7 +2831,8 @@ uint64_t g_nvn_discards[2];   // calls of DiscardColor / DiscardDepthStencil (co
 static int rs_record_discards(void) {
     static atomic_int cached=ATOMIC_VAR_INIT(-1);
     int on=atomic_load_explicit(&cached,memory_order_relaxed);
-    if (on<0) { const char *e=getenv("DM_VK_RESOLUTION_REPLAY_CHECK"); on=e && atoi(e)!=0; atomic_store_explicit(&cached,on,memory_order_relaxed); }
+    if (on<0) { const char *e=getenv("DM_VK_RESOLUTION_REPLAY_CHECK"); int vk_rs_live_available(void);
+        on=(e && atoi(e)!=0)||vk_rs_live_available(); atomic_store_explicit(&cached,on,memory_order_relaxed); }
     return on;
 }
 #endif

@@ -12,6 +12,7 @@
 #include "dm_input.h"
 #include "overlay_layout.h"
 #include "spatial_upscaler.h"
+#include "gfx_vk_resolution_live.h"
 #include "saves_android.h"
 #include "jni_android.h"
 #include "driver_selection.h"
@@ -72,6 +73,13 @@ static char g_root[512];
 const char *dm_front_root(void) { return g_root; }   // overlay_theme.c: the player's path has no APK assets, the theme comes from the pack's overlay/
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // gamepad, rumble, frame rate
 static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalone FG preferences
+static _Atomic unsigned g_set_rs_live=NX_RS_OFF|(50u<<2)|(100u<<9);
+unsigned dm_rs_live_config(void) {return atomic_load(&g_set_rs_live);}
+int vk_rs_live_available(void); unsigned vk_rs_live_recorded(void);
+int dm_menu_rs_live(void) {return vk_rs_live_available();}
+int dm_menu_rs_mode(void) {return nx_rs_live_unpack(dm_rs_live_config()).mode;}
+int dm_menu_rs_max(void) {return nx_rs_live_unpack(dm_rs_live_config()).max;}
+unsigned dm_menu_rs_recorded(void) {return vk_rs_live_recorded();}
 static _Atomic int g_set_dyn, g_set_dyn_min = 70;             // requested true 3D dynamic-resolution mode and minimum percent
 static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), -1 unlocked, 0 follows profile
 static _Atomic int g_set_vivid;
@@ -87,13 +95,13 @@ static int ctl_named(const char *n) { for (int i = 0; i < OV_N; i++) if (!strcmp
 int dm_opmode(void); void dm_set_opmode(int m);   // hle_oe.c: 0 handheld, 1 docked; a change reaches the game as the Switch's operation mode notification
 int dm_fps_lock_supported(void);
 int dm_render_scale_supported(void);                 // loader: a real recompiler or Unreal CVar hook
-int dm_graphics_dynamic_enabled(void) { return atomic_load(&g_set_dyn) && dm_render_scale_supported(); }
+int dm_graphics_dynamic_enabled(void) { return !dm_menu_rs_live() && atomic_load(&g_set_dyn) && dm_render_scale_supported(); }
 int dm_graphics_scale_min_pct(void) { return atomic_load(&g_set_dyn_min); }
-int dm_menu_drs_supported(void) { return dm_render_scale_supported(); }
+int dm_menu_drs_supported(void) { return dm_menu_rs_live() || dm_render_scale_supported(); }
 int dm_menu_drs_enabled(void) { return dm_graphics_dynamic_enabled(); }
 int dm_graphics_scale_actual_pct(void);             // hle_nvn: real internal scale, not final presentation size
 int dm_menu_drs_actual(void) { return dm_render_scale_supported() ? dm_graphics_scale_actual_pct() : 100; }
-int dm_menu_drs_min(void) { return atomic_load(&g_set_dyn_min); }  // host validates known Unreal CVar pairs by exact main build ID
+int dm_menu_drs_min(void) { return dm_menu_rs_live()? (int)nx_rs_live_unpack(dm_rs_live_config()).min : atomic_load(&g_set_dyn_min); }  // host validates known Unreal CVar pairs by exact main build ID
 int dm_graphics_target_fps(void) { return dm_fps_lock_supported() ? atomic_load(&g_set_rate) : 0; }
 int dm_menu_rate(void) { return atomic_load(&g_set_rate); }
 int dm_menu_rate_supported(void) { return dm_fps_lock_supported(); }
@@ -134,6 +142,8 @@ static void settings_load(void) {
         else if (sscanf(line, "upscaler=%d", &v) == 1 && spatial_mode_valid(v)) saved_upscaler = v;
         else if (sscanf(line, "fsr_sharp=%d", &v) == 1) atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
         else if (sscanf(line, "fps_mode=%d", &v) == 1 && (v == -1 || v == 30 || v == 40 || v == 60)) atomic_store(&g_set_rate, v);
+        else if (sscanf(line, "rs_live=%d", &v) == 1 && v>0 &&
+                 nx_rs_live_pack(nx_rs_live_unpack((unsigned)v))==(unsigned)v) atomic_store(&g_set_rs_live,(unsigned)v);
         else if (sscanf(line, "dyn_scale=%d", &v) == 1) atomic_store(&g_set_dyn, v != 0);
         else if (sscanf(line, "dyn_min=%d", &v) == 1 && v >= 50 && v <= 95 && v % 5 == 0) atomic_store(&g_set_dyn_min, v);
         else if (!strncmp(line, "ui=", 3)) {   // ui=<layout>,<control>,<x>,<y>,<size>: x, y in 1/10000 of the window (-1 the layout's place), size in 1/1000
@@ -157,7 +167,7 @@ static void settings_save(void) {
             atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow),
             upscaler == SP_FSR1, upscaler, atomic_load(&g_set_fsr_sharp), atomic_load(&g_set_rate),
             atomic_load(&g_set_dyn), atomic_load(&g_set_dyn_min));
-    fprintf(f, "vivid=%d\n", atomic_load(&g_set_vivid));
+    fprintf(f, "vivid=%d\nrs_live=%u\n", atomic_load(&g_set_vivid),dm_rs_live_config());
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
         _Atomic int *c = g_cust[0][l][i]; int x = atomic_load(&c[0]), y = atomic_load(&c[1]), z = atomic_load(&c[2]);
         if ((x && y) || z) fprintf(f, "ui=%s,%s,%d,%d,%d\n", LAYOUT_NAMES[l], OV_LAYOUTS[0][i].name, x && y ? x - 1 : -1, x && y ? y - 1 : -1, z ? z : 1000);
@@ -743,7 +753,24 @@ static void menu_rate_step(int direction) {
     LOG("[graphics] live source frame-rate target %d -> %d (-1 unlocked; 40 uses 25 ms)", previous, next);
     dm_haptics_android_tap(); settings_save(); dm_overlay_redraw();
 }
+static void menu_rs_change(nx_rs_live_config c) {
+    unsigned p=nx_rs_live_pack(c);
+    if (p && atomic_exchange(&g_set_rs_live,p)!=p) {
+        atomic_fetch_add(&g_menu_cfg_ver,1);dm_haptics_android_tap();dm_overlay_redraw();
+    }
+}
+static void menu_rs_mode_step(int direction) {
+    nx_rs_live_config c=nx_rs_live_unpack(dm_rs_live_config());
+    c.mode=(c.mode+(direction<0?2:1))%3;
+    menu_rs_change(c);settings_save();
+}
+static void menu_rs_max(int pct) {
+    if (!dm_menu_rs_live()) return;
+    pct=pct<50?50:pct>100?100:pct;
+    menu_rs_change(nx_rs_live_max(nx_rs_live_unpack(dm_rs_live_config()),5u*((unsigned)(pct+2)/5)));
+}
 static void menu_drs_toggle(void) {
+    if (dm_menu_rs_live()) {menu_rs_mode_step(1);return;}
     if (!dm_menu_drs_supported()) {
         LOG("[graphics] internal resolution unavailable: no verified render-scale hook for this game build");
         dm_overlay_redraw(); return;
@@ -754,6 +781,10 @@ static void menu_drs_toggle(void) {
     dm_haptics_android_tap(); settings_save(); dm_overlay_redraw();
 }
 static void menu_drs_min(int pct) {
+    if (dm_menu_rs_live()) {
+        pct=pct<50?50:pct>100?100:pct;
+        menu_rs_change(nx_rs_live_min(nx_rs_live_unpack(dm_rs_live_config()),5u*((unsigned)(pct+2)/5)));return;
+    }
     pct = pct < 50 ? 50 : pct > 95 ? 95 : pct;
     pct = 5 * ((pct + 2) / 5);
     if (atomic_exchange(&g_set_dyn_min, pct) != pct) {
@@ -934,7 +965,7 @@ static void menu_do(int item) {
         settings_save();
     }
     else if (item == OVM_VIVID) { atomic_store(&g_set_vivid, !atomic_load(&g_set_vivid)); atomic_fetch_add(&g_menu_cfg_ver, 1); settings_save(); }
-    else if (item == OVM_FSR_SHARP || item == OVM_DRS_MIN) return;
+    else if (item == OVM_FSR_SHARP || item == OVM_DRS_MIN || item == OVM_RS_MAX) return;
     else if (item == OVM_RATE) { menu_rate_step(1); return; }
     else if (item == OVM_DRS) { menu_drs_toggle(); return; }
     else if (item == OVM_DRS_NOW || item == OVM_DRS_HOOK) return;
@@ -986,20 +1017,22 @@ static void menu_touch(const dm_java_event *e, float W, float H) {   // a press 
         if (item == OVM_TAB) menu_tab(ov_menu_tab_at(x, p));   // a tab opens as the finger touches it
         else if (item == OVM_OPACITY) menu_opacity(ov_menu_track_value(x, p, row));
         else if (item == OVM_FSR_SHARP) menu_fsr_sharp(ov_menu_sharp_value(x, p, row));
-        else if (item == OVM_DRS_MIN) menu_drs_min(ov_menu_dyn_min_value(x, p, row));
+        else if (item == OVM_DRS_MIN) menu_drs_min(dm_menu_rs_live()?ov_menu_rs_value(x,p,row):ov_menu_dyn_min_value(x, p, row));
+        else if (item == OVM_RS_MAX) menu_rs_max(ov_menu_rs_value(x,p,row));
         if (row >= 0) { atomic_store(&g_menu_hi, item >= 0 ? row : -1); dm_overlay_redraw(); }
     } else if (act == AMOTION_EVENT_ACTION_MOVE && g_menu_ptr >= 0 && g_menu_row >= 0) {   // the slider follows the finger; another row's highlight follows it off the row and back
         for (int k = 0; k < e->pointers; k++) if ((e->ptr[k].id & 31) == g_menu_ptr) {
             float kx = e->ptr[k].x, ky = e->ptr[k].y;
             if (ov_menu_item(tab, g_menu_row) == OVM_OPACITY) { menu_opacity(ov_menu_track_value(kx, p, g_menu_row)); continue; }
             if (ov_menu_item(tab, g_menu_row) == OVM_FSR_SHARP) { menu_fsr_sharp(ov_menu_sharp_value(kx, p, g_menu_row)); continue; }
-            if (ov_menu_item(tab, g_menu_row) == OVM_DRS_MIN) { menu_drs_min(ov_menu_dyn_min_value(kx, p, g_menu_row)); continue; }
+            if (ov_menu_item(tab, g_menu_row) == OVM_DRS_MIN) { menu_drs_min(dm_menu_rs_live()?ov_menu_rs_value(kx,p,g_menu_row):ov_menu_dyn_min_value(kx, p, g_menu_row)); continue; }
+            if (ov_menu_item(tab,g_menu_row)==OVM_RS_MAX) {menu_rs_max(ov_menu_rs_value(kx,p,g_menu_row));continue;}
             int r = ov_menu_row_at(kx, ky, W, H), hi = r == g_menu_row && ov_menu_item(tab, r) >= 0 ? r : -1;
             if (atomic_exchange(&g_menu_hi, hi) != hi) dm_overlay_redraw();
         }
     } else if ((act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) && id == g_menu_ptr) {
         int down = g_menu_row; g_menu_ptr = -1; atomic_store(&g_menu_hi, -1);
-        if (down >= 0 && (ov_menu_item(tab, down) == OVM_OPACITY || ov_menu_item(tab, down) == OVM_FSR_SHARP || ov_menu_item(tab, down) == OVM_DRS_MIN)) { settings_save(); dm_overlay_redraw(); }
+        if (down >= 0 && (ov_menu_item(tab, down) == OVM_OPACITY || ov_menu_item(tab, down) == OVM_FSR_SHARP || ov_menu_item(tab, down) == OVM_DRS_MIN || ov_menu_item(tab,down)==OVM_RS_MAX)) { settings_save(); dm_overlay_redraw(); }
         else if (row == down && item >= 0 && item != OVM_TAB) menu_do(item);
         else if (row == down && (row == -2 || row == -3)) { dm_haptics_android_tap(); menu_close(); }
         else dm_overlay_redraw();
@@ -1015,7 +1048,9 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
     } else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_OPACITY) { menu_opacity(atomic_load(&g_set_opacity) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FSR_SHARP) { menu_fsr_sharp(atomic_load(&g_set_fsr_sharp) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
-    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_DRS_MIN) { menu_drs_min(atomic_load(&g_set_dyn_min) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_DRS_MIN) { menu_drs_min(dm_menu_drs_min() + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit==DM_BTN_LEFT || bit==DM_BTN_RIGHT) && item==OVM_RS_MAX) {menu_rs_max(dm_menu_rs_max()+(bit==DM_BTN_LEFT?-5:5));settings_save();}
+    else if ((bit==DM_BTN_LEFT || bit==DM_BTN_RIGHT) && item==OVM_DRS && dm_menu_rs_live()) menu_rs_mode_step(bit==DM_BTN_LEFT?-1:1);
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_RATE) { menu_rate_step(bit == DM_BTN_LEFT ? -1 : 1); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_MULT) { fg_mult_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_FLOW) { fg_flow_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
