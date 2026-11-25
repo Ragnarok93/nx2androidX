@@ -7,7 +7,7 @@ import errno, hashlib, importlib.util, json, mmap, os, re, shutil, socket, struc
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from porter import config, datapack, dumps, fpslocker, install, paths, product_cache, profiles, resources, romfs_pack, toolchain
+from porter import config, datapack, dumps, fpslocker, install, paths, product_cache, profiles, resources, romfs_pack, signing, toolchain
 from porter.revision import PLAYER_API_REVISION
 from porter.adb import NO_ADB, Adb, AdbError
 from porter.paths import DM, NXNATIVE
@@ -1391,6 +1391,7 @@ class Port:
             PROG.stage('APK')
         stem = app_stem(self.g, self.app_name)
         self.apk_path = self.o.out / f'{stem}.apk'; self.o.out.mkdir(parents=True, exist_ok=True)
+        key = signing.export_key(f'{self.app:016X}')
         icon = self.icon()
         code = version_code(self.pkg_ver, self.o.vercode_offset)
         if self.o.vercode_offset: say(f'versionCode {code} ({self.pkg_ver} + 1 + offset {self.o.vercode_offset})')
@@ -1472,7 +1473,7 @@ class Port:
         # Adding both paths used to request host/libadrenotools.so even when it did not
         # exist, aborting an otherwise successful Xclipse port in build_zip_file().
         vulkan_libs = self.apk_vulkan_libraries()
-        cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, paths.signing_key(), '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
+        cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, key, '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
                '--version-code', str(code), '--preserve-version-floor', '--version-name', self.display]
         if self.o.self_contained:
             cmd += data_assets

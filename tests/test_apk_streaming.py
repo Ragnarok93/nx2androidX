@@ -80,6 +80,84 @@ class StreamingApkTests(unittest.TestCase):
             with apksign.upgrade_version(key, "org.nx2a.other", 7) as version:
                 self.assertEqual(version, 7)
 
+    def test_title_signing_is_reproducible_and_preserves_legacy_exports(self):
+        from porter import signing
+        from porter.upstream import BuildError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "signing-key.json"
+            seed = bytes(range(32)).hex()
+            seed_path = legacy.with_suffix(".seed-v1")
+            seed_path.write_text(seed + "\n")
+            library = root / "host.so"
+            library.write_bytes(b"runtime fixture")
+            title, other = "0100000000010000", "01000000000AB000"
+            package = "org.nx2a.signing.fixture"
+            apk_tools = signing.paths.DM / "android" / "apk"
+            dex = root / "classes.dex"
+            dex.write_bytes(b"dex fixture")
+
+            def build(name, key, version):
+                apk = root / (name + ".apk")
+                subprocess.run([sys.executable, str(apk_tools / "mkapk.py"), str(library), str(apk),
+                                str(key), "--lib", "dmhost", "--dex", str(dex), "--package", package,
+                                "--version-code", str(version), "--preserve-version-floor"],
+                               check=True, capture_output=True)
+                _assert_v2_digest(self, apk.read_bytes())
+                with zipfile.ZipFile(apk) as z:
+                    return apk, signing.source_certificate(apk, z.start_dir)
+
+            with patch.object(signing.paths, "signing_key", return_value=legacy):
+                key = signing.export_key(title)
+                first, identity = build("first", key, 42)
+                self.assertEqual(hashlib.sha256(identity[0]).hexdigest(),
+                                 "1551c62c47add16a6ecd4017fbc9e91c3c92c938a1d4503ec32a78d0a5c93ae9")
+                key.unlink()
+                second, second_identity = build("second", signing.export_key(title), 7)
+                self.assertEqual(identity, second_identity)
+                with zipfile.ZipFile(first) as before, zipfile.ZipFile(second) as after:
+                    self.assertEqual(before.read("AndroidManifest.xml"), after.read("AndroidManifest.xml"))
+                other_apk, other_identity = build("another-title", signing.export_key(other.lower()), 42)
+                self.assertNotEqual(identity, other_identity)
+                self.assertEqual(signing.original_key(second), key)
+                upgraded = root / "runtime-upgrade.apk"
+                original_key = signing.original_key(first, title=title)
+                subprocess.run([sys.executable, str(apk_tools / "apkdriver.py"), str(first),
+                                str(upgraded), str(original_key), "--host", str(library), "--dex", str(dex)],
+                               check=True, capture_output=True)
+                _assert_v2_digest(self, upgraded.read_bytes())
+                with zipfile.ZipFile(upgraded) as z:
+                    self.assertEqual(identity, signing.source_certificate(upgraded, z.start_dir))
+                with self.assertRaisesRegex(BuildError, "original key"):
+                    signing.original_key(other_apk, title=title)
+
+                old, old_identity = build("legacy", legacy, 12)
+                later, later_identity = build("legacy-recompile", signing.export_key("01000000000CD000"), 1)
+                self.assertEqual(old_identity, later_identity)
+                self.assertEqual(signing.original_key(old, title=other), legacy)
+                self.assertEqual(signing.export_key(title), key)
+
+                key.unlink()
+                self.assertEqual(signing.original_key(first, title=title), key)
+                key.unlink()
+                seed_path.unlink()
+                with self.assertRaisesRegex(BuildError, "signing seed is missing"):
+                    signing.export_key(title)
+                self.assertFalse(seed_path.exists())
+                seed_path.write_text("ff" * 32)
+                with self.assertRaisesRegex(BuildError, "seed does not match"):
+                    signing.export_key(title)
+                self.assertFalse(key.exists())
+
+            restored = root / "restored" / legacy.name
+            restored.parent.mkdir()
+            restored.with_suffix(".seed-v1").write_text(seed)
+            with patch.object(signing.paths, "signing_key", return_value=restored):
+                restored_key = signing.original_key(first, title=title)
+                _, restored_identity = build("restored", restored_key, 42)
+                self.assertEqual(identity, restored_identity)
+
     def test_runtime_upgrade_replaces_code_only(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -184,6 +262,7 @@ class StreamingApkTests(unittest.TestCase):
                 (output / "libdmhost.so").write_bytes(ident + struct.pack("<HH", 3, 183))
 
             with (patch.object(upgrade_apk, "metadata", return_value=(manifest, "record", [])),
+                  patch.object(upgrade_apk.signing, "original_key", return_value=key) as original_key,
                   patch.object(upgrade_apk, "activity_dex", return_value=root / "classes.dex"),
                   patch.object(upgrade_apk.runtime_update, "find_profile", return_value=(registered, fingerprint, True)),
                   patch.object(upgrade_apk.host, "stale_sources", return_value=[]),
@@ -191,6 +270,7 @@ class StreamingApkTests(unittest.TestCase):
                   patch.object(upgrade_apk.subprocess, "run", side_effect=build_or_package)):
                 result = upgrade_apk.upgrade(root / "old.apk", root / "updated.apk", key=key)
                 self.assertEqual(result, root / "updated.apk")
+                original_key.assert_called_once_with(root / "old.apk", title=title, explicit=key)
 
     def test_v2_signed_apk_keeps_zip_entries_readable(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -5,7 +5,7 @@
 import json, re, shlex, subprocess, sys, tempfile
 from pathlib import Path
 
-from porter import datapack, paths
+from porter import datapack, signing
 from porter.adb import AdbError
 from porter.paths import DM
 from porter.upstream import BuildError, say
@@ -38,7 +38,7 @@ def swap(adb, package, driver=None):
         src, out = Path(t) / 'installed.apk', Path(t) / 'driver.apk'
         say(f'{package}: pulling the installed APK')
         adb.run('pull', installed_apk(adb, package), src, timeout=600)
-        r = subprocess.run([sys.executable, str(DM / 'android/apk/apkdriver.py'), str(src), str(out), str(paths.signing_key())]
+        r = subprocess.run([sys.executable, str(DM / 'android/apk/apkdriver.py'), str(src), str(out), str(signing.original_key(src))]
                            + (['--driver', str(driver)] if driver else ['--system']), capture_output=True, text=True, errors='replace')
         if r.returncode: raise BuildError((r.stderr.strip() or r.stdout.strip()).splitlines()[-1])
         res = json.loads(r.stdout.strip().splitlines()[-1])

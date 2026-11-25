@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from porter import config, host, paths, resources, runtime_update, toolchain
+from porter import config, host, resources, runtime_update, signing, toolchain
 from porter.upstream import BuildError
 from porter.paths import DM
 from porter.revision import PLAYER_API_REVISION
@@ -115,13 +115,12 @@ def activity_dex(apk, scratch):
 def upgrade(apk, output, *, data=None, key=None, jobs=None, no_lsfg=False, debug=False):
     apk, output = Path(apk).resolve(), Path(output).resolve()
     if apk == output: raise BuildError('Choose a separate output APK.')
-    key = Path(key or paths.signing_key())
-    if not key.is_file(): raise BuildError('Original signing key is unavailable; do not generate a new one.')
     manifest, record, modules = metadata(apk, data)
     title = manifest.get('title_id', '').upper()
     fingerprint = manifest.get('profile_h')
     if not host.TITLE_ID.fullmatch(title) or not fingerprint:
         raise BuildError('Original game profile identity is missing.')
+    key = signing.original_key(apk, title=title, explicit=key)
     profile, _, _ = runtime_update.find_profile(title, fingerprint)
     if profile is None: raise BuildError('The original profile is unavailable; refusing a potentially incompatible runtime.')
     if not record.strip(): raise BuildError('Original guest rewriter fingerprint is missing.')

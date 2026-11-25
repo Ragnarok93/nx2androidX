@@ -15,7 +15,12 @@ __pycache__/
 *.pdb
 
 # Keys: never committed
+signing-key.json
 *-signing-key.json
+signing-key.titles/
+*-signing-key.titles/
+signing-key.seed-v1*
+*-signing-key.seed-v1*
 *.keystore
 prod.keys
 title.keys

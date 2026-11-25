@@ -8,7 +8,7 @@
 import argparse, json, os, sys, zipfile, struct, tempfile
 from pathlib import Path
 
-from apksign import build_zip, sign_v2, build_zip_file, sign_v2_file, ZipEntrySource, spki
+from apksign import build_zip, sign_v2, build_zip_file, sign_v2_file, ZipEntrySource, read_signer, spki
 
 ABI = 'lib/arm64-v8a/'
 OWN = {'libdmhost.so', 'libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so', 'libfile_redirect_hook.so', 'libgsl_alloc_hook.so'}   # nx2android's own libraries; any other is the driver
@@ -92,21 +92,24 @@ def source_certificate(src, central):
     raise ValueError('APK has no v2 signer')
 
 
+def checked_signer(src, central, key):
+    private, certificate = read_signer(key)
+    if source_certificate(src, central) != (certificate, spki(private)):
+        raise ValueError('original APK signing key does not match; refusing to replace signer')
+    return private, certificate
+
+
 def rewrite_runtime(src, out, key, host, dex, assets=None):
     """Replace only runtime code, retaining the exact manifest and existing game assets."""
     src, out = Path(src), Path(out)
     if src.resolve() == out.resolve(): raise ValueError('choose a separate output APK')
-    kj = json.loads(Path(key).read_text())
-    k = {n: int(v) for n,v in kj.items() if n != 'cert'}
-    crt = bytes.fromhex(kj['cert'])
     replace = {ABI+'libdmhost.so': host, 'classes.dex': dex}
     for name, path in (assets or {}).items():
         if not name.startswith('font/') and name not in ('licenses/sgsr1.txt', 'licenses/sgsr2.txt'):
             raise ValueError('only runtime fonts and GSR licenses can be added')
         replace['assets/'+name] = path
     with zipfile.ZipFile(src) as archive:
-        cert, public = source_certificate(src, archive.start_dir)
-        if cert != crt or public != spki(k): raise ValueError('original APK signing key does not match; refusing to replace signer')
+        k, crt = checked_signer(src, archive.start_dir, key)
         infos = archive.infolist()
         names = {i.filename for i in infos}
         if len(names) != len(infos) or any(i.compress_type != zipfile.ZIP_STORED for i in infos):
@@ -140,11 +143,15 @@ def main():
     if a.dex:
         if not a.host or a.driver or a.system: p.error('--dex requires --host without driver changes')
         try: rewrite_runtime(a.src, a.out, a.key, a.host, a.dex, assets)
-        except (OSError, ValueError, zipfile.BadZipFile) as e: p.error(str(e))
+        except (OSError, ValueError, KeyError, TypeError, struct.error, zipfile.BadZipFile) as e: p.error(str(e))
         print(json.dumps({'runtime': a.out}))
         return
+    try:
+        with zipfile.ZipFile(a.src) as archive:
+            k, crt = checked_signer(a.src, archive.start_dir, a.key)
+    except (OSError, ValueError, KeyError, TypeError, struct.error, zipfile.BadZipFile) as e:
+        p.error(str(e))
     entries, dropped, added = rebuild(a.src, None if a.system else a.driver or KEEP, a.host, assets)
-    kj = json.load(open(a.key)); k = {n: int(v) for n, v in kj.items() if n != 'cert'}; crt = bytes.fromhex(kj['cert'])
     z, cd, eocd = build_zip(entries)
     open(a.out, 'wb').write(sign_v2(z, cd, eocd, k, crt))
     print(json.dumps({'driver': added, 'dropped': dropped}))

@@ -82,7 +82,7 @@ def _parser():
     up.add_argument('apk')
     up.add_argument('-o', '--out', required=True)
     up.add_argument('--data', help='existing companion data folder for a split APK')
-    up.add_argument('--key', help='original APK signing key (default: existing porter key)')
+    up.add_argument('--key', help='original APK signing key (default: match a saved title or legacy key)')
     up.add_argument('--jobs', type=int, default=None)
     up.add_argument('--no-lsfg', action='store_true')
     up.add_argument('--debug', action='store_true')

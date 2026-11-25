@@ -2,7 +2,7 @@
 # mkapk.py builds an APK with them; apkdriver.py rebuilds an installed one with another Vulkan driver library
 from contextlib import contextmanager
 from pathlib import Path
-import errno, hashlib, json, os, secrets, shutil, struct, tempfile, time, zlib
+import errno, hashlib, hmac, json, os, secrets, shutil, struct, tempfile, time, zlib
 
 @contextmanager
 def signing_lock(path):
@@ -41,22 +41,35 @@ def write_signing_state(path, data):
     finally:
         Path(tmp).unlink(missing_ok=True)
 
-def persistent_signer(path):
+def read_signer(path):
+    record = json.loads(Path(path).read_text(encoding='ascii'))
+    return {name: int(record[name]) for name in ('n', 'e', 'd')}, bytes.fromhex(record['cert'])
+
+
+def version_directory(key_path):
+    return Path(str(key_path) + '.versions')
+
+
+def persistent_signer(path, derive=None):
     path = Path(path)
     with signing_lock(path.with_suffix(path.suffix + '.lock')):
         if path.exists():
-            record = json.loads(path.read_text(encoding='ascii'))
-            return {a: int(v) for a, v in record.items() if a != 'cert'}, bytes.fromhex(record['cert'])
+            return read_signer(path)
         t = time.monotonic()
-        key = gen_key()
-        certificate = cert(key)
+        if derive is not None:
+            key, certificate = derive()
+        else:
+            if version_directory(path).exists():
+                raise ValueError('Original APK signing key is missing. Restore it before recompiling this game.')
+            key = gen_key()
+            certificate = cert(key)
         write_signing_state(path, json.dumps({**{a: str(v) for a, v in key.items()}, 'cert': certificate.hex()}))
         print(f'new signing key {path} ({time.monotonic() - t:.1f} s)')
         return key, certificate
 
 @contextmanager
 def upgrade_version(key_path, package, requested):
-    directory = Path(str(key_path) + '.versions')
+    directory = version_directory(key_path)
     directory.mkdir(exist_ok=True)
     path = directory / hashlib.sha256(package.encode('utf-8')).hexdigest()
     with signing_lock(path.with_suffix('.lock')):
@@ -70,28 +83,56 @@ def upgrade_version(key_path, package, requested):
 
 
 # ---------------- RSA, DER, self-signed certificate ----------------
-def is_prime(n):
+def is_prime(n, randbelow=secrets.randbelow):
     if n < 2: return False
     for p in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
         if n % p == 0: return n == p
     d, r = n - 1, 0
     while d % 2 == 0: d //= 2; r += 1
     for _ in range(40):
-        x = pow(secrets.randbelow(n - 3) + 2, d, n)
+        x = pow(randbelow(n - 3) + 2, d, n)
         if x in (1, n - 1): continue
         for _ in range(r - 1):
             x = pow(x, 2, n)
             if x == n - 1: break
         else: return False
     return True
-def gen_prime(bits):
+def gen_prime(bits, randbits=secrets.randbits, randbelow=secrets.randbelow):
     while True:
-        p = secrets.randbits(bits) | (3 << (bits - 2)) | 1
-        if p % 65537 != 1 and is_prime(p): return p
+        p = randbits(bits) | (3 << (bits - 2)) | 1
+        if p % 65537 != 1 and is_prime(p, randbelow): return p
 def gen_key():
     p, q = gen_prime(1024), gen_prime(1024)
     n, e = p * q, 65537
     return {'n': n, 'e': e, 'd': pow(e, -1, (p - 1) * (q - 1))}
+
+def derive_signer_v1(seed, title):
+    """Reproduce the RSA key and exact certificate for a private seed and base title ID."""
+    # The random stream, prime tests and DER bytes are part of the v1 signing identity.
+    title_seed = hmac.digest(seed, b'nx2a standalone signing v1\0' + bytes.fromhex(title), 'sha256')
+    counter = 0
+
+    def randbits(bits):
+        nonlocal counter
+        counter += 1
+        digest = hashlib.shake_256(title_seed + counter.to_bytes(8, 'big')).digest((bits + 7) // 8)
+        return int.from_bytes(digest, 'big') & ((1 << bits) - 1)
+
+    def randbelow(limit):
+        while True:
+            value = randbits(limit.bit_length())
+            if value < limit:
+                return value
+
+    p = gen_prime(1024, randbits, randbelow)
+    q = gen_prime(1024, randbits, randbelow)
+    while abs(p - q) <= 1 << 924:
+        q = gen_prime(1024, randbits, randbelow)
+    e = 65537
+    key = {'n': p * q, 'e': e, 'd': pow(e, -1, (p - 1) * (q - 1))}
+    serial = int.from_bytes(hmac.digest(title_seed, b'certificate serial', 'sha256')[:8], 'big')
+    return key, cert(key, serial=(serial >> 2) | 1)
+
 
 def der(tag, body):
     l = len(body)
@@ -114,10 +155,11 @@ def rsa_sign(k, msg):
     kl = (k['n'].bit_length() + 7) // 8
     em = b'\x00\x01' + b'\xff' * (kl - len(di) - 3) + b'\x00' + di
     return pow(int.from_bytes(em, 'big'), k['d'], k['n']).to_bytes(kl, 'big')
-def cert(k):
+def cert(k, serial=None):
+    if serial is None: serial = secrets.randbits(62) | 1
     name = der_seq(der(0x31, der_seq(der_oid('2.5.4.3'), der(0x0c, b'nx2a probe'))))
     validity = der_seq(der(0x17, b'260101000000Z'), der(0x18, b'20560101000000Z'))
-    tbs = der_seq(der(0xa0, der_int(2)), der_int(secrets.randbits(62) | 1), ALG_SHA256_RSA, name, validity, name, spki(k))
+    tbs = der_seq(der(0xa0, der_int(2)), der_int(serial), ALG_SHA256_RSA, name, validity, name, spki(k))
     return der_seq(tbs, ALG_SHA256_RSA, der(0x03, b'\0' + rsa_sign(k, tbs)))
 
 # ---------------- ZIP (stored) ----------------

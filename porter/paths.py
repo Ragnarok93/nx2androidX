@@ -23,6 +23,6 @@ def player_tools():   # the toolchains `porter tools --download` fetched for the
     return user_dir() / 'toolchains'
 
 
-def signing_key():   # one key per player: every app they port keeps its signer, so a new port installs over the last one
+def signing_key():   # legacy signer and the location anchor for per-title keys
     configured = os.environ.get('NX2A_SIGNING_KEY')
     return Path(configured) if configured else user_dir() / 'signing-key.json'

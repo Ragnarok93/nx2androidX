@@ -28,6 +28,7 @@ class FakePort:
         self.so = root / 'libdmhost.so'
         self.so.write_bytes(b'ELF')
         self.g = {'ipa': 'TestGame.ipa'}
+        self.app = 0x0100000000010000
         self.app_name = 'Test Game'
         self.pkg_ver = 'v0'
         self.display = '1.0'
@@ -73,14 +74,16 @@ class ApkLimitFallbackTests(unittest.TestCase):
         self.progress = mock.patch.object(pipeline, 'PROG')
         self.progress.start()
         self.addCleanup(self.progress.stop)
-        self.signing = mock.patch.object(pipeline.paths, 'signing_key', return_value=self.root / 'signing.json')
-        self.signing.start()
-        self.addCleanup(self.signing.stop)
+        signing = mock.patch.object(pipeline.signing, 'export_key', return_value=self.root / 'signing.json')
+        self.signing = signing.start()
+        self.addCleanup(signing.stop)
         self.vercode = mock.patch.object(pipeline, 'version_code', return_value=1)
         self.vercode.start()
         self.addCleanup(self.vercode.stop)
 
     def fake_mkapk(self, cmd, *args, **kwargs):
+        self.signing.assert_called_with('0100000000010000')
+        self.assertEqual(cmd[4], self.root / 'signing.json')
         # Command index 3 is the exported APK path in the real mkapk invocation.
         self.assertIn('--data-root', cmd)
         self.assertIn('--dex', cmd)
