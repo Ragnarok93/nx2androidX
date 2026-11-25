@@ -40,6 +40,9 @@ static const vkfmt_t *vk_fmt(int n) {
     }
 }
 static vkimg_t *vk_tex(const tex_t *t) { return &images[same_image || t==&src?0:1]; }
+static int g_rs_replay;
+static int vk_rs_cache_has_scaled(void) { return 0; }
+static vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c) { (void)c; abort(); }
 static void vk_end_pass(void) {}
 static void vk_watch(const vkimg_t *im,const char *why) {(void)im;(void)why;}
 static VkCommandBuffer vk_cmd(void) {return (VkCommandBuffer)(uintptr_t)1;}

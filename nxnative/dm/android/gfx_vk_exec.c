@@ -4162,7 +4162,10 @@ static void copy_t2t(const p_copy_t2t *c) {
 }
 static void clear_tex(const p_clear_tex *c) {
     vk_end_pass();
-    vkimg_t *im = vk_tex(c->tex); if (!im) return;
+    vkimg_t *im = NULL;
+    if (g_rs_replay && vk_rs_cache_has_scaled()) im=vk_rs_native_for_full_clear(c);
+    if (!im) im=vk_tex(c->tex);
+    if (!im) return;
     VkCommandBuffer cb = vk_cmd(); vk_tex_prepare(cb, im); vk_img_barrier_all(cb);
     VkImageSubresourceLayers l = sub_of(im, &c->view, c->has_view, c->r.zoffset);
     VkImageSubresourceRange rg = {l.aspectMask, l.mipLevel, 1, l.baseArrayLayer, im->layers > 1 ? (uint32_t)(c->r.depth ? c->r.depth : 1) : 1};
