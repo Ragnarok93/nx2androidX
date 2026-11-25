@@ -42,6 +42,7 @@ static nx_rs_raster g_rs_raster;
 typedef struct { nx_rs_draw_samples samples; int failed; } rs_stage_collect;
 static rs_stage_collect *g_rs_collect;
 int vk_rs_cache_has_scaled(void) { return 0; }
+void vk_rs_variant_destroy(vk_rs_variant *variant) { (void)variant; abort(); }
 int vk_rs_preflight_view(const tex_t *t, const view_t *v, int supported, nx_rs_draw_extent *extent) { abort(); }
 int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned *slot, unsigned *flags) { abort(); }
 int vk_shader_resolution_support(const vkshader_t *s, float target, const vk_rs_sample_scale *samples, unsigned count, VkDescriptorBufferInfo *out) { abort(); }

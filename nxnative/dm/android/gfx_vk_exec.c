@@ -2863,6 +2863,7 @@ static int resolution_preflight_stages(int target_scaled) {
         int support=0, sample_scaled=0;
         for (unsigned i=0;i<s->nbind;i++) {
             const dmsv_bind *b=&s->b[i];
+            if (b->samp==RS_UBO) return 0; // CPU-decoded sampler handle
             switch (b->kind) {
             case RK_SUPPORT: case RK_C1: case RK_DRV:
                 if (b->count!=1 || b->desc!=RD_UBO) return 0;
@@ -2895,6 +2896,47 @@ static int resolution_preflight_stages(int target_scaled) {
         if ((sample_scaled || (target_scaled && st==1)) && !support) return 0;
     }
     return 1;
+}
+// Vertex and indirect-index bindings have no Vulkan bound size. Check the
+// backing chunk tail, not the guest's nominal vertex range. Unknown ranges
+// and transform feedback must not coexist with scaled owners.
+static int resolution_raw_span(uint64_t addr,uint64_t bytes,int tail) {
+    if (!addr) return 0;
+    vkpool_t *p=vk_pool_of(addr,1);
+    if (!p || !p->buf || (p->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) || addr<p->lo || addr>=p->hi) return 0;
+    if (tail) bytes=p->hi-addr;
+    if (!bytes || bytes>p->hi-addr) return 0;
+    return vk_rs_preflight_buffer(addr,bytes);
+}
+static int resolution_draw_inputs(uint64_t index,int index_type,int count,int indexed,
+                                  uint64_t indirect,uint64_t mdi_count,int mdi_max,int mdi_stride) {
+    if (g_tf_on) return 0;
+    for (unsigned i=0;i<16;i++) {
+        if (S.vbuf[i].address && !resolution_raw_span(S.vbuf[i].address,0,1)) return 0;
+    }
+    if (indexed) {
+        if (index_type<0 || index_type>2 || count<0) return 0;
+        uint64_t bytes=(uint64_t)(unsigned)count << index_type;
+        if (!resolution_raw_span(index,bytes,indirect!=0)) return 0;
+    }
+    if (mdi_count && (!indirect || !resolution_raw_span(mdi_count,4,0))) return 0;
+    if (indirect) {
+        unsigned record=indexed?20:16;
+        uint64_t bytes=record;
+        if (mdi_count) {
+            if (mdi_max<=0 || mdi_stride<(int)record || (mdi_stride&3)) return 0;
+            bytes=(uint64_t)(unsigned)mdi_max*(unsigned)mdi_stride;
+        }
+        if (!resolution_raw_span(indirect,bytes,0)) return 0;
+    }
+    return 1;
+}
+static void resolution_draw_preflight(uint64_t index,int index_type,int count,int indexed,
+                                      uint64_t indirect,uint64_t mdi_count,int mdi_max,int mdi_stride) {
+    int scaled;
+    if (!resolution_draw_inputs(index,index_type,count,indexed,indirect,mdi_count,mdi_max,mdi_stride) ||
+        !resolution_preflight_targets(&scaled) || !resolution_preflight_stages(scaled))
+        resolution_restore_before_recording();
 }
 static int prepare_draw(int prim, int indexed) {
     // DM_VK_CB_DRAWS (read every submission, default 128, 0 = never): the replay is cut every that many draws and what is recorded goes to the GPU at once
@@ -2941,11 +2983,6 @@ static int prepare_draw(int prim, int indexed) {
             vk_end_pass(); g_psplit_now = 1; } }
     else if (g_psplit > 0 && S.pass_open == 1 && g_pass_draws == (uint64_t)g_psplit && S.daspect && !g_psplit_depth) { static int n; if (n++ < 3) VKLOG("pass split: pass %d (%ux%u) has depth (format %d): not split", g_sub_pass - 1, S.pass_w, S.pass_h, S.dfmt); }
     if (g_order_pending) { g_order_pending = 0; g_order_check = S.pass_open == 1; }   // an order-only barrier kept the pass open: decided below, once the draw's images are known
-    if (g_rs_replay && vk_rs_cache_has_scaled()) {
-        int scaled;
-        if (!resolution_preflight_targets(&scaled) || !resolution_preflight_stages(scaled))
-            resolution_restore_before_recording();
-    }
     if (!begin_draw_pass()) { g_vkst.skip_rt++; return 0; }
     if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) g_tracing = 1;
     uint64_t t0 = tick();
@@ -3362,6 +3399,8 @@ static int mdi_group(uint64_t cnt, uint64_t ind, int i, int max, int stride, int
     return 0;
 }
 static void draw(const p_draw *d) {
+    if (g_rs_replay && vk_rs_cache_has_scaled())
+        resolution_draw_preflight(0,0,d->count,0,d->ind,d->mdi_cnt,d->mdi_max,d->mdi_stride);
     graphics_updates_ready();
     graphics_cpu_ready();
     for (int st = 0; st < 3; st++) texel_snapshots(st, S.sh[st]);
@@ -3493,6 +3532,8 @@ static void capture_indexed_inputs(const p_draw_idx *d, VkBuffer arguments, VkDe
     }
 }
 static void draw_idx(const p_draw_idx *d) {
+    if (g_rs_replay && vk_rs_cache_has_scaled())
+        resolution_draw_preflight(d->ibuf,d->itype,d->count,1,d->ind,d->mdi_cnt,d->mdi_max,d->mdi_stride);
     graphics_updates_ready();
     graphics_cpu_ready();
     for (int st = 0; st < 3; st++) texel_snapshots(st, S.sh[st]);
@@ -3707,7 +3748,7 @@ static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *
     int support=0, sampled_scaled=0;
     for (int i=0;i<cs->nbind;i++) {
         const dmsv_bind *b=&cs->b[i];
-        if (b->count!=1) return 0;
+        if (b->count!=1 || b->samp==RS_UBO) return 0;
         if (b->kind==RK_SUPPORT || b->kind==RK_C1 || b->kind==RK_DRV) {
             if (b->desc!=RD_UBO) return 0;
             if (b->kind==RK_SUPPORT) support=1;
@@ -3775,15 +3816,14 @@ static void dispatch(const p_dispatch *d) {
     g_compute_attempts++;
     vkshader_t *cs = S.sh[5];
     if (!cs) { g_compute_failed++; VKRED_ONCE(60, "dispatch with no compute shader in the bundle: skipped"); return; }
+    // Preflight before CPU-decoded descriptors or indirect argument access.
+    if (g_rs_replay && vk_rs_cache_has_scaled() && !resolution_preflight_compute(cs,d))
+        resolution_restore_before_recording();
     shader_cpu_ready(cs, 5);
     VkBuffer src[3]; VkBufferCopy spans[3]; int nspans = 0;
     if (d->ind && !(nspans = dispatch_indirect_spans(d->ind, src, spans))) { g_compute_failed++; VKRED_ONCE(61, "indirect dispatch arguments are not a valid aligned memory pool range: %#llx", (unsigned long long)d->ind); return; }
     vk_end_pass_land();
     if (g_rs_audit) resolution_audit_compute_grid(cs,d);
-    // Only proven native storage outputs and compatible sampled inputs
-    // can coexist with scaled owners. All unknown access restores first.
-    if (g_rs_replay && vk_rs_cache_has_scaled() && !resolution_preflight_compute(cs,d))
-        resolution_restore_before_recording();
     texel_snapshots(5, cs);
     VkCommandBuffer cb = vk_cmd();
     VkDescriptorSetLayout dsl[5] = {cs->dsl}; VkPipelineLayout layout = vk_pipeline_layout(dsl, 1);
@@ -4180,7 +4220,11 @@ static void set_rt(const p_set_rt *r) {
 }
 static void bind_handles_rec(uint32_t op, const void *a) {
     p_bind_handles tmp; const p_bind_handles *b = bind_rec(op, a, &tmp);
-    if (b->defer && b->src && b->n > 0 && b->n <= 32) memcpy((void *)b->h, (const void *)(uintptr_t)b->src, 8 * (size_t)b->n);
+    if (b->defer && b->src && b->n > 0 && b->n <= 32) {
+        if (g_rs_replay && vk_rs_cache_has_scaled() && !vk_rs_preflight_buffer(b->src,8ull*(unsigned)b->n))
+            resolution_restore_before_recording();
+        memcpy((void *)b->h, (const void *)(uintptr_t)b->src, 8 * (size_t)b->n);
+    }
     int st = b->stage; if (st < 0 || st > 5) return;
     for (int i = 0; i < b->n; i++) {
         int slot = b->first + i;
@@ -4254,18 +4298,33 @@ static void exec_ops(const uint8_t *p) {
         case OP_BEGIN: break;
         case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
         case OP_CALL: { uint64_t t; memcpy(&t, a, 8); exec_ops((const uint8_t *)(uintptr_t)t); break; }
-        case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4); mtl_sub_event(val, m, v); break; }
-        case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); if (g_x_tracepass == -2) VKLOG("--- report counter type %#llx to %#llx", (unsigned long long)t, (unsigned long long)ad); mtl_sub_counter(ad, (uint32_t)t); break; }
+        case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4);
+            if (g_rs_replay && vk_rs_cache_has_scaled() &&
+                !vk_rs_preflight_buffer((uintptr_t)val,4)) resolution_restore_before_recording();
+            mtl_sub_event(val, m, v); break; }
+        case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8);
+            if (g_rs_replay && vk_rs_cache_has_scaled() &&
+                !vk_rs_preflight_buffer(ad,16)) resolution_restore_before_recording();
+            if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); if (g_x_tracepass == -2) VKLOG("--- report counter type %#llx to %#llx", (unsigned long long)t, (unsigned long long)ad); mtl_sub_counter(ad, (uint32_t)t); break; }
         case OP_RESET_COUNTER: break;
         case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8);
             if (!sync_replay_fence(s, mtl_last_fence() + 1)) { static int n; if (n++ < 4) VKLOG("fence on sync %p skipped: the game has finalized or freed it (nvn_obj.h sync_replay_fence)", (void *)s); }
             break; }
         // (DM_VK_TRACE_PASS=-2 lists the buffer writes too: copies, clears and uniform updates, by address)
-        case OP_COPY_B2B: { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); mtl_sub_copy(s_, d, n);
+        case OP_COPY_B2B: { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8);
+            if (n && g_rs_replay && vk_rs_cache_has_scaled() &&
+                (!resolution_raw_span(s_,n,0) || !resolution_raw_span(d,n,0))) resolution_restore_before_recording();
+            mtl_sub_copy(s_, d, n);
             if (g_x_tracepass == -2 || mdi_log_now()) VKLOG("--- copy %#llx → %#llx, %llu bytes, after pass %d", (unsigned long long)s_, (unsigned long long)d, (unsigned long long)n, g_sub_pass - 1); break; }
-        case OP_CLEAR_BUF: { const p_clear_buf *c = (const p_clear_buf *)a; mtl_sub_fill(c->addr, c->size, c->value);
+        case OP_CLEAR_BUF: { const p_clear_buf *c = (const p_clear_buf *)a;
+            if (c->size && g_rs_replay && vk_rs_cache_has_scaled() &&
+                !resolution_raw_span(c->addr,c->size,0)) resolution_restore_before_recording();
+            mtl_sub_fill(c->addr, c->size, c->value);
             if (g_x_tracepass == -2 || mdi_log_now()) VKLOG("--- buffer clear %#llx, %llu bytes to %#x, after pass %d", (unsigned long long)c->addr, (unsigned long long)c->size, c->value, g_sub_pass - 1); break; }
-        case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8); vk_sub_update(d, a + 16, n);
+        case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8);
+            if (n && g_rs_replay && vk_rs_cache_has_scaled() &&
+                !resolution_raw_span(d,n,0)) resolution_restore_before_recording();
+            vk_sub_update(d, a + 16, n);
             if (g_x_tracepass == -2) VKLOG("--- uniform update %#llx, %llu bytes, after pass %d", (unsigned long long)d, (unsigned long long)n, g_sub_pass - 1); break; }
         case OP_SET_RT: set_rt((const p_set_rt *)a); break;
         case OP_CLEAR_COLOR: if (!g_rc_skip) clear_color((const p_clear_color *)a); break;
@@ -4321,14 +4380,24 @@ static void exec_ops(const uint8_t *p) {
             if (h.op == OP_SET_TEX_POOL) g_pool_tex_base = base; else g_pool_samp_base = base;
             break; }
         case OP_COPY_STRIDE: { const p_copy_stride *c = (const p_copy_stride *)a; if (c->image) S.image_stride = c->stride; else S.row_stride = c->stride; break; }
-        case OP_COPY_B2T: copy_b2t((const p_copy_b2t *)a, 1); break;
-        case OP_COPY_T2B: copy_b2t((const p_copy_b2t *)a, 0); break;
+        case OP_COPY_B2T: case OP_COPY_T2B: {
+            const p_copy_b2t *c=(const p_copy_b2t *)a;
+            // Buffer-image pitch/format and packed conversions may change the
+            // range. Until an exact span is available use the chunk tail.
+            if (g_rs_replay && vk_rs_cache_has_scaled() &&
+                !resolution_raw_span(c->src,0,1)) resolution_restore_before_recording();
+            copy_b2t(c,h.op==OP_COPY_B2T); break; }
         case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
         case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
-        case OP_RENDER_COND: render_cond((const p_render_cond *)a); break;   // recorded only with the profile key render_cond (hle_nvn.c)
+        case OP_RENDER_COND: {
+            const p_render_cond *rc=(const p_render_cond *)a;
+            if (rc->mode<2 && g_rs_replay && vk_rs_cache_has_scaled() &&
+                !vk_rs_preflight_buffer(rc->addr,24)) resolution_restore_before_recording();
+            render_cond(rc); break; }   // recorded only with the profile key render_cond (hle_nvn.c)
         case OP_DRAW_TF: if (!g_rc_skip) draw_tf((const p_draw_tf *)a); break;
         case OP_TF_BIND: { const p_tf_bind *b = (const p_tf_bind *)a; if (b->index >= 0 && b->index < 4) g_tf[b->index] = *b; break; }
-        case OP_TF_STATE: if (!V.has_xfb) VKRED_ONCE(80, "transform feedback: the device has none, its draws write nothing"); tf_state((const p_tf_state *)a); break;
+        case OP_TF_STATE: if (g_rs_replay && vk_rs_cache_has_scaled()) resolution_restore_before_recording();
+            if (!V.has_xfb) VKRED_ONCE(80, "transform feedback: the device has none, its draws write nothing"); tf_state((const p_tf_state *)a); break;
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = (const p_vp_swizzle *)a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
         default: VKRED_ONCE(82, "unknown record op %u", h.op); break;
         }
