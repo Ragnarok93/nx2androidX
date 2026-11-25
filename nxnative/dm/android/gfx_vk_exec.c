@@ -239,6 +239,7 @@ static void render_cond(const p_render_cond *rc) {
 
 // Startup-only diagnostic switches; the native path bypasses the classifier.
 static int g_rs_audit, g_rs_probe, g_rs_observe, g_rs_replay;
+#include "gfx_vk_resolution_compute_probe.inc"
 static nx_rs_raster g_rs_raster;
 static int g_rs_pass_scaled;
 static void exec_begin(int continuing) {   // internal segments retain the current logical NVN and conditional state
@@ -251,6 +252,8 @@ static void exec_begin(int continuing) {   // internal segments retain the curre
         g_rs_observe = g_rs_audit || g_rs_probe;
         const char *replay = getenv("DM_VK_RESOLUTION_REPLAY_CHECK");
         g_rs_replay = replay && atoi(replay) != 0;
+        const char *compute_probe=getenv("DM_VK_RESOLUTION_COMPUTE_PROBE");
+        if (compute_probe && atoi(compute_probe)) resolution_probe_compute();
         state_reset(); crash_add_note_hook(build_dump); prewarm_start(); compute_warm_start();
     }
     if (!continuing) { g_rc_npend = 0; g_rc_skip = 0; }
