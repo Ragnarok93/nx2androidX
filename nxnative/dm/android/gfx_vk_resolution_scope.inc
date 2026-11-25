@@ -2,7 +2,6 @@
 // narrow production seam: only disjoint bounded raw and indirect accesses, no unknown
 // descriptors, feedback, conditional rendering or open-ended lifetimes.
 #include "gfx_vk_resolution_scope.h"
-static const uint8_t *g_rs_scope_end;
 static unsigned g_rs_scope_nested,g_rs_scope_program_count;
 static int g_rs_scope_overwrite;
 static const uint64_t *g_rs_scope_rest;

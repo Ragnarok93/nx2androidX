@@ -371,6 +371,7 @@ static vk_rs_variant *rs_variant_allocate(const vkimg_t *logical,uint32_t w,uint
         !(props.sampleCounts & VK_SAMPLE_COUNT_1_BIT)) return NULL;
     vk_rs_variant *v = calloc(1, sizeof *v);
     if (!v) return NULL;
+    atomic_init(&v->refs, 1);
     v->logical_w = logical->w; v->logical_h = logical->h;
     v->physical_w = w; v->physical_h = h; v->format = logical->fmt; v->aspect = logical->aspect;
     v->layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -435,7 +436,7 @@ vk_rs_variant *vk_rs_storage_variant_create_private(uint32_t lw,uint32_t lh,uint
     return rs_variant_allocate(&logical,w,h,1);
 }
 void vk_rs_variant_destroy(vk_rs_variant *v) {
-    if (!v) return;
+    if (!v || atomic_fetch_sub(&v->refs, 1) != 1) return;
     if (v->view) vkDestroyImageView(V.dev, v->view, NULL);
     if (v->image) vkDestroyImage(V.dev, v->image, NULL);
     if (v->memory) vkFreeMemory(V.dev, v->memory, NULL);
@@ -1350,9 +1351,11 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
         }
         if (existing) {
             reuse[i]=existing;
-            if (rs_is_scaled(existing)) {
-                if (!nx_rs_active_update(&dormant,(uintptr_t)existing,0)) goto done;
-            } else {
+            if (rs_is_scaled(existing) &&
+                !nx_rs_active_update(&dormant,(uintptr_t)existing,0)) goto done;
+            // Presentation may still read the last contents after replay
+            // discards them. Reuse only when the cache is the sole owner.
+            if (!rs_is_scaled(existing) || atomic_load(&existing->rs_backing->refs) != 1) {
                 replacement[i]=vk_rs_variant_create(existing,w,h);
                 if (!replacement[i] || !replacement[i]->native_bytes ||
                     replacement[i]->bytes>=replacement[i]->native_bytes) goto done;

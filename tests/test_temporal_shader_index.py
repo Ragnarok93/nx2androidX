@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'nxnative/dm/android/tools'))
 import dmsv
+from resolution_meta import encode_resolution_meta
 import temporal_shader_index as temporal
 
 
@@ -52,14 +53,15 @@ def module():
     return struct.pack(f'<{len(words)}I', *words)
 
 
-def reflection():
+def reflection(c1=b""):
     rows = [
         (1, 0, 255, 0, 0, 1, 3, 0, 0, -1, 0),
         (7, 2, 1, 0, 2, 1, 5, 0, 0, -1, 0),
         (7, 2, 1, 0, 4, 1, 9, 0, 0, -1, 0),
         (9, 3, 1, 0, 7, 1, 0, 0, 4, -1, 0),
     ]
-    return struct.pack('<5I', len(rows), 0, 8, 8, 1) + b''.join(map(lambda row: temporal.REFLECTION.pack(*row), rows))
+    return struct.pack('<5I', len(rows), len(c1), 8, 8, 1) + b''.join(
+        temporal.REFLECTION.pack(*row) for row in rows) + c1
 
 
 class TemporalShaderIndex(unittest.TestCase):
@@ -83,6 +85,26 @@ class TemporalShaderIndex(unittest.TestCase):
         self.assertEqual(bindings[4]['coordinate_uniform_sources'], [(0, 68)])
         self.assertTrue(bindings[7]['writes'])
         self.assertNotIn('role', bindings[4])
+
+    def test_production_scaling_trailer_preserves_temporal_candidates(self):
+        bindings = [{'binding': binding, 'type': kind, 'count': 1, 'dim': 1}
+                    for binding, kind in ((2, 'sampled'), (4, 'sampled'), (7, 'storage'))]
+        resources = {
+            'textures': [{'binding': binding, 'flags': 2, 'array': 1} for binding in (2, 4)],
+            'images': [{'binding': 7, 'flags': 4, 'array': 1}],
+        }
+        base = reflection(b'RSCL in C1 must not be parsed')
+        trailer = encode_resolution_meta('cs', bindings, resources)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'shaders.dmsv'
+            code = module()
+            dmsv.write(path, [(1, 5, code, base), (2, 5, code, base + trailer),
+                              (3, 5, code, base + trailer[:-1])], level=0)
+            report = temporal.build_index(path, '')
+        legacy, scaled = report['candidates']
+        self.assertEqual((legacy['key'], scaled['key']), ('0000000000000001', '0000000000000002'))
+        self.assertEqual(legacy['bindings'], scaled['bindings'])
+        self.assertEqual(temporal.reflected_bindings(base + b'UNKNOWN!'), {})
 
     def test_invalid_module_is_reported_and_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:

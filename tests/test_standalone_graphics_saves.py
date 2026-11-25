@@ -61,7 +61,7 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         rcas = (ANDROID / "shaders/fsr_rcas.frag").read_text()
         self.assertIn("FsrEasuF(", easu)
         self.assertIn("FsrRcasF(", rcas)
-        self.assertIn("spatial_draw(cb, SP_RCAS, SP_INTERMEDIATE", self.spatial)
+        self.assertIn("spatial_draw(cb, SP_RCAS, g_spatial.set[SP_INTERMEDIATE]", self.spatial)
         self.assertIn("mode == SP_FSR1 ? SP_EASU : SP_GSR1", self.spatial)
         self.assertIn("gsr1_frag_spv", self.spatial)
         self.assertIn("if (g_spatial.ticket == ticket) return output", self.spatial)

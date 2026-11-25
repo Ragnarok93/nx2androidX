@@ -190,6 +190,17 @@ Per-build knowledge stays where upstream keeps it: the rewriter's cuts in `patch
 
 The Vulkan present thread identifies real frames by their game present tickets. It crops and orients the source, then runs Bilinear, FSR 1 EASU/RCAS, or Qualcomm GSR 1 into a picture-sized image before passing that image to LSFG. The Native selection leaves the source at its guest size and fits it to the surface at presentation. Auto currently prefers GSR 1 and falls back to Bilinear if the raster path is unavailable. The runtime logs the effective mode, any fallback, and GPU timing when the queue supports timestamps. Changing the upscaler takes effect on the next real frame.
 
+A certified full color copy to a same-size NVN display texture also offers the
+physical backing to the presenter. The handoff checks the display image and
+write sequence at the real-frame ticket. For an uncropped frame, Bilinear,
+FSR 1 and GSR 1 reconstruct from the physical extent into the picture extent.
+Compatible raster inputs can be sampled from their original image view.
+Other encodings or orientations use a physical-size staging image. The original
+display copy preserves the guest texture for its other consumers and for
+fallback. The reconstruction queue and GPU submission retain the physical
+backing independently of the replay cache. Replay can reuse a discarded
+allocation once it is the sole owner.
+
 LSFG outputs and pause-menu redraws use the reconstructed images already available. Vivid applies display-referred SDR contrast and saturation after LSFG, followed by the runtime overlay. sRGB images use compatible UNORM views for the spatial shaders so they filter display-encoded values, then present and composite with their sRGB encoding intact.
 
 The Upgrade tab and `python -m porter upgrade-apk` reuse existing rewritten modules, game data, and compatible shader bundles. The upgrade verifies the original signer, runtime ABI, profile and rewrite inputs, and replaces the standalone runtime and its display assets. The package identity, save directory, and imported driver files remain in place.
@@ -218,6 +229,8 @@ After publishing or validating the cached Vulkan shader bundle, the porter
 indexes candidate compute and fragment modules in `temporal-shaders.json`.
 The index links NVN shader keys to SPIR-V image operations, storage writes,
 fixed uniform byte offsets, and traceable inputs to sample coordinates.
+The indexer reads the same descriptor records in legacy and RSCL-enabled
+shader bundles. The RSCL trailer adds scaling metadata after the C1 bytes.
 Its independent receipt is keyed to the shader bundle and analyzer, so
 backfilling or changing the analyzer does not retranslate guest shaders.
 Candidate analysis uses bounded memory and a bounded byte budget. It runs at

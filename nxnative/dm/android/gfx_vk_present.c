@@ -100,6 +100,7 @@ static VkExtent2D g_next;   // the swapchain images' extent: the window's (g_sex
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
                 VkSampler samp; VkPipeline pipe; VkFormat pfmt; } g_rot;
 static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to);
+#include "gfx_vk_reconstruction.h"
 #include "gfx_vk_spatial.h"
 static void rot_drop_image(void) {
     if (g_rot.view) vkDestroyImageView(V.dev, g_rot.view, NULL);
@@ -1292,6 +1293,44 @@ static void shot(vkimg_t *im, uint64_t n) {
     VKLOG("frame %llu written to %s (%ux%u)", (unsigned long long)n, path, w, h);
 }
 #include "dm_framegen.h"
+// Replay publishes at most one candidate before the next NVN present.
+static struct {
+    vk_reconstruction_input input;
+    VkImage display;
+    uint64_t written;
+} g_physical_offer;
+
+void vk_present_offer_physical(const vkimg_t *src, const vkimg_t *display) {
+    if (dm_spatial_mode() == SP_NATIVE || !dm_front_window()) return;
+    vk_rs_variant *v = src->rs_backing;
+    atomic_fetch_add(&v->refs, 1);
+    vk_rs_variant_destroy(g_physical_offer.input.backing);
+    g_physical_offer.input = (vk_reconstruction_input){
+        .backing = v,
+        .physical = {v->physical_w, v->physical_h},
+        .logical = {display->w, display->h},
+        .valid = {{0, 0}, {v->physical_w, v->physical_h}},
+        .sampled = (src->usage & VK_IMAGE_USAGE_SAMPLED_BIT) ? v->view : VK_NULL_HANDLE,
+        .format = src->fmt,
+        .layout = src->layout,
+    };
+    g_physical_offer.display = display->img;
+    g_physical_offer.written = display->wseq;
+}
+
+static vk_reconstruction_input take_physical_offer(const vkimg_t *im, uint64_t ticket) {
+    vk_reconstruction_input input = g_physical_offer.input;
+    g_physical_offer.input.backing = NULL;
+    if (!im || im->img != g_physical_offer.display || im->wseq != g_physical_offer.written ||
+        im->fmt != input.format || im->novl || im->packaged || im->lin_mem) {
+        vk_rs_variant_destroy(input.backing);
+        return (vk_reconstruction_input){0};
+    }
+    input.ticket = ticket;
+    input.flip_y = vk_window_bottom_up();
+    return input;
+}
+
 static pthread_mutex_t g_present_mu = PTHREAD_MUTEX_INITIALIZER;   // the swapchain against the window going away (vk_window_lost, on the main thread)
 void vk_window_lost(void) {
     pthread_mutex_lock(&g_present_mu);
@@ -1304,13 +1343,21 @@ void vk_window_lost(void) {
 // swapchain's fences (a FIFO swapchain blocks there until a vsync); the window texture is not drawn again before its blit, because NVN's acquire waits for
 // its ticket (mtl_present_wait), and the blit's submission comes after the frame's own on the one queue. DM_VK_SYNC_PRESENT=1 presents on the game thread.
 #define PQ_N 4
-static struct { vkimg_t *im; int crop[4], has_crop; uint64_t n; double period; } g_pq[PQ_N];
+static struct {
+    vkimg_t *im;
+    int crop[4], has_crop;
+    uint64_t n;
+    double period;
+    vk_reconstruction_input physical;
+} g_pq[PQ_N];
 static uint64_t g_pq_head, g_pq_tail, g_pq_done;   // queued [tail, head), presents up to ticket g_pq_done are blitted
 static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pq_cv = PTHREAD_COND_INITIALIZER;
 // While the game is held (the pause menu) no frame comes: dm_overlay_redraw presents the last one again with what the overlay now shows.
 static _Atomic int g_redraw;
 void dm_overlay_redraw(void) { atomic_store(&g_redraw, 1); pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }
-static void present_window(vkimg_t *im, const int *crop, double period, uint64_t ticket, int redraw) {
+static void present_window(vkimg_t *im, const int *crop, double period, uint64_t ticket, int redraw,
+                           const vk_reconstruction_input *physical) {
+    if (g_spatial.live_sources) spatial_collect_sources();
     if (g_present_failed) return;
     if (!redraw) {
         VkFormat want = present_window_format(im->fmt);
@@ -1330,7 +1377,11 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     if (redraw) {
         if (ticket && g_spatial.ticket == ticket) reconstructed = &g_spatial.image[SP_OUTPUT];
     } else if (period >= 0) {
-        reconstructed = spatial_reconstruct(im, raw, flip_y, picture.width, picture.height, ticket);
+        // A guest crop can carry engine dynamic-resolution information.
+        // Keep the existing native image path for anything but the full copy.
+        int full = !raw[0] && !raw[1] && raw[2] == (int)im->w && raw[3] == (int)im->h;
+        reconstructed = spatial_reconstruct(im, raw, flip_y, picture.width, picture.height, ticket,
+                                           full ? physical : NULL);
     }
 
     vkimg_t *source = reconstructed ? &reconstructed->texture : im;
@@ -1368,7 +1419,7 @@ static void *present_thread(void *arg) {
             pthread_mutex_unlock(&g_pq_mu);
             if (last.im) {
                 pthread_mutex_lock(&g_present_mu);
-                present_window(last.im, last.has_crop ? last.crop : NULL, -1, last.n, 1);
+                present_window(last.im, last.has_crop ? last.crop : NULL, -1, last.n, 1, NULL);
                 pthread_mutex_unlock(&g_present_mu);
             }
             continue;
@@ -1377,20 +1428,25 @@ static void *present_thread(void *arg) {
         pthread_mutex_unlock(&g_pq_mu);
         if (e.im) {
             last = e;
+            last.physical.backing = NULL;
             pthread_mutex_lock(&g_present_mu);
-            present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0);
+            present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0,
+                           e.physical.backing ? &e.physical : NULL);
             pthread_mutex_unlock(&g_present_mu);
         }
+        vk_rs_variant_destroy(e.physical.backing);
         pthread_mutex_lock(&g_pq_mu); g_pq_tail++; g_pq_done = e.n; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
     }
     return NULL;
 }
 static void present_thread_start(void) { pthread_t t; pthread_create(&t, NULL, present_thread, NULL); pthread_detach(t); }
-static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, double period) {   // im NULL: nothing to show, the ticket still completes in order
+static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, double period,
+                                const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
     static int sync = -1; static pthread_once_t once = PTHREAD_ONCE_INIT;
     if (sync < 0) sync = getenv("DM_VK_SYNC_PRESENT") != NULL;
     if (sync || !dm_front_window()) {   // headless: nothing to show; or presenting on this thread
-        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0); pthread_mutex_unlock(&g_present_mu); }
+        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, physical); pthread_mutex_unlock(&g_present_mu); }
+        if (physical) vk_rs_variant_destroy(physical->backing);
         pthread_mutex_lock(&g_pq_mu); if (g_pq_tail == g_pq_head) g_pq_done = n; pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
         return n;
     }
@@ -1398,6 +1454,8 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_head - g_pq_tail >= PQ_N) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // never more than PQ_N frames behind
     typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = im; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
+    if (physical) e->physical = *physical;
+    else e->physical.backing = NULL;
     g_pq_head++; pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     return n;
@@ -1485,8 +1543,14 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     }
     { void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4]);
       uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done(), im, crop); }
-    if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period); }
-    if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period); }   // never drawn into: nothing to show yet
+    vk_reconstruction_input physical;
+    const vk_reconstruction_input *input = NULL;
+    if (g_physical_offer.input.backing) {
+        physical = take_physical_offer(im && im->layout == VK_IMAGE_LAYOUT_GENERAL ? im : NULL, n);
+        if (physical.backing) input = &physical;
+    }
+    if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period, NULL); }
+    if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period, NULL); }   // never drawn into: nothing to show yet
     shown++;
     if (shot_wanted(n)) shot(im, n);
     { void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
@@ -1494,7 +1558,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
         pthread_create(&th, &a, (void *(*)(void *))(void *)vk_pipeline_cache_save, NULL); pthread_attr_destroy(&a);
     }
-    uint64_t ticket=present_enqueue(im, crop, n, period);
+    uint64_t ticket=present_enqueue(im, crop, n, period, input);
     vk_rs_publish_source_frame(n);
     return ticket;
 }
@@ -1525,7 +1589,7 @@ uint64_t vk_present_vkimg(vkimg_t *im, double period) {
     { int disp = V.has_dtiming && dm_front_window() && (n <= 240 || g_pres_recorded); struct timespec ts; if (!disp) clock_gettime(CLOCK_MONOTONIC, &ts);
       present_time_begin(n, disp ? 0 : (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
     if (shot_wanted(n) && im->layout == VK_IMAGE_LAYOUT_GENERAL) shot(im, n);
-    return present_enqueue(im, NULL, n, period);
+    return present_enqueue(im, NULL, n, period, NULL);
 }
 void mtl_present_wait(uint64_t tk) {   // NVN acquire: the window texture's last present has been blitted (the game may draw into it again)
     if (!tk) return;

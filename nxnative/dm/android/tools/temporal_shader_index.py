@@ -8,6 +8,7 @@ import hashlib
 import struct
 
 import dmsv
+import resolution_meta
 
 NAME = 'temporal-shaders.json'
 MAX_MODULE_BYTES = 2 << 20
@@ -41,11 +42,22 @@ def reflected_bindings(data):
     if len(data) < 20:
         return {}
     count, constants = struct.unpack_from('<II', data)
-    if 20 + REFLECTION.size * count + constants != len(data):
+    end = 20 + REFLECTION.size * count
+    trailer = end + constants
+    if trailer > len(data):
         return {}
+    if trailer < len(data):
+        # RSCL follows the C1 bytes. Its scaling slots are not Vulkan
+        # descriptor bindings and provide no temporal-role evidence.
+        if len(data) - trailer < resolution_meta.HEADER.size:
+            return {}
+        magic, version, records = resolution_meta.HEADER.unpack_from(data, trailer)
+        if magic != b'RSCL' or version != 1 or records > 96 or (
+                len(data) - trailer != resolution_meta.HEADER.size + records * resolution_meta.RECORD.size):
+            return {}
     bindings = {}
     for kind, desc, dim, flags, slot, count, reg, _, fmt, off, _ in REFLECTION.iter_unpack(
-            memoryview(data)[20:len(data) - constants]):
+            memoryview(data)[20:end]):
         # Dim 1 is 2D. Descriptor arrays of 2D views are allowed; array
         # image types, multisampled views and translated 1D fetches are excluded.
         if dim == 1 and not flags & 11 and desc in (2, 3, 6):

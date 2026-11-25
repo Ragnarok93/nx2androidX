@@ -3,6 +3,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,6 +71,20 @@ static void vk_img_barrier_all(VkCommandBuffer cb) {
                          0, 1, &b, 0, NULL, 0, NULL);
 }
 
+typedef struct {
+    VkImage image;
+    VkImageView view;
+    _Atomic unsigned refs;
+} vk_rs_variant;
+#include "gfx_vk_reconstruction.h"
+
+static void vk_rs_variant_destroy(vk_rs_variant *v) {
+    if (v) {
+        unsigned previous = atomic_fetch_sub(&v->refs, 1);
+        assert(previous > 1); // each fixture owns its allocation separately
+    }
+}
+
 #include "gfx_vk_spatial.h"
 
 enum { SRC = 20, OUT = 32 };
@@ -114,24 +129,24 @@ static void complete(void) {
     CHECK(vkQueueWaitIdle(V.q));
 }
 
-static spatial_image source_image(void) {
+static spatial_image source_image(int size) {
     spatial_image saved = g_spatial.image[SP_OUTPUT];
     g_spatial.image[SP_OUTPUT] = (spatial_image){0};
-    assert(spatial_image_ready(SP_OUTPUT, SRC, SRC,
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, g_sfmt));
+    assert(spatial_image_ready(SP_OUTPUT, size, size,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, g_sfmt));
     spatial_image src = g_spatial.image[SP_OUTPUT];
     g_spatial.image[SP_OUTPUT] = saved;
-    for (int y = 0; y < SRC; y++)
-        for (int x = 0; x < SRC; x++) {
-            uint8_t *p = mapped + (SRC * y + x) * 4;
-            p[0] = (x < 2 || x > 17) ? 255 : y < SRC / 2 ? 55 : 218;
-            p[1] = x + y > 19 ? 250 : 14;
+    for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++) {
+            uint8_t *p = mapped + (size * y + x) * 4;
+            p[0] = (x < 2 || x > size - 3) ? 255 : y < size / 2 ? 55 : 218;
+            p[1] = x + y > size - 1 ? 250 : 14;
             p[2] = 76;
             p[3] = 173;
         }
     begin();
     barrier(test_cb, src.texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkBufferImageCopy region = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {SRC, SRC, 1}};
+    VkBufferImageCopy region = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {size, size, 1}};
     vkCmdCopyBufferToImage(test_cb, pixels, src.texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     barrier(test_cb, src.texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     complete();
@@ -174,22 +189,22 @@ static void check_vivid(spatial_image *input) {
 }
 
 static void run_spatial(void) {
-    spatial_image src = source_image();
+    spatial_image src = source_image(SRC);
     int crop[] = {2, 2, 16, 16};
     uint8_t bilinear[OUT * OUT * 4];
     static uint64_t ticket = 0;
     const int modes[] = {SP_BILINEAR, SP_FSR1, SP_SGSR1, SP_AUTO, SP_NATIVE};
     for (unsigned i = 0; i < sizeof modes / sizeof modes[0]; i++) {
         selected_mode = modes[i];
-        spatial_image *out = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket);
+        spatial_image *out = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket, NULL);
         if (selected_mode == SP_NATIVE) {
             assert(!out && spatial_active == SP_NATIVE);
             continue;
         }
         assert(out && spatial_active == (selected_mode == SP_AUTO ? SP_SGSR1 : selected_mode));
         unsigned slot = g_spatial.slot;
-        assert(spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ticket) == out);
-        assert(spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, 0) == NULL);
+        assert(spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ticket, NULL) == out);
+        assert(spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, 0, NULL) == NULL);
         assert(g_spatial.slot == slot);
         readback(out->texture.img, OUT, OUT);
         if (selected_mode == SP_BILINEAR) memcpy(bilinear, mapped, sizeof bilinear);
@@ -198,17 +213,69 @@ static void run_spatial(void) {
     }
     selected_mode = SP_FSR1;
     sharpness = 0;
-    spatial_image *resized = spatial_reconstruct(&src.texture, crop, 1, 24, OUT, ++ticket);
+    spatial_image *resized = spatial_reconstruct(&src.texture, crop, 1, 24, OUT, ++ticket, NULL);
     assert(resized && resized->texture.w == 24);
     readback(resized->texture.img, 24, OUT);
     sharpness = 50;
     selected_mode = SP_AUTO;
     V.has_dynrender = 0;
-    spatial_image *fallback = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket);
+    spatial_image *fallback = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket, NULL);
     assert(fallback && spatial_active == SP_BILINEAR);
     readback(fallback->texture.img, OUT, OUT);
     V.has_dynrender = 1;
     spatial_image_drop(&src);
+}
+
+static void run_physical(void) {
+    static uint64_t ticket = 100;
+    int raw[] = {0, 0, OUT, OUT};
+    for (unsigned scale = 50; scale <= 75; scale += 25) {
+        int size = OUT * scale / 100;
+        int actual[] = {0, 0, size, size};
+        spatial_image src = source_image(size);
+        vk_rs_variant backing = {.image = src.texture.img, .view = src.view, .refs = 1};
+        vkimg_t guest = {.w = OUT, .h = OUT, .fmt = g_sfmt, .layout = VK_IMAGE_LAYOUT_GENERAL};
+        for (int mode = SP_BILINEAR; mode <= SP_SGSR1; mode++) {
+            selected_mode = mode;
+            spatial_image *ref = spatial_reconstruct(&src.texture, actual, 0, OUT, OUT, ++ticket, NULL);
+            assert(ref);
+            begin();
+            VkBufferImageCopy region = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {OUT, OUT, 1}};
+            vkCmdCopyImageToBuffer(test_cb, ref->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &region);
+            vk_img_barrier_all(test_cb);
+            complete();
+            uint8_t expected[OUT * OUT * 4];
+            memcpy(expected, mapped, sizeof expected);
+
+            spatial_image_drop(&g_spatial.image[SP_SOURCE]);
+            vk_reconstruction_input input = {
+                .backing = &backing,
+                .physical = {size, size},
+                .logical = {OUT, OUT},
+                .valid = {{0, 0}, {size, size}},
+                .sampled = src.view,
+                .format = g_sfmt,
+                .layout = VK_IMAGE_LAYOUT_GENERAL,
+                .ticket = ++ticket,
+            };
+            spatial_image *out = spatial_reconstruct(&guest, raw, 0, OUT, OUT, ticket, &input);
+            assert(out && spatial_active == mode && backing.refs > 1);
+            if (mode == SP_BILINEAR || g_sfmt == VK_FORMAT_R8G8B8A8_UNORM)
+                assert(!g_spatial.image[SP_SOURCE].texture.img);
+            begin();
+            vkCmdCopyImageToBuffer(test_cb, out->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &region);
+            vk_img_barrier_all(test_cb);
+            complete();
+            spatial_collect_sources();
+            assert(backing.refs == 1);
+            for (unsigned i = 0; i < sizeof expected; i++)
+                assert(abs((int)expected[i] - mapped[i]) <= 1);
+        }
+        spatial_drop_images();
+        assert(backing.refs == 1);
+        spatial_image_drop(&src);
+    }
+    assert(!spatial_reconstruct(&(vkimg_t){.w = OUT, .h = OUT}, raw, 0, OUT, OUT, ++ticket, NULL));
 }
 
 #ifdef SGSR2_HOST_PROBE
@@ -252,8 +319,10 @@ int main(void) {
     check_temporal();
 #else
     run_spatial();
+    run_physical();
     g_sfmt = VK_FORMAT_R8G8B8A8_SRGB;
     run_spatial();
+    run_physical();
 #endif
     CHECK(vkDeviceWaitIdle(V.dev));
     spatial_drop_images();
@@ -273,6 +342,6 @@ int main(void) {
     vkDestroyDevice(V.dev, NULL);
     vkDestroyInstance(instance, NULL);
 #ifndef SGSR2_HOST_PROBE
-    puts("spatial reconstruction passed (UNORM and sRGB)");
+    puts("spatial reconstruction passed (UNORM and sRGB, physical 50% and 75%, native bypass at 100%)");
 #endif
 }

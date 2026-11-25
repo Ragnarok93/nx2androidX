@@ -43,6 +43,12 @@ static const vkfmt_t *vk_fmt(int n) {
 }
 static int g_rs_replay,scaled_active,scaled_lookups;
 static vk_rs_variant physical;
+static const uint8_t *g_rs_scope_end;
+static unsigned offered;
+void vk_present_offer_physical(const vkimg_t *source, const vkimg_t *display) {
+    assert(source == &images[0] && display == &images[1] && display->gpu_w);
+    offered++;
+}
 static vkimg_t *vk_tex(const tex_t *t) {
     assert(!scaled_active || t!=&src); // direct copy must not request native source
     return &images[same_image || t==&src?0:1];
@@ -127,11 +133,14 @@ int main(int argc,char **argv) {
             images[0].usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;images[1].usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT;
             physical=(vk_rs_variant){.physical_w=32*scale/100,.physical_h=32*scale/100,.logical_w=32,.logical_h=32,.image=images[0].img};
             images[0].rs_backing=&physical;g_rs_replay=scaled_active=1;scaled_lookups=0;
+            g_rs_scope_end=linear?(const uint8_t *)&physical:NULL;
+            offered=0;
             copy_t2t(&c);
             assert(blits==1 && !copies && !resolves && !retired && !create_calls && scaled_lookups==1);
             assert(last_blit.srcOffsets[1].x==(int32_t)physical.physical_w && last_blit.srcOffsets[1].y==(int32_t)physical.physical_h);
             assert(last_blit.dstOffsets[1].x==32 && last_blit.dstOffsets[1].y==32);
             assert(last_filter==(linear?VK_FILTER_LINEAR:VK_FILTER_NEAREST) && images[1].gpu_w);
+            assert(offered==(unsigned)linear);
             scaled_active=g_rs_replay=0;
         }
     }

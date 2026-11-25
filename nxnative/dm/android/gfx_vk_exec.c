@@ -241,6 +241,7 @@ static void render_cond(const p_render_cond *rc) {
 
 // Startup-only diagnostic switches; the native path bypasses the classifier.
 static int g_rs_audit, g_rs_probe, g_rs_observe, g_rs_replay, g_rs_scopes;
+static const uint8_t *g_rs_scope_end;
 // Only the present producer publishes frame epochs. The replay thread owns
 // the latch; internal submission cuts never change its target.
 static unsigned g_rs_frame_request; // 0 disables the experimental coordinator
@@ -4194,6 +4195,10 @@ static int resolution_copy_to_display(const p_copy_t2t *c) {
     vkCmdBlitImage(cb,s->img,VK_IMAGE_LAYOUT_GENERAL,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&b,
         (c->flags&1)?VK_FILTER_LINEAR:VK_FILTER_NEAREST);
     vk_tex_mark_written(d);vk_img_barrier_all(cb);
+    // Scope admission proves this transfer ends the source's write phase.
+    // Keep the guest blit for any later consumer of the display texture.
+    if (g_rs_scope_end && s->w == d->w && s->h == d->h && !d->novl)
+        vk_present_offer_physical(s, d);
     return 1;
 }
 static void copy_t2t(const p_copy_t2t *c) {

@@ -1269,6 +1269,7 @@ class Port:
 
     def index_temporal_shaders(self, shader_receipt):
         """Run after either translation or validated DMSV reuse, with an independent receipt."""
+        import resolution_meta
         import temporal_shader_index
         PROG.set(step='indexing temporal shader bindings')
         output = self.aw / temporal_shader_index.NAME
@@ -1281,7 +1282,7 @@ class Port:
             if source['stat'] != product_cache.file_state(self.dmsv):
                 raise ValueError('shader bundle changed before temporal analysis')
             analyzer = Path(temporal_shader_index.__file__)
-            key = nsp.fingerprint(bundle_sha256, ('files', [analyzer]))
+            key = nsp.fingerprint(bundle_sha256, ('files', [analyzer, Path(resolution_meta.__file__)]))
             if product_cache.reused(receipt, key, output) is None:
                 index = temporal_shader_index.build_index(self.dmsv, bundle_sha256)
                 if source['stat'] != product_cache.file_state(self.dmsv):

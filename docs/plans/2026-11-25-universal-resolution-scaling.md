@@ -140,3 +140,15 @@ Shader metadata hardening: validate the entire immutable RSCL trailer once at sh
 Direct physical-to-display transfer: certified complete single-level same-format color copies into an explicit NVN display texture can consume physical source backing with a single Vulkan blit into the logical presentation target. No native intermediate source allocation or reverse restore, and no change to asynchronous display ownership. Source/destination disjointness, full extents, format blit/filter features and exact live backing are checked; partial, aliased, view-based, resolve and arbitrary raw-copy destinations remain native. Independent disjoint native texture copies/clears can coexist with a scope. This is a nearest/linear reconstruction seam, not yet direct FSR/GSR processing of the physical image; existing upscaler/LSFG presentation order remains unchanged. Added geometry and real scanner coverage; CI and device readback pending.
 
 Regression fixture integration: the full DMSV reader harness now includes the production RSCL validator instead of failing on a missing declaration. Texture transfer fixture executes the real display-copy path with 50/75% physical source backing, asserts one blit with exact physical and native extents, correct filter, written destination, no native source lookup and no intermediate allocation or copy. Existing transfer assertions retained. CI pending.
+
+Direct spatial reconstruction now consumes certified full-frame physical
+color copies before LSFG. The display image and write sequence identify the
+handoff, which is consumed once by a real present. Replay retains the guest
+copy for possible guest consumers. Compatible FSR 1 and GSR 1 inputs are
+sampled directly, with physical-size staging for incompatible encodings or
+orientation. Bilinear uses the physical blit extent. Backings retained by
+the presenter cannot be reused for a new raster lifetime until the
+reconstruction fence retires. Cropped or superseded display writes use the
+existing display texture. Software Vulkan readbacks cover 50% and 75% inputs
+and the 100% bypass. Device coverage, performance and temporal replay
+integration still require validation.

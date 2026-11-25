@@ -148,12 +148,15 @@ typedef struct vk_rs_variant {
     VkDeviceMemory memory;
     VkDeviceSize bytes, native_bytes;
     uint8_t restore_budget, native_only;
+    _Atomic unsigned refs; // cache/replay retirement and pending presentation
     VkImageLayout layout;
     VkFormat format;
     VkImageAspectFlags aspect;
     uint32_t logical_w, logical_h, physical_w, physical_h;
     uint64_t generation;
 } vk_rs_variant;
+void vk_present_offer_physical(const vkimg_t *src, const vkimg_t *display);
+
 // Replay thread, outside any render pass. Variants are private scratch until
 // raster/shader/alias virtualization is implemented; never substitute vk_tex().
 vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t h);

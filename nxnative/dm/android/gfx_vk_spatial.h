@@ -15,7 +15,7 @@ static struct {
     VkDescriptorSetLayout dsl;
     VkPipelineLayout layout;
     VkDescriptorPool pool;
-    VkDescriptorSet set[3];
+    VkDescriptorSet set[3], direct_set[SP_SLOTS];
     VkSampler sampler;
     VkPipeline pipeline[SP_PASS_COUNT];
     VkFormat fmt;
@@ -25,6 +25,8 @@ static struct {
     VkCommandPool commands;
     VkCommandBuffer cb[SP_SLOTS];
     VkFence fence[SP_SLOTS];
+    vk_rs_variant *source[SP_SLOTS];
+    unsigned live_sources;
     VkQueryPool queries;
     uint32_t timestamp_bits;
     unsigned slot, encoding;
@@ -46,7 +48,22 @@ static void spatial_forget_fence(VkFence fence) {
         if (g_spatial.image[i].last_use == fence) g_spatial.image[i].last_use = VK_NULL_HANDLE;
 }
 
+static void spatial_release_source(unsigned slot) {
+    vk_rs_variant_destroy(g_spatial.source[slot]);
+    g_spatial.source[slot] = NULL;
+    g_spatial.live_sources &= ~(1u << slot);
+}
+
+static void spatial_collect_sources(void) {
+    for (unsigned mask = g_spatial.live_sources; mask; mask &= mask - 1) {
+        unsigned slot = (unsigned)__builtin_ctz(mask);
+        if (vkWaitForFences(V.dev, 1, &g_spatial.fence[slot], VK_TRUE, 0) == VK_SUCCESS)
+            spatial_release_source(slot);
+    }
+}
+
 static void spatial_drop_images(void) {
+    for (unsigned i = 0; i < SP_SLOTS; i++) spatial_release_source(i);
     for (int i = 0; i < SP_IMAGE_COUNT; i++) spatial_image_drop(&g_spatial.image[i]);
     g_spatial.ticket = g_spatial.retry_after = 0;
 }
@@ -70,8 +87,8 @@ static int spatial_pipeline_ready(int pass) {
         VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
         VkPipelineLayoutCreateInfo lc = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &g_spatial.dsl, 1, &pc};
         if (!r) r = vkCreatePipelineLayout(V.dev, &lc, NULL, &g_spatial.layout);
-        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
-        VkDescriptorPoolCreateInfo pool = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 3, 1, &ps};
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 + SP_SLOTS};
+        VkDescriptorPoolCreateInfo pool = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 3 + SP_SLOTS, 1, &ps};
         if (!r) r = vkCreateDescriptorPool(V.dev, &pool, NULL, &g_spatial.pool);
         VkDescriptorSetLayout ls[3] = {g_spatial.dsl, g_spatial.dsl, g_spatial.dsl};
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_spatial.pool, 3, ls};
@@ -186,7 +203,7 @@ static int spatial_image_ready(int index, uint32_t w, uint32_t h, VkImageUsageFl
     t->layout = VK_IMAGE_LAYOUT_GENERAL;
     s->usage = usage;
     s->view_fmt = view_fmt;
-    if (usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+    if (index < SP_OUTPUT && (usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
         VkDescriptorImageInfo info = {g_spatial.sampler, s->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_spatial.set[index],
             0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &info};
@@ -196,7 +213,7 @@ static int spatial_image_ready(int index, uint32_t w, uint32_t h, VkImageUsageFl
 }
 
 typedef struct { float sizes[4], origin[2], sharpness, padding; } spatial_constants;
-static void spatial_draw(VkCommandBuffer cb, int pass, int set, VkImageView view,
+static void spatial_draw(VkCommandBuffer cb, int pass, VkDescriptorSet set, VkImageView view,
                      int x, int y, uint32_t w, uint32_t h, spatial_constants c) {
     VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, view,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -206,7 +223,7 @@ static void spatial_draw(VkCommandBuffer cb, int pass, int set, VkImageView view
         {{x, y}, {w, h}}, 1, 0, 1, &ca, NULL, NULL};
     vkCmdBeginRendering(cb, &ri);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_spatial.pipeline[pass]);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_spatial.layout, 0, 1, &g_spatial.set[set], 0, NULL);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_spatial.layout, 0, 1, &set, 0, NULL);
     vkCmdPushConstants(cb, g_spatial.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof c, &c);
     VkViewport vp = {(float)x, (float)y, (float)w, (float)h, 0, 1};
     VkRect2D sc = {{x, y}, {w, h}};
@@ -300,7 +317,8 @@ static void spatial_report(int requested, int active, const char *reason, uint64
 // and overlay-only presents never enter this function. Cached output remains
 // readable by LSFG and the presenter until the next reconstruction.
 static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int flip_y,
-                                         uint32_t w, uint32_t h, uint64_t ticket) {
+                                         uint32_t w, uint32_t h, uint64_t ticket,
+                                         const vk_reconstruction_input *physical) {
     if (!ticket) return NULL;
     spatial_image *output = &g_spatial.image[SP_OUTPUT];
     if (g_spatial.ticket == ticket) return output;
@@ -312,8 +330,26 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         spatial_report(requested, SP_NATIVE, NULL, ticket);
         return NULL;
     }
+    VkImage image = src->img;
+    VkFormat format = src->fmt;
+    VkImageLayout layout = src->layout;
+    uint32_t sw = src->w, sh = src->h;
+    int valid[4];
+    if (physical && physical->backing && physical->ticket == ticket && physical->layout == VK_IMAGE_LAYOUT_GENERAL &&
+        physical->logical.width == sw && physical->logical.height == sh &&
+        physical->format == format) {
+        image = physical->backing->image;
+        sw = physical->physical.width;
+        sh = physical->physical.height;
+        valid[0] = physical->valid.offset.x;
+        valid[1] = physical->valid.offset.y;
+        valid[2] = (int)physical->valid.extent.width;
+        valid[3] = (int)physical->valid.extent.height;
+        crop = valid;
+        flip_y = physical->flip_y;
+    } else physical = NULL;
     if (crop[2] <= 0 || crop[3] <= 0 || crop[0] < 0 || crop[1] < 0 ||
-        (uint64_t)crop[0] + crop[2] > src->w || (uint64_t)crop[1] + crop[3] > src->h ||
+        (uint64_t)crop[0] + crop[2] > sw || (uint64_t)crop[1] + crop[3] > sh ||
         !w || !h || (w <= (uint32_t)crop[2] && h <= (uint32_t)crop[3])) {
         spatial_report(requested, SP_NATIVE, "picture fits or exceeds output", ticket);
         return NULL;
@@ -324,7 +360,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     }
 
     VkFormat sample_fmt = spatial_unorm_format(g_sfmt);
-    VkFormatFeatureFlags src_features = spatial_features(src->fmt);
+    VkFormatFeatureFlags src_features = spatial_features(format);
     VkFormatFeatureFlags dst_features = spatial_features(g_sfmt);
     VkFormatFeatureFlags raster_features = spatial_features(sample_fmt);
     VkFormatFeatureFlags sampling = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
@@ -342,7 +378,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (!(src_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
         (dst_features & (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) !=
         (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
-        (mode == SP_BILINEAR && !((crop[0] || crop[1] || iw != src->w || ih != src->h
+        (mode == SP_BILINEAR && !((crop[0] || crop[1] || iw != sw || ih != sh
             ? dst_features : src_features) & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))) {
         spatial_report(requested, SP_NATIVE, "image format cannot be reconstructed", ticket);
         return NULL;
@@ -351,8 +387,20 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     spatial_image *stage = &g_spatial.image[SP_SOURCE];
     spatial_image *intermediate = &g_spatial.image[SP_INTERMEDIATE];
     int raster = mode != SP_BILINEAR;
-    int isolated = crop[0] || crop[1] || iw != src->w || ih != src->h;
-    int stage_needed = raster || isolated;
+    int isolated = crop[0] || crop[1] || iw != sw || ih != sh;
+    unsigned slot = g_spatial.slot % SP_SLOTS;
+    // A matching encoded view can feed the raster filters directly. Cropped,
+    // flipped and incompatible encodings still use a physical-size staging
+    // image to preserve clamp, orientation and color behavior.
+    int direct = raster && physical && !isolated && !flip_y && format == sample_fmt &&
+        physical->sampled && (src_features & sampling) == sampling;
+    VkDescriptorSet *source_set = &g_spatial.direct_set[slot];
+    if (direct && !*source_set) {
+        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL,
+            g_spatial.pool, 1, &g_spatial.dsl};
+        if (vkAllocateDescriptorSets(V.dev, &ai, source_set)) direct = 0;
+    }
+    int stage_needed = (raster && !direct) || isolated;
     VkImageUsageFlags stage_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         (raster ? VK_IMAGE_USAGE_SAMPLED_BIT : VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     rcas = raster && rcas;
@@ -367,12 +415,19 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         return NULL;
     }
 
-    unsigned slot = g_spatial.slot++ % SP_SLOTS;
+    g_spatial.slot++;
     VkFence fence = g_spatial.fence[slot];
     VkCommandBuffer cb = g_spatial.cb[slot];
     if (vkWaitForFences(V.dev, 1, &fence, VK_TRUE, UINT64_MAX)) goto submit_error;
     spatial_forget_fence(fence);
+    spatial_release_source(slot);
     spatial_read_timing(slot);
+    if (direct) {
+        VkDescriptorImageInfo info = {g_spatial.sampler, physical->sampled, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, *source_set,
+            0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &info};
+        vkUpdateDescriptorSets(V.dev, 1, &write, 0, NULL);
+    }
     VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     if (vkBeginCommandBuffer(cb, &begin)) goto submit_error;
     vk_img_barrier_all(cb);
@@ -380,12 +435,12 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         vkCmdResetQueryPool(cb, g_spatial.queries, 2 * slot, 2);
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_spatial.queries, 2 * slot);
     }
-    if (src->layout == VK_IMAGE_LAYOUT_UNDEFINED)
-        barrier(cb, src->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED)
+        barrier(cb, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
     if (stage_needed) {
         barrier(cb, stage->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        spatial_blit(cb, src->img, stage->texture.img, crop, iw, ih, flip_y, VK_FILTER_NEAREST);
+        spatial_blit(cb, image, stage->texture.img, crop, iw, ih, flip_y, VK_FILTER_NEAREST);
         barrier(cb, stage->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 raster ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL);
     }
@@ -393,11 +448,11 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         spatial_constants params = {{(float)iw, (float)ih, (float)w, (float)h}, {0, 0}, sharpness, 0};
         spatial_image *first = rcas ? intermediate : output;
         barrier(cb, first->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-        spatial_draw(cb, first_pass, SP_SOURCE, first->view, 0, 0, w, h, params);
+        spatial_draw(cb, first_pass, direct ? *source_set : g_spatial.set[SP_SOURCE], first->view, 0, 0, w, h, params);
         if (rcas) {
             barrier(cb, first->texture.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-            spatial_draw(cb, SP_RCAS, SP_INTERMEDIATE, output->view, 0, 0, w, h, params);
+            spatial_draw(cb, SP_RCAS, g_spatial.set[SP_INTERMEDIATE], output->view, 0, 0, w, h, params);
         }
         barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     } else {
@@ -405,7 +460,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         // Vulkan may filter outside a blit's crop offsets. When cropped, scale
         // the isolated source so taps clamp to the picture and avoid guard pixels.
         int full[4] = {0, 0, (int)iw, (int)ih};
-        spatial_blit(cb, isolated ? stage->texture.img : src->img, output->texture.img,
+        spatial_blit(cb, isolated ? stage->texture.img : image, output->texture.img,
                      isolated ? full : crop, w, h, isolated ? 0 : flip_y, VK_FILTER_LINEAR);
         barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     }
@@ -419,7 +474,15 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     pthread_mutex_unlock(&g_vk_queue_mu);
     if (r) goto submit_error;
 
-    src->layout = VK_IMAGE_LAYOUT_GENERAL;
+    if (physical) {
+        atomic_fetch_add(&physical->backing->refs, 1);
+        g_spatial.source[slot] = physical->backing;
+        g_spatial.live_sources |= 1u << slot;
+        if (ticket % 120 == 0 && vk_pass_dump_user_active())
+            VKLOG("[upscale] real frame %llu physical %ux%u, logical %ux%u, output %ux%u%s",
+                  (unsigned long long)ticket, iw, ih, physical->logical.width, physical->logical.height,
+                  w, h, stage_needed ? " (physical-size staging)" : "");
+    } else src->layout = VK_IMAGE_LAYOUT_GENERAL;
     if (stage_needed) stage->last_use = fence;
     if (rcas) intermediate->last_use = fence;
     output->last_use = fence;
@@ -447,6 +510,6 @@ static int vivid_record(VkCommandBuffer cb, VkImage src, const int crop[4], int 
     barrier(cb, tgt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     int srgb = spatial_unorm_format(g_sfmt) != g_sfmt;
     spatial_constants params = {{0}, {(float)dx, (float)dy}, 0, srgb ? 2.0f : 1.0f};
-    spatial_draw(cb, SP_VIVID, SP_DISPLAY, view, dx, dy, dw, dh, params);
+    spatial_draw(cb, SP_VIVID, g_spatial.set[SP_DISPLAY], view, dx, dy, dw, dh, params);
     return 1;
 }
