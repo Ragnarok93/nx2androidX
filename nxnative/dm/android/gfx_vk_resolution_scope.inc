@@ -96,6 +96,56 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
     }
     return 1;
 }
+// Direct native-grid compute consumers: scaled inputs are sampled only,
+// storage destinations must be provably disjoint native images. No SSBOs,
+// bindless handles, physical addressing, indirect dispatch or grid changes.
+static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,int *samples) {
+    *samples=0;
+    vkshader_t *s=look->sh[5];
+    if (!s || s->stage!=5 || d->ind || d->x<=0 || d->y<=0 || d->z<=0 ||
+        (uint32_t)d->x>V.props.limits.maxComputeWorkGroupCount[0] ||
+        (uint32_t)d->y>V.props.limits.maxComputeWorkGroupCount[1] ||
+        (uint32_t)d->z>V.props.limits.maxComputeWorkGroupCount[2] ||
+        s->nbind<0 || s->nbind>96 || (s->nbind && !s->b) ||
+        !nx_rs_compute_logical(s->spv,s->nspv)) return 0;
+    int support=0;
+    for (int i=0;i<s->nbind;i++) {
+        const dmsv_bind *b=&s->b[i];
+        if (b->count!=1 || b->samp==RS_UBO) return 0;
+        switch(b->kind) {
+        case RK_SUPPORT: case RK_C1: case RK_DRV:
+            if (b->desc!=RD_UBO) return 0;
+            if (b->kind==RK_SUPPORT) support=1;
+            break;
+        case RK_CBUF:
+            if (b->desc!=RD_UBO || b->reg<0 || b->reg>=16 || !rs_scope_uniform(g,&look->ubo[5][b->reg])) return 0;
+            break;
+        case RK_TEX: case RK_IMG: {
+            int storage=b->kind==RK_IMG;
+            if (b->desc!=(storage?RD_STORAGE:RD_SAMPLED) || b->reg<0 || b->reg>=(storage?32:256)) return 0;
+            uint64_t handle=storage?look->img[5][b->reg]:vk_tex_slot_handle(look->tex[5],look->img[5],(unsigned)b->reg);
+            int tid=(int)(handle&0xfffff);
+            if (!tid) {if (storage) return 0;break;}
+            const tex_t *t=NULL;const view_t *v=NULL;
+            if (!vk_tex_by_id(tid,&v,&t) || !t || t->d.target==NVN_TEXTURE_TARGET_BUFFER) return 0;
+            int match=rs_scope_match(g,t,v);
+            if (match<0 || (match && storage)) return 0;
+            if (storage && (v || t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 ||
+                t->d.depth!=1 || t->d.samples>1 || b->dim!=1 || (b->flags&3) ||
+                !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE))) return 0;
+            if (match) {
+                unsigned slot=0,flags=0;
+                if (b->dim!=1 || (b->flags&3) ||
+                    !vk_shader_resolution_binding(s,b->binding,&slot,&flags) ||
+                    slot==NX_RS_REF_UNKNOWN || (flags&(NX_RS_REF_UNSUPPORTED|NX_RS_REF_WRITES))) return 0;
+                *samples=1;
+            }
+            break; }
+        default:return 0;
+        }
+    }
+    return !*samples || support;
+}
 static int rs_scope_program_proof(__typeof__(S) *look,const uint8_t *record,const p_bind_program *bp) {
     if (g_rs_scope_program_count==RS_SCOPE_PROGRAM_MAX) return 0;
     uint32_t mask=bp->stages?(uint32_t)bp->stages&0x3f:0x3f;
@@ -168,11 +218,13 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
             if (match<0 || !nx_rs_scope_switch(&life,match)) return NULL;break; }
         case OP_CLEAR_COLOR: {
             RS_NEED(p_clear_color);const p_clear_color *c=(const p_clear_color *)a;
+            if (life.phase==1 && life.original_bound) return NULL;
             if (life.phase==0 && (c->index<0 || c->index>=8 ||
                 !nx_rs_scope_clear(&life,1u<<c->index,c->mask==15 && rs_scope_full_scissor(&look,g)))) return NULL;
             break; }
         case OP_CLEAR_DS: {
             RS_NEED(p_clear_ds);const p_clear_ds *c=(const p_clear_ds *)a;
+            if (life.phase==1 && life.original_bound) return NULL;
             if (life.phase==0) {
                 const vkfmt_t *f=g->target[8]?vk_fmt(g->target[8]->d.format):NULL;
                 if (!f || !nx_rs_scope_clear(&life,1u<<8,rs_scope_full_scissor(&look,g) &&
@@ -198,16 +250,17 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
                 n<offsetof(p_bind_vbuf,r)+(size_t)b->n*sizeof b->r[0]) return NULL;
             for (int i=0;i<b->n;i++) look.vbuf[b->first+i]=b->r[i];
             break; }
-        case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: {
+        case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: {
             p_bind_handles tmp;
             if (h.op==OP_BIND_TEX1) { RS_NEED(p_bind_tex1); }
             else if (n<offsetof(p_bind_handles,h)) return NULL;
             const p_bind_handles *b=bind_rec(h.op,a,&tmp);
-            int limit=h.op==OP_BIND_SAMP?128:256;
+            int limit=h.op==OP_BIND_SAMP?128:h.op==OP_BIND_IMG?32:256;
             if (b->defer || b->stage<0 || b->stage>=6 || b->first<0 || b->n<0 || b->n>32 ||
                 b->first>limit || b->n>limit-b->first ||
                 (h.op!=OP_BIND_TEX1 && n<offsetof(p_bind_handles,h)+(size_t)b->n*8)) return NULL;
-            if (h.op!=OP_BIND_SAMP) for (int i=0;i<b->n;i++) look.tex[b->stage][b->first+i]=b->h[i];
+            if (h.op==OP_BIND_IMG) for (int i=0;i<b->n;i++) look.img[b->stage][b->first+i]=b->h[i];
+            else if (h.op!=OP_BIND_SAMP) for (int i=0;i<b->n;i++) look.tex[b->stage][b->first+i]=b->h[i];
             break; }
         case OP_SCISSOR: RS_NEED(p_scissor);look.sc=*(const p_scissor *)a;look.sc_set=1;break;
         case OP_RAST_DISCARD: RS_NEED(p_rast_discard);look.rast_discard=((const p_rast_discard *)a)->on;break;
@@ -224,6 +277,11 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
             }
             int sampled=0;
             if (!rs_scope_draw_proof(g,&look,life.phase==0,&sampled) || !nx_rs_scope_draw(&life,1,sampled)) return NULL;
+            break; }
+        case OP_DISPATCH: {
+            RS_NEED(p_dispatch);int sampled=0;
+            if (!rs_scope_compute_proof(g,&look,(const p_dispatch *)a,&sampled) ||
+                !nx_rs_scope_dispatch(&life,1,sampled)) return NULL;
             break; }
         // State-only records, no guest data reads or resource accesses.
         case OP_BEGIN: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_BIND_STATE:
@@ -244,7 +302,7 @@ static void rs_scope_try_begin(const uint8_t *next) {
     if (!nvn_replaying_job() || S.pass_open || vk_rs_cache_has_scaled() || g_rc_skip || g_tf_on ||
         DM_GAME_RENDER_COND || g_bis_on || g_pd_state || g_x_listpasses || g_x_tracepass>=0 ||
         g_td_off>=0 || g_x_nflat || g_x_nobar || g_x_depth || g_x_color ||
-        g_lrz_touch || g_ubolog_key || g_x_logfs || slot0_fill_on()) return;
+        g_lrz_touch || g_ubolog_key || g_x_logfs || g_x_nodispbar || slot0_fill_on()) return;
     rs_scope_group group={0};nx_rs_group dims={0};
     for (unsigned i=0;i<9;i++) {
         if (i<8 && i<(unsigned)S.rt_n && S.rt_bad[i]) return;

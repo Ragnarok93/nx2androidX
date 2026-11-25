@@ -29,6 +29,11 @@ int main(void) {
     assert(nx_rs_scope_discard(&s,256)==1 && !nx_rs_scope_discard(&s,256));
     assert(nx_rs_scope_discard(&s,1)==2 && s.phase==3);
     assert(!nx_rs_scope_discard(&s,1));
+    assert(nx_rs_scope_init(&s,1));assert(!nx_rs_scope_dispatch(&s,1,1));
+    assert(nx_rs_scope_clear(&s,1,1) && nx_rs_scope_draw(&s,1,0));
+    assert(!nx_rs_scope_dispatch(&s,1,0) && !nx_rs_scope_dispatch(&s,0,1));
+    assert(nx_rs_scope_dispatch(&s,1,1) && !nx_rs_scope_draw(&s,1,0));
+    assert(nx_rs_scope_discard(&s,1)==2);
 }
 """
 class ScopeTests(unittest.TestCase):
@@ -68,7 +73,7 @@ static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 static struct {
     p_scissor sc; int sc_set,rast_discard;
     p_bind_buf ubo[6][16]; NVNbufferRange vbuf[16];
-    uint64_t tex[6][256];
+    uint64_t tex[6][256],img[6][32];
 } S;
 typedef struct { const tex_t *target[9]; uint64_t addr[9]; unsigned mask; uint32_t w,h; } rs_scope_group;
 typedef struct {int depth,stencil;} vkfmt_t;
@@ -83,6 +88,9 @@ static int rs_scope_program_proof(__typeof__(S) *s,const uint8_t *p,const p_bind
  * when its test texture binding is set. */
 static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,int scaled,int *sampled) {
     (void)g;*sampled=s->tex[1][0]==7;return !s->rast_discard && (!scaled || !*sampled);
+}
+static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,int *sampled) {
+    (void)g;*sampled=s->tex[5][0]==7;return d->x>0 && d->y>0 && d->z>0 && !d->ind && s->img[5][0]==8;
 }
 """
         code+=part("enum { RS_SCOPE_PROGRAM_MAX=", "typedef struct { const uint8_t *record;")
@@ -110,6 +118,7 @@ static void rt(tex_t *target) {p_set_rt r={.n=1,.color={target}};append(OP_SET_R
 static void clear(unsigned mask) {p_clear_color c={.index=0,.mask=mask};append(OP_CLEAR_COLOR,&c,sizeof c);}
 static void draw(void) {p_draw d={.count=3,.instances=1};append(OP_DRAW,&d,sizeof d);}
 static void bind(unsigned id,int deferred) {p_bind_handles b={.stage=1,.first=0,.n=1,.defer=deferred,.h={id}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);}
+static void compute(int aliased,int indirect) {p_bind_handles b={.stage=5,.first=0,.n=1,.h={7}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);b.h[0]=aliased?7:8;append(OP_BIND_IMG,&b,offsetof(p_bind_handles,h)+8);p_dispatch d={.x=8,.y=8,.z=1,.ind=indirect};append(OP_DISPATCH,&d,sizeof d);}
 static uint8_t *discard(void) {p_rs_discard d={.index=0};return append(OP_RS_DISCARD,&d,sizeof d);}
 static const uint8_t *scan(void) {rs_scope_group g={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};append(OP_END,NULL,0);return rs_scope_scan(commands,&g);}
 static void producer(void) {clear(15);draw();}
@@ -123,6 +132,11 @@ int main(void) {
     reset();producer();rt(&t[1]);draw();rt(&t[0]);discard();assert(!scan());
     reset();producer();rt(&t[1]);bind(7,1);draw();rt(&t[0]);discard();assert(!scan());
     reset();producer();append(OP_DISPATCH,NULL,0);consumer();rt(&t[0]);discard();assert(!scan());
+    reset();producer();compute(0,0);end=discard();assert(scan()==end);
+    reset();producer();compute(1,0);discard();assert(!scan());
+    reset();producer();compute(0,1);discard();assert(!scan());
+    reset();producer();compute(0,0);draw();discard();assert(!scan());
+    reset();producer();compute(0,0);clear(15);discard();assert(!scan());
     reset();producer();t[1].off=128;t[1].mem=storage+128;consumer();rt(&t[0]);discard();assert(!scan());
     reset();producer();consumer();rt(&t[0]);draw();discard();assert(!scan());
     reset();producer();consumer();rt(&t[0]);append(OP_RS_DISCARD,NULL,0);assert(!scan());
