@@ -19,6 +19,20 @@ int main(void) {
     assert(!nx_rs_compute_logical(0,9));
     uint32_t duplicate[]={0x07230203u,0x10000,0,10,0,(3u<<16)|14,0,1,(3u<<16)|14,0,1};
     assert(!nx_rs_compute_logical(duplicate,11));
+    const uint32_t g[]={160,90,1}, l[]={8,8,1};
+    uint32_t out[]={99,99,99};
+    assert(nx_rs_compute_grid(g,l,1280,720,640,360,out));
+    assert(out[0]==80 && out[1]==45 && out[2]==1);
+    assert(nx_rs_compute_grid(g,l,1280,720,1280,720,out));
+    assert(out[0]==160 && out[1]==90);
+    assert(!nx_rs_compute_grid(g,l,1280,720,960,540,out));
+    assert(out[0]==160 && out[1]==90);
+    assert(!nx_rs_compute_grid(g,l,1280,720,640,352,out));
+    assert(!nx_rs_compute_grid(g,l,1279,720,640,360,out));
+    assert(!nx_rs_compute_grid(g,l,1280,720,0,0,out));
+    const uint32_t z[]={8,8,2}, huge[]={UINT32_MAX,90,1};
+    assert(!nx_rs_compute_grid(g,z,1280,720,640,360,out));
+    assert(!nx_rs_compute_grid(huge,l,1280,720,640,360,out));
     return 0;
 }
 """
