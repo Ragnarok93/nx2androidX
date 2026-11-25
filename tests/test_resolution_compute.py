@@ -84,5 +84,16 @@ class ResolutionComputeTests(unittest.TestCase):
                             str(ROOT / "tests/resolution_storage_private.c"), "-o", str(exe)], check=True)
             subprocess.run([str(exe)], check=True)
 
+    def test_source_frame_latch(self):
+        cc = shutil.which("cc") or shutil.which("clang")
+        if not cc:
+            self.skipTest("C compiler required")
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "frame"
+            subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "nxnative/dm/gfx/nvn"),
+                            str(ROOT / "tests/resolution_frame.c"), "-o", str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+
 if __name__ == "__main__":
     unittest.main()
