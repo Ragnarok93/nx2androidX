@@ -1826,7 +1826,7 @@ static _Atomic uint64_t g_itv2_since;   // start of the game's current run of in
 __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c; graphics unit tests have no loader
 __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine frame limits in game memory (Monster Hunter Rise); graphics unit tests have no host
 static int fps_step_cap(void) {
-    if (!dm_fps_state) return 0;
+    if (dm_graphics_target_fps() == -1 || !dm_fps_state) return 0;
     uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
     return t <= 0 ? 0 : __atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED) || t <= 30 ? 30 : 60;
 }
@@ -1860,6 +1860,7 @@ static uint64_t present_period(const win_t *o) {
         else if (was < 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
     }
     int fixed = dm_graphics_target_fps();
+    if (fixed == -1) return dm_present_period_adapt(0);
     if (fixed == 30 || fixed == 40 || fixed == 60)
         return dm_present_period_adapt(1000000000ull / (uint64_t)fixed);
     int itv = present_itv(o), hz = g_hz;

@@ -73,7 +73,7 @@ const char *dm_front_root(void) { return g_root; }   // overlay_theme.c: the pla
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // gamepad, rumble, frame rate
 static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalone FG preferences
 static _Atomic int g_set_dyn, g_set_dyn_min = 70;             // requested true 3D dynamic-resolution mode and minimum percent
-static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), 0 follows profile
+static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), -1 unlocked, 0 follows profile
 static _Atomic int g_set_vivid;
 static _Atomic int g_set_upscaler, g_set_fsr_sharp = 50;            // spatial backend and sharpness 0..100
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
@@ -133,7 +133,7 @@ static void settings_load(void) {
         else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_upscaler, v ? SP_FSR1 : SP_NATIVE);
         else if (sscanf(line, "upscaler=%d", &v) == 1 && spatial_mode_valid(v)) saved_upscaler = v;
         else if (sscanf(line, "fsr_sharp=%d", &v) == 1) atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
-        else if (sscanf(line, "fps_mode=%d", &v) == 1 && (v == 30 || v == 40 || v == 60)) atomic_store(&g_set_rate, v);
+        else if (sscanf(line, "fps_mode=%d", &v) == 1 && (v == -1 || v == 30 || v == 40 || v == 60)) atomic_store(&g_set_rate, v);
         else if (sscanf(line, "dyn_scale=%d", &v) == 1) atomic_store(&g_set_dyn, v != 0);
         else if (sscanf(line, "dyn_min=%d", &v) == 1 && v >= 50 && v <= 95 && v % 5 == 0) atomic_store(&g_set_dyn_min, v);
         else if (!strncmp(line, "ui=", 3)) {   // ui=<layout>,<control>,<x>,<y>,<size>: x, y in 1/10000 of the window (-1 the layout's place), size in 1/1000
@@ -733,12 +733,14 @@ static void menu_rate_step(int direction) {
         return;
     }
     int previous = atomic_load(&g_set_rate), next;
-    if (previous == 30) next = direction < 0 ? 60 : 40;
+    if (previous == 30) next = direction < 0 ? -1 : 40;
     else if (previous == 40) next = direction < 0 ? 30 : 60;
-    else next = direction < 0 ? 40 : 30;
+    else if (previous == 60) next = direction < 0 ? 40 : -1;
+    else if (previous == -1) next = direction < 0 ? 60 : 30;
+    else next = direction < 0 ? -1 : 30;
     atomic_store(&g_set_rate, next);
     atomic_fetch_add(&g_menu_cfg_ver, 1);
-    LOG("[graphics] live source frame-rate target %d -> %d FPS; 40 uses a 25 ms presentation period", previous, next);
+    LOG("[graphics] live source frame-rate target %d -> %d (-1 unlocked; 40 uses 25 ms)", previous, next);
     dm_haptics_android_tap(); settings_save(); dm_overlay_redraw();
 }
 static void menu_drs_toggle(void) {

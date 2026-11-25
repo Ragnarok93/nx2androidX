@@ -338,8 +338,8 @@ static void cv_text(const ov_canvas *cv, float x, float cy, const char *s, int s
 // Material 3 dark roles. The existing gamepad and FPS sprites keep their original colors.
 static const uint8_t M3_SURFACE[4] = {29, 27, 32, 255},
     M3_CONTAINER[4] = {39, 37, 43, 255}, M3_HIGH[4] = {49, 46, 55, 255},
-    M3_PRIMARY[4] = {3, 129, 254, 255}, M3_ON_PRIMARY[4] = {8, 16, 26, 255},
-    M3_SECONDARY[4] = {31, 60, 91, 255}, M3_ON_SECONDARY[4] = {218, 234, 255, 255},
+    M3_PRIMARY[4] = {3, 129, 254, 255}, M3_ON_PRIMARY[4] = {255, 255, 255, 255},
+    M3_SECONDARY[4] = {31, 60, 91, 255}, M3_ON_SECONDARY[4] = {255, 255, 255, 255},
     M3_ON_SURFACE[4] = {230, 225, 229, 255}, M3_VARIANT[4] = {202, 196, 208, 255},
     M3_OUTLINE[4] = {147, 143, 153, 255}, M3_DIVIDER[4] = {73, 69, 79, 255},
     M3_ERROR[4] = {242, 184, 181, 255};
@@ -437,7 +437,7 @@ static void ov_text_panel(const ov_canvas *cv) {
 static void cv_button(const ov_canvas *cv, const float b[4], const char *l, int fill, int held) {   // a rounded button with its word, as large as fits
     float rad = fminf(b[2], b[3]) * 0.5f, edge = fmaxf(1, b[3] * 0.055f);
     if (b[2] <= 2*edge || b[3] <= 2*edge) return;
-    if (fill || held) cv_rrect(cv, b[0], b[1], b[0]+b[2], b[1]+b[3], rad, held ? M3_ON_SECONDARY : M3_PRIMARY);
+    if (fill || held) cv_rrect(cv, b[0], b[1], b[0]+b[2], b[1]+b[3], rad, held ? M3_SECONDARY : M3_PRIMARY);
     else {
         cv_rrect(cv, b[0], b[1], b[0]+b[2], b[1]+b[3], rad, M3_OUTLINE);
         cv_rrect(cv, b[0]+edge, b[1]+edge, b[0]+b[2]-edge, b[1]+b[3]-edge, rad-edge, M3_CONTAINER);
@@ -583,6 +583,8 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                 else snprintf(value, sizeof value, "%d%%", scale);
             } else if (it == OVM_RATE) {
                 if (!dm_menu_rate_supported()) snprintf(value, sizeof value, "Unavailable");
+                else if (dm_menu_rate() == -1) snprintf(value, sizeof value, "Unlocked");
+                else if (dm_menu_rate() == 0) snprintf(value, sizeof value, "Profile");
                 else snprintf(value, sizeof value, "%d FPS", dm_menu_rate());
             } else if (it == OVM_DRS_NOW) {
                 if (!dm_menu_drs_supported()) snprintf(value, sizeof value, "Unavailable");
@@ -1410,8 +1412,14 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     // stays at 60 Hz, where two images do not fit into one refresh (the FIFO swapchain carries one a refresh) — the present thread then runs at half the game's
     // rate and the game waits behind it: the game slows down
     static ANativeWindow *rate_win; static double rate_fps, want_fps; static uint64_t want_since;
-    double fps = window_fps(wperiod);
-    int changed = window_rate_changed(fps, &rate_fps, &want_fps, &want_since, g_presents);
+    int dm_graphics_target_fps(void);
+    int unlocked = dm_graphics_target_fps() == -1;
+    double fps = unlocked ? 0.0 : window_fps(wperiod);
+    int changed;
+    if (unlocked) {
+        changed = rate_fps != 0.0;
+        rate_fps = want_fps = 0.0; want_since = g_presents;
+    } else changed = window_rate_changed(fps, &rate_fps, &want_fps, &want_since, g_presents);
     if (g_win && (g_win != rate_win || changed)) {
         rate_win = g_win;
         if (!changed) rate_fps = fps;

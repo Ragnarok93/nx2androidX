@@ -251,8 +251,17 @@ static int fps_cap_step(void) {
 }
 uint64_t dm_present_period_adapt(uint64_t period) {
     int fixed = dm_graphics_target_fps();
+    static int prev_fixed;
+    if (fixed == -1) {
+        if (prev_fixed != -1) {
+            g_step = 0; g_nwork = g_nshown = g_ok_frames = 0;
+            g_last_change = g_last_up = 0; prev_fixed = -1;
+            LOG("[perf] live graphics target unlocked (no host pacing)");
+        }
+        g_game_period = 0;
+        return 0;
+    }
     if (fixed == 30 || fixed == 40 || fixed == 60) {
-        static int prev_fixed;
         if (fixed != prev_fixed) {
             g_nwork = g_nshown = g_ok_frames = 0; g_last_change = g_last_up = 0;
             LOG("[perf] live graphics target %d fps (adaptive downshift bypassed)", fixed);
@@ -262,6 +271,7 @@ uint64_t dm_present_period_adapt(uint64_t period) {
         g_game_period = (uint64_t)STEPS[g_step];
         return g_game_period;
     }
+    prev_fixed = 0;
     g_game_period = period;
     if (!period) return period;
     if (!adaptive_enabled()) {
@@ -276,6 +286,7 @@ uint64_t dm_present_period_adapt(uint64_t period) {
 // to 30 fps would be counted as one refresh short and the generation would ask for more frames than the panel can show)
 int dm_perf_rate_fps(void) {
     int fixed = dm_graphics_target_fps();
+    if (fixed == -1) return 0;
     return fixed == 30 || fixed == 40 || fixed == 60 ? fixed : (int)(1000000000ll / STEPS[g_step]);
 }
 static int fps_pin(void) { return g_fps_pin; }   // the presenting thread refreshes DM_FPS_PIN every 30 frames in game_mode_sync
@@ -328,7 +339,7 @@ static int shown_late(void) {   // of the last 64 frames on screen, how many mis
     return m * 64 / n;
 }
 static void adapt_frame(int64_t work, int64_t now) {
-    if (!adaptive_enabled()) return;
+    if (dm_graphics_target_fps() == -1 || !adaptive_enabled()) return;
     // A long frame in which the replay and the GPU did next to nothing is a load (a loading screen, the game reading files on its main thread), not a frame the
     // rate could fit: it is not judged. Hades II's room changes gave ~10 frames of 28-680 ms with 0.3-0.4 ms of GPU work, the rate stepped down to 40 fps,
     // and each fight began at 40 until it climbed back 4 s later
@@ -393,8 +404,8 @@ void dm_perf_frame(double period) {
 
 // The window's frame rate: the game's rate, so the display can pick a mode it divides (60 / 120 Hz rather than 144 Hz for a 60 fps game).
 void dm_perf_window(ANativeWindow *w, double fps) {
-    if (!w || fps <= 0) return;
-    int r = ANativeWindow_setFrameRate(w, (float)fps, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+    if (!w || fps < 0) return;
+    int r = ANativeWindow_setFrameRate(w, (float)fps, fps == 0 ? ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT : ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
     LOG("[perf] window frame rate %.0f fps%s", fps, r ? " refused" : "");
 }
 

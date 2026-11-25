@@ -243,33 +243,37 @@ void dm_fps_lock_tick(void) {
     // copies even after a level load changes them. Other titles keep env policy.
     int live = dm_fps_lock_supported() ? dm_graphics_target_fps() : 0;
     int want = live ? live : target;
-    if (want != 30 && want != 40 && want != 60) return;
+    const int unlocked = want == -1;
+    if (!unlocked && want != 30 && want != 40 && want != 60) return;
+    if (unlocked && !dm_fps_lock_supported()) return;
     if (g_nimp) { imp_tick(base, want == 40 ? 60 : want); return; }
     target = want;
     for (int r = 0; r < nrow; r++) {
-        int k = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
+        int k = rows[r];
+        if (unlocked && !strstr(k_locks[k].what, "Unreal")) continue;
+        uint64_t obj = (uint64_t)(uintptr_t)base;
         if (k_locks[k].ptr_off && (!rd((uint64_t)(uintptr_t)(base + k_locks[k].ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (k_locks[k].ptr2 && (!rd(obj + k_locks[k].ptr2, &obj, sizeof obj) || !obj)) continue;   // the class's static fields not allocated yet
         for (int c = 0; c < k_locks[k].copies; c++) {
             uint64_t a = obj + k_locks[k].field + 4 * (uint64_t)c; uint32_t cur, want; char was[16];
             if (!rd(a, &cur, sizeof cur)) break;
             if (k_locks[k].kind != VSYNCS_I32 && k_locks[k].kind != FPS_I32) {
-                int ms = k_locks[k].kind == MS_F32 ? 1 : k_locks[k].kind == SEC_F32 ? 1000 : 0; float f, w = ms ? ms_want(target) / (float)ms : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
+                int ms = k_locks[k].kind == MS_F32 ? 1 : k_locks[k].kind == SEC_F32 ? 1000 : 0; float f, w = ms ? ms_want(target) / (float)ms : target == -1 ? 0.0f : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
                 if (cur == want || !(ms ? f * (float)ms >= 8 && f * (float)ms <= 100 :
                     (f >= 10 && f <= 120) ||
                     (f == 0 && strstr(k_locks[k].what, "Unreal t.MaxFPS")))) continue;   // 0 = valid UE uncapped cvar after registration   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", ms ? f * (float)ms : f);
             } else {
                 int fps = k_locks[k].kind == FPS_I32;
-                want = fps ? (uint32_t)target : (target == 30 ? 2u : 1u);   // 40 FPS has no integer 60 Hz interval; host paces at 25 ms
-                if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 120u : 4u)) continue;
+                want = fps ? (uint32_t)target : (target == -1 ? 0u : target == 30 ? 2u : 1u);   // 40 FPS has no integer 60 Hz interval; host paces at 25 ms
+                if (cur == want || cur < (fps ? 10u : strstr(k_locks[k].what, "Unreal") ? 0u : 1u) || cur > (fps ? 120u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);
             }
             uint32_t *p = (uint32_t *)(uintptr_t)a;
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
             if (nlog[k] < 8) { nlog[k]++; char now[24];
                 if (k_locks[k].kind == MS_F32 || k_locks[k].kind == SEC_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
-                else snprintf(now, sizeof now, "%u%s", k_locks[k].kind == FPS_F32 ? (unsigned)target : want, k_locks[k].kind == FPS_F32 || k_locks[k].kind == FPS_I32 ? " fps" : " vsyncs");
+                else snprintf(now, sizeof now, "%u%s", k_locks[k].kind == FPS_F32 ? (target == -1 ? 0u : (unsigned)target) : want, k_locks[k].kind == FPS_F32 || k_locks[k].kind == FPS_I32 ? " fps" : " vsyncs");
                 LOG("main: %s%s %s → %s (%s)", k_locks[k].what, k_locks[k].copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }
     }

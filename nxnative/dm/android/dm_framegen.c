@@ -164,6 +164,14 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding,
         if (F.state >= 0) { atomic_store(&g_state, 0); reason("%s", "off"); }
         return 0;
     }
+    // Unlocked source has no fixed cadence; do not invent an LSFG hold or
+    // let generated images impose a hidden rate limit. Resume on fixed mode.
+    if (period == 0 && dm_perf_rate_fps() == 0) {
+        if (F.chain) teardown();
+        atomic_store(&g_state, 2);
+        reason("%s", "uncapped source rate; select a fixed FPS mode for frame generation");
+        return 0;
+    }
     if (!im || !im->img || im->layout != VK_IMAGE_LAYOUT_GENERAL) return 0;
     if (atomic_exchange(&g_reprobe, 0) && F.state < 0) {
         F.state = 0;
