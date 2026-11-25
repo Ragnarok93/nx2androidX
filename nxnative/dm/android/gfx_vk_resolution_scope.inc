@@ -232,7 +232,8 @@ static void rs_scope_try_begin(const uint8_t *next) {
     // proof inputs. Reject diagnostic modes that can inject extra accesses.
     if (!nvn_replaying_job() || S.pass_open || vk_rs_cache_has_scaled() || g_rc_skip || g_tf_on ||
         DM_GAME_RENDER_COND || g_bis_on || g_pd_state || g_x_listpasses || g_x_tracepass>=0 ||
-        g_td_off>=0 || g_x_nflat || g_x_nobar || g_x_depth || g_x_color || slot0_fill_on()) return;
+        g_td_off>=0 || g_x_nflat || g_x_nobar || g_x_depth || g_x_color ||
+        g_lrz_touch || g_ubolog_key || g_x_logfs || slot0_fill_on()) return;
     rs_scope_group group={0};nx_rs_group dims={0};
     for (unsigned i=0;i<9;i++) {
         if (i<8 && (i>=(unsigned)S.rt_n || !S.rt_has_col[i])) continue;

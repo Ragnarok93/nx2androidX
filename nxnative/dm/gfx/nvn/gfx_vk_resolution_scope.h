@@ -22,7 +22,11 @@ static inline int nx_rs_scope_draw(nx_rs_scope *s,int compatible,int samples_gro
     return 0;
 }
 static inline int nx_rs_scope_switch(nx_rs_scope *s,int original_group) {
+    // Rebinding an identical group does not end its lifetime; likewise
+    // any number of disjoint native passes may consume the scaled group.
+    if (s->phase==0 && original_group) return 1;
     if (s->phase==0 && !original_group && s->drew && s->cleared==s->mask) { s->phase=1;return 1; }
+    if (s->phase==1 && !original_group) return 1;
     if (s->phase==1 && original_group && s->sampled) { s->phase=2;return 1; }
     return 0;
 }
