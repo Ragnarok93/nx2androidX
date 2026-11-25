@@ -1,7 +1,18 @@
 package org.nx2a;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
+import android.content.res.ColorStateList;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -29,40 +40,203 @@ final class DriverDocuments {
     private AtomicFile marker() {
         return new AtomicFile(new File(activity.getFilesDir(), "driver-selection"));
     }
-    private String selected() {
+    // Keep the native marker ABI unchanged: only the next process loads the selection.
+    private static final int SURFACE = Color.rgb(39, 37, 43);
+    private static final int TEXT = Color.rgb(230, 225, 229);
+    private static final int MUTED = Color.rgb(202, 196, 208);
+    private static final int BLUE = Color.rgb(3, 129, 254);
+    private static final int LINK = Color.rgb(62, 145, 255);
+    private static final String ENTRY = ".driver-entry.json";
+
+    private static final class DriverEntry {
+        final String path, label;
+        DriverEntry(String path, String label) { this.path = path; this.label = label; }
+    }
+
+    private String selection() {
         try {
             byte[] b = marker().readFully();
-            if (b.length > 384) return "Invalid";
-            String text = new String(b, StandardCharsets.US_ASCII).trim();
-            if ("system".equals(text)) return "System Vulkan";
-            return new File(text).getName();
-        } catch (IOException e) { return "Original APK default"; }
+            if (b.length > 383) return "";
+            String value = new String(b, StandardCharsets.US_ASCII).trim();
+            return "system".equals(value) || value.matches("drivers/[0-9a-f]{32}/[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.so") ? value : "";
+        } catch (IOException e) { return ""; }
     }
+
+    private static JSONObject readJson(File file) throws Exception {
+        if (!file.isFile() || file.length() > 65536) throw new IOException("Invalid driver metadata");
+        byte[] bytes = new byte[(int) file.length()];
+        try (DataInputStream in = new DataInputStream(new FileInputStream(file))) { in.readFully(bytes); }
+        return new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+    }
+
+    private static void writeEntry(File stage, String library, String display) throws Exception {
+        JSONObject entry = new JSONObject();
+        entry.put("library", library);
+        entry.put("label", display == null || display.trim().isEmpty() ? library : display.substring(0, Math.min(180, display.length())));
+        try (FileOutputStream out = new FileOutputStream(new File(stage, ENTRY))) {
+            out.write(entry.toString().getBytes(StandardCharsets.UTF_8));
+            out.getFD().sync();
+        }
+    }
+
+    // Older builds already retained UUID directories. Recover their exact entry
+    // point from the selection marker, ZIP metadata, or the old import heuristic.
+    private List<DriverEntry> installed(String current) {
+        ArrayList<DriverEntry> entries = new ArrayList<>();
+        File[] dirs = new File(activity.getFilesDir(), "drivers").listFiles();
+        if (dirs == null) return entries;
+        for (File dir : dirs) {
+            String id = dir.getName();
+            if (!dir.isDirectory() || !id.matches("[0-9a-f]{32}")) continue;
+            String prefix = "drivers/" + id + "/";
+            try {
+                String library = null, label = null;
+                File manifest = new File(dir, ENTRY);
+                if (manifest.isFile()) {
+                    JSONObject data = readJson(manifest);
+                    library = data.optString("library");
+                    label = data.optString("label");
+                } else if (current.startsWith(prefix)) {
+                    library = current.substring(prefix.length());
+                } else if (new File(dir, "meta.json").isFile()) {
+                    JSONObject meta = readJson(new File(dir, "meta.json"));
+                    library = meta.optString("libraryName");
+                } else {
+                    File[] libs = dir.listFiles(f -> f.isFile() && safeLibrary(f.getName()));
+                    if (libs == null) continue;
+                    for (File lib : libs) {
+                        String name = lib.getName().toLowerCase(Locale.ROOT);
+                        if (name.contains("vulkan") || name.contains("radv")) {
+                            if (library != null) { library = null; break; }
+                            library = lib.getName();
+                        }
+                    }
+                    if (library == null && libs.length == 1) library = libs[0].getName();
+                }
+                if (!safeLibrary(library)) continue;
+                File file = new File(dir, library);
+                if (!file.isFile() || !file.canRead() || file.length() < 64) continue;
+                if (label == null || label.trim().isEmpty()) {
+                    label = library;
+                    try {
+                        JSONObject meta = readJson(new File(dir, "meta.json"));
+                        String name = meta.optString("name"), version = meta.optString("version");
+                        if (!name.isEmpty()) label = name + (version.isEmpty() ? "" : " " + version);
+                    } catch (Exception ignored) { }
+                }
+                // Short directory ID disambiguates packages with the same name.
+                entries.add(new DriverEntry(prefix + library, label + " · " + id.substring(0, 8)));
+            } catch (Exception e) { Log.w("nx2a-driver", "Skipping invalid driver entry " + id, e); }
+        }
+        Collections.sort(entries, (a, b) -> a.label.compareToIgnoreCase(b.label));
+        return entries;
+    }
+
+    private int dp(float n) { return Math.round(n * activity.getResources().getDisplayMetrics().density); }
+
+    private TextView text(String value, int size, int color) {
+        TextView view = new TextView(activity);
+        view.setText(value);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        return view;
+    }
+
+    private Button action(String value, Runnable callback) {
+        Button button = new Button(activity);
+        button.setText(value);
+        button.setAllCaps(false);
+        button.setTextColor(LINK);
+        button.setBackgroundColor(Color.TRANSPARENT);
+        button.setOnClickListener(v -> callback.run());
+        return button;
+    }
+
     void choose() {
-        if (busy || activity.isFinishing()) return;
-        AlertDialog dialog = new AlertDialog.Builder(activity)
-            .setTitle("Vulkan driver")
-            .setMessage("Active: " + GameActivity.activeVulkanDriver() +
-                        "\nNext launch: " + selected() +
-                        "\n\nChanges apply after fully closing and reopening the game. Import only trusted drivers for your GPU.")
-            .setPositiveButton("Import ZIP / SO", (d, w) -> pick())
-            .setNeutralButton("System Vulkan", (d, w) -> selectSystem())
-            .setNegativeButton("Cancel", null)
-            .create();
+        if (busy || activity.isFinishing() || activity.isDestroyed()) return;
+        String current = selection();
+        List<DriverEntry> entries = installed(current);
+        entries.add(0, new DriverEntry("system", "System Vulkan"));
+        entries.add(1, new DriverEntry("", "Original APK default"));
+        String next = current.isEmpty() ? "Original APK default" : current.equals("system") ? "System Vulkan" : "Unavailable driver (system fallback)";
+        for (DriverEntry entry : entries) if (entry.path.equals(current)) next = entry.label;
+
+        // Explicit opaque content rather than recoloring a vendor AlertDialog window:
+        // One UI may install a separate light background on its AlertDialog decor.
+        Dialog dialog = new Dialog(activity, android.R.style.Theme_Material_Dialog_NoActionBar);
+        LinearLayout panel = new LinearLayout(activity);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(22), dp(18), dp(22), dp(10));
+        GradientDrawable surface = new GradientDrawable();
+        surface.setColor(SURFACE);
+        surface.setCornerRadius(dp(28));
+        panel.setBackground(surface);
+        TextView title = text("Vulkan driver", 21, TEXT);
+        title.setTypeface(null, Typeface.BOLD);
+        panel.addView(title);
+        TextView status = text("Active: " + GameActivity.activeVulkanDriver() + "\nNext launch: " + next, 14, TEXT);
+        status.setPadding(0, dp(8), 0, dp(8));
+        panel.addView(status);
+
+        RadioGroup options = new RadioGroup(activity);
+        options.setOrientation(LinearLayout.VERTICAL);
+        int checked = View.NO_ID;
+        ColorStateList tint = new ColorStateList(new int[][]{
+            new int[]{android.R.attr.state_checked}, new int[]{}}, new int[]{BLUE, MUTED});
+        for (DriverEntry entry : entries) {
+            RadioButton row = new RadioButton(activity);
+            row.setId(View.generateViewId());
+            row.setText(entry.label);
+            row.setTextColor(TEXT);
+            row.setButtonTintList(tint);
+            row.setTextSize(15);
+            row.setMinHeight(dp(44));
+            options.addView(row);
+            if (entry.path.equals(current)) checked = row.getId();
+            row.setOnClickListener(v -> {
+                try {
+                    if (entry.path.isEmpty()) {
+                        marker().delete();
+                        if (marker().getBaseFile().exists()) throw new IOException("Cannot restore APK default");
+                    } else {
+                        if (!entry.path.equals("system") && !new File(activity.getFilesDir(), entry.path).isFile())
+                            throw new IOException("Driver no longer exists");
+                        commit(entry.path);
+                    }
+                    dialog.dismiss();
+                    toast(entry.label + " selected. Fully close and reopen the game.");
+                } catch (IOException e) {
+                    dialog.dismiss();
+                    toast("Cannot save driver selection: " + e.getMessage());
+                    choose();
+                }
+            });
+        }
+        if (checked != View.NO_ID) options.check(checked);
+        ScrollView scroll = new ScrollView(activity);
+        scroll.addView(options);
+        // A bounded list leaves the actions reachable in landscape, even with many imports.
+        int screenHeight = activity.getResources().getDisplayMetrics().heightPixels;
+        int listHeight = Math.min(dp(44 * Math.min(entries.size(), 6)), Math.max(dp(44), screenHeight / 3));
+        panel.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, listHeight));
+        TextView hint = text("Changes apply after fully closing and reopening the game. Import only trusted drivers for your GPU.", 12, MUTED);
+        hint.setPadding(0, dp(8), 0, dp(4));
+        panel.addView(hint);
+        LinearLayout actions = new LinearLayout(activity);
+        actions.setGravity(android.view.Gravity.END);
+        actions.addView(action("Cancel", dialog::dismiss));
+        actions.addView(action("Import ZIP / SO", () -> { dialog.dismiss(); pick(); }));
+        panel.addView(actions);
+        dialog.setContentView(panel);
         dialog.show();
         Window window = dialog.getWindow();
         if (window != null) {
-            GradientDrawable surface = new GradientDrawable();
-            surface.setColor(Color.rgb(39,37,43));
-            surface.setCornerRadius(28f * activity.getResources().getDisplayMetrics().density);
-            window.setBackgroundDrawable(surface);
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setDimAmount(0.5f);
+            window.setLayout(Math.min(dp(540), activity.getResources().getDisplayMetrics().widthPixels - dp(24)),
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
         }
-        int primary = Color.rgb(208,188,255);
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(primary);
-        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(primary);
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(primary);
-        android.widget.TextView message = dialog.findViewById(android.R.id.message);
-        if (message != null) message.setTextColor(Color.rgb(230,225,229));
     }
     private void pick() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -71,12 +245,6 @@ final class DriverDocuments {
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try { activity.startActivityForResult(i, REQUEST); }
         catch (Exception e) { toast("Cannot open driver picker: " + e.getMessage()); }
-    }
-    private void selectSystem() {
-        try {
-            commit("system");
-            toast("System Vulkan selected. Fully close and reopen the game.");
-        } catch (IOException e) { toast("Cannot save driver selection: " + e.getMessage()); }
     }
     boolean onResult(int request, int result, Intent data) {
         if (request != REQUEST) return false;
@@ -89,7 +257,8 @@ final class DriverDocuments {
             try {
                 File root = new File(activity.getFilesDir(), "drivers");
                 if (!root.isDirectory() && !root.mkdirs()) throw new IOException("Cannot create driver directory");
-                stage = new File(root, UUID.randomUUID().toString().replace("-", ""));
+                String id = UUID.randomUUID().toString().replace("-", "");
+                stage = new File(root, ".partial-" + id);
                 if (!stage.mkdir()) throw new IOException("Cannot stage driver");
                 String display = null;
                 try (Cursor c = activity.getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
@@ -100,9 +269,12 @@ final class DriverDocuments {
                     if (in == null) throw new IOException("Cannot read selected document");
                     library = unpack(in, display, stage);
                 }
-                commit("drivers/" + stage.getName() + "/" + library);
-                committed = true;
-                final String message = library + " selected. Fully close and reopen the game to activate it.";
+                writeEntry(stage, library, display);
+                File target = new File(root, id);
+                if (!stage.renameTo(target)) throw new IOException("Cannot publish driver");
+                committed = true; // keep the saved import even if selecting it fails
+                commit("drivers/" + id + "/" + library);
+                final String message = library + " saved and selected. Fully close and reopen the game to activate it.";
                 activity.runOnUiThread(() -> toast(message));
             } catch (Exception e) {
                 Log.e("nx2a-driver", "Driver import failed", e);

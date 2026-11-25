@@ -338,8 +338,8 @@ static void cv_text(const ov_canvas *cv, float x, float cy, const char *s, int s
 // Material 3 dark roles. The existing gamepad and FPS sprites keep their original colors.
 static const uint8_t M3_SURFACE[4] = {29, 27, 32, 255},
     M3_CONTAINER[4] = {39, 37, 43, 255}, M3_HIGH[4] = {49, 46, 55, 255},
-    M3_PRIMARY[4] = {208, 188, 255, 255}, M3_ON_PRIMARY[4] = {56, 30, 114, 255},
-    M3_SECONDARY[4] = {74, 68, 88, 255}, M3_ON_SECONDARY[4] = {232, 222, 248, 255},
+    M3_PRIMARY[4] = {3, 129, 254, 255}, M3_ON_PRIMARY[4] = {8, 16, 26, 255},
+    M3_SECONDARY[4] = {31, 60, 91, 255}, M3_ON_SECONDARY[4] = {218, 234, 255, 255},
     M3_ON_SURFACE[4] = {230, 225, 229, 255}, M3_VARIANT[4] = {202, 196, 208, 255},
     M3_OUTLINE[4] = {147, 143, 153, 255}, M3_DIVIDER[4] = {73, 69, 79, 255},
     M3_ERROR[4] = {242, 184, 181, 255};
