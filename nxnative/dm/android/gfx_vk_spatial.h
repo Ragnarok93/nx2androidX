@@ -456,7 +456,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (g_spatial.ticket == ticket) return output;
     g_spatial.ticket = 0;
     int requested = dm_spatial_mode();
-    int wants_flow = requested == SP_AUTO || requested == SP_SGSR2;
+    int wants_flow = requested == SP_SGSR2;
     int mode = wants_flow ? SP_SGSR1 : requested;
     const char *reason = NULL;
 #if SP_TEMPORAL

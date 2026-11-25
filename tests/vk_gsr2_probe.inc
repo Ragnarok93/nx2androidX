@@ -382,7 +382,7 @@ static void check_image_temporal(void) {
     if (!(vk_gsr2_variants() & DM_TEMPORAL_2FS)) return;
     spatial_image src = source_image(24);
     int crop[4] = {0, 0, 24, 24};
-    selected_mode = SP_AUTO;
+    selected_mode = SP_SGSR2;
     flow_frame(&src, 0, 0);
     spatial_image *output = spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 100, NULL);
     assert(output && spatial_active == SP_SGSR2 && g_flow.ctx->pending_plan.reset);

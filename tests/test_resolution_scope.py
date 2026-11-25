@@ -57,6 +57,53 @@ class ScopeTests(unittest.TestCase):
         self.assertIn("g_rs_scope_end==p && g_rs_scope_overwrite",replay)
         self.assertIn("rs_scope_close();\n            rs_scope_try_begin(p);",replay)
 
+    def test_synchronous_replay_copies_flat_handles(self):
+        cc = shutil.which("cc") or shutil.which("clang")
+        if not cc:
+            self.skipTest("C compiler required")
+        source = (ROOT / "nxnative/dm/gfx/nvn/hle_nvn.c").read_text()
+        def part(start, end):
+            offset = source.index(start)
+            return source[offset:source.index(end, offset)]
+        code = """
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include "nvn_obj.h"
+#define LOG(...) ((void)0)
+"""
+        code += part("static size_t rec_flat(", "static uint64_t g_flat_bytes")
+        code += part("static void resolution_snapshot_free(", "#endif")
+        code += r"""
+int main(void) {
+    struct { op_hdr draw, end; } leaf = {{OP_DRAW, 8}, {OP_END, 8}};
+    struct { op_hdr call; uint64_t target; op_hdr end; } root =
+        {{OP_CALL, 16}, (uintptr_t)&leaf, {OP_END, 8}};
+    uint64_t handles[] = {(uintptr_t)&root, (uintptr_t)&leaf};
+    uint64_t *snapshot = resolution_snapshot(handles, 2);
+    assert(snapshot && snapshot[0] != handles[0] && snapshot[1] != handles[1]);
+    leaf.draw.op = OP_BARRIER;
+    for (unsigned i = 0; i < 2; i++) {
+        const op_hdr *flat = (const op_hdr *)(uintptr_t)snapshot[i];
+        assert(flat[0].op == OP_DRAW && flat[1].op == OP_END);
+    }
+    resolution_snapshot_free(snapshot, 2);
+    assert(!resolution_snapshot(handles, 257));
+    assert(rec_flat((const uint8_t *)&root, NULL, 0, 1, 0, 1) == SIZE_MAX);
+    leaf.draw.size = 4;
+    assert(!resolution_snapshot(handles, 2));
+}
+"""
+        with tempfile.TemporaryDirectory() as d:
+            c, exe = Path(d) / "snapshot.c", Path(d) / "snapshot"
+            c.write_text(code)
+            subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "nxnative/dm/gfx/nvn"),
+                            "-I", str(ROOT / "nxnative/dm/gfx/nvn/include"),
+                            "-I", str(ROOT / "nxnative/dm/gfx/tex"), str(c),
+                            "-o", str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+
     def test_actual_replay_scan(self):
         cc=shutil.which("cc") or shutil.which("clang")
         if not cc:self.skipTest("C compiler required")

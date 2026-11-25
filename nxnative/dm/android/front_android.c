@@ -83,7 +83,7 @@ unsigned dm_menu_rs_recorded(void) {return vk_rs_live_recorded();}
 static _Atomic int g_set_dyn, g_set_dyn_min = 70;             // requested true 3D dynamic-resolution mode and minimum percent
 static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), -1 unlocked, 0 follows profile
 static _Atomic int g_set_vivid;
-static _Atomic int g_set_upscaler = SP_AUTO, g_set_fsr_sharp = 50;            // spatial backend and sharpness 0..100
+static _Atomic int g_set_upscaler = SP_NATIVE, g_set_fsr_sharp = 50;            // spatial backend and sharpness 0..100
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid
@@ -97,7 +97,7 @@ int dm_fps_lock_supported(void);
 int dm_render_scale_supported(void);                 // loader: a real recompiler or Unreal CVar hook
 int dm_graphics_dynamic_enabled(void) { return !dm_menu_rs_live() && atomic_load(&g_set_dyn) && dm_render_scale_supported(); }
 int dm_graphics_scale_min_pct(void) { return atomic_load(&g_set_dyn_min); }
-int dm_menu_drs_supported(void) { return dm_menu_rs_live() || dm_render_scale_supported(); }
+int dm_menu_drs_supported(void) { return dm_menu_rs_live(); }
 int dm_menu_drs_enabled(void) { return dm_graphics_dynamic_enabled(); }
 int dm_graphics_scale_actual_pct(void);             // hle_nvn: real internal scale, not final presentation size
 int dm_menu_drs_actual(void) { return dm_render_scale_supported() ? dm_graphics_scale_actual_pct() : 100; }
@@ -120,7 +120,7 @@ static void settings_load(void) {
     if ((fg_env = getenv("DM_VIVID"))) atomic_store(&g_set_vivid, atoi(fg_env) != 0);
     if ((fg_env = getenv("DM_FSR"))) atomic_store(&g_set_upscaler, atoi(fg_env) ? SP_FSR1 : SP_NATIVE);
     if ((fg_env = getenv("DM_UPSCALER"))) {
-        int mode = atoi(fg_env);
+        int mode = spatial_mode_restore(atoi(fg_env));
         if (spatial_mode_valid(mode)) atomic_store(&g_set_upscaler, mode);
     }
     if ((fg_env = getenv("DM_FSR_SHARPNESS"))) {
@@ -139,7 +139,10 @@ static void settings_load(void) {
         else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow, v <= 0 ? 0 : v < 25 ? 25 : v > 100 ? 100 : v);
         else if (sscanf(line, "vivid=%d", &v) == 1) atomic_store(&g_set_vivid, v != 0);
         else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_upscaler, v ? SP_FSR1 : SP_NATIVE);
-        else if (sscanf(line, "upscaler=%d", &v) == 1 && spatial_mode_valid(v)) saved_upscaler = v;
+        else if (sscanf(line, "upscaler=%d", &v) == 1) {
+            v = spatial_mode_restore(v);
+            if (spatial_mode_valid(v)) saved_upscaler = v;
+        }
         else if (sscanf(line, "fsr_sharp=%d", &v) == 1) atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
         else if (sscanf(line, "fps_mode=%d", &v) == 1 && (v == -1 || v == 30 || v == 40 || v == 60)) atomic_store(&g_set_rate, v);
         else if (sscanf(line, "rs_live=%d", &v) == 1 && v>0 &&
@@ -770,27 +773,12 @@ static void menu_rs_max(int pct) {
     menu_rs_change(nx_rs_live_max(nx_rs_live_unpack(dm_rs_live_config()),5u*((unsigned)(pct+2)/5)));
 }
 static void menu_drs_toggle(void) {
-    if (dm_menu_rs_live()) {menu_rs_mode_step(1);return;}
-    if (!dm_menu_drs_supported()) {
-        LOG("[graphics] internal resolution unavailable: no verified render-scale hook for this game build");
-        dm_overlay_redraw(); return;
-    }
-    int on = !atomic_load(&g_set_dyn);
-    atomic_store(&g_set_dyn, on); atomic_fetch_add(&g_menu_cfg_ver, 1);
-    LOG("[graphics] internal dynamic resolution %s (floor %d%%)", on ? "on" : "off", atomic_load(&g_set_dyn_min));
-    dm_haptics_android_tap(); settings_save(); dm_overlay_redraw();
+    if (dm_menu_rs_live()) menu_rs_mode_step(1);
 }
 static void menu_drs_min(int pct) {
-    if (dm_menu_rs_live()) {
-        pct=pct<50?50:pct>100?100:pct;
-        menu_rs_change(nx_rs_live_min(nx_rs_live_unpack(dm_rs_live_config()),5u*((unsigned)(pct+2)/5)));return;
-    }
-    pct = pct < 50 ? 50 : pct > 95 ? 95 : pct;
-    pct = 5 * ((pct + 2) / 5);
-    if (atomic_exchange(&g_set_dyn_min, pct) != pct) {
-        atomic_fetch_add(&g_menu_cfg_ver, 1);
-        dm_haptics_android_tap(); dm_overlay_redraw();
-    }
+    if (!dm_menu_rs_live()) return;
+    pct=pct<50?50:pct>100?100:pct;
+    menu_rs_change(nx_rs_live_min(nx_rs_live_unpack(dm_rs_live_config()),5u*((unsigned)(pct+2)/5)));
 }
 static void menu_fsr_sharp(int v) {
     v = v < 0 ? 0 : v > 100 ? 100 : v;
@@ -960,7 +948,7 @@ static void menu_do(int item) {
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
     else if (item == OVM_FSR) {
-        atomic_store(&g_set_upscaler, (dm_spatial_mode() + 1) % SP_MODE_COUNT);
+        atomic_store(&g_set_upscaler, spatial_mode_next(dm_spatial_mode()));
         atomic_fetch_add(&g_menu_cfg_ver, 1);
         settings_save();
     }

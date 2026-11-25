@@ -190,11 +190,18 @@ static void check_vivid(spatial_image *input) {
 }
 
 static void run_spatial(void) {
+    const char *names[] = {"None", "Bilinear", "FSR 1", "GSR 1", "GSR 2"};
+    int mode = SP_NATIVE;
+    for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++) {
+        assert(!strcmp(names[i], spatial_mode_name(mode)));
+        mode = spatial_mode_next(mode);
+    }
+    assert(mode == SP_NATIVE && spatial_mode_restore(SP_LEGACY_AUTO) == SP_SGSR2);
     spatial_image src = source_image(SRC);
     int crop[] = {2, 2, 16, 16};
     uint8_t bilinear[OUT * OUT * 4];
     static uint64_t ticket = 0;
-    const int modes[] = {SP_BILINEAR, SP_FSR1, SP_SGSR1, SP_AUTO, SP_NATIVE};
+    const int modes[] = {SP_BILINEAR, SP_FSR1, SP_SGSR1, SP_NATIVE};
     for (unsigned i = 0; i < sizeof modes / sizeof modes[0]; i++) {
         selected_mode = modes[i];
         spatial_image *out = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket, NULL);
@@ -202,7 +209,7 @@ static void run_spatial(void) {
             assert(!out && spatial_active == SP_NATIVE);
             continue;
         }
-        assert(out && spatial_active == (selected_mode == SP_AUTO ? SP_SGSR1 : selected_mode));
+        assert(out && spatial_active == selected_mode);
         unsigned slot = g_spatial.slot;
         assert(spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ticket, NULL) == out);
         assert(spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, 0, NULL) == NULL);
@@ -218,7 +225,7 @@ static void run_spatial(void) {
     assert(resized && resized->texture.w == 24);
     readback(resized->texture.img, 24, OUT);
     sharpness = 50;
-    selected_mode = SP_AUTO;
+    selected_mode = SP_SGSR2;
     V.has_dynrender = 0;
     spatial_image *fallback = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket, NULL);
     assert(fallback && spatial_active == SP_BILINEAR);

@@ -490,7 +490,7 @@ __attribute__((weak)) int dm_menu_rs_mode(void) {return 0;}
 __attribute__((weak)) int dm_menu_rs_max(void) {return 100;}
 __attribute__((weak)) unsigned dm_menu_rs_recorded(void) {return 0;}
 __attribute__((weak)) int dm_vivid_enabled(void) { return 0; }
-__attribute__((weak)) int dm_spatial_mode(void) { return SP_AUTO; }
+__attribute__((weak)) int dm_spatial_mode(void) { return SP_NATIVE; }
 __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
 int dm_menu_fg_has_dll(void);
 const char *dm_vk_driver_status(void);   // a controller's face buttons (front_android.c pad_labels)
@@ -556,7 +556,10 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
         }
         float x0 = r[0]+rh*0.18f;
         if (row != sel) cv_rrect(cv,r[0],r[1]+rh*0.055f,r[0]+rw,r[1]+rh*0.945f,rh*0.18f,M3_HIGH);
-        const char *label=it==OVM_DRS && dm_menu_rs_live()?"Resolution mode":it==OVM_DRS_NOW && dm_menu_rs_live()?"Recorded scale":OVM_LABELS[it];
+        const char *label = OVM_LABELS[it];
+        if (it == OVM_DRS) label = "Internal resolution";
+        if (it == OVM_DRS_NOW && dm_menu_rs_live()) label = "Recorded scale";
+        if (it == OVM_RS_MAX && dm_menu_rs_mode() == 1) label = "Fixed scale";
         m3_text(cv,x0,cy,label,is,M3_ON_SURFACE);
         if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN || it==OVM_RS_MAX) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
             int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : it==OVM_RS_MAX?dm_menu_rs_max():dm_fsr_sharpness();
@@ -579,13 +582,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                 int mode=dm_menu_rs_mode();
                 snprintf(value,sizeof value,"%s",mode==1?"Fixed":mode==2?"Adaptive":"Off");
             } else if (it == OVM_FSR) {
-                int requested = dm_spatial_mode();
-                if (requested == SP_NATIVE) snprintf(value, sizeof value, "Native");
-                else if (requested != spatial_requested)
-                    snprintf(value, sizeof value, "%s (on resume)", spatial_mode_name(requested));
-                else if (requested != spatial_active)
-                    snprintf(value, sizeof value, "%s / %s", spatial_mode_name(requested), spatial_mode_name(spatial_active));
-                else snprintf(value, sizeof value, "%s", spatial_mode_name(requested));
+                snprintf(value, sizeof value, "%s", spatial_mode_name(dm_spatial_mode()));
             } else if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
             else if (it == OVM_FG_FLOW) {
                 int scale = dm_menu_fg_flow();
@@ -604,7 +601,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                 } else if (!dm_menu_drs_supported()) snprintf(value, sizeof value, "Unavailable");
                 else snprintf(value, sizeof value, "%d%%", dm_menu_drs_actual());
             } else if (it == OVM_DRS_HOOK) {
-                snprintf(value, sizeof value, "%s", dm_menu_rs_live()?"Vulkan (experimental)":dm_menu_drs_supported() ? "Game engine" : "Not supported");
+                snprintf(value, sizeof value, "%s", dm_menu_rs_live()?"Vulkan renderer":"Unavailable");
             } else if (it == OVM_DIAG_STATUS) dm_menu_diag_note(value, sizeof value);
             else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
@@ -1382,7 +1379,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         // Keep the existing native image path for anything but the full copy.
         int full = !raw[0] && !raw[1] && raw[2] == (int)im->w && raw[3] == (int)im->h;
         int mode = dm_spatial_mode();
-        if (mode == SP_AUTO || mode == SP_SGSR2) {
+        if (mode == SP_SGSR2) {
             uint64_t now = mono_ns();
             if (g_flow.last_source_ns && now - g_flow.last_source_ns > 250000000) g_flow.ticket = 0;
             g_flow.last_source_ns = now;

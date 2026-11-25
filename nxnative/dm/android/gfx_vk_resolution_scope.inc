@@ -274,7 +274,7 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
         op_hdr h;memcpy(&h,p,sizeof h);
         if (h.size<8 || (h.size&7) || h.size>RS_SCOPE_BYTES_MAX-bytes) return NULL;
         bytes+=h.size;const uint8_t *a=p+8;size_t n=h.size-8;
-        // The replay job owns every flattened handle in this array. Keep
+        // The submission owns every flattened handle in this array. Keep
         // the same byte/op bound across all handles, not per handle.
         if (h.op==OP_END) {
             if (h.size!=8 || !g_rs_scope_rest || crossed>=g_rs_scope_rest_n || crossed>=RS_SCOPE_HANDLE_MAX) return NULL;
@@ -404,9 +404,9 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
 }
 static void rs_scope_try_begin(const uint8_t *next) {
     // rec_copy makes immutable, flat handles with terminal OP_END records.
-    // Synchronous guest command memory and nested/unflattened calls are not
-    // proof inputs. Reject diagnostic modes that can inject extra accesses.
-    if (!nvn_replaying_job() || S.pass_open || vk_rs_cache_has_scaled() || g_rc_skip || g_tf_on ||
+    // Both replay paths need a snapshot. Guest memory and nested calls are
+    // not proof inputs. Diagnostic modes can inject extra accesses.
+    if ((!g_rs_sync_snapshot && !nvn_replaying_job()) || S.pass_open || vk_rs_cache_has_scaled() || g_rc_skip || g_tf_on ||
         DM_GAME_RENDER_COND || g_bis_on || g_pd_state || g_x_listpasses || g_x_tracepass>=0 ||
         g_td_off>=0 || g_x_nflat || g_x_nobar || g_x_depth || g_x_color ||
         g_lrz_touch || g_ubolog_key || g_x_logfs || g_x_nodispbar || slot0_fill_on()) return;

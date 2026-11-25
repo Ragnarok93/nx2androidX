@@ -188,12 +188,21 @@ Per-build knowledge stays where upstream keeps it: the rewriter's cuts in `patch
 
 ### Standalone spatial reconstruction
 
+Internal resolution controls use the Vulkan renderer independently of game
+engine hooks. Closed lifetimes may use reduced physical backing on either
+NVN replay path. Asynchronous replay uses its existing immutable command
+copies. Synchronous replay takes a bounded snapshot when a subnative target
+is active, and falls back to its original command stream if it cannot make
+the snapshot. Off and 100% skip the synchronous snapshot and lifetime scan.
+Only certified passes scale. The menu reports how many passes used smaller
+backing, and older shaders without scaling metadata may remain native.
+
 The Vulkan present thread identifies real frames by their game present tickets.
 It crops and orients the source, then passes the reconstructed picture to LSFG.
-Auto is the default when a game has no saved preference. It tries image-driven
-GSR 2 when the picture needs enlargement and the queue can time the work.
-GSR 1 and Bilinear provide automatic fallback. FSR 1 and Native remain
-selectable. Native fits the guest-sized frame to the surface at presentation.
+The menu offers None, Bilinear, FSR 1, GSR 1 and GSR 2. None fits the
+guest-sized frame to the surface at presentation. Saved Auto preferences
+migrate to GSR 2. GSR 2 uses GSR 1 or Bilinear as a fallback when the device
+or frame cannot support temporal reconstruction.
 The runtime reports the effective mode, fallback reason and measured GPU time.
 
 A certified full color copy to a same-size NVN display texture also offers the

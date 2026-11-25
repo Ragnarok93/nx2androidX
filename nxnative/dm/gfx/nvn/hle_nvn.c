@@ -1377,15 +1377,23 @@ static void replay_unlock(void) { if (nvn_async()) pthread_mutex_unlock(&g_sub_m
 // Under asynchronous replay the game may record into its command memory again before the replay thread reaches what it submitted (Unicorn Overlord's skipped
 // scenes: the replay read overwritten records, "unknown record op", and drew nothing while the sound went on). So each submitted handle is copied whole when it
 // is submitted: JUMPs followed, CALLs inlined, and the pointers a record keeps to its own texture snapshots (tex_snap) moved with it. out NULL: only the size
-static size_t rec_flat(const uint8_t *p, uint8_t *out, size_t at, size_t cap, int depth) {
+static size_t rec_flat(const uint8_t *p, uint8_t *out, size_t at, size_t cap, int depth, int strict) {
     for (;;) {
         op_hdr hd; memcpy(&hd, p, sizeof hd);
-        if (hd.op == OP_END) return at;
+        if (hd.op == OP_END) return strict && hd.size != 8 ? SIZE_MAX : at;
+        if (strict && ((hd.size < 8 || hd.size & 7) ||
+                      ((hd.op == OP_JUMP || hd.op == OP_CALL) && hd.size < 16))) return SIZE_MAX;
         if (hd.op == OP_JUMP) { memcpy(&p, p + 8, 8); continue; }
-        if (hd.op == OP_CALL && depth < 8) { uint64_t t; memcpy(&t, p + 8, 8); at = rec_flat((const uint8_t *)(uintptr_t)t, out, at, cap, depth + 1); p += hd.size; continue; }
+        if (hd.op == OP_CALL && depth < 8) {
+            uint64_t t; memcpy(&t, p + 8, 8);
+            at = rec_flat((const uint8_t *)(uintptr_t)t, out, at, cap, depth + 1, strict);
+            if (at == SIZE_MAX) return SIZE_MAX;
+            p += hd.size;
+            continue;
+        }
         if (hd.size < 8 || hd.size & 7) { LOG("[RED] submission copy: a record of size %u (op %u): copied up to it", hd.size, hd.op); return at; }
+        if ((out || strict) && (at > cap || hd.size > cap - at)) return strict ? SIZE_MAX : at;
         if (out) {
-            if (at + hd.size > cap) return at;   // (the game changed the records between the two walks)
             uint8_t *d = out + at; memcpy(d, p, hd.size);
             for (uint32_t k = 8; k + 8 <= hd.size; k += 8) { uint64_t v; memcpy(&v, d + k, 8);
                 if (v >= (uintptr_t)p && v < (uintptr_t)p + hd.size) { v += (uintptr_t)d - (uintptr_t)p; memcpy(d + k, &v, 8); } }
@@ -1395,11 +1403,43 @@ static size_t rec_flat(const uint8_t *p, uint8_t *out, size_t at, size_t cap, in
 }
 static uint64_t g_flat_bytes;
 static uint64_t rec_copy(uint64_t h) {
-    const uint8_t *p = (const uint8_t *)(uintptr_t)h; size_t n = rec_flat(p, NULL, 0, 0, 0) + 8;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)h; size_t n = rec_flat(p, NULL, 0, 0, 0, 0) + 8;
     uint8_t *c = malloc(n); if (!c) die("submission copy: out of memory (%zu bytes)", n);
-    size_t at = rec_flat(p, c, 0, n - 8, 0); op_hdr e = {OP_END, 8}; memcpy(c + at, &e, 8);
+    size_t at = rec_flat(p, c, 0, n - 8, 0, 0); op_hdr e = {OP_END, 8}; memcpy(c + at, &e, 8);
     g_flat_bytes += n; return (uint64_t)(uintptr_t)c;
 }
+#ifdef __ANDROID__
+static void resolution_snapshot_free(uint64_t *snapshot, int count) {
+    for (int i = 0; i < count; i++) free((void *)(uintptr_t)snapshot[i]);
+    free(snapshot);
+}
+
+static uint64_t *resolution_snapshot(const uint64_t *handles, int count) {
+    // Bound extra CPU memory and preserve native replay if the submission
+    // cannot be flattened within the scanner's budget.
+    enum { MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024, MAX_SNAPSHOT_HANDLES = 256 };
+    if (count <= 0 || count > MAX_SNAPSHOT_HANDLES) return NULL;
+    uint64_t *snapshot = calloc((size_t)count, sizeof *snapshot);
+    if (!snapshot) return NULL;
+    size_t remaining = MAX_SNAPSHOT_BYTES;
+    for (int i = 0; i < count; i++) {
+        if (remaining < 8) break;
+        const uint8_t *original = (const uint8_t *)(uintptr_t)handles[i];
+        size_t size = rec_flat(original, NULL, 0, remaining, 0, 1);
+        if (size > remaining - 8) break;
+        uint8_t *copy = malloc(size + 8);
+        if (!copy) break;
+        snapshot[i] = (uint64_t)(uintptr_t)copy;
+        if (rec_flat(original, copy, 0, size, 0, 1) != size) break;
+        op_hdr end = {OP_END, 8};
+        memcpy(copy + size, &end, 8);
+        remaining -= size + 8;
+        if (i + 1 == count) return snapshot;
+    }
+    resolution_snapshot_free(snapshot, count);
+    return NULL;
+}
+#endif
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     if (nvn_async()) { uint64_t *c = malloc(sizeof *c * (size_t)(n > 0 ? n : 1)); for (int i = 0; i < n; i++) c[i] = rec_copy(h[i]); ((queue_t *)q)->submits++;
         static uint64_t ns, last; if (++ns % 600 == 0) { LOG("[nvn] submissions copied for the replay thread: %.2f MB each (last 600)", (g_flat_bytes - last) / 600.0 / 1048576); last = g_flat_bytes; }
@@ -1411,13 +1451,33 @@ static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h) {
     gfx_enter();
     pthread_mutex_lock(&g_sub_mu);
     uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
-    if (!nvn_async()) ((queue_t *)q)->submits++;
+    int async = nvn_async();
+    if (!async) ((queue_t *)q)->submits++;
+#ifdef __ANDROID__
+    int vk_rs_wants_sync_snapshot(void);
+    void vk_rs_set_sync_snapshot(int);
+    static uint64_t *previous_snapshot;
+    static int previous_count;
+    uint64_t *snapshot = !async && n > 0 && vk_rs_wants_sync_snapshot()
+        ? resolution_snapshot((const uint64_t *)h, n) : NULL;
+    if (snapshot) {
+        h = (const NVNcommandHandle *)snapshot;
+        vk_rs_set_sync_snapshot(1);
+    }
+#endif
     mtl_sub_begin(); ft_del_drain();
     nvn_ft_poll();
     mtl_sub_index((const uint64_t *)h, n);
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
     mtl_sub_commit();
+#ifdef __ANDROID__
+    if (snapshot) vk_rs_set_sync_snapshot(0);
+    // Match asynchronous replay's ownership of the previous command records.
+    if (previous_snapshot) resolution_snapshot_free(previous_snapshot, previous_count);
+    previous_snapshot = snapshot;
+    previous_count = snapshot ? n : 0;
+#endif
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);

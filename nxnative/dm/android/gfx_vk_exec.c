@@ -248,20 +248,28 @@ static unsigned g_rs_frame_request; // 0 disables the experimental coordinator
 static uint64_t g_rs_frame_packet; // present id in upper 57 bits, percent in low 7
 static nx_rs_frame_state g_rs_frame={0,100};
 static unsigned g_rs_recorded_passes,g_rs_recorded_frame;
-// Explicit development opt-in; do not override engine-side env scaling.
+// Renderer scaling is available by default; explicit engine-side overrides take precedence.
 int vk_rs_live_available(void) {
     static int cached=-1;
     int v=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);
     if (v<0) {
-        const char *e=getenv("DM_VK_RESOLUTION_LIVE"),*a=getenv("DM_NVN_ASYNC");
+        const char *e=getenv("DM_VK_RESOLUTION_LIVE");
+        const char *diagnostic=getenv("DM_VK_RESOLUTION_TARGET_PERCENT"),*adaptive=getenv("DM_VK_RESOLUTION_ADAPTIVE");
         const char *m=getenv("DM_RENDER_SCALE"),*d=getenv("DM_DYN_SCALE");
         char *end=NULL; double manual=m&&*m?strtod(m,&end):1.0;
-        v=e && atoi(e)!=0 && a && atoi(a)!=0 && (!d || !*d || !strcmp(d,"0")) &&
+        v=(e ? atoi(e)!=0 : !diagnostic && !(adaptive && atoi(adaptive))) && (!d || !*d || !strcmp(d,"0")) &&
             manual==1.0 && (!end || !*end);
         __atomic_store_n(&cached,v,__ATOMIC_RELEASE);
     }
     return v;
 }
+// Synchronous replay only needs immutable command snapshots at subnative targets.
+static int g_rs_sync_snapshot;
+int vk_rs_wants_sync_snapshot(void) {
+    uint64_t packet=__atomic_load_n(&g_rs_frame_packet,__ATOMIC_ACQUIRE);
+    return g_rs_scopes && packet && (packet&127)<100;
+}
+void vk_rs_set_sync_snapshot(int on) { g_rs_sync_snapshot=on; }
 // Upper bits: scaled passes actually recorded; lower 7: latched target.
 // This is not the effective scale of the entire frame.
 unsigned vk_rs_live_recorded(void) {return __atomic_load_n(&g_rs_recorded_frame,__ATOMIC_ACQUIRE);}
