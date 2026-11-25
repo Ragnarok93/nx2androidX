@@ -37,7 +37,7 @@ on:
   push:
     # Trusted android-branch changes build an upgradeable test APK. Tags still
     # attach their signed build to the release; PRs use an ephemeral signer.
-    branches: [android]
+    branches: [android, ci/gsr2-android-apk-20261124]
     tags: ['v*']
     paths:
       - 'android/**'
