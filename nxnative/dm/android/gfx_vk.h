@@ -174,6 +174,9 @@ int vk_rs_cache_exchange_live(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t 
 int vk_rs_pass_idle(void);
 int vk_rs_require_native(vkimg_t *im); // explicit native-only boundary, outside a pass
 int vk_rs_cache_has_scaled(void);
+// Experimental request coordinator: target does not imply effective scale.
+int vk_rs_set_scale_request(unsigned percent);
+void vk_rs_publish_source_frame(uint64_t present);
 // Read-only preflight: 0 native, 1 compatible scaled owner, 2 restore.
 int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent);
 int vk_rs_preflight_buffer(uint64_t addr,uint64_t size); // 1 only when disjoint from active owners
