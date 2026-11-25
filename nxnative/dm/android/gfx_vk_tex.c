@@ -12,6 +12,7 @@
 #include "gfx_vk_resolution_restore.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "gfx_vk_resolution_active.h"
+#include "gfx_vk_resolution_storage_private.h"
 #include "nvn_tex.h"
 #include "../gfx/tex/nvn_deswizzle.h"
 #include "nvn_hmap.h"
@@ -330,21 +331,10 @@ static nx_rs_budget g_rs_budget, g_rs_restore_budget;
 static uint64_t g_rs_generation;
 #define NX_RS_BUDGET_BYTES (64ull * 1024 * 1024)
 #define NX_RS_RESTORE_BUDGET_BYTES (64ull * 1024 * 1024)
-vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t h) {
-    if (!logical || !w || !h || !vk_sub_open() || logical->novl || logical->packaged ||
-        logical->lin_mem || logical->target != NVN_TEXTURE_TARGET_2D ||
-        logical->d != 1 || logical->layers != 1 || logical->levels != 1 || logical->samples != 1 ||
-        logical->bc_draw || logical->bc_of || !logical->pool ||
-        (logical->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_IMAGE))) return NULL;
-    const vkfmt_t *fmt = vk_fmt(logical->nvn_format);
-    if (!fmt || fmt->compressed || fmt->is_int || !logical->aspect) return NULL;
-    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    usage |= logical->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    if ((logical->usage & usage) != usage || (logical->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return NULL;
-    // Match the original creation contract, including view format list. A
-    // backing can only replace the cache image if its view capabilities match.
-    usage = logical->usage;
-    VkImageCreateFlags flags = logical->cflags;
+static vk_rs_variant *rs_variant_allocate(const vkimg_t *logical,uint32_t w,uint32_t h,int private_storage) {
+    if (!logical || !w || !h || !vk_sub_open()) return NULL;
+    VkImageUsageFlags usage=logical->usage;
+    VkImageCreateFlags flags=logical->cflags;
     VkFormat list[4] = {logical->fmt,0,0,0};
     uint32_t nfmt=1;
     if (logical->fmt2) list[nfmt++]=logical->fmt2;
@@ -367,6 +357,7 @@ vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t
     if (vkCreateImage(V.dev, &ci, NULL, &v->image) != VK_SUCCESS) goto fail;
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(V.dev, v->image, &req);
+    if (private_storage && (!req.size || req.size>(1u<<20))) goto fail;
     uint32_t type = vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     if (type == UINT32_MAX) goto fail;
     if (logical->rs_backing) v->native_bytes=logical->rs_backing->native_bytes;
@@ -395,6 +386,30 @@ vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t
 fail:
     vk_rs_variant_destroy(v); // never recorded or published
     return NULL;
+}
+vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical,uint32_t w,uint32_t h) {
+    if (!logical || !w || !h || !vk_sub_open() || logical->novl || logical->packaged ||
+        logical->lin_mem || logical->target != NVN_TEXTURE_TARGET_2D ||
+        logical->d != 1 || logical->layers != 1 || logical->levels != 1 || logical->samples != 1 ||
+        logical->bc_draw || logical->bc_of || !logical->pool ||
+        (logical->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_IMAGE))) return NULL;
+    const vkfmt_t *fmt = vk_fmt(logical->nvn_format);
+    if (!fmt || fmt->compressed || fmt->is_int || !logical->aspect) return NULL;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    usage |= logical->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if ((logical->usage & usage) != usage || (logical->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return NULL;
+    return rs_variant_allocate(logical,w,h,0);
+}
+// A private storage control has no guest pool, address or cache owner. It
+// shares the budget and cleanup machinery without relaxing live eligibility.
+vk_rs_variant *vk_rs_storage_variant_create_private(uint32_t lw,uint32_t lh,uint32_t w,uint32_t h) {
+    if (!nx_rs_private_storage_extent(lw,lh,w,h) || !vk_sub_open() || !vk_rs_pass_idle()) return NULL;
+    const vkimg_t logical={
+        .usage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .fmt=VK_FORMAT_R32G32B32A32_SFLOAT,.aspect=VK_IMAGE_ASPECT_COLOR_BIT,
+        .w=lw,.h=lh,.d=1,.levels=1,.layers=1,.samples=1,.target=NVN_TEXTURE_TARGET_2D
+    };
+    return rs_variant_allocate(&logical,w,h,1);
 }
 void vk_rs_variant_destroy(vk_rs_variant *v) {
     if (!v) return;
