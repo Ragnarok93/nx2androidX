@@ -1,12 +1,14 @@
 /* Opt-in, one-shot compute coverage diagnostic. Private objects, private
  * command buffer and fence; never use guest cache owners or replay descriptors. */
 #include "gfx_vk_resolution_compute_probe_shader.h"
+#include "gfx_vk_resolution_compute_transform.h"
 extern pthread_mutex_t g_vk_queue_mu;
 
-static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t groups[3]) {
-    VkImage im=VK_NULL_HANDLE;
-    VkImageView view=VK_NULL_HANDLE;
-    VkDeviceMemory imem=VK_NULL_HANDLE,bmem=VK_NULL_HANDLE;
+static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t groups[3],int transform) {
+    VkImage im=VK_NULL_HANDLE,src=VK_NULL_HANDLE;
+    VkImageView view=VK_NULL_HANDLE,src_view=VK_NULL_HANDLE;
+    VkSampler sampler=VK_NULL_HANDLE;
+    VkDeviceMemory imem=VK_NULL_HANDLE,bmem=VK_NULL_HANDLE,src_mem=VK_NULL_HANDLE;
     VkBuffer buf=VK_NULL_HANDLE;
     VkShaderModule shader=VK_NULL_HANDLE;
     VkDescriptorSetLayout dsl=VK_NULL_HANDLE;
@@ -25,8 +27,8 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
     const VkImageUsageFlags usage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VkImageFormatProperties props;
     VkMemoryRequirements rq;
-    if (!w || !h || w>32 || h>32 || !groups) return 0;
-    const VkDeviceSize bytes=(VkDeviceSize)pixels*16;
+    if (!w || !h || w>32 || h>32 || !groups || (transform && !nx_rs_transform_shape(w,h))) return 0;
+    const VkDeviceSize bytes=(VkDeviceSize)pixels*16, read_offset=transform?bytes:0;
 #define RS_TRY(label,call) do {step=(label);r=(call);if(r!=VK_SUCCESS)goto cleanup;} while(0)
     RS_TRY("format support",vkGetPhysicalDeviceImageFormatProperties(V.pd,fmt,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&props));
     if(w>props.maxExtent.width || h>props.maxExtent.height || !(props.sampleCounts&VK_SAMPLE_COUNT_1_BIT)) {r=VK_ERROR_FORMAT_NOT_SUPPORTED;goto cleanup;}
@@ -44,7 +46,27 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
     VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=im,.viewType=VK_IMAGE_VIEW_TYPE_2D,
         .format=fmt,.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
     RS_TRY("image view",vkCreateImageView(V.dev,&vi,NULL,&view));
-    VkBufferCreateInfo bi={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=bytes,.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    if(transform) {
+        ici.usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        RS_TRY("source format support",vkGetPhysicalDeviceImageFormatProperties(V.pd,fmt,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,ici.usage,0,&props));
+        if(w>props.maxExtent.width || h>props.maxExtent.height || !(props.sampleCounts&VK_SAMPLE_COUNT_1_BIT)){r=VK_ERROR_FORMAT_NOT_SUPPORTED;goto cleanup;}
+        RS_TRY("source image",vkCreateImage(V.dev,&ici,NULL,&src));
+        vkGetImageMemoryRequirements(V.dev,src,&rq);
+        step="source memory type/budget";
+        mt=vk_mem_type(rq.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,0);
+        if(mt==UINT32_MAX || rq.size>(1u<<20)){r=VK_ERROR_OUT_OF_DEVICE_MEMORY;goto cleanup;}
+        ma.allocationSize=rq.size;ma.memoryTypeIndex=mt;
+        RS_TRY("source memory",vkAllocateMemory(V.dev,&ma,NULL,&src_mem));
+        RS_TRY("source bind",vkBindImageMemory(V.dev,src,src_mem,0));
+        vi.image=src;
+        RS_TRY("source view",vkCreateImageView(V.dev,&vi,NULL,&src_view));
+        VkSamplerCreateInfo si={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,.magFilter=VK_FILTER_NEAREST,.minFilter=VK_FILTER_NEAREST,
+            .mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST,.addressModeU=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.maxLod=0.f};
+        RS_TRY("source sampler",vkCreateSampler(V.dev,&si,NULL,&sampler));
+    }
+    VkBufferCreateInfo bi={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=bytes+read_offset,
+        .usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT|(transform?VK_BUFFER_USAGE_TRANSFER_SRC_BIT:0),
         .sharingMode=VK_SHARING_MODE_EXCLUSIVE};
     RS_TRY("readback buffer",vkCreateBuffer(V.dev,&bi,NULL,&buf));
     vkGetBufferMemoryRequirements(V.dev,buf,&rq);
@@ -55,14 +77,18 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
     RS_TRY("allocate readback",vkAllocateMemory(V.dev,&ma,NULL,&bmem));
     RS_TRY("bind readback",vkBindBufferMemory(V.dev,buf,bmem,0));
     RS_TRY("map readback",vkMapMemory(V.dev,bmem,0,VK_WHOLE_SIZE,0,&mapped));
-    memset(mapped,0,(size_t)bytes);
-    VkShaderModuleCreateInfo sm={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=sizeof nx_rs_probe_shader,.pCode=nx_rs_probe_shader};
+    memset(mapped,0,(size_t)(bytes+read_offset));
+    if(transform && !nx_rs_transform_source((uint32_t *)mapped,w,h)) {step="source pattern";r=VK_ERROR_INITIALIZATION_FAILED;goto cleanup;}
+    VkShaderModuleCreateInfo sm={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize=transform?sizeof nx_rs_transform_shader:sizeof nx_rs_probe_shader,
+        .pCode=transform?nx_rs_transform_shader:nx_rs_probe_shader};
     RS_TRY("shader",vkCreateShaderModule(V.dev,&sm,NULL,&shader));
-    VkDescriptorSetLayoutBinding binding={7,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL};
-    VkDescriptorSetLayoutCreateInfo ds={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=1,.pBindings=&binding};
+    VkDescriptorSetLayoutBinding binding[2]={{7,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL},
+        {6,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL}};
+    VkDescriptorSetLayoutCreateInfo ds={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=transform?2:1,.pBindings=binding};
     RS_TRY("descriptor layout",vkCreateDescriptorSetLayout(V.dev,&ds,NULL,&dsl));
-    VkDescriptorPoolSize ps={VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1};
-    VkDescriptorPoolCreateInfo pc={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=1,.poolSizeCount=1,.pPoolSizes=&ps};
+    VkDescriptorPoolSize ps[2]={{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1}};
+    VkDescriptorPoolCreateInfo pc={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=1,.poolSizeCount=transform?2:1,.pPoolSizes=ps};
     RS_TRY("descriptor pool",vkCreateDescriptorPool(V.dev,&pc,NULL,&dp));
     VkDescriptorSetAllocateInfo da={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,.descriptorPool=dp,.descriptorSetCount=1,.pSetLayouts=&dsl};
     VkDescriptorSet set;
@@ -71,6 +97,11 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
     VkWriteDescriptorSet dw={.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=set,.dstBinding=7,.descriptorCount=1,
         .descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,.pImageInfo=&di};
     vkUpdateDescriptorSets(V.dev,1,&dw,0,NULL);
+    if(transform) {
+        VkDescriptorImageInfo source={.sampler=sampler,.imageView=src_view,.imageLayout=VK_IMAGE_LAYOUT_GENERAL};
+        dw.dstBinding=6;dw.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;dw.pImageInfo=&source;
+        vkUpdateDescriptorSets(V.dev,1,&dw,0,NULL);
+    }
     VkPipelineLayoutCreateInfo pli={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=1,.pSetLayouts=&dsl};
     RS_TRY("pipeline layout",vkCreatePipelineLayout(V.dev,&pli,NULL,&layout));
     VkComputePipelineCreateInfo pi={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -94,12 +125,21 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
     vkCmdClearColorImage(cb,im,VK_IMAGE_LAYOUT_GENERAL,&zero,1,&range);
     ib.oldLayout=VK_IMAGE_LAYOUT_GENERAL;ib.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;ib.dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
     vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,NULL,0,NULL,1,&ib);
+    if(transform) {
+        VkImageMemoryBarrier sb=ib;
+        sb.image=src;sb.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;sb.srcAccessMask=0;sb.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,0,NULL,1,&sb);
+        VkBufferImageCopy upload={.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.imageExtent={w,h,1}};
+        vkCmdCopyBufferToImage(cb,buf,src,VK_IMAGE_LAYOUT_GENERAL,1,&upload);
+        sb.oldLayout=VK_IMAGE_LAYOUT_GENERAL;sb.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;sb.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,NULL,0,NULL,1,&sb);
+    }
     vkCmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);
     vkCmdBindDescriptorSets(cb,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,1,&set,0,NULL);
     vkCmdDispatch(cb,groups[0],groups[1],groups[2]);
     ib.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;ib.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,0,NULL,1,&ib);
-    VkBufferImageCopy copy={.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.imageExtent={w,h,1}};
+    VkBufferImageCopy copy={.bufferOffset=read_offset,.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},.imageExtent={w,h,1}};
     vkCmdCopyImageToBuffer(cb,im,VK_IMAGE_LAYOUT_GENERAL,buf,1,&copy);
     VkMemoryBarrier host={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,.dstAccessMask=VK_ACCESS_HOST_READ_BIT};
     vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&host,0,NULL,0,NULL);
@@ -117,9 +157,10 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
         VKLOG("[resolution-compute-probe] %ux%u fence wait=%d; INCONCLUSIVE, private resources retained",w,h,r);
         return -1;
     }
-    matches=nx_rs_probe_matches((const uint32_t *)mapped,pixels);
+    const uint32_t *read=(const uint32_t *)((const uint8_t *)mapped+read_offset);
+    matches=transform?nx_rs_transform_matches(read,w,h):nx_rs_probe_matches(read,pixels);
     result=matches==pixels;
-    VKLOG("[resolution-compute-probe] %ux%u groups=%ux%u pixels=%u/%u %s",w,h,groups[0],groups[1],matches,pixels,result?"PASS":"FAIL");
+    VKLOG("[resolution-compute-probe] %s %ux%u groups=%ux%u pixels=%u/%u %s",transform?"transform":"fill",w,h,groups[0],groups[1],matches,pixels,result?"PASS":"FAIL");
 cleanup:
     if(r!=VK_SUCCESS)VKLOG("[resolution-compute-probe] %ux%u %s result=%d; INCONCLUSIVE",w,h,step,r);
     if(fence)vkDestroyFence(V.dev,fence,NULL);
@@ -129,6 +170,10 @@ cleanup:
     if(dp)vkDestroyDescriptorPool(V.dev,dp,NULL);
     if(dsl)vkDestroyDescriptorSetLayout(V.dev,dsl,NULL);
     if(shader)vkDestroyShaderModule(V.dev,shader,NULL);
+    if(sampler)vkDestroySampler(V.dev,sampler,NULL);
+    if(src_view)vkDestroyImageView(V.dev,src_view,NULL);
+    if(src)vkDestroyImage(V.dev,src,NULL);
+    if(src_mem)vkFreeMemory(V.dev,src_mem,NULL);
     if(view)vkDestroyImageView(V.dev,view,NULL);
     if(im)vkDestroyImage(V.dev,im,NULL);
     if(imem)vkFreeMemory(V.dev,imem,NULL);
@@ -146,8 +191,13 @@ static void resolution_probe_compute(void) {
         VKLOG("[resolution-compute-probe] INCONCLUSIVE: shader or grid self-check rejected");
         return;
     }
-    int a=resolution_probe_compute_extent(32,32,native);
-    int b=a<0?-1:resolution_probe_compute_extent(16,16,half);
+    int a=resolution_probe_compute_extent(32,32,native,0);
+    int b=a<0?-1:resolution_probe_compute_extent(16,16,half,0);
     VKLOG("[resolution-compute-probe] native=%d half=%d overall=%s; guest images unchanged",
         a,b,a==1&&b==1?"PASS":a<0||b<0?"INCONCLUSIVE":"FAIL");
+    if(a!=1 || b!=1) return;
+    int c=resolution_probe_compute_extent(32,32,native,1);
+    int d=c<0?-1:resolution_probe_compute_extent(16,16,half,1);
+    VKLOG("[resolution-compute-probe] transform native=%d half=%d overall=%s; guest images unchanged",
+        c,d,c==1&&d==1?"PASS":c<0||d<0?"INCONCLUSIVE":"FAIL");
 }
