@@ -3,6 +3,11 @@
 #include <stdint.h>
 enum { NX_RS_ACTIVE_MAX=64 };
 typedef struct { uintptr_t owner[NX_RS_ACTIVE_MAX]; unsigned n; } nx_rs_active;
+static inline int nx_rs_active_contains(const nx_rs_active *a,uintptr_t owner) {
+    if (!a || !owner || a->n>NX_RS_ACTIVE_MAX) return 0;
+    for (unsigned i=0;i<a->n;i++) if (a->owner[i]==owner) return 1;
+    return 0;
+}
 /* Called under the cache lock. Copy the index for transactional staging. */
 static inline int nx_rs_active_update(nx_rs_active *a,uintptr_t owner,int scaled) {
     if (!a || !owner || a->n>NX_RS_ACTIVE_MAX) return 0;

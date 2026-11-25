@@ -269,6 +269,7 @@ static void resolution_latch_frame(void) {
         }
         action=nx_rs_frame_latch(&g_rs_frame,epoch,p,0,0);
     }
+    if(action==NX_RS_FRAME_ACCEPT && old!=p) vk_rs_release_dormant();
     if(action==NX_RS_FRAME_ACCEPT && (old!=p || epoch==1))
         VKLOG("[resolution-frame] epoch=%llu target=%u backing=%s; target is not effective scale",(unsigned long long)epoch,p,vk_rs_cache_has_scaled()?"mixed/physical":"native");
 }

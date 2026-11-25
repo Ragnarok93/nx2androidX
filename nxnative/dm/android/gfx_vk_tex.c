@@ -200,11 +200,15 @@ static pthread_mutex_t g_img_mu = PTHREAD_MUTEX_INITIALIZER;
 // Allocated only for the first actual nonnative cache exchange. All mutations
 // occur under g_img_mu. The published count is an O(1) replay fast path.
 static nx_rs_active *g_rs_live;
+// Discarded contents are undefined, but their backing can be reused at the
+// next certified full overwrite. Dormant owners are not active consumers.
+static nx_rs_active g_rs_dormant;
 static unsigned g_rs_live_count;
 static void rs_active_publish(void) {
     __atomic_store_n(&g_rs_live_count,g_rs_live?g_rs_live->n:0,__ATOMIC_RELEASE);
 }
 static void rs_active_drop(vkimg_t *im) {
+    nx_rs_active_update(&g_rs_dormant,(uintptr_t)im,0);
     if (!g_rs_live) return;
     nx_rs_active_update(g_rs_live,(uintptr_t)im,0);
     rs_active_publish();
@@ -1041,6 +1045,46 @@ enum { EVICT_KEEP = 60 };
 static uint64_t g_img_n, g_img_bytes, g_img_evicted;   // live images and their bytes, images evicted so far (vk_tex_sweep's line)
 static void img_drop(vkimg_t *im) { if (im->rs_backing) rs_active_drop(im); if (vk_rs_tracking()) { ro_drop(im); if (im->bc_draw) ro_drop(im->bc_draw); } if (im->bc_draw) { vkimg_t *d = im->bc_draw; vk_lrz_forget(d); vk_tex_view_drop_all(d); if (d->sub) vk_defer_free_image_sub(d->img, d->sub); else vk_defer_free_image(d->img, d->mem); free(d); }
     vk_lrz_forget(im); if (im->lin_mem) nvn_dirty_release(im->lin_mem, im->lin_len); if (im->packaged && !im->pkg_released && im->pkg_mem) nvn_dirty_release(im->pkg_mem, im->pkg_len); g_img_n--; g_img_bytes -= im->size > 0 ? (uint64_t)im->size : 0; alias_unlink(im); vk_tex_view_drop_all(im); if (im->rs_backing) vk_rs_variant_retire(im->rs_backing); else if (im->sub) vk_defer_free_image_sub(im->img, im->sub); else vk_defer_free_image(im->img, im->mem); free(im); }
+// g_img_mu held. Remove only discarded content; never blit it back to
+// logical dimensions. Retire the physical allocation by the normal fence.
+static void rs_evict_dormant_owner(vkimg_t *im) {
+    for (uint32_t j=0;j<g_by_key.cap;j++) if (g_by_key.vals[j]==im) {
+        akey k; memcpy(&k,g_by_key.keys+(size_t)j*g_by_key.klen,sizeof k);
+        nvn_hm_del(&g_by_key,&k); img_drop(im); return;
+    }
+    die("[vk] resolution: dormant owner absent from cache");
+}
+static void rs_evict_dormant_overlaps(uint64_t addr,uint64_t size) {
+    for (unsigned i=0;i<g_rs_dormant.n;) {
+        vkimg_t *im=(vkimg_t *)g_rs_dormant.owner[i];
+        if (!addr || !size || !im->rs_guest_addr || im->size<=0 ||
+            nx_rs_range_overlap(addr,size,im->rs_guest_addr,(uint64_t)im->size)) {
+            rs_evict_dormant_owner(im);
+        } else i++;
+    }
+}
+void vk_rs_release_dormant(void) {
+    pthread_mutex_lock(&g_img_mu);
+    rs_evict_dormant_overlaps(0,0);
+    pthread_mutex_unlock(&g_img_mu);
+}
+// Caller has witnessed complete discards for every remaining active owner
+// within the certified replay lifetime. No allocation, copy or global wait.
+int vk_rs_suspend_discarded_group(void) {
+    if (!vk_sub_open() || !vk_rs_pass_idle()) return 0;
+    pthread_mutex_lock(&g_img_mu);
+    nx_rs_active staged=g_rs_dormant;
+    for (unsigned i=0;g_rs_live && i<g_rs_live->n;i++) {
+        vkimg_t *im=(vkimg_t *)g_rs_live->owner[i];
+        if (!rs_is_scaled(im) || !nx_rs_active_update(&staged,(uintptr_t)im,1)) {
+            pthread_mutex_unlock(&g_img_mu); return 0;
+        }
+    }
+    g_rs_dormant=staged;
+    free(g_rs_live); g_rs_live=NULL; rs_active_publish();
+    pthread_mutex_unlock(&g_img_mu);
+    return 1;
+}
 static void evict_overlaps(uint64_t pool, int64_t off, int64_t size) {
     akey ks[64]; int n = 0;
     for (uint32_t i = 0; i < g_by_key.cap && n < 64; i++) {
@@ -1222,7 +1266,7 @@ static int rs_stage_cache_capacity(const nvn_hmap *old,unsigned extra,nvn_hmap *
 int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h) {
     if (!targets || !vk_sub_open() || !vk_rs_pass_idle() || !vk_rs_tracking() || !w || !h) return 0;
     akey keys[VK_RS_GROUP_SIZE]={0};
-    vkimg_t *fresh[VK_RS_GROUP_SIZE]={0};
+    vkimg_t *fresh[VK_RS_GROUP_SIZE]={0},*reuse[VK_RS_GROUP_SIZE]={0};
     uint64_t addr[VK_RS_GROUP_SIZE]={0};
     const vkfmt_t *formats[VK_RS_GROUP_SIZE]={0};
     nx_rs_draw_extent ext[VK_RS_GROUP_SIZE]={0},chosen;
@@ -1253,7 +1297,7 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
     }
     if (!n || !nx_rs_draw_group(ext,VK_RS_GROUP_SIZE,&chosen)) return 0;
     pthread_mutex_lock(&g_img_mu);
-    nx_rs_active staged={0},*allocated=NULL;
+    nx_rs_active staged={0},*allocated=NULL, dormant=g_rs_dormant;
     nvn_hmap next_map={0};
     int ok=0;
     if (g_rs_live) staged=*g_rs_live;
@@ -1266,21 +1310,42 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
             im->rs_backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed) goto done;
         needed+=im->rs_backing->native_bytes;
     }
+    unsigned added=0;
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (targets[i]) {
-        if (nvn_hm_get(&g_by_key,&keys[i])) goto done;
+        vkimg_t *existing=nvn_hm_get(&g_by_key,&keys[i]);
+        if (existing) {
+            if (!nx_rs_active_contains(&dormant,(uintptr_t)existing) ||
+                !rs_is_scaled(existing) || existing->rs_backing->native_only ||
+                existing->rs_guest_addr!=addr[i] || existing->size<=0 ||
+                (uint64_t)existing->size!=targets[i]->L.size ||
+                existing->rs_backing->physical_w!=w || existing->rs_backing->physical_h!=h ||
+                existing->rs_backing->layout!=existing->layout ||
+                existing->novl || existing->packaged || existing->lin_mem || existing->family_closed ||
+                (keys[i].family && existing->family_formats!=1)) goto done;
+        }
         for (uint32_t j=0;j<g_by_key.cap;j++) {
-            vkimg_t *o=g_by_key.vals[j]; if (!o) continue;
+            vkimg_t *o=g_by_key.vals[j]; if (!o || o==existing) continue;
             if (!o->rs_guest_addr || o->size<=0 ||
                 nx_rs_range_overlap(addr[i],targets[i]->L.size,o->rs_guest_addr,(uint64_t)o->size)) goto done;
         }
-        fresh[i]=rs_fresh_owner(targets[i],formats[i],w,h,addr[i]);
-        if (!fresh[i] || needed>NX_RS_RESTORE_BUDGET_BYTES ||
-            fresh[i]->rs_backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed ||
-            !nx_rs_active_update(&staged,(uintptr_t)fresh[i],1)) goto done;
-        needed+=fresh[i]->rs_backing->native_bytes;
-        if (keys[i].family) fresh[i]->family_formats=1;
+        if (existing) {
+            reuse[i]=existing;
+            if (!nx_rs_active_update(&dormant,(uintptr_t)existing,0)) goto done;
+        } else {
+            fresh[i]=rs_fresh_owner(targets[i],formats[i],w,h,addr[i]);
+            if (!fresh[i]) goto done;
+            if (keys[i].family) fresh[i]->family_formats=1;
+            added++;
+        }
+        vkimg_t *im=existing?existing:fresh[i];
+        if (needed>NX_RS_RESTORE_BUDGET_BYTES ||
+            im->rs_backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed ||
+            !nx_rs_active_update(&staged,(uintptr_t)im,1)) goto done;
+        needed+=im->rs_backing->native_bytes;
     }
-    if (!rs_stage_cache_capacity(&g_by_key,n,&next_map)) goto done;
+    // Reserve room for this complete group to become dormant at discard.
+    if (dormant.n>NX_RS_ACTIVE_MAX || staged.n>NX_RS_ACTIVE_MAX-dormant.n ||
+        !rs_stage_cache_capacity(&g_by_key,added,&next_map)) goto done;
     if (!g_rs_live && !(allocated=malloc(sizeof *allocated))) goto done;
     if (next_map.cap) {
         free(g_by_key.keys); free(g_by_key.vals);
@@ -1293,6 +1358,8 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
         im->used=g_tex_frame; g_img_n++; g_img_bytes+=(uint64_t)im->size;
         nvn_hm_put(&g_by_key,&keys[i],im); fresh[i]=NULL;
     }
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (reuse[i]) reuse[i]->used=g_tex_frame;
+    g_rs_dormant=dormant;
     if (allocated) g_rs_live=allocated;
     *g_rs_live=staged; rs_active_publish();
     ok=1;
@@ -1319,6 +1386,9 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     // CPU-write marks affect uploads below, never storage identity. Packaged
     // initialization metadata may close a family but cannot split existing peers.
     pthread_mutex_lock(&g_img_mu);
+    // Outside a certified scope, discarded physical content is never
+    // returned as native. Recreate on demand, with no lossy reverse copy.
+    if (g_rs_dormant.n) rs_evict_dormant_overlaps(rs_guest_address(t),t->L.size);
     // Last-line guard for callers that bypass draw preflight. In particular,
     // never create/evict an overlapping owner or mutate a format family
     // while its storage is represented by a scaled backing.
