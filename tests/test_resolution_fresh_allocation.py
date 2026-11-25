@@ -59,7 +59,7 @@ class FreshAllocationTests(unittest.TestCase):
         if not cc:self.skipTest("C compiler required")
         source=(ROOT/"nxnative/dm/android/gfx_vk_tex.c").read_text()
         start=source.index("static int rs_stage_cache_capacity(")
-        end=source.index("// The real cache allocation transaction.",start)
+        end=source.index("// Native-to-physical replacement",start)
         main=r"""
 #include <assert.h>
 int main(void) {
@@ -80,4 +80,38 @@ int main(void) {
             c=Path(d)/"map.c"; exe=Path(d)/"map"
             c.write_text('#include "nvn_hmap.h"\\n'.replace('\\n','\n')+source[start:end]+main)
             subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I",str(ROOT/"nxnative/dm/gfx/nvn"),str(c),"-o",str(exe)],check=True)
+            subprocess.run([str(exe)],check=True)
+
+    def test_native_overwrite_admission(self):
+        cc=shutil.which("cc") or shutil.which("clang")
+        if not cc:self.skipTest("C compiler required")
+        source=(ROOT/"nxnative/dm/android/gfx_vk_tex.c").read_text()
+        start=source.index("static int rs_native_overwrite_candidate(")
+        end=source.index("// The real cache allocation transaction.",start)
+        code=r"""
+#include <assert.h>
+#include <stddef.h>
+enum { VK_IMAGE_LAYOUT_GENERAL=1,VK_IMAGE_LAYOUT_UNDEFINED=0 };
+typedef struct {
+    unsigned img,mem,layout,rs_backing,sub,full,rs_presented,novl,packaged,lin_mem,bc_draw,bc_of;
+} vkimg_t;
+"""+source[start:end]+r"""
+int main(void) {
+    vkimg_t im={.img=1,.mem=2,.layout=VK_IMAGE_LAYOUT_GENERAL};
+    assert(rs_native_overwrite_candidate(&im));
+    assert(!rs_native_overwrite_candidate(NULL));
+    im.layout=VK_IMAGE_LAYOUT_UNDEFINED;assert(rs_native_overwrite_candidate(&im));
+    im.layout=2;assert(!rs_native_overwrite_candidate(&im));im.layout=1;
+    im.rs_presented=1;assert(!rs_native_overwrite_candidate(&im));im.rs_presented=0;
+    im.sub=1;assert(!rs_native_overwrite_candidate(&im));im.sub=0;
+    im.packaged=1;assert(!rs_native_overwrite_candidate(&im));im.packaged=0;
+    im.rs_backing=1;assert(!rs_native_overwrite_candidate(&im));im.rs_backing=0;
+    im.novl=1;assert(!rs_native_overwrite_candidate(&im));im.novl=0;
+    assert(rs_native_overwrite_candidate(&im));
+}
+"""
+        with tempfile.TemporaryDirectory() as d:
+            c=Path(d)/"native.c";exe=Path(d)/"native"
+            c.write_text(code)
+            subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror",str(c),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)

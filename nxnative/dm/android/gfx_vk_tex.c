@@ -1118,6 +1118,7 @@ vkimg_t *vk_tex_for_present(const tex_t *t) {
         }
     }
     vkimg_t *im=vk_tex_get(t,0);
+    if (im && vk_rs_provenance()) im->rs_presented=1;
     if (vk_rs_tracking()) vk_rs_note(im,NX_RO_PRESENT);
     // Presentation currently expects logical-sized images and may queue a
     // pointer for asynchronous use. Restore before handing it to that queue.
@@ -1259,14 +1260,23 @@ static int rs_stage_cache_capacity(const nvn_hmap *old,unsigned extra,nvn_hmap *
         nvn_hm_put(next,old->keys+(size_t)i*old->klen,old->vals[i]);
     return 1;
 }
+// Native-to-physical replacement is permitted only at a certified complete
+// overwrite. Native slabs are excluded: releasing one slot does not actually
+// release device memory. Presentation owners can outlive the replay interval.
+static int rs_native_overwrite_candidate(const vkimg_t *im) {
+    return im && im->img && im->mem && !im->rs_backing && !im->sub &&
+        !im->full && !im->rs_presented && !im->novl && !im->packaged &&
+        !im->lin_mem && !im->bc_draw && !im->bc_of &&
+        (im->layout==VK_IMAGE_LAYOUT_GENERAL || im->layout==VK_IMAGE_LAYOUT_UNDEFINED);
+}
 // The real cache allocation transaction. Caller MUST prove the full overwrite
 // and all consumers through the end of the lifetime before using this entry.
-// No gameplay caller is authorized yet. In particular a clean observed graph
-// or CPU_NO_ACCESS alone is not a certificate of future GPU accesses.
+// A clean observed graph or CPU_NO_ACCESS alone is not a lifetime certificate.
 int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h) {
     if (!targets || !vk_sub_open() || !vk_rs_pass_idle() || !vk_rs_provenance() || !w || !h) return 0;
     akey keys[VK_RS_GROUP_SIZE]={0};
     vkimg_t *fresh[VK_RS_GROUP_SIZE]={0},*reuse[VK_RS_GROUP_SIZE]={0};
+    vk_rs_variant *replacement[VK_RS_GROUP_SIZE]={0};
     uint64_t addr[VK_RS_GROUP_SIZE]={0};
     const vkfmt_t *formats[VK_RS_GROUP_SIZE]={0};
     nx_rs_draw_extent ext[VK_RS_GROUP_SIZE]={0},chosen;
@@ -1314,14 +1324,16 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (targets[i]) {
         vkimg_t *existing=nvn_hm_get(&g_by_key,&keys[i]);
         if (existing) {
-            if (!nx_rs_active_contains(&dormant,(uintptr_t)existing) ||
-                !rs_is_scaled(existing) || existing->rs_backing->native_only ||
-                existing->rs_guest_addr!=addr[i] || existing->size<=0 ||
+            if (existing->rs_guest_addr!=addr[i] || existing->size<=0 ||
                 (uint64_t)existing->size!=targets[i]->L.size ||
-                existing->rs_backing->physical_w!=w || existing->rs_backing->physical_h!=h ||
-                existing->rs_backing->layout!=existing->layout ||
                 existing->novl || existing->packaged || existing->lin_mem || existing->family_closed ||
-                (keys[i].family && existing->family_formats!=1)) goto done;
+                existing->rs_presented || (keys[i].family && existing->family_formats!=1)) goto done;
+            if (rs_is_scaled(existing)) {
+                if (!nx_rs_active_contains(&dormant,(uintptr_t)existing) ||
+                    existing->rs_backing->native_only ||
+                    existing->rs_backing->physical_w!=w || existing->rs_backing->physical_h!=h ||
+                    existing->rs_backing->layout!=existing->layout) goto done;
+            } else if (!rs_native_overwrite_candidate(existing)) goto done;
         }
         for (uint32_t j=0;j<g_by_key.cap;j++) {
             vkimg_t *o=g_by_key.vals[j]; if (!o || o==existing) continue;
@@ -1330,7 +1342,13 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
         }
         if (existing) {
             reuse[i]=existing;
-            if (!nx_rs_active_update(&dormant,(uintptr_t)existing,0)) goto done;
+            if (rs_is_scaled(existing)) {
+                if (!nx_rs_active_update(&dormant,(uintptr_t)existing,0)) goto done;
+            } else {
+                replacement[i]=vk_rs_variant_create(existing,w,h);
+                if (!replacement[i] || !replacement[i]->native_bytes ||
+                    replacement[i]->bytes>=replacement[i]->native_bytes) goto done;
+            }
         } else {
             fresh[i]=rs_fresh_owner(targets[i],formats[i],w,h,addr[i]);
             if (!fresh[i]) goto done;
@@ -1338,10 +1356,11 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
             added++;
         }
         vkimg_t *im=existing?existing:fresh[i];
+        const vk_rs_variant *backing=replacement[i]?replacement[i]:im->rs_backing;
         if (needed>NX_RS_RESTORE_BUDGET_BYTES ||
-            im->rs_backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed ||
+            backing->native_bytes>NX_RS_RESTORE_BUDGET_BYTES-needed ||
             !nx_rs_active_update(&staged,(uintptr_t)im,1)) goto done;
-        needed+=im->rs_backing->native_bytes;
+        needed+=backing->native_bytes;
     }
     // Reserve room for this complete group to become dormant at discard.
     if (dormant.n>NX_RS_ACTIVE_MAX || staged.n>NX_RS_ACTIVE_MAX-dormant.n ||
@@ -1351,20 +1370,26 @@ int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint
         free(g_by_key.keys); free(g_by_key.vals);
         g_by_key=next_map; next_map=(nvn_hmap){0};
     }
-    // All native descriptions have been destroyed, physical allocation
-    // and index capacity validated; no Vulkan calls or allocations remain.
+    // All physical allocations and index capacity validated. Publication
+    // retires old native backings and views by fence, without a reverse copy.
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (fresh[i]) {
         vkimg_t *im=fresh[i];
         im->used=g_tex_frame; g_img_n++; g_img_bytes+=(uint64_t)im->size;
         nvn_hm_put(&g_by_key,&keys[i],im); fresh[i]=NULL;
     }
-    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (reuse[i]) reuse[i]->used=g_tex_frame;
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (reuse[i]) {
+        if (replacement[i]) {
+            rs_publish_backing(reuse[i],replacement[i]); replacement[i]=NULL;
+        }
+        reuse[i]->used=g_tex_frame;
+    }
     g_rs_dormant=dormant;
     if (allocated) g_rs_live=allocated;
     *g_rs_live=staged; rs_active_publish();
     ok=1;
 done:
     free(next_map.keys); free(next_map.vals);
+    for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) vk_rs_variant_destroy(replacement[i]);
     for (unsigned i=0;i<VK_RS_GROUP_SIZE;i++) if (fresh[i]) {
         vk_rs_variant_destroy(fresh[i]->rs_backing); free(fresh[i]);
     }

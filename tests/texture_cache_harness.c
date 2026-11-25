@@ -29,6 +29,7 @@ typedef struct vkimg {
     struct vk_rs_variant *rs_backing;
     uint32_t w,h;
     uint64_t rs_guest_addr;
+    uint8_t rs_presented;
 } vkimg_t;
 static unsigned written,uploads,created,dropped;
 static uint64_t dirty_now=1;
