@@ -51,6 +51,8 @@ public final class DiagnosticArchiveFixture {
         check(DiagnosticArchive.allowedName("pass_00.ppm.f32"), "float allowlist");
         check(!DiagnosticArchive.allowedName("pass_99.ppm/../saves"), "no traversal");
         check(!DiagnosticArchive.allowedName("shaders.dmsv"), "no shader bundle");
+        put(root, "temporal-shaders.json", bytes("{}"));
+        put(root, "shaders.dmsv", bytes("translated code is private"));
         check(!DiagnosticArchive.allowedName("env.txt"), "no external configuration");
         check(!DiagnosticArchive.allowedName("log.txt.bak"), "no extra files");
         check(!DiagnosticArchive.allowedName("pass_000000.ppm"), "no fake pass");
@@ -115,6 +117,7 @@ public final class DiagnosticArchiveFixture {
         check(zip.containsKey("metadata/pass_dump_manifest.tsv"), "manifest");
         check(zip.containsKey("metadata/surface_usage.tsv"), "surface catalog");
         check(zip.containsKey("metadata/surface_samples.tsv"), "sample index");
+        check(Arrays.equals(zip.get("metadata/temporal-shaders.json"), bytes("{}")), "temporal index");
         check(Arrays.equals(zip.get("captures/surface_samples.raw"), new byte[]{0,2,4,6,8}), "exact tile bytes");
         check(!zip.containsKey("metadata/surface_usage.tsv.tmp"), "partial catalog excluded");
         check(Arrays.equals(zip.get("metadata/gpu_draw_inputs.tsv"),
@@ -131,7 +134,7 @@ public final class DiagnosticArchiveFixture {
         check(!zip.containsKey("captures/pass_01.ppm"), "stale pass suppressed by manifest");
         check(!zip.containsKey("captures/pass_02.ppm"), "symlink excluded");
         for (String key : zip.keySet())
-            check(!key.contains("shaders") && !key.contains("RomFS") &&
+            check(!key.contains("shaders.dmsv") && !key.contains("RomFS") &&
                   !key.contains("Lossless") && !key.contains("save"), "no game/private files");
         check(zip.containsKey("logs/log.prev.txt") && zip.containsKey("logs/log.prev.2.txt") &&
               zip.containsKey("logs/log.prev.3.txt"), "three prior runs");

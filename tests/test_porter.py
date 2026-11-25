@@ -1,5 +1,5 @@
 # Unit tests of the port pipeline's own parts (python -m unittest discover tests). They need no game files, toolchains or device.
-import contextlib, hashlib, importlib.util, io, json, os, random, re, shutil, struct, sys, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, random, re, shutil, struct, sys, tempfile, unittest, zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -167,6 +167,16 @@ class DataPack(unittest.TestCase):
             self.assertEqual(man['status'], p.status)   # the app tells the player what to expect (an experimental port says so)
             self.assertIn('graphics', man); self.assertIn('lan', man)   # what the game needs: the library page shows it from the pack
             self.assertEqual(datapack.read_manifest(o)['package'], 'org.nx2a.neo')
+            index = t / 'temporal-shaders.json'
+            index.write_text('{"schema":1}')
+            indexed = datapack.build(o, profile=p, version='v196608', display='1.03', patched=t / 'patched',
+                                     romfs=t / 'romfs', shaders=t / 'shaders.dmsv', temporal_shaders=index)
+            self.assertEqual((o / index.name).read_bytes(), index.read_bytes())
+            self.assertEqual(indexed['files'], 4)  # two assets, shader bundle, and index
+            packed = t / 'nx2a-data.zip'
+            datapack.write_embedded_zip(o, packed, 1 << 20)
+            with zipfile.ZipFile(packed) as embedded:
+                self.assertEqual(embedded.read(index.name), index.read_bytes())
             datapack.build(t / 'touch-data', profile=p, version='v196608', display='1.03', patched=t / 'patched', romfs=t / 'romfs', shaders=t / 'shaders.dmsv',
                            settings=pipeline.TOUCH_SETTINGS)   # --touch: the gamepad starts hidden, the profile's other settings stay
             self.assertEqual((t / 'touch-data/settings.txt').read_text(), 'docked=0\noverlay=0\nrumble=1\n')

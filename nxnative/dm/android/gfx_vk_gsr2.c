@@ -4,6 +4,7 @@
 #endif
 #include "gfx_vk_gsr2.h"
 
+#include <float.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -24,6 +25,7 @@ typedef struct {
     float clip_to_prev[16];
     float exposure, tan_half_fov_x, near_plane, min_lerp;
     uint32_t same_camera, reset, tail[2];
+    float input_convention[4];
 } compute_params;
 
 typedef struct {
@@ -31,13 +33,16 @@ typedef struct {
     float render[2], output[2], render_rcp[2], output_rcp[2], jitter[2], scale_ratio[2];
     float tan_half_fov_x, min_lerp, reset;
     uint32_t same_camera;
+    float input_convention[4];
 } fragment_params;
 
-_Static_assert(sizeof(compute_params) == 144 && offsetof(compute_params, clip_to_prev) == 48 &&
-               offsetof(compute_params, exposure) == 112 && offsetof(compute_params, reset) == 132,
+_Static_assert(sizeof(compute_params) == 160 && offsetof(compute_params, clip_to_prev) == 48 &&
+               offsetof(compute_params, exposure) == 112 && offsetof(compute_params, reset) == 132 &&
+               offsetof(compute_params, input_convention) == 144,
                "Qualcomm compute std140 UBO");
-_Static_assert(sizeof(fragment_params) == 128 && offsetof(fragment_params, render) == 64 &&
-               offsetof(fragment_params, scale_ratio) == 104 && offsetof(fragment_params, reset) == 120,
+_Static_assert(sizeof(fragment_params) == 144 && offsetof(fragment_params, render) == 64 &&
+               offsetof(fragment_params, scale_ratio) == 104 && offsetof(fragment_params, reset) == 120 &&
+               offsetof(fragment_params, input_convention) == 128,
                "Qualcomm fragment std140 UBO");
 
 enum { G2_CLIP, G2_MOTION, G2_YCOCG, G2_RESULT, G2_HISTORY0, G2_HISTORY1, G2_LUMA0, G2_LUMA1, G2_IMAGES };
@@ -156,6 +161,9 @@ static int gsr2_image(vk_gsr2 *ctx, unsigned index, VkExtent2D extent, VkFormat 
     // Only the exposed result needs transfer source usage.
     if (index == G2_RESULT || (ctx->fragment && (index == G2_HISTORY0 || index == G2_HISTORY1)))
         usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+#ifdef SGSR2_HOST_PROBE
+    if (index == ctx->spec[0].target) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+#endif
     VkImageFormatProperties properties;
     if (vkGetPhysicalDeviceImageFormatProperties(V.pd, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
           usage, 0, &properties) ||
@@ -348,9 +356,113 @@ static int gsr2_sampleable(vk_gsr2_input input) {
                           input.layout == VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
 }
 
+// Convert from the producer's clip convention and remove its projection offset
+// by subtracting jitter * w, which also works for off-axis projections.
+static void gsr2_camera_matrix(const vk_gsr2_camera *camera, int y_down, int reversed,
+                               double matrix[16]) {
+    for (unsigned c = 0; c < 16; c += 4) {
+        const float *m = &camera->world_to_clip[c];
+        matrix[c] = m[0] - (double)camera->jitter_ndc[0] * m[3];
+        matrix[c + 1] = (m[1] - (double)camera->jitter_ndc[1] * m[3]) * (y_down ? -1 : 1);
+        matrix[c + 2] = reversed ? (double)m[3] - m[2] : m[2];
+        matrix[c + 3] = m[3];
+    }
+}
+
+static int gsr2_camera_inverse(const double matrix[16], double inverse[16]) {
+    double aug[4][8] = {{0}};
+    for (unsigned row = 0; row < 4; row++) {
+        for (unsigned col = 0; col < 4; col++) {
+            double v = matrix[col * 4 + row];
+            if (!isfinite(v)) return 0;
+            aug[row][col] = v;
+        }
+        aug[row][row + 4] = 1;
+    }
+    for (unsigned col = 0; col < 4; col++) {
+        unsigned pivot = col;
+        for (unsigned row = col + 1; row < 4; row++)
+            if (fabs(aug[row][col]) > fabs(aug[pivot][col])) pivot = row;
+        double divisor = aug[pivot][col];
+        if (!isfinite(divisor) || divisor == 0) return 0;
+        for (unsigned k = 0; k < 8; k++) {
+            double cell = aug[col][k];
+            aug[col][k] = aug[pivot][k] / divisor;
+            if (pivot != col) aug[pivot][k] = cell;
+        }
+        for (unsigned row = 0; row < 4; row++) {
+            if (row == col) continue;
+            double scale = aug[row][col];
+            for (unsigned k = 0; k < 8; k++) aug[row][k] -= scale * aug[col][k];
+        }
+    }
+    for (unsigned col = 0; col < 4; col++)
+        for (unsigned row = 0; row < 4; row++) {
+            double v = aug[row][col + 4];
+            if (!isfinite(v)) return 0;
+            inverse[col * 4 + row] = v;
+        }
+    return 1;
+}
+
+int vk_gsr2_set_camera(vk_gsr2_inputs *in, VkExtent2D render,
+                      const vk_gsr2_camera *current, const vk_gsr2_camera *previous,
+                      int clip_y_down, unsigned clip_depth_convention) {
+    if (!in || !current || !previous || !render.width || !render.height ||
+        clip_depth_convention > VK_GSR2_DEPTH_REVERSED) return 0;
+    double scale[2] = {0.5 * render.width, (clip_y_down ? 0.5 : -0.5) * render.height};
+    float jitter[2];
+    for (unsigned k = 0; k < 2; k++) {
+        double now = current->jitter_ndc[k] * scale[k];
+        double before = previous->jitter_ndc[k] * scale[k];
+        if (!(fabs(now) <= 0.5001 && fabs(before) <= 0.5001)) return 0;
+        jitter[k] = (float)now;
+    }
+    double cur[16], prev[16], inv[16];
+    gsr2_camera_matrix(current, clip_y_down, clip_depth_convention, cur);
+    gsr2_camera_matrix(previous, clip_y_down, clip_depth_convention, prev);
+    if (!gsr2_camera_inverse(prev, inv) || !gsr2_camera_inverse(cur, inv)) return 0;
+
+    float transform[16];
+    int same = 1;
+    for (unsigned col = 0; col < 4; col++)
+        for (unsigned row = 0; row < 4; row++) {
+            double value = 0;
+            for (unsigned k = 0; k < 4; k++) value += prev[k * 4 + row] * inv[col * 4 + k];
+            if (!(fabs(value) <= FLT_MAX)) return 0;
+            transform[col * 4 + row] = (float)value;
+            same &= fabs(value - (row == col)) <= 1e-7;
+        }
+    memcpy(in->clip_to_prev, transform, sizeof transform);
+    memcpy(in->jitter, jitter, sizeof jitter);
+    in->same_camera = same;
+    return 1;
+}
+
+static void gsr2_input_convention(float convention[4], const vk_gsr2_inputs *in,
+                                  VkExtent2D render) {
+    float scale_x = 1, scale_y = 1;
+    if (in->motion_format == VK_GSR2_MOTION_UV_A) scale_x = scale_y = 2;
+    if (in->motion_format == VK_GSR2_MOTION_PIXELS_A) {
+        scale_x = 2.0f / render.width;
+        scale_y = 2.0f / render.height;
+    }
+    if (in->motion_flags & VK_GSR2_MOTION_PREV_MINUS_CURRENT) {
+        scale_x = -scale_x;
+        scale_y = -scale_y;
+    }
+    convention[0] = scale_x;
+    convention[1] = in->motion_flags & VK_GSR2_MOTION_Y_DOWN ? -scale_y : scale_y;
+    convention[2] = in->depth_convention == VK_GSR2_DEPTH_REVERSED;
+    convention[3] = in->motion_format != VK_GSR2_MOTION_UE;
+}
+
 static int gsr2_inputs_valid(const vk_gsr2_inputs *in, int opaque) {
     if (!in || !gsr2_sampleable(in->color) || !gsr2_sampleable(in->depth) ||
         !gsr2_sampleable(in->motion) || (opaque && !gsr2_sampleable(in->opaque))) return 0;
+    if (in->depth_convention > VK_GSR2_DEPTH_REVERSED ||
+        in->motion_format > VK_GSR2_MOTION_PIXELS_A ||
+        (in->motion_flags & ~(VK_GSR2_MOTION_Y_DOWN | VK_GSR2_MOTION_PREV_MINUS_CURRENT))) return 0;
     for (unsigned i = 0; i < 16; i++) if (!isfinite(in->clip_to_prev[i])) return 0;
     return fabsf(in->jitter[0]) <= 0.5001f && fabsf(in->jitter[1]) <= 0.5001f &&
            isfinite(in->pre_exposure) && in->pre_exposure > 0 &&
@@ -371,6 +483,7 @@ static void gsr2_params(vk_gsr2 *ctx, unsigned slot, const vk_gsr2_inputs *in, d
             .tan_half_fov_x = in->tan_half_fov_x, .min_lerp = in->min_lerp,
             .reset = (float)plan.reset, .same_camera = in->same_camera != 0};
         memcpy(p.clip_to_prev, in->clip_to_prev, sizeof p.clip_to_prev);
+        gsr2_input_convention(p.input_convention, in, ctx->render);
         memcpy(dst, &p, sizeof p);
         return;
     }
@@ -381,6 +494,7 @@ static void gsr2_params(vk_gsr2 *ctx, unsigned slot, const vk_gsr2_inputs *in, d
         .tan_half_fov_x = in->tan_half_fov_x, .near_plane = in->near_plane,
         .min_lerp = in->min_lerp, .same_camera = in->same_camera != 0, .reset = plan.reset != 0};
     memcpy(p.clip_to_prev, in->clip_to_prev, sizeof p.clip_to_prev);
+    gsr2_input_convention(p.input_convention, in, ctx->render);
     memcpy(dst, &p, sizeof p);
 }
 

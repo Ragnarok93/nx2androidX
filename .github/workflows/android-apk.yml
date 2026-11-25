@@ -11,8 +11,8 @@
 # The APK is the run's artifact (nx2android-android-apk), and a published release gets it as an asset named
 # after the version (nx2android-v0.3.0-alpha02.apk).
 #
-# Pull requests targeting android run the same tests and APK build as a release, and keep the artifact for review.
-# A release attaches only tagged builds; trusted android branch pushes keep their signed APK as a workflow artifact.
+# Pull requests targeting android run regression tests and native link checks without signing credentials.
+# Trusted push and dispatch runs build a signed APK. Only tagged builds attach it to a release.
 #
 # A tag's build also tells the QQ group: the announcement (the version, the release's Chinese changelog, the
 # release's page and the netdisk link) goes out once the APK is attached. It is an extra: it never fails the
@@ -35,8 +35,7 @@ on:
       - 'requirements.txt'
       - '.github/workflows/android-apk.yml'
   push:
-    # Trusted android-branch changes build an upgradeable test APK. Tags still
-    # attach their signed build to the release; PRs use an ephemeral signer.
+    # Trusted android-branch changes build an upgradeable APK. Tags also attach it to the release.
     branches: [android, ci/gsr2-android-apk-20261124]
     tags: ['v*']
     paths:
@@ -56,12 +55,6 @@ permissions:
 
 jobs:
   apk:
-    # Signing passwords never go in logs, artifacts, or source. The runner only
-    # receives them through GitHub Actions secrets on trusted events.
-    env:
-      NX2A_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.NX2A_KEYSTORE_PASSWORD || '' }}
-      # SHA-256 of the DER certificate used by alpha16 and later upgradeable APKs.
-      NX2A_RELEASE_CERT_SHA256: 24c2fde0b7e75d5a8325ad21079fccbc5cd0929fe26e0a3e6dda7b4235026953
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -73,6 +66,37 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'       # the Android Gradle plugin's Java
+      - name: verify and prepare the repository signing key
+        if: github.event_name != 'pull_request'
+        env:
+          NX2A_KEYSTORE_B64: ${{ secrets.NX2A_KEYSTORE_B64 }}
+          NX2A_KEYSTORE_PASSWORD: ${{ secrets.NX2A_KEYSTORE_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "$NX2A_KEYSTORE_B64" || -z "$NX2A_KEYSTORE_PASSWORD" ]]; then
+            echo "::error::Set NX2A_KEYSTORE_B64 and NX2A_KEYSTORE_PASSWORD in the repository's Actions secrets."
+            exit 1
+          fi
+
+          expected=$(cat packaging/android-apk/signing-cert.sha256)
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Invalid release certificate pin."
+            exit 1
+          fi
+
+          umask 077
+          keyfile="$RUNNER_TEMP/nx2android.keystore"
+          trap 'rm -f -- "$keyfile"' EXIT
+          printf '%s' "$NX2A_KEYSTORE_B64" | base64 --decode > "$keyfile"
+          candidate=$(keytool -exportcert -keystore "$keyfile" -alias nx2android \
+            -storepass:env NX2A_KEYSTORE_PASSWORD | sha256sum | cut -d ' ' -f 1)
+          if [[ "$candidate" != "$expected" ]]; then
+            echo "::error::Repository signing certificate $candidate does not match the pinned release certificate $expected."
+            exit 1
+          fi
+          printf 'NX2A_KEYSTORE=%s\n' "$keyfile" >> "$GITHUB_ENV"
+          trap - EXIT
+          echo "Verified repository signing certificate: $candidate"
       - uses: android-actions/setup-android@v4
       - uses: actions/setup-dotnet@v4
         with:
@@ -89,6 +113,7 @@ jobs:
           }
       # the payload and the build tools do not depend on the repository: they are fetched once and kept
       - uses: actions/cache@v4
+        if: github.event_name != 'pull_request'
         with:
           path: |
             packaging/android-apk/.cache/payload-arm64.tar.gz
@@ -96,48 +121,6 @@ jobs:
             packaging/android-apk/.cache/debs
             packaging/android-apk/.cache/nuget
           key: nx2a-android-payload-v1
-      - name: the app's signing key
-        id: signer
-        env:
-          NX2A_KEYSTORE_B64: ${{ github.event_name != 'pull_request' && secrets.NX2A_KEYSTORE_B64 || '' }}
-        run: |
-          # Every installable update must use the alpha16 migration certificate.
-          # Incorrect or absent secrets on branch builds produce an explicitly
-          # non-upgradeable debug-signed artifact; release tags fail closed.
-          test_signer() {
-            echo "persistent=false" >> "$GITHUB_OUTPUT"
-            # Never fall back to a cached ~/.android/nx2android.keystore.
-            echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android-no-permanent-key" >> "$GITHUB_ENV"
-          }
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            test_signer
-            echo "::warning::PR verification APK uses an ephemeral signing key and CANNOT update an installed app"
-          elif [ -z "$NX2A_KEYSTORE_B64" ] || [ -z "$NX2A_KEYSTORE_PASSWORD" ]; then
-            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-              echo "::error::Cannot publish a tagged release: restore the original NX2A_KEYSTORE_B64 and NX2A_KEYSTORE_PASSWORD secrets"
-              exit 1
-            fi
-            test_signer
-            echo "::warning::Permanent signing secrets are absent. Building a test-only APK that CANNOT update existing installations."
-          else
-            keyfile="$RUNNER_TEMP/nx2android.keystore"
-            printf '%s' "$NX2A_KEYSTORE_B64" | base64 --decode > "$keyfile"
-            keytool -list -keystore "$keyfile" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" >/dev/null
-            candidate=$(keytool -exportcert -keystore "$keyfile" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" | sha256sum | cut -d' ' -f1)
-            if [ "$candidate" != "$NX2A_RELEASE_CERT_SHA256" ]; then
-              rm -f "$keyfile"
-              if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-                echo "::error::Release signing secret has the wrong certificate ($candidate). Restore the original alpha16 signing key (SHA-256 $NX2A_RELEASE_CERT_SHA256)."
-                exit 1
-              fi
-              test_signer
-              echo "::warning::Configured signing secret has certificate $candidate, not the alpha16 release certificate $NX2A_RELEASE_CERT_SHA256. Producing TEST-ONLY APK with a throwaway key; it CANNOT update existing installations. Restore the original GitHub signing secrets."
-            else
-              echo "NX2A_KEYSTORE=$keyfile" >> "$GITHUB_ENV"
-              echo "persistent=true" >> "$GITHUB_OUTPUT"
-              echo "Permanent signing key matches the alpha16 update certificate"
-            fi
-          fi
       - name: the tests
         run: |
           python -m pip install -r requirements.txt
@@ -174,16 +157,17 @@ jobs:
               exit 1
             fi
           done
-      - name: the app
+      - name: build the signed app
+        if: github.event_name != 'pull_request'
         run: |
           export DOTNET="$(which dotnet)"
           bash packaging/android-apk/build_apk.sh release
         env:
           GH_TOKEN: ${{ github.token }}   # built-in token can download the public payload release
-          # Only untrusted/unsigned branch verification builds use the ephemeral
-          # certificate. Release tags already fail in the signing-key preflight.
-          NX2A_VERIFICATION_BUILD: ${{ steps.signer.outputs.persistent == 'true' && '0' || '1' }}
+          NX2A_KEYSTORE_PASSWORD: ${{ secrets.NX2A_KEYSTORE_PASSWORD }}
+          NX2A_KEY_PASSWORD: ${{ secrets.NX2A_KEY_PASSWORD }}
       - name: the APK's name
+        if: github.event_name != 'pull_request'
         id: apk
         run: |
           # The name carries the version, the way the desktop bundles' names do: a build of a tag gets the
@@ -196,36 +180,31 @@ jobs:
           echo "name=nx2android-${ver}.apk" >> "$GITHUB_OUTPUT"
           echo "name: nx2android-${ver}.apk"
       - name: the APK
+        if: github.event_name != 'pull_request'
         run: ls -la android/app/build/outputs/apk/release/*.apk
       - name: verify the APK and signing identity
+        if: github.event_name != 'pull_request'
+        shell: bash
         run: |
           apk=android/app/build/outputs/apk/release/app-release.apk
-          # setup-android installs the build tools but does not guarantee
-          # apksigner is on PATH. Invoke the exact installed version.
           signer="$ANDROID_HOME/build-tools/36.0.0/apksigner"
-          if [ ! -x "$signer" ]; then
-            echo "::error::Missing Android SDK apksigner at $signer"
+          certs=$("$signer" verify --min-sdk-version 26 --print-certs "$apk")
+          actual=$(sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' <<< "$certs")
+          expected=$(cat packaging/android-apk/signing-cert.sha256)
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::APK must have one signer matching the pinned release certificate $expected."
             exit 1
           fi
-          "$signer" verify --min-sdk-version 26 --verbose "$apk"
-          if [ "${{ steps.signer.outputs.persistent }}" = "true" ]; then
-            expected=$(keytool -exportcert -keystore "$NX2A_KEYSTORE" -alias nx2android -storepass "$NX2A_KEYSTORE_PASSWORD" | sha256sum | cut -d' ' -f1)
-            actual=$("$signer" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
-            [ -n "$actual" ] && [ "$actual" = "$expected" ] || {
-              echo "::error::APK signing certificate does not match the permanent keystore"
-              exit 1
-            }
-            # Catch any Gradle signer drift after the keystore preflight.
-            [ "$actual" = "$NX2A_RELEASE_CERT_SHA256" ] || {
-              echo "::error::Signing keystore does not match the pinned update-compatible alpha16 certificate"
-              exit 1
-            }
-            echo "Verified permanent signing certificate fingerprint: $actual"
-          fi
+          echo "Verified APK signing certificate: $actual"
+      - name: remove the runner keystore
+        if: always() && github.event_name != 'pull_request'
+        run: rm -f -- "$RUNNER_TEMP/nx2android.keystore"
       - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
         with:
-          name: ${{ steps.signer.outputs.persistent == 'true' && 'nx2android-android-apk' || 'nx2android-TEST-EPHEMERAL-NOT-UPDATABLE' }}
+          name: nx2android-android-apk
           path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
           retention-days: 14
       - if: startsWith(github.ref, 'refs/tags/')
         run: |

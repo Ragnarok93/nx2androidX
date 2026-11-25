@@ -225,7 +225,7 @@ def refresh_in_place(dst, staging, payload, generated_files, manifest, progress=
 
     # Remove obsolete generated assets, not saves or unknown player files.
     owned_dirs = set(OWNED) | {'drivers', 'host', 'overlay'}
-    owned_root = {'shaders.dmsv', 'nintendo_ext.ttf', 'standard.ttf',
+    owned_root = {'shaders.dmsv', 'temporal-shaders.json', 'nintendo_ext.ttf', 'standard.ttf',
                   'fpslock.tsv', 'icon.png', 'languages.txt', 'drivers.txt',
                   'settings.txt', 'env.txt'}
     for root, dirs, files in os.walk(dst, topdown=False, followlinks=False):
@@ -253,7 +253,7 @@ def refresh_in_place(dst, staging, payload, generated_files, manifest, progress=
 
 
 def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, text=None,
-          host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None, require_links=False):
+          host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None, require_links=False, temporal_shaders=None):
     """Write the pack to dst (replacing it). profile: the AndroidProfile; package: the app's, when not the profile's; env: more env.txt rows, after the profile's; settings: settings.txt values over the profile's;
     files: {name in the pack: source} (the 60 fps memory writes, fpslock.tsv; the button-icon font; subfolders for the app's mode: host/, drivers/, overlay/, icon.png);
     text: {name in the pack: its text} (the launcher's lists: languages.txt, drivers.txt); host/icon/drivers: the app's artifacts, named in the manifest;
@@ -277,6 +277,7 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
                 path = Path(root) / name
                 payload[(Path(sub) / path.relative_to(src)).as_posix()] = path
     if shaders: payload['shaders.dmsv'] = shaders
+    if shaders and temporal_shaders: payload['temporal-shaders.json'] = temporal_shaders
     for name, src in (files or {}).items():
         payload[name] = Path(src)
     n = len(payload)

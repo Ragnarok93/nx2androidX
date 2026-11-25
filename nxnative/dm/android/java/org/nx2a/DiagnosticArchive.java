@@ -29,7 +29,7 @@ final class DiagnosticArchive {
     private static boolean metadataName(String name) {
         return name.equals("capture_timeline.tsv") || name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
                name.equals("gpu_draw_inputs.tsv") || name.equals("surface_usage.tsv") ||
-               name.equals("surface_samples.tsv");
+               name.equals("surface_samples.tsv") || name.equals("temporal-shaders.json");
     }
     static boolean allowedName(String name) {
         return name.equals("log.txt") || name.equals("log.prev.txt") ||
@@ -130,7 +130,7 @@ final class DiagnosticArchive {
             if (name.equals("surface_usage.tsv") && !catalogCurrent) continue;
             if ((name.equals("surface_samples.tsv") || name.equals("surface_samples.raw")) &&
                     !surfacesCompleted) continue;
-            if (!archivePrefix.isEmpty() && (logName(name) || name.startsWith("frame_"))) continue;
+            if (!archivePrefix.isEmpty() && (logName(name) || name.startsWith("frame_") || name.equals("temporal-shaders.json"))) continue;
             if (!f.getCanonicalPath().startsWith(prefix)) continue;
             inputs.add(new ArchiveInput(f, archivePrefix));
         }
@@ -172,6 +172,7 @@ final class DiagnosticArchive {
                     "indexed by offset and hash in surface_samples.tsv. Metadata-only and skipped rows give their status.\n" +
                     "Compute-uniform rows record shader, descriptor binding (slot), NVN register (element), and effective descriptor size (guest_bytes).\n" +
                     "ubo:offset:bytes points to the prefix copied before dispatch, up to 4096 bytes. Match sampled bindings by their dispatch ordinal.\n" +
+                    "temporal-shaders.json indexes translated shader bindings and uniform offsets without including shader bytecode.\n" +
                     "The last three prior runtime logs are retained across app launches.\n" +
                     "No game ROM, shaders, saves or user DLLs are included.\n" +
                     "Logs may contain device identifiers, filesystem paths, shader keys and GPU addresses.\n" +

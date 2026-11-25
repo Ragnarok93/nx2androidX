@@ -1199,6 +1199,7 @@ class Port:
 
     # ---- shaders: upstream's split, then SPIR-V for the Vulkan backend ----
     def shaders(self):
+        self.temporal_shaders = None
         if getattr(self, 'gl', False):   # an OpenGL ES game: the driver compiles its shaders on the device
             self.dmsv = None
             for st in ('shader split', 'Vulkan shaders'): PROG.stage(st); PROG.end('none: the game renders with OpenGL ES')
@@ -1234,6 +1235,7 @@ class Port:
         legacy_key = (lambda: input_key(previous)) if previous else None
         if (note := product_cache.reused(kf, key, self.dmsv, companions=(published_report,),
                                          legacy_key=legacy_key)) is not None:
+            self.index_temporal_shaders(kf)
             PROG.end(f'{note}, reused (inputs unchanged)'); return
         tmp = self.dmsv.with_name('shaders.dmsv.partial'); nsp.rmtree(tmp)
         report = Path(str(tmp) + '.report.json'); nsp.rmtree(report)
@@ -1261,8 +1263,35 @@ class Port:
         nsp.swap_in(tmp, self.dmsv)
         report.replace(published_report)
         product_cache.stamp(kf, key, self.dmsv, note, complete=complete, companions=(published_report,))
+        self.index_temporal_shaders(kf)
         PROG.end(note)
         for d in (self.work / 'tmp').glob('shvk_*'): nsp.rmtree(d)   # the translator's work folders
+
+    def index_temporal_shaders(self, shader_receipt):
+        """Run after either translation or validated DMSV reuse, with an independent receipt."""
+        import temporal_shader_index
+        PROG.set(step='indexing temporal shader bindings')
+        output = self.aw / temporal_shader_index.NAME
+        receipt = output.with_suffix('.key')
+        try:
+            # Reuse the bundle hash just validated by the shader stage. Avoid
+            # rereading a large bundle merely to validate the small index.
+            source = json.loads(shader_receipt.read_text(encoding='utf-8'))
+            bundle_sha256 = source['files'][0][2]
+            if source['stat'] != product_cache.file_state(self.dmsv):
+                raise ValueError('shader bundle changed before temporal analysis')
+            analyzer = Path(temporal_shader_index.__file__)
+            key = nsp.fingerprint(bundle_sha256, ('files', [analyzer]))
+            if product_cache.reused(receipt, key, output) is None:
+                index = temporal_shader_index.build_index(self.dmsv, bundle_sha256)
+                if source['stat'] != product_cache.file_state(self.dmsv):
+                    raise ValueError('shader bundle changed during temporal analysis')
+                product_cache.write_json(output, index)
+                product_cache.stamp(receipt, key, output, f'{len(index["candidates"]):,} shader candidates')
+            self.temporal_shaders = output
+        except (OSError, ValueError, TypeError, KeyError, IndexError, RuntimeError) as exc:
+            # Spatial rendering and the translated shader product remain valid.
+            say(f'[RED] temporal shader analysis unavailable: {exc}')
 
     def pull_captures(self):
         """Shaders whose code no game file holds: the app saves each one the bundle lacks on the device (gfx_vk_shader.c vk_shader_missing), and they are
@@ -1676,6 +1705,7 @@ class Port:
             for d in self.drivers() + self.loader_libs(): files[f'drivers/{d.name}'] = d
             drivers = sorted({f'drivers/{d.name}' for d in self.drivers() + self.loader_libs()})
         man = datapack.build(dst, profile=self.ap, version=self.pkg_ver, display=self.display, patched=self.patched, romfs=romfs, romfs_at=romfs_at, shaders=self.dmsv,
+                             temporal_shaders=getattr(self, 'temporal_shaders', None),
                              aoc=self.aoc, sysdata=self.sysdata, language=self.lang, package=self.package, env=self.fps_env + font_env + zenv + (['DM_VK_MT_REPLAY=1'] if self.o.mt_replay else [])
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
                              files=files, text=self.lists(), host=host, icon=icon, drivers=drivers, profile_h=getattr(self, 'profile_h', None),
