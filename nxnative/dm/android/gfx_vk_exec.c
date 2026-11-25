@@ -10,6 +10,7 @@
 #include "gfx_vk_resolution_raster.h"
 #include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_resolution_support.h"
+#include "gfx_vk_resolution_compute.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
 #include <math.h>
@@ -2198,7 +2199,7 @@ static void resolution_collect_sample(int st,const dmsv_bind *b,vkimg_t *im,int 
     const vk_rs_variant *v=im->rs_backing;
     if (v->physical_w==im->w && v->physical_h==im->h) return;
     nx_rs_raster r; unsigned slot,flags;
-    int ok=st>=0 && st<3 && !storage && b->count==1 && b->dim==1 && !(b->flags&3) &&
+    int ok=((st>=0 && st<3) || st==5) && !storage && b->count==1 && b->dim==1 && !(b->flags&3) &&
         v->image==im->img && nx_rs_raster_init(&r,im->w,im->h,v->physical_w,v->physical_h) &&
         S.sh[st] && vk_shader_resolution_binding(S.sh[st],b->binding,&slot,&flags) &&
         slot!=NX_RS_REF_UNKNOWN && !(flags&(NX_RS_REF_UNSUPPORTED|NX_RS_REF_WRITES));
@@ -3632,6 +3633,43 @@ static int dispatch_indirect_spans(uint64_t addr, VkBuffer src[3], VkBufferCopy 
     }
     return n;
 }
+// Retain unrelated scaled images for a narrowly classified direct dispatch.
+// Do not change group counts: no storage-image output grid is virtualized.
+// Raw guest buffers and indirect arguments are deliberately excluded until
+// their memory ranges can be proven disjoint from every active owner.
+static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *d) {
+    if (!cs || !d || d->ind || cs->stage!=5 || cs->nbind<0 || cs->nbind>96 ||
+        (cs->nbind && !cs->b) || !nx_rs_compute_logical(cs->spv,cs->nspv)) return 0;
+    int support=0, sampled_scaled=0;
+    for (int i=0;i<cs->nbind;i++) {
+        const dmsv_bind *b=&cs->b[i];
+        if (b->count!=1) return 0;
+        if (b->kind==RK_SUPPORT || b->kind==RK_C1 || b->kind==RK_DRV) {
+            if (b->desc!=RD_UBO) return 0;
+            if (b->kind==RK_SUPPORT) support=1;
+            continue;
+        }
+        int storage=b->kind==RK_IMG;
+        if (!storage && b->kind!=RK_TEX) return 0;
+        if (storage ? b->desc!=RD_STORAGE : b->desc!=RD_SAMPLED) return 0;
+        if (b->reg<0 || b->reg>=(storage?32:256)) return 0;
+        uint64_t h=storage?S.img[5][b->reg]:vk_tex_slot_handle(S.tex[5],S.img[5],(unsigned)b->reg);
+        int tid=(int)(h&0xfffff);
+        if (!tid) continue;
+        const view_t *v=NULL; const tex_t *t=NULL;
+        if (!vk_tex_by_id(tid,&v,&t) || !t || !t->pool ||
+            t->d.target==NVN_TEXTURE_TARGET_BUFFER) return 0;
+        unsigned slot=0,flags=0;
+        int supported=!storage && b->dim==1 && !(b->flags&3) &&
+            vk_shader_resolution_binding(cs,b->binding,&slot,&flags) &&
+            slot!=NX_RS_REF_UNKNOWN && !(flags&(NX_RS_REF_UNSUPPORTED|NX_RS_REF_WRITES));
+        nx_rs_draw_extent extent;
+        int r=vk_rs_preflight_view(t,v,supported,&extent);
+        if (r==2) return 0;
+        sampled_scaled|=r==1;
+    }
+    return !sampled_scaled || support;
+}
 static void dispatch(const p_dispatch *d) {
     g_compute_attempts++;
     vkshader_t *cs = S.sh[5];
@@ -3640,8 +3678,10 @@ static void dispatch(const p_dispatch *d) {
     VkBuffer src[3]; VkBufferCopy spans[3]; int nspans = 0;
     if (d->ind && !(nspans = dispatch_indirect_spans(d->ind, src, spans))) { g_compute_failed++; VKRED_ONCE(61, "indirect dispatch arguments are not a valid aligned memory pool range: %#llx", (unsigned long long)d->ind); return; }
     vk_end_pass_land();
-    // Dispatch geometry and storage-image indexing are not virtualized yet.
-    if (g_rs_replay && vk_rs_cache_has_scaled()) resolution_restore_before_recording();
+    // Only proven native storage outputs and compatible sampled inputs
+    // can coexist with scaled owners. All unknown access restores first.
+    if (g_rs_replay && vk_rs_cache_has_scaled() && !resolution_preflight_compute(cs,d))
+        resolution_restore_before_recording();
     texel_snapshots(5, cs);
     VkCommandBuffer cb = vk_cmd();
     VkDescriptorSetLayout dsl[5] = {cs->dsl}; VkPipelineLayout layout = vk_pipeline_layout(dsl, 1);
