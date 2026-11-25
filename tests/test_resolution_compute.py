@@ -51,5 +51,16 @@ class ResolutionComputeTests(unittest.TestCase):
                             str(src), "-o", str(exe)], check=True)
             subprocess.run([str(exe)], check=True)
 
+    def test_constant_fill_proof(self):
+        cc = shutil.which("cc") or shutil.which("clang")
+        if not cc:
+            self.skipTest("C compiler required")
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "proof"
+            subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "nxnative/dm/gfx/nvn"),
+                            str(ROOT / "tests/resolution_compute_proof.c"), "-o", str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+
 if __name__ == "__main__":
     unittest.main()
