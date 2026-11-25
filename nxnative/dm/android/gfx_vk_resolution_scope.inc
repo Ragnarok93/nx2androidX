@@ -334,6 +334,17 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
             uint64_t src,dst,len;memcpy(&src,a,8);memcpy(&dst,a+8,8);memcpy(&len,a+16,8);
             if (len && (!rs_scope_raw(g,src,len,0) || !rs_scope_raw(g,dst,len,0))) return NULL;
             break; }
+        case OP_COPY_T2T: {
+            RS_NEED(p_copy_t2t);const p_copy_t2t *c=(const p_copy_t2t *)a;
+            int src=rs_scope_match(g,c->src,c->has_sv?&c->sv:NULL);
+            int dst=rs_scope_match(g,c->dst,c->has_dv?&c->dv:NULL);
+            if (src<0 || dst!=0) return NULL;
+            if (src && (!resolution_display_copy_format(c) || !nx_rs_scope_dispatch(&life,1,1))) return NULL;
+            break; }
+        case OP_CLEAR_TEX: {
+            RS_NEED(p_clear_tex);const p_clear_tex *c=(const p_clear_tex *)a;
+            if (rs_scope_match(g,c->tex,c->has_view?&c->view:NULL)!=0) return NULL;
+            break; }
         case OP_CLEAR_BUF: {
             RS_NEED(p_clear_buf);const p_clear_buf *c=(const p_clear_buf *)a;
             if (c->size && !rs_scope_raw(g,c->addr,c->size,0)) return NULL;

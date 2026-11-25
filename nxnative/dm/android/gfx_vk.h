@@ -203,6 +203,7 @@ static inline int vk_rs_provenance(void) { return __atomic_load_n(&g_vk_rs_track
 void vk_rs_note(vkimg_t *im, uint32_t flags);
 void vk_rs_note_group(vkimg_t *const *images, unsigned count);
 vkimg_t *vk_tex_for_present(const tex_t *t);
+vkimg_t *vk_rs_copy_source(const tex_t *t); // certified whole-display transfer only
 vkimg_t *vk_tex(const tex_t *t);                                 // the image of a texture object (created, uploaded or refreshed as needed)
 void vk_lrz_forget(vkimg_t *im);                                 // an image is being dropped: the pass code forgets it (gfx_vk_exec.c)
 int vk_window_bottom_up(void);                                   // the game draws in lower-left origin mode: its window image is stored bottom-up (gfx_vk_exec.c)

@@ -70,6 +70,8 @@ class ScopeTests(unittest.TestCase):
 #include "nvn_obj.h"
 #include "gfx_vk_resolution_scope.h"
 #include "gfx_vk_resolution_preflight.h"
+#include "gfx_vk_resolution_transfer.h"
+static int resolution_display_copy_format(const p_copy_t2t *c) {return nx_rs_display_copy_shape(c); }
 static const uint64_t *g_rs_scope_rest;
 static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 static int g_rs_scope_overwrite;
@@ -141,6 +143,16 @@ int main(void) {
     reset();producer();rt(&t[1]);bind(7,1);draw();rt(&t[0]);discard();assert(!scan());
     reset();producer();append(OP_DISPATCH,NULL,0);consumer();rt(&t[0]);discard();assert(!scan());
     reset();producer();compute(0,0);end=discard();assert(scan()==end);
+    reset();producer();t[1].d.flags=NVN_TEXTURE_FLAGS_DISPLAY;
+    p_copy_t2t display={.src=&t[0],.dst=&t[1],.sr={0,0,0,64,64,1},.dr={0,0,0,64,64,1}};
+    append(OP_COPY_T2T,&display,sizeof display);end=discard();assert(scan()==end);
+    reset();producer();append(OP_COPY_T2T,&display,sizeof display);discard();assert(!scan());
+    reset();producer();t[1].d.flags=NVN_TEXTURE_FLAGS_DISPLAY;display.sr.width=32;
+    append(OP_COPY_T2T,&display,sizeof display);discard();assert(!scan());display.sr.width=64;
+    reset();producer();display.src=&t[1];display.dst=&t[2];
+    append(OP_COPY_T2T,&display,sizeof display);consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    reset();producer();display.dst=&t[0];append(OP_COPY_T2T,&display,sizeof display);
+    consumer();rt(&t[0]);discard();assert(!scan());
     reset();clear(15);
     uint64_t update[]={ (uintptr_t)(storage+8192),8,42 };
     append(OP_UPDATE_UB,update,sizeof update);

@@ -4158,8 +4158,47 @@ static VkImage transfer_image(VkCommandBuffer cb, VkFormat fmt, uint32_t w, uint
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
     return im;
 }
+#include "gfx_vk_resolution_transfer.h"
+static int resolution_display_copy_format(const p_copy_t2t *c) {
+    if (!nx_rs_display_copy_shape(c)) return 0;
+    const vkfmt_t *f=vk_fmt(c->src->d.format);
+    if (!f || f->compressed || f->dec || f->is_int || f->depth || f->stencil) return 0;
+    VkFormatProperties p;vkGetPhysicalDeviceFormatProperties(V.pd,f->vk,&p);
+    VkFormatFeatureFlags required=VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    if (c->flags&1) required|=VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    return (p.optimalTilingFeatures&required)==required;
+}
+// Direct physical-to-display reconstruction for certified whole-image
+// copies. A native intermediate source is never allocated or restored.
+// The normal presentation path still owns the destination and its fences.
+static int resolution_copy_to_display(const p_copy_t2t *c) {
+    if (!g_rs_replay || !vk_rs_cache_has_scaled() || !resolution_display_copy_format(c)) return 0;
+    nx_rs_draw_extent src,dst;
+    if (vk_rs_preflight_view(c->src,NULL,1,&src)!=1 ||
+        vk_rs_preflight_view(c->dst,NULL,0,&dst)!=0) return 0;
+    vkimg_t *s=vk_rs_copy_source(c->src);
+    if (!s) return 0;
+    vkimg_t *d=vk_tex(c->dst);
+    if (!d) return 1; // same allocation failure as the native copy path
+    if (s==d || !s->rs_backing || s->fmt!=d->fmt ||
+        s->aspect!=VK_IMAGE_ASPECT_COLOR_BIT || d->aspect!=VK_IMAGE_ASPECT_COLOR_BIT ||
+        d->w!=dst.lw || d->h!=dst.lh || d->samples!=1 || d->levels!=1 || d->layers!=1 ||
+        (d->rs_backing && (d->rs_backing->physical_w!=d->w || d->rs_backing->physical_h!=d->h)) ||
+        s->rs_backing->physical_w!=src.pw || s->rs_backing->physical_h!=src.ph ||
+        !(s->usage&VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(d->usage&VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
+    VkCommandBuffer cb=vk_cmd();vk_tex_prepare(cb,s);vk_tex_prepare(cb,d);vk_img_barrier_all(cb);
+    VkImageBlit b={.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},
+        .srcOffsets={{0,0,0},{(int32_t)src.pw,(int32_t)src.ph,1}},
+        .dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},
+        .dstOffsets={{0,0,0},{(int32_t)dst.lw,(int32_t)dst.lh,1}}};
+    vkCmdBlitImage(cb,s->img,VK_IMAGE_LAYOUT_GENERAL,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&b,
+        (c->flags&1)?VK_FILTER_LINEAR:VK_FILTER_NEAREST);
+    vk_tex_mark_written(d);vk_img_barrier_all(cb);
+    return 1;
+}
 static void copy_t2t(const p_copy_t2t *c) {
     vk_end_pass();
+    if (resolution_copy_to_display(c)) return;
     vkimg_t *s = vk_tex(c->src), *d = vk_tex(c->dst);
     if (!s || !d) return;
     const vkfmt_t *sf = vk_fmt(c->src->d.format), *df = vk_fmt(c->dst->d.format);

@@ -1102,6 +1102,14 @@ vkimg_t *vk_tex(const tex_t *t) {
     if (rs_is_scaled(im) && !vk_rs_require_native(im)) die("[vk] resolution: native-only texture access could not restore backing");
     return im;
 }
+// A certified display reconstruction may consume physical backing
+// directly. No raw caller may use this helper without preflight.
+vkimg_t *vk_rs_copy_source(const tex_t *t) {
+    nx_rs_draw_extent extent;
+    if (vk_rs_preflight_view(t,NULL,1,&extent)!=1) return NULL;
+    vkimg_t *im=vk_tex_get(t,0);
+    return rs_is_scaled(im)?im:NULL;
+}
 vkimg_t *vk_tex_for_present(const tex_t *t) {
     // Presentation can resolve a new wrapper outside a replay submission.
     // Restore before lookup so the overlap guard cannot see an unprepared
