@@ -4,11 +4,15 @@
 #include "gfx_vk_temporal_policy.h"
 
 enum { VK_GSR2_SLOTS = 3 };
+enum { VK_GSR2_DEPTH_STANDARD, VK_GSR2_DEPTH_REVERSED };
+enum { VK_GSR2_MOTION_UE, VK_GSR2_MOTION_NDC_A, VK_GSR2_MOTION_UV_A, VK_GSR2_MOTION_PIXELS_A };
+enum { VK_GSR2_MOTION_Y_DOWN = 1, VK_GSR2_MOTION_PREV_MINUS_CURRENT = 2 };
 
 // An adapter supplies sampleable, one-mip, single-sample views at iw x ih.
-// Scene color is linear. Depth is normalized standard-Z, with 1 at the far
-// plane. Encoded motion is current minus previous clip-space position, with
-// positive-up Y (zero texel only for static geometry handled by reprojection).
+// Scene color is linear. Depth is a depth-aspect or scalar color view in [0,1].
+// Motion excludes jitter. The default is UE packed NDC with zero X for camera
+// reprojection. The signed float formats use alpha > 0 for valid object motion
+// (including zero vectors), and alpha <= 0 for static geometry.
 typedef struct {
     VkImageView view;
     VkImageLayout layout;
@@ -21,7 +25,20 @@ typedef struct {
     float pre_exposure;    // previous/current exposure
     float tan_half_fov_x, near_plane, min_lerp;
     int same_camera;
+    unsigned depth_convention, motion_format, motion_flags;
 } vk_gsr2_inputs;
+
+typedef struct {
+    float world_to_clip[16]; // column-major, includes the declared projection jitter
+    float jitter_ndc[2];    // actual clip.xy / clip.w offset in the source axes
+} vk_gsr2_camera;
+
+// The two matrices must use the same world origin and a zero-to-one clip depth.
+// Derives unjittered positive-up, standard-Z reprojection and top-left pixel jitter.
+// The adapter supplies near plane, FOV and exposure separately from verified inputs.
+int vk_gsr2_set_camera(vk_gsr2_inputs *input, VkExtent2D render,
+                      const vk_gsr2_camera *current, const vk_gsr2_camera *previous,
+                      int clip_y_down, unsigned clip_depth_convention);
 
 typedef struct vk_gsr2 vk_gsr2;
 typedef struct {

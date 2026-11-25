@@ -196,12 +196,35 @@ The Upgrade tab and `python -m porter upgrade-apk` reuse existing rewritten modu
 
 ### Temporal Vulkan backend
 
-The GSR 2 backend accepts replay-certified scene color, standard-Z depth,
-encoded motion, a current-to-previous clip transform, jitter and exposure.
-Three-pass compute also requires opaque-only color. The backend owns its
-bounded intermediates and ping-pong history. The replay caller owns
-command submission, slot retirement, image lifetimes and the output consumer.
-Each successful real-frame submission advances history once.
+The GSR 2 backend accepts replay-certified scene color, [0,1] standard or
+reversed depth, object motion, camera reprojection, jitter and exposure.
+Three-pass compute also requires opaque-only color. Its first pass samples
+depth directly and normalizes it before nearest-depth selection. It decodes
+packed UE motion or signed NDC, UV or render-pixel motion with alpha coverage
+and explicit direction and axis conventions. Uncovered pixels use camera
+reprojection. The camera helper converts the producer's jittered
+world-to-clip matrices into an unjittered clip-to-previous-clip transform
+and top-left pixel jitter. Depth-aspect sampling avoids dependence on the
+D24S8 image-to-buffer representation.
+
+The backend owns its bounded intermediates and ping-pong history. The replay
+caller owns command submission, slot retirement, image lifetimes and the
+output consumer. Each successful real-frame submission advances history once.
+The host Vulkan probe checks that equivalent input encodings produce the
+same motion and depth intermediates, with known perspective, jitter and
+object motion.
+
+After publishing or validating the cached Vulkan shader bundle, the porter
+indexes candidate compute and fragment modules in `temporal-shaders.json`.
+The index links NVN shader keys to SPIR-V image operations, storage writes,
+fixed uniform byte offsets, and traceable inputs to sample coordinates.
+Its independent receipt is keyed to the shader bundle and analyzer, so
+backfilling or changing the analyzer does not retranslate guest shaders.
+Candidate analysis uses bounded memory and a bounded byte budget. It runs at
+port time on the bundle already produced by the build. Both standalone export
+formats include the index, and the opt-in diagnostics ZIP includes it without
+exporting translated shader code. The index reports static evidence. Replay
+still needs verified semantic bindings before enabling temporal reconstruction.
 
 Older FFR captures contain image bindings, render areas and presentation
 sources. The rolling replay capture now also includes exact prefixes of the
@@ -209,9 +232,13 @@ GPU constant buffers bound to compute shaders. Copies are scheduled before
 dispatch, after replay has resolved the actual descriptor and any shadow,
 and share the existing diagnostic allocation. Compute-uniform rows join to
 image bindings by present, submission, dispatch ordinal and shader key.
-These samples support validation of camera matrices, jitter and exposure
-for an FFR adapter. Gameplay uses the spatial pipeline while the adapter's
-input semantics are being established.
+A build-specific adapter can also be established offline by tracing the
+translated temporal shader's sampled and uniform accesses and correlating
+the shader key and descriptor slots with archived replay bindings. A live
+adapter must still verify the same shader and resources, frame and view
+identity, and coverage before allowing history to advance. Gameplay uses
+the spatial pipeline while the FFR adapter's input bindings are being
+established.
 
 Legacy packs without saved profiles cannot use this path and receive a clear suggestion to port again. Compilation failure offers retry or a full re-port; load failures and identifiable native crashes also suggest a full re-port without claiming that old data caused the error. Full re-port still requires source game files and keys, so keeping a backup is useful. Saves, user settings and selected drivers are retained during runtime updates.
 

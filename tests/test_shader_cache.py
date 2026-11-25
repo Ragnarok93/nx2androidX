@@ -89,6 +89,20 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(self.exports, 1)
         self.assertEqual(self.p.dmsv.read_bytes(), first)
 
+    def test_legacy_bundle_gains_temporal_index_without_retranslation(self):
+        import temporal_shader_index
+        self.export()
+        output = self.p.temporal_shaders
+        temporal = json.loads(output.read_text())
+        self.assertEqual(temporal['bundle_sha256'], product_cache.inventory(self.p.dmsv)[0][2])
+        output.unlink()
+        self.export()
+        self.assertEqual(self.exports, 1)
+        self.assertEqual(json.loads(output.read_text()), temporal)
+        with mock.patch.object(temporal_shader_index, 'build_index', side_effect=AssertionError('index was rebuilt')):
+            self.export()
+        self.assertEqual(self.p.temporal_shaders, output)
+
     def test_posix_same_size_corruption_rebuilt_even_with_original_mtime(self):
         product = self.root / 'bundle'; original = b'original'
         product.write_bytes(original)

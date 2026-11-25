@@ -9,6 +9,50 @@ VARIANTS = {
 }
 
 
+def convert_inputs(text, source, variant):
+    """Fold depth and velocity normalization into the vendor's first pass."""
+    text = text.replace("} params;", "    highp vec4 inputConvention;\n} params;", 1)
+    text = text.replace("uniform mediump sampler2D InputDepth", "uniform highp sampler2D InputDepth")
+    text = text.replace("uniform mediump sampler2D InputVelocity", "uniform highp sampler2D InputVelocity")
+    text, gathers = re.subn(r"textureGather\(InputDepth,\s*(.*),\s*0\)",
+                           r"gsr2GatherDepth(\1)", text)
+    if gathers != (3 if variant == "3cs" else 4):
+        raise ValueError(f"{source}: unexpected depth-gather count")
+    if variant == "3cs":
+        old = "texelFetch(InputDepth, InputPosBtmRight, 0).x"
+        new = ("gsr2Depth(texelFetch(InputDepth, min(InputPosBtmRight, "
+               "ivec2(params.renderSize) - ivec2(1)), 0).x)")
+        if old not in text:
+            raise ValueError(f"{source}: missing depth neighbor fetch")
+        text = text.replace(old, new)
+    helpers = """
+float gsr2Depth(float depth) {
+    return params.inputConvention.z > 0.0 ? 1.0 - depth : depth;
+}
+
+vec4 gsr2GatherDepth(vec2 coord) {
+    vec4 depth = textureGather(InputDepth, coord, 0);
+    return params.inputConvention.z > 0.0 ? vec4(1.0) - depth : depth;
+}
+
+"""
+    text = text.replace("void main()", helpers + "void main()", 1)
+    old = "if (EncodedVelocity.x > 0.0)"
+    decode = "motion = decodeVelocityFromTexture(EncodedVelocity.xy);"
+    position = "        vec3 Position = vec3(ScreenPos, "
+    if not all(expression in text for expression in (old, decode, position)):
+        raise ValueError(f"{source}: unexpected motion reprojection")
+    text = text.replace(old, """bool signedMotion = params.inputConvention.w > 0.0;
+    if (signedMotion ? EncodedVelocity.a > 0.0 : EncodedVelocity.x > 0.0)""")
+    text = text.replace(decode, """vec2 velocity = signedMotion ? EncodedVelocity.xy : decodeVelocityFromTexture(EncodedVelocity.xy);
+        motion = velocity * params.inputConvention.xy;""")
+    # ScreenPos uses Y-up clip space, while jitterOffset is measured from
+    # the top-left in render pixels. Remove it before camera reprojection.
+    text = text.replace(position, """        ScreenPos -= params.jitterOffset * vec2(2.0, -2.0) / vec2(params.renderSize);
+""" + position)
+    return text
+
+
 def shader_sources(vendor, generated):
     """Create named, stage-suffixed copies for glslc and return their paths."""
     generated.mkdir(parents=True, exist_ok=True)
@@ -25,6 +69,8 @@ def shader_sources(vendor, generated):
                     lambda m: f"layout(set = 0, binding = {int(m[1]) + 4}, {m[2]})", text)
                 if remapped != 2:
                     raise ValueError(f"{source}: expected two GL image bindings")
+            if stage == "convert":
+                text = convert_inputs(text, source, variant)
             if extension == "comp":
                 # A real render size is not necessarily a multiple of eight.
                 size = "displaySize" if stage == "upscale" else "renderSize"
