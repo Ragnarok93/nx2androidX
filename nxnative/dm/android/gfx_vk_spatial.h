@@ -1,4 +1,6 @@
 // Present-thread-owned spatial reconstruction. All work uses the graphics queue.
+int vk_pass_dump_user_active(void);
+
 enum { SP_EASU, SP_RCAS, SP_GSR1, SP_VIVID, SP_PASS_COUNT };
 enum { SP_SOURCE, SP_INTERMEDIATE, SP_DISPLAY, SP_OUTPUT, SP_IMAGE_COUNT };
 enum { SP_SLOTS = 8, SP_MAX_PIXELS = 3840 * 1080 };
@@ -300,7 +302,6 @@ static void spatial_report(int requested, int active, const char *reason, uint64
     spatial_requested = requested;
     spatial_active = active;
     spatial_reason = reason;
-    int vk_pass_dump_user_active(void);
     if (changed || (ticket % 120 == 0 && vk_pass_dump_user_active())) {
         if (g_spatial.measured_ticket)
             VKLOG("[upscale] real frame %llu, requested %s, active %s, %s, GPU %.3f ms (frame %llu)",
