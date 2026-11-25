@@ -10,6 +10,7 @@
 #include "gfx_vk_resolution_budget.h"
 #include "ownership_exchange.h"
 #include "gfx_vk_resolution_restore.h"
+#include "gfx_vk_resolution_preflight.h"
 #include "nvn_tex.h"
 #include "../gfx/tex/nvn_deswizzle.h"
 #include "nvn_hmap.h"
@@ -556,6 +557,25 @@ int vk_rs_require_native(vkimg_t *im) {
     im->rs_backing->native_only=1;
     return 1;
 }
+// Inspect actual cache membership, not the private probe's generations.
+int vk_rs_cache_has_scaled(void) {
+    int found=0;
+    pthread_mutex_lock(&g_img_mu);
+    for (uint32_t i=0;i<g_by_key.cap && !found;i++) found=rs_is_scaled(g_by_key.vals[i]);
+    pthread_mutex_unlock(&g_img_mu);
+    return found;
+}
+int vk_rs_cache_restore_all(void) {
+    if (!vk_sub_open() || !vk_rs_pass_idle()) return 0;
+    int ok=1;
+    pthread_mutex_lock(&g_img_mu);
+    for (uint32_t i=0;i<g_by_key.cap;i++) {
+        vkimg_t *im=g_by_key.vals[i];
+        if (rs_is_scaled(im) && !vk_rs_require_native(im)) { ok=0; break; }
+    }
+    pthread_mutex_unlock(&g_img_mu);
+    return ok;
+}
 void vk_tex_prepare(VkCommandBuffer cb, vkimg_t *im) {
     if (im->layout == VK_IMAGE_LAYOUT_GENERAL) return;
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -827,6 +847,41 @@ vkimg_t *vk_tex_for_present(const tex_t *t) {
         if (!ok) die("[vk] resolution: native presentation backing could not be restored");
     }
     return im;
+}
+// No image creation, upload, view creation, family mutation or guest writes.
+int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent) {
+    if (!t || !extent) return 2;
+    *extent=(nx_rs_draw_extent){t->d.width,t->d.height,t->d.width,t->d.height,1};
+    if (!t->pool) return 0;
+    if (t->off<0 || !t->L.size) return 2;
+    const vkfmt_t *f=vk_fmt(t->d.format);
+    if (!f) return 2;
+    akey k; memset(&k,0,sizeof k); k.pool=(uint64_t)(uintptr_t)t->pool; k.off=t->off; k.d=t->d;
+    k.d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (f->depth || f->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
+    if (v && (v->set_levels || v->set_layers || v->set_format || v->set_target || v->set_swizzle || v->set_dsmode)) supported=0;
+    if (t->has_layout || t->has_pkg_data || (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) supported=0;
+    int result=0;
+    pthread_mutex_lock(&g_img_mu);
+    for (uint32_t i=0;i<g_by_key.cap;i++) {
+        vkimg_t *im=g_by_key.vals[i];
+        if (!rs_is_scaled(im) || im->pool!=k.pool) continue;
+        if (im->off<0 || im->size<=0) { result=2; break; }
+        int exact=!memcmp(g_by_key.keys+(size_t)i*g_by_key.klen,&k,sizeof k) &&
+            im->off==k.off && (uint64_t)im->size==(uint64_t)t->L.size &&
+            im->w==t->d.width && im->h==t->d.height && im->nvn_format==t->d.format &&
+            !im->novl && !im->packaged && !im->lin_mem && !im->family_closed &&
+            im->rs_backing->image==im->img;
+        int access=nx_rs_preflight_overlap((uint64_t)k.off,t->L.size,(uint64_t)im->off,(uint64_t)im->size,exact,supported);
+        if (access==2 || (access==1 && result==1)) { result=2; break; }
+        if (access==1) {
+            result=1; extent->pw=im->rs_backing->physical_w; extent->ph=im->rs_backing->physical_h;
+        }
+    }
+    pthread_mutex_unlock(&g_img_mu);
+    // CPU marks are checked outside the image-table lock.
+    int nvn_ft_written(const tex_t *);
+    if (result==1 && (packaged_tex(t) || nvn_ft_written(t))) return 2;
+    return result;
 }
 static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     if (!t || !t->serial || t->magic != MAGIC('T', 'E', 'X', 0)) return NULL;

@@ -1375,9 +1375,33 @@ static int resolution_configure_pass(void) {
     g_rs_pass_scaled=1;
     return 1;
 }
+// Attachment preflight runs before resolving views, including clear-only passes.
+static int resolution_preflight_targets(int *scaled) {
+    nx_rs_draw_extent ext[9]={0},chosen;
+    *scaled=0;
+    for (int i=0;i<9;i++) {
+        if (i<8 && (i>=S.rt_n || !S.rt_has_col[i])) continue;
+        if (i==8 && !S.rt_has_dep) continue;
+        const tex_t *t=i==8?&S.rt_dep:&S.rt_col[i];
+        const view_t *v=i==8?(S.rt_has_dview?&S.rt_dview:NULL):(S.rt_has_cview[i]?&S.rt_cview[i]:NULL);
+        int r=vk_rs_preflight_view(t,v,1,&ext[i]);
+        if (r==2) return 0;
+        *scaled |= r==1;
+    }
+    return !*scaled || (nx_rs_draw_group(ext,9,&chosen) &&
+        !slot0_fill_on() && !g_pd_state && !g_x_listpasses);
+}
+static void resolution_restore_before_recording(void) {
+    vk_end_pass();
+    if (!vk_rs_cache_restore_all()) die("[vk] resolution: preflight native restoration failed");
+}
 static int begin_pass(void) {
     if (S.pass_open) return 1;
     g_rs_pass_scaled = 0;
+    if (g_rs_replay && vk_rs_cache_has_scaled()) {
+        int scaled;
+        if (!resolution_preflight_targets(&scaled)) resolution_restore_before_recording();
+    }
     int psplit = g_psplit_now; g_psplit_now = 0;   // a pass split (prepare_draw): taken before any early return, so the flag never forces a later pass's cut
     VkCommandBuffer cb = vk_cmd();
     VkRenderingAttachmentInfo *ca = P_ca; memset(ca, 0, sizeof P_ca);
@@ -2766,6 +2790,45 @@ static void texbind(const pkey *k) {
     }
 }
 static pkey g_input_key; // last prepared indexed draw, only while input diagnostics are armed
+// Never discover a required backing exchange after binding descriptor sets.
+static int resolution_preflight_stages(int target_scaled) {
+    for (int st=0;st<3;st++) {
+        vkshader_t *s=S.sh[st];
+        if (!s || (st==1 && S.rast_discard)) continue;
+        if (st==2 || shader_wmem(s)) return 0;
+        int support=0, sample_scaled=0;
+        for (unsigned i=0;i<s->nbind;i++) {
+            const dmsv_bind *b=&s->b[i];
+            switch (b->kind) {
+            case RK_SUPPORT: support=1; break;
+            case RK_CBUF: case RK_C1: case RK_DRV: break;
+            case RK_TEX: case RK_TEX_UBO: case RK_TEX_C2A: {
+                // Arrays and unknown dynamic handles are not yet proven.
+                if (b->count!=1) return 0;
+                uint64_t handle=b->kind==RK_TEX ? vk_tex_slot_handle(S.tex[st],S.img[st],(unsigned)b->reg) :
+                    b->kind==RK_TEX_UBO ? mem_handle(ubo_word(st,b->reg,b->off)) :
+                    (b->off>=0?c2_handle(st,b->off):0);
+                int tid=(int)(handle&0xfffff);
+                const view_t *v=NULL; const tex_t *t=NULL;
+                if (!tid) break;
+                if (!vk_tex_by_id(tid,&v,&t) || !t) return 0;
+                unsigned slot=0,flags=0;
+                int supported=b->dim==1 && !(b->flags&3) &&
+                    vk_shader_resolution_binding(s,b->binding,&slot,&flags) &&
+                    slot!=NX_RS_REF_UNKNOWN && !(flags&(NX_RS_REF_UNSUPPORTED|NX_RS_REF_WRITES));
+                nx_rs_draw_extent ext;
+                int r=vk_rs_preflight_view(t,v,supported,&ext);
+                if (r==2) return 0;
+                sample_scaled |= r==1;
+                break;
+            }
+            default: return 0; // storage, texel buffers and unresolved descriptors
+            }
+        }
+        if ((sample_scaled || (target_scaled && st==1)) && !support) return 0;
+    }
+    return 1;
+}
 static int prepare_draw(int prim, int indexed) {
     // DM_VK_CB_DRAWS (read every submission, default 128, 0 = never): the replay is cut every that many draws and what is recorded goes to the GPU at once
     // (vk_cmd_split), so the GPU works on the frame while the rest is replayed instead of after all of it: NEO's Scramble Crossing 36.7 → 15.7 ms a frame
@@ -2811,6 +2874,11 @@ static int prepare_draw(int prim, int indexed) {
             vk_end_pass(); g_psplit_now = 1; } }
     else if (g_psplit > 0 && S.pass_open == 1 && g_pass_draws == (uint64_t)g_psplit && S.daspect && !g_psplit_depth) { static int n; if (n++ < 3) VKLOG("pass split: pass %d (%ux%u) has depth (format %d): not split", g_sub_pass - 1, S.pass_w, S.pass_h, S.dfmt); }
     if (g_order_pending) { g_order_pending = 0; g_order_check = S.pass_open == 1; }   // an order-only barrier kept the pass open: decided below, once the draw's images are known
+    if (g_rs_replay && vk_rs_cache_has_scaled()) {
+        int scaled;
+        if (!resolution_preflight_targets(&scaled) || !resolution_preflight_stages(scaled))
+            resolution_restore_before_recording();
+    }
     if (!begin_draw_pass()) { g_vkst.skip_rt++; return 0; }
     if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) g_tracing = 1;
     uint64_t t0 = tick();
@@ -3572,6 +3640,8 @@ static void dispatch(const p_dispatch *d) {
     VkBuffer src[3]; VkBufferCopy spans[3]; int nspans = 0;
     if (d->ind && !(nspans = dispatch_indirect_spans(d->ind, src, spans))) { g_compute_failed++; VKRED_ONCE(61, "indirect dispatch arguments are not a valid aligned memory pool range: %#llx", (unsigned long long)d->ind); return; }
     vk_end_pass_land();
+    // Dispatch geometry and storage-image indexing are not virtualized yet.
+    if (g_rs_replay && vk_rs_cache_has_scaled()) resolution_restore_before_recording();
     texel_snapshots(5, cs);
     VkCommandBuffer cb = vk_cmd();
     VkDescriptorSetLayout dsl[5] = {cs->dsl}; VkPipelineLayout layout = vk_pipeline_layout(dsl, 1);

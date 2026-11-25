@@ -168,6 +168,10 @@ void vk_rs_group_retire(vk_rs_images *group);
 int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
 int vk_rs_pass_idle(void);
 int vk_rs_require_native(vkimg_t *im); // explicit native-only boundary, outside a pass
+int vk_rs_cache_has_scaled(void);
+// Read-only preflight: 0 native, 1 compatible scaled owner, 2 restore.
+int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent);
+int vk_rs_cache_restore_all(void); // replay thread, closed pass; diagnostic fail-stop on allocation failure
 void vk_rs_variant_retire(vk_rs_variant *v);
 void vk_rs_variant_destroy(vk_rs_variant *v); // only after fence or before any recording
 // Opt-in lifetime graph. No graph storage is allocated on the native path.
