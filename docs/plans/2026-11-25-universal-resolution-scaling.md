@@ -90,3 +90,7 @@ Checkpoint P4a: experimental source-frame target latch (DM_VK_RESOLUTION_REPLAY_
 - Verify 1x correctness, fixed and adaptive scale, source-frame timing, memory high-water mark, pause/resume, saved settings and upgrade compatibility on Xclipse and Adreno. No automatic enablement without these results.
 
 Architectural references: Eden-xclipse `dce1290` texture-cache and shader rescaling mechanisms; implementation here is independent and scoped to the NVN/Vulkan backend.
+
+## P4 integration build repair
+
+The latest code-bearing P4a commit `b991dad8` passed the separate resolution host/SPIR-V workflow (45571376914) but failed the full Android workflow (45571376700): 734 tests, 18 failures, 7 errors, 10 skips. Repository signing key verification succeeded; native link and APK packaging were not reached. The regression fixtures were updated to import the actual RSCL encoder, extract only their intended production data/functions, and declare native-only fixture boundaries for the new resolution dependencies. Native fixture stubs reject unexpected scaled backend operations rather than silently simulating successful scaling. Existing behavioral assertions are retained. This change is CI repair, not live scaling activation; full CI and device validation must be observed separately.

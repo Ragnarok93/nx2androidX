@@ -2,10 +2,14 @@
 // The GPU boundary stores one representative byte; this is not a Vulkan device test.
 #include "nvn_obj.h"
 #include "nvn_hmap.h"
+#include "gfx_vk_resolution_active.h"
+#include "gfx_vk_resolution_preflight.h"
+#include "gfx_vk_resolution_ownership.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #define VKLOG(...) ((void)0)
+#define die(...) abort()
 #define DM_GAME_TEX_CPU_UNCACHED 0
 #define VKRED_ONCE(...) ((void)0)
 typedef int pthread_mutex_t;
@@ -13,6 +17,7 @@ typedef int pthread_mutex_t;
 #define pthread_mutex_lock(p) ((void)(p))
 #define pthread_mutex_unlock(p) ((void)(p))
 typedef struct { int depth,stencil,vk,compressed,dec; } vkfmt_t;
+struct vk_rs_variant { uint32_t physical_w, physical_h; };
 typedef struct vkimg {
     uint64_t pool,used,pkg_used,pkg_vgen,pkg_stamp,pkg_seen,pkg_hash;
     int64_t off,size; int flags,looked,packaged,pkg_sparse,pkg_released,gpu_w;
@@ -21,6 +26,9 @@ typedef struct vkimg {
     struct vkimg *bc_draw; // No compressed-format stand-in in this family fixture.
     unsigned family_formats,family_closed;
     int format,content;
+    struct vk_rs_variant *rs_backing;
+    uint32_t w,h;
+    uint64_t rs_guest_addr;
 } vkimg_t;
 static unsigned written,uploads,created,dropped;
 static uint64_t dirty_now=1;
@@ -51,6 +59,15 @@ static void pkg_upload(vkimg_t *im,const tex_t *t,const vkfmt_t *f) {
 static int nvn_sparse_since(const void *pool,uint64_t addr,size_t size,uint64_t gen,uint64_t stamp) {(void)pool;(void)addr;(void)size;(void)gen;(void)stamp;return 0;}
 static int nvn_dirty_since_span(const void *span,const void *mem,size_t size,uint64_t stamp) {(void)span;(void)mem;(void)size;return stamp<dirty_now;}
 static void nvn_dirty_protect(const void *mem,size_t size) {(void)mem;(void)size;}
+/* This native-only fixture has no Vulkan scaling backend. Unexpected use fails. */
+static int vk_rs_tracking(void) { return 0; }
+static void ro_drop(vkimg_t *im) { (void)im; abort(); }
+static void vk_rs_variant_retire(struct vk_rs_variant *v) { (void)v; abort(); }
+static int vk_rs_pass_idle(void) { abort(); }
+static int rs_restore_all_locked(void) { abort(); }
+static void vk_rs_note(vkimg_t *im, uint32_t flags) { (void)im; (void)flags; abort(); }
+static int vk_rs_require_native(vkimg_t *im) { (void)im; abort(); }
+/* RESOLUTION PROVENANCE */
 /* CACHE KEYS */
 /* CACHE LIFETIME */
 /* MATERIAL STORAGE */

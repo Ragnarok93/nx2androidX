@@ -24,7 +24,7 @@ class TextureTransfers(unittest.TestCase):
         header = (ROOT / 'nxnative/dm/android/gfx_vk.h').read_text(encoding='utf-8')
         harness = (ROOT / 'tests/texture_transfers_harness.c').read_text(encoding='utf-8')
         types = between(header, 'typedef struct { VkFormat vk;', 'const vkfmt_t *vk_fmt')
-        types += between(header, 'typedef struct vkimg vkimg_t;', 'vkimg_t *vk_tex(')
+        types += between(header, 'typedef struct vkimg vkimg_t;', '// Replay thread, outside any render pass.')
         tex = (ROOT / 'nxnative/dm/android/gfx_vk_tex.c').read_text(encoding='utf-8')
         functions = between(tex, 'static uint64_t g_wseq;', 'static void alias_link(')
         functions += between(exe, 'static VkImageSubresourceLayers sub_of(', 'static void copy_b2t(')

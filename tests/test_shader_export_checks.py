@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / 'nxnative/dm/android/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsv
+from resolution_meta import encode_resolution_meta
 
 
 def reflection(key='0000000000000001', stage='cs'):
@@ -104,7 +105,7 @@ class ExportChecks(unittest.TestCase):
         except ModuleNotFoundError: products = None
         env = dict(collections=collections, cf=cf, gc=gc, os=os, json=json, mmap=mmap, struct=struct,
                    tempfile=tempfile, subprocess=subprocess, dmsv=dmsv, Path=Path, re=re, signal=signal,
-                   shader_products=products, GAME=game, MAP=str(table), XLATE_DLL='translator.dll',
+                   shader_products=products, encode_resolution_meta=encode_resolution_meta, GAME=game, MAP=str(table), XLATE_DLL='translator.dll',
                    a=SimpleNamespace(pkg=str(self.root/'pkg'), out=str(self.out), capture=None, keys='',
                                      jobs=self.jobs, batch_size=self.batch_size, dotnet='dotnet', zstd=0, report=str(self.report)),
                    STAGES={'vs': 0, 'cs': 5}, kinds_all=collections.Counter(),

@@ -13,6 +13,7 @@ PREFIX = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "gfx_vk_resolution_support.h"
 typedef uintptr_t VkBuffer, VkDeviceMemory;
 typedef struct { int type; void *next; unsigned flags; uint64_t size; unsigned usage, sharing, count; const unsigned *indices; } VkBufferCreateInfo;
 typedef struct { uint64_t size, alignment; uint32_t memoryTypeBits; } VkMemoryRequirements;
@@ -60,8 +61,11 @@ int main(void) {
 def harness_source():
     source = SOURCE.read_text(encoding='utf-8')
     begin = source.index('static VkBuffer static_buf(int which)')
-    end = source.index("// a shader's c1 constants", begin)
-    return PREFIX + source[begin:end] + SUFFIX
+    end = source.index('\n}', begin) + 2
+    accessors = '\n'.join(next(line for line in source.splitlines() if line.startswith(signature))
+                          for signature in ('VkBuffer vk_support_buffer(void)', 'VkBuffer vk_zero_buffer(void)',
+                                            'VkBuffer vk_default_attribute_buffer(void)'))
+    return PREFIX + source[begin:end] + '\n' + accessors + '\n' + SUFFIX
 
 
 @unittest.skipUnless(shutil.which('cc'), 'native C compiler unavailable')
@@ -70,6 +74,6 @@ class VertexDefaultBuffers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             (path/'check.c').write_text(harness_source(), encoding='utf-8')
-            subprocess.run(['cc', '-std=gnu11', '-O2', '-pthread', str(path/'check.c'), '-o', str(path/'check')], check=True, capture_output=True)
+            subprocess.run(['cc', '-std=gnu11', '-O2', '-pthread', '-I', str(SOURCE.parent.parent / 'gfx/nvn'), str(path/'check.c'), '-o', str(path/'check')], check=True)
             result = subprocess.run([str(path/'check')], check=True, capture_output=True, text=True)
             self.assertIn('PASS', result.stdout)

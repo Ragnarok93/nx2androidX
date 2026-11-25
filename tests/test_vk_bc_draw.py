@@ -116,7 +116,7 @@ def build_and_run(code, tag):
 class BcDraw(unittest.TestCase):
     def setUp(self):
         header = (ROOT / 'nxnative/dm/android/gfx_vk.h').read_text(encoding='utf-8')
-        self.head = {'@FMT@': between(header, 'typedef struct { VkFormat vk;', 'const vkfmt_t *vk_fmt'), '@IMG@': between(header, 'typedef struct vkimg vkimg_t;', 'vkimg_t *vk_tex(')}
+        self.head = {'@FMT@': between(header, 'typedef struct { VkFormat vk;', 'const vkfmt_t *vk_fmt'), '@IMG@': between(header, 'typedef struct vkimg vkimg_t;', '// Replay thread, outside any render pass.')}
 
     def fill(self, code, **parts):
         for k, v in {**self.head, **parts}.items(): code = code.replace(k, v)

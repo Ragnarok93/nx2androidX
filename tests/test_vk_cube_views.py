@@ -30,6 +30,7 @@ class CubeViews(unittest.TestCase):
 #include <stdarg.h>
 #include "nxnative/dm/gfx/nvn/nvn_obj.h"
 #include "nxnative/dm/gfx/nvn/nvn_hmap.h"
+#include "nxnative/dm/gfx/nvn/gfx_vk_resolution_ownership.h"
 #define VKLOG(...) ((void)0)
 static int red_calls;
 static char last_red[512];
@@ -41,13 +42,19 @@ static void capture_red(const char *fmt, ...) {
         code += next(line for line in header.splitlines() if line.startswith('#define VKRED_ONCE(')) + '\n'
         code += between(header, 'typedef struct { VkFormat vk;', 'const vkfmt_t *vk_fmt')
         code += between(header, 'static inline int vk_view_selects_stencil', 'void vk_bc_decode')
-        code += between(header, 'typedef struct vkimg vkimg_t;', 'vkimg_t *vk_tex(')
+        code += between(header, 'typedef struct vkimg vkimg_t;', '// Replay thread, outside any render pass.')
         code += between(header, 'typedef struct __attribute__((packed)) { uint8_t kind, desc, dim, flags;', '_Static_assert(sizeof(dmsv_bind)')
         code += r'''
 static struct { VkDevice dev; VkPhysicalDevice pd; } V;
 static uint64_t g_wseq, g_tex_gen=1, g_set_epoch=1, g_x_logfs;
 static int g_var_now, g_tracing, g_pd_state, g_pd_effects, g_pd_full, g_sub_pass;
 static uint64_t g_pd_capture_id;
+/* This fixture exercises native views only. Unexpected scaled operations fail. */
+static int vk_rs_tracking(void) { return 0; }
+static void vk_rs_note(vkimg_t *im, uint32_t flags) { (void)im; (void)flags; abort(); }
+static void *g_rs_collect;
+static void resolution_note_binding(int st, const dmsv_bind *b, vkimg_t *im, int storage) { (void)st; (void)b; (void)im; (void)storage; abort(); }
+static void resolution_collect_sample(int st, const dmsv_bind *b, vkimg_t *im, int storage) { (void)st; (void)b; (void)im; (void)storage; abort(); }
 static void surface_descriptor(const vkimg_t *im, VkImageView view, int stage, int binding, unsigned element, int storage) {
     (void)im; (void)view; (void)stage; (void)binding; (void)element; (void)storage;
     abort();

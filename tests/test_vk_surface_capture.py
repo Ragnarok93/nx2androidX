@@ -16,7 +16,7 @@ class SurfaceCapture(unittest.TestCase):
     def test_readbacks_cover_array_and_volume_subresources(self):
         header = (DM / "gfx_vk.h").read_text()
         types = header[header.index("typedef struct { VkFormat vk;"):header.index("const vkfmt_t *vk_fmt")]
-        types += header[header.index("typedef struct vkimg vkimg_t;"):header.index("vkimg_t *vk_tex(")]
+        types += header[header.index("typedef struct vkimg vkimg_t;"):header.index("// Replay thread, outside any render pass.")]
         replay = (DM / "gfx_vk_exec.c").read_text()
         dump_type = replay[replay.index("typedef struct { VkBuffer b; VkDeviceMemory m; void *p;"):
                            replay.index("enum { PD_MAX = 96 }")]
