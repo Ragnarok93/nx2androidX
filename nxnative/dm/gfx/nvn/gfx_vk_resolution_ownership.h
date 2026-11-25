@@ -50,4 +50,26 @@ static inline uint32_t nx_ro_flags(nx_ro_graph *g, uint32_t id) {
 static inline void nx_ro_drop(nx_ro_graph *g, uintptr_t key) {
     uint32_t id=nx_ro_find(g,key,0); if (id) g->nodes[id-1].live=0;
 }
+/* Necessary admission condition only: observed history cannot prove future consumers. */
+static inline int nx_ro_group_admit(nx_ro_graph *g, const uintptr_t *keys, unsigned n) {
+    if (!g || g->exhausted || !keys || !n || n>9) return 0;
+    uint32_t ids[9]={0}, root=0;
+    unsigned count=0;
+    for (unsigned i=0;i<n;i++) if (keys[i]) {
+        uint32_t id=nx_ro_find(g,keys[i],0);
+        if (!id || !(g->nodes[id-1].flags&NX_RO_ATTACH) || (nx_ro_flags(g,id)&NX_RO_BLOCKERS)) return 0;
+        uint32_t r=nx_ro_root(g,id);
+        if (root && root!=r) return 0;
+        root=r;
+        for (unsigned j=0;j<count;j++) if (ids[j]==id) return 0;
+        ids[count++]=id;
+    }
+    if (!count) return 0;
+    for (uint32_t i=1;i<=g->count;i++) if (g->nodes[i-1].live && nx_ro_root(g,i)==root) {
+        unsigned j=0;
+        while (j<count && ids[j]!=i) j++;
+        if (j==count) return 0;
+    }
+    return 1;
+}
 #endif
