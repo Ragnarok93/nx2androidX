@@ -5,10 +5,11 @@
 extern pthread_mutex_t g_vk_queue_mu;
 
 static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t groups[3],int transform) {
+    vk_rs_variant *output=NULL;
     VkImage im=VK_NULL_HANDLE,src=VK_NULL_HANDLE;
     VkImageView view=VK_NULL_HANDLE,src_view=VK_NULL_HANDLE;
     VkSampler sampler=VK_NULL_HANDLE;
-    VkDeviceMemory imem=VK_NULL_HANDLE,bmem=VK_NULL_HANDLE,src_mem=VK_NULL_HANDLE;
+    VkDeviceMemory bmem=VK_NULL_HANDLE,src_mem=VK_NULL_HANDLE;
     VkBuffer buf=VK_NULL_HANDLE;
     VkShaderModule shader=VK_NULL_HANDLE;
     VkDescriptorSetLayout dsl=VK_NULL_HANDLE;
@@ -30,22 +31,17 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
     if (!w || !h || w>32 || h>32 || !groups || (transform && !nx_rs_transform_shape(w,h))) return 0;
     const VkDeviceSize bytes=(VkDeviceSize)pixels*16, read_offset=transform?bytes:0;
 #define RS_TRY(label,call) do {step=(label);r=(call);if(r!=VK_SUCCESS)goto cleanup;} while(0)
-    RS_TRY("format support",vkGetPhysicalDeviceImageFormatProperties(V.pd,fmt,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&props));
-    if(w>props.maxExtent.width || h>props.maxExtent.height || !(props.sampleCounts&VK_SAMPLE_COUNT_1_BIT)) {r=VK_ERROR_FORMAT_NOT_SUPPORTED;goto cleanup;}
+    step="private storage variant";
+    output=vk_rs_storage_variant_create_private(32,32,w,h);
+    if(!output){r=VK_ERROR_INITIALIZATION_FAILED;goto cleanup;}
+    im=output->image;view=output->view;
     VkImageCreateInfo ici={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,.imageType=VK_IMAGE_TYPE_2D,.format=fmt,
         .extent={w,h,1},.mipLevels=1,.arrayLayers=1,.samples=VK_SAMPLE_COUNT_1_BIT,.tiling=VK_IMAGE_TILING_OPTIMAL,
         .usage=usage,.sharingMode=VK_SHARING_MODE_EXCLUSIVE,.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED};
-    RS_TRY("create image",vkCreateImage(V.dev,&ici,NULL,&im));
-    vkGetImageMemoryRequirements(V.dev,im,&rq);
-    step="image memory type/budget";
-    uint32_t mt=vk_mem_type(rq.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,0);
-    if(mt==UINT32_MAX || rq.size>(1u<<20)){r=VK_ERROR_OUT_OF_DEVICE_MEMORY;goto cleanup;}
-    VkMemoryAllocateInfo ma={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=rq.size,.memoryTypeIndex=mt};
-    RS_TRY("allocate image",vkAllocateMemory(V.dev,&ma,NULL,&imem));
-    RS_TRY("bind image",vkBindImageMemory(V.dev,im,imem,0));
     VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=im,.viewType=VK_IMAGE_VIEW_TYPE_2D,
         .format=fmt,.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
-    RS_TRY("image view",vkCreateImageView(V.dev,&vi,NULL,&view));
+    uint32_t mt;
+    VkMemoryAllocateInfo ma={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     if(transform) {
         ici.usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         RS_TRY("source format support",vkGetPhysicalDeviceImageFormatProperties(V.pd,fmt,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,ici.usage,0,&props));
@@ -160,7 +156,7 @@ static int resolution_probe_compute_extent(uint32_t w,uint32_t h,const uint32_t 
     const uint32_t *read=(const uint32_t *)((const uint8_t *)mapped+read_offset);
     matches=transform?nx_rs_transform_matches(read,w,h):nx_rs_probe_matches(read,pixels);
     result=matches==pixels;
-    VKLOG("[resolution-compute-probe] %s %ux%u groups=%ux%u pixels=%u/%u %s",transform?"transform":"fill",w,h,groups[0],groups[1],matches,pixels,result?"PASS":"FAIL");
+    VKLOG("[resolution-compute-probe] %s %ux%u groups=%ux%u pixels=%u/%u output_bytes=%llu %s",transform?"transform":"fill",w,h,groups[0],groups[1],matches,pixels,(unsigned long long)output->bytes,result?"PASS":"FAIL");
 cleanup:
     if(r!=VK_SUCCESS)VKLOG("[resolution-compute-probe] %ux%u %s result=%d; INCONCLUSIVE",w,h,step,r);
     if(fence)vkDestroyFence(V.dev,fence,NULL);
@@ -174,9 +170,7 @@ cleanup:
     if(src_view)vkDestroyImageView(V.dev,src_view,NULL);
     if(src)vkDestroyImage(V.dev,src,NULL);
     if(src_mem)vkFreeMemory(V.dev,src_mem,NULL);
-    if(view)vkDestroyImageView(V.dev,view,NULL);
-    if(im)vkDestroyImage(V.dev,im,NULL);
-    if(imem)vkFreeMemory(V.dev,imem,NULL);
+    vk_rs_variant_destroy(output);
     if(mapped)vkUnmapMemory(V.dev,bmem);
     if(buf)vkDestroyBuffer(V.dev,buf,NULL);
     if(bmem)vkFreeMemory(V.dev,bmem,NULL);
