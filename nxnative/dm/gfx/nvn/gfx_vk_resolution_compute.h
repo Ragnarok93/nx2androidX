@@ -18,4 +18,18 @@ static inline int nx_rs_compute_logical(const uint32_t *w, uint32_t n) {
     }
     return model!=0;
 }
+/* Geometry only, NOT shader authorization. A 2D grid must cover the native
+ * image exactly, and both extents must be multiples of the fixed local size.
+ * No padded lanes, partial tiles, z layers, or nonuniform scaling. */
+static inline int nx_rs_compute_grid(const uint32_t groups[3],const uint32_t local[3],
+                                     uint32_t lw,uint32_t lh,uint32_t pw,uint32_t ph,
+                                     uint32_t out[3]) {
+    if (!groups || !local || !out || !lw || !lh || !pw || !ph ||
+        !local[0] || !local[1] || local[2]!=1 || groups[2]!=1 ||
+        pw>lw || ph>lh || (uint64_t)pw*lh!=(uint64_t)ph*lw ||
+        (uint64_t)groups[0]*local[0]!=lw || (uint64_t)groups[1]*local[1]!=lh ||
+        pw%local[0] || ph%local[1]) return 0;
+    out[0]=pw/local[0]; out[1]=ph/local[1]; out[2]=1;
+    return 1;
+}
 #endif
