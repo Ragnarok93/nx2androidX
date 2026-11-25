@@ -35,7 +35,10 @@ static inline int nx_rs_scope_switch(nx_rs_scope *s,int original_group) {
 static inline int nx_rs_scope_dispatch(nx_rs_scope *s,int compatible,int samples_group) {
     if (!compatible || s->phase>1) return 0;
     if (s->phase==0) {
-        if (!s->drew || s->cleared!=s->mask || !samples_group) return 0;
+        // Independent native compute may run between producer draws.
+        // Only actual sampling of the scaled group ends its write phase.
+        if (!samples_group) return 1;
+        if (!s->drew || s->cleared!=s->mask) return 0;
         s->phase=1;
     }
     s->sampled|=samples_group!=0;return 1;

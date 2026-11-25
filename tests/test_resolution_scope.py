@@ -31,7 +31,7 @@ int main(void) {
     assert(!nx_rs_scope_discard(&s,1));
     assert(nx_rs_scope_init(&s,1));assert(!nx_rs_scope_dispatch(&s,1,1));
     assert(nx_rs_scope_clear(&s,1,1) && nx_rs_scope_draw(&s,1,0));
-    assert(!nx_rs_scope_dispatch(&s,1,0) && !nx_rs_scope_dispatch(&s,0,1));
+    assert(nx_rs_scope_dispatch(&s,1,0) && s.phase==0 && !nx_rs_scope_dispatch(&s,0,1));
     assert(nx_rs_scope_dispatch(&s,1,1) && !nx_rs_scope_draw(&s,1,0));
     assert(nx_rs_scope_discard(&s,1)==2);
 }
@@ -72,7 +72,7 @@ static const uint64_t *g_rs_scope_rest;
 static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 static struct {
     p_scissor sc; int sc_set,rast_discard;
-    p_bind_buf ubo[6][16]; NVNbufferRange vbuf[16];
+    p_bind_buf ubo[6][16],ssbo[6][16]; NVNbufferRange vbuf[16];
     uint64_t tex[6][256],img[6][32];
 } S;
 typedef struct { const tex_t *target[9]; uint64_t addr[9]; unsigned mask; uint32_t w,h; } rs_scope_group;
@@ -90,7 +90,10 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,in
     (void)g;*sampled=s->tex[1][0]==7;return !s->rast_discard && (!scaled || !*sampled);
 }
 static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,int *sampled) {
-    (void)g;*sampled=s->tex[5][0]==7;return d->x>0 && d->y>0 && d->z>0 && !d->ind && s->img[5][0]==8;
+    *sampled=s->tex[5][0]==7;
+    const p_bind_buf *b=&s->ssbo[5][0];
+    return d->x>0 && d->y>0 && d->z>0 && !d->ind && s->img[5][0]==8 &&
+        (!b->addr || rs_scope_raw(g,b->addr,b->size,0));
 }
 """
         code+=part("enum { RS_SCOPE_PROGRAM_MAX=", "typedef struct { const uint8_t *record;")
@@ -133,6 +136,28 @@ int main(void) {
     reset();producer();rt(&t[1]);bind(7,1);draw();rt(&t[0]);discard();assert(!scan());
     reset();producer();append(OP_DISPATCH,NULL,0);consumer();rt(&t[0]);discard();assert(!scan());
     reset();producer();compute(0,0);end=discard();assert(scan()==end);
+    reset();clear(15);
+    uint64_t update[]={ (uintptr_t)(storage+8192),8,42 };
+    append(OP_UPDATE_UB,update,sizeof update);
+    p_clear_buf cb={.addr=(uintptr_t)(storage+8192),.size=16,.value=0};
+    append(OP_CLEAR_BUF,&cb,sizeof cb);
+    uint64_t copy[]={ (uintptr_t)(storage+8192),(uintptr_t)(storage+12288),16 };
+    append(OP_COPY_B2B,copy,sizeof copy);
+    draw();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    reset();producer();update[0]=(uintptr_t)storage+4092;append(OP_UPDATE_UB,update,sizeof update);
+    consumer();rt(&t[0]);discard();assert(!scan());
+    reset();producer();update[0]=(uintptr_t)storage+8192;update[1]=16;append(OP_UPDATE_UB,update,sizeof update);
+    consumer();rt(&t[0]);discard();assert(!scan());
+    reset();producer();cb.addr=(uintptr_t)storage;append(OP_CLEAR_BUF,&cb,sizeof cb);
+    consumer();rt(&t[0]);discard();assert(!scan());
+    reset();producer();copy[0]=(uintptr_t)storage;append(OP_COPY_B2B,copy,sizeof copy);
+    consumer();rt(&t[0]);discard();assert(!scan());
+    reset();producer();copy[0]=(uintptr_t)storage+8192;copy[1]=(uintptr_t)storage;append(OP_COPY_B2B,copy,sizeof copy);
+    consumer();rt(&t[0]);discard();assert(!scan());
+    reset();producer();p_bind_buf sb={.stage=5,.index=0,.addr=(uintptr_t)storage+8192,.size=16};
+    append(OP_BIND_SSBO,&sb,sizeof sb);compute(0,0);end=discard();assert(scan()==end);
+    reset();producer();sb.addr=(uintptr_t)storage;append(OP_BIND_SSBO,&sb,sizeof sb);
+    compute(0,0);discard();assert(!scan());
     reset();producer();compute(1,0);discard();assert(!scan());
     reset();producer();compute(0,1);discard();assert(!scan());
     reset();producer();compute(0,0);draw();discard();assert(!scan());

@@ -1,5 +1,5 @@
 // Closed, bounded immutable-replay lifetime proof. This is deliberately a
-// narrow production seam: no raw transfers, indirect dispatch/draw, unknown
+// narrow production seam: only disjoint bounded raw transfers, no indirect dispatch/draw, unknown
 // descriptors, feedback, conditional rendering or open-ended lifetimes.
 #include "gfx_vk_resolution_scope.h"
 static const uint8_t *g_rs_scope_end;
@@ -42,6 +42,18 @@ static int rs_scope_raw(const rs_scope_group *g,uint64_t addr,uint64_t bytes,int
     if (!bytes || bytes>p->hi-addr) return 0;
     for (unsigned i=0;i<9;i++) if (g->target[i] && nx_rs_range_overlap(addr,bytes,g->addr[i],g->target[i]->L.size)) return 0;
     return 1;
+}
+// Match the descriptor span used by stage_set, including the aligned
+// prefix. Require an explicit range instead of accepting its chunk-tail
+// fallback. Compute dispatch dimensions remain native.
+static int rs_scope_storage_buffer(const rs_scope_group *g,const p_bind_buf *u) {
+    if (!u->addr || !u->size) return 0;
+    vkpool_t *p=vk_pool_of(u->addr,1);
+    uint64_t start,size;
+    return p && p->buf && !(p->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) &&
+        V.props.limits.minStorageBufferOffsetAlignment<=SB_ALIGN && !(p->boff%SB_ALIGN) &&
+        nx_rs_buffer_span(p->lo,p->hi,u->addr,u->size,SB_ALIGN,&start,&size) &&
+        rs_scope_raw(g,start,size,0);
 }
 static int rs_scope_uniform(const rs_scope_group *g,const p_bind_buf *u) {
     if (!u->addr) return 1;
@@ -97,8 +109,9 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
     return 1;
 }
 // Direct native-grid compute consumers: scaled inputs are sampled only,
-// storage destinations must be provably disjoint native images. No SSBOs,
-// bindless handles, physical addressing, indirect dispatch or grid changes.
+// storage destinations must be provably disjoint native images or explicit
+// bounded native SSBOs. No bindless handles, physical addressing, indirect
+// dispatch or grid changes.
 static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,int *samples) {
     *samples=0;
     vkshader_t *s=look->sh[5];
@@ -119,6 +132,10 @@ static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *l
             break;
         case RK_CBUF:
             if (b->desc!=RD_UBO || b->reg<0 || b->reg>=16 || !rs_scope_uniform(g,&look->ubo[5][b->reg])) return 0;
+            break;
+        case RK_SBUF:
+            if (b->desc!=RD_SSBO || b->reg<0 || b->reg>=16 ||
+                !rs_scope_storage_buffer(g,&look->ssbo[5][b->reg])) return 0;
             break;
         case RK_TEX: case RK_IMG: {
             int storage=b->kind==RK_IMG;
@@ -239,10 +256,26 @@ static const uint8_t *rs_scope_scan(const uint8_t *p,const rs_scope_group *g) {
             break; }
         case OP_BIND_PROGRAM: RS_NEED(p_bind_program);
             if (!rs_scope_program_proof(&look,p,(const p_bind_program *)a)) return NULL;break;
-        case OP_BIND_UBO: {
+        case OP_BIND_UBO: case OP_BIND_SSBO: {
             RS_NEED(p_bind_buf);const p_bind_buf *b=(const p_bind_buf *)a;
             if (b->stage<0 || b->stage>=6 || b->index<0 || b->index>=16) return NULL;
-            look.ubo[b->stage][b->index]=*b;break; }
+            if (h.op==OP_BIND_SSBO) look.ssbo[b->stage][b->index]=*b;
+            else look.ubo[b->stage][b->index]=*b;
+            break; }
+        case OP_UPDATE_UB: {
+            if (n<16) return NULL;
+            uint64_t dst,len;memcpy(&dst,a,8);memcpy(&len,a+8,8);
+            if (len>n-16 || (len && !rs_scope_raw(g,dst,len,0))) return NULL;
+            break; }
+        case OP_COPY_B2B: {
+            if (n<24) return NULL;
+            uint64_t src,dst,len;memcpy(&src,a,8);memcpy(&dst,a+8,8);memcpy(&len,a+16,8);
+            if (len && (!rs_scope_raw(g,src,len,0) || !rs_scope_raw(g,dst,len,0))) return NULL;
+            break; }
+        case OP_CLEAR_BUF: {
+            RS_NEED(p_clear_buf);const p_clear_buf *c=(const p_clear_buf *)a;
+            if (c->size && !rs_scope_raw(g,c->addr,c->size,0)) return NULL;
+            break; }
         case OP_BIND_VBUF: {
             if (n<offsetof(p_bind_vbuf,r)) return NULL;
             const p_bind_vbuf *b=(const p_bind_vbuf *)a;
