@@ -328,10 +328,11 @@ static struct { vkimg_t *im; VkImageView v; uint32_t fmt, layers, w, h, bc_lv, b
 // A candidate is NOT a proven scalable pass; shader and later resource consumers
 // must also be classified before allocating any physical-size variant.
 static void resolution_observe_pass(void) {
-    static int enabled = -1;
+    static int enabled = -1, probe = -1, probed;
     static uint64_t total, eligible, blocked[8], pixels, planned_pixels;
     if (enabled < 0) { const char *env = getenv("DM_VK_RESOLUTION_AUDIT"); enabled = env && atoi(env) != 0; }
-    if (!enabled) return;
+    if (probe < 0) { const char *env = getenv("DM_VK_RESOLUTION_PROBE"); probe = env && atoi(env) != 0; }
+    if (!enabled && (!probe || probed)) return;
     nx_rs_group group = {0};
     for (int i = 0; i < 9; i++) {
         const vkimg_t *im = P_att[i].im;
@@ -353,9 +354,28 @@ static void resolution_observe_pass(void) {
         eligible++;
         pixels += (uint64_t)group.w * group.h;
         planned_pixels += (uint64_t)extent.w * extent.h;
+        // One opt-in offscreen allocation/clear transaction. No guest image
+        // is read, written or replaced, and all allocations retire by fence.
+        if (probe && !probed && P_att[8].im && group.n >= 2) {
+            probed = 1;
+            vk_rs_variant *variants[9] = {0};
+            int ok = 1; uint64_t bytes = 0;
+            for (int i = 0; i < 9; i++) if (P_att[i].im) {
+                variants[i] = vk_rs_variant_create(P_att[i].im, extent.w, extent.h);
+                if (!variants[i]) { ok = 0; break; }
+                bytes += variants[i]->bytes;
+            }
+            for (int i = 0; i < 9; i++) if (variants[i]) {
+                if (ok) { vk_rs_variant_clear(vk_cmd(), variants[i]); vk_rs_variant_retire(variants[i]); }
+                else vk_rs_variant_destroy(variants[i]); // no recording before whole group succeeds
+            }
+            VKLOG("[resolution-probe] %s: %ux%u -> %ux%u, %llu allocated bytes; guest images unchanged",
+                  ok ? "recorded isolated clear" : "allocation rejected, rolled back", group.w, group.h,
+                  extent.w, extent.h, (unsigned long long)bytes);
+        }
     }
     for (unsigned i = 0; i < 8; i++) if (group.blockers & (1u << i)) blocked[i]++;
-    if (++total % 300 == 0)
+    if (enabled && ++total % 300 == 0)
         VKLOG("[resolution-audit] passes=%llu candidates=%llu logical_pixels=%llu planned_75pct_pixels=%llu blockers mixed=%llu alias=%llu storage=%llu non2d=%llu msaa=%llu guest=%llu view=%llu invalid=%llu; observation only",
               (unsigned long long)total, (unsigned long long)eligible, (unsigned long long)pixels, (unsigned long long)planned_pixels,
               (unsigned long long)blocked[0], (unsigned long long)blocked[1], (unsigned long long)blocked[2], (unsigned long long)blocked[3],
@@ -398,6 +418,7 @@ static int pass_commit(void) {
     if (dim) g_lrz_prev = dim;
     if ((g_lrz_touch & LRZ_READ) && dim && P_da.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) lrz_touch(dim, 0);
     void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(0, 0, 0, 0, 0);
+    resolution_observe_pass(); // before opening either kind of Vulkan render pass
     if (rp_on()) {
         rpkey k; memset(&k, 0, sizeof k); k.ncol = P_ri.colorAttachmentCount; k.samples = S.samples ? S.samples : 1;
         fbkey fk; memset(&fk, 0, sizeof fk); VkImageView views[9]; VkClearValue cv[9]; uint32_t na = 0;
@@ -421,7 +442,6 @@ static int pass_commit(void) {
         else { VKRED_ONCE(76, "render pass or framebuffer failed without dynamic rendering: pass skipped"); return 0; }   // (still pass_open 2: vk_end_pass drops it)
     } else { vkCmdBeginRendering(vk_cmd(), &P_ri); S.rp_pass = 0; }
     S.pass_open = 1; g_vkst.passes++; g_sub_pass++; g_pass_wmem = 0;
-    resolution_observe_pass();
     for (int i = 0; i < 9; i++) { vkimg_t *a = P_att[i].im; if (a && a->rt_last != g_tex_frame + 1) { a->rt_frames = a->rt_last == g_tex_frame ? a->rt_frames + 1 : 1; a->rt_last = g_tex_frame + 1; } }   // (async_pipe)
     { extern uint64_t g_cmd_gen; g_cmd_gen++; }   // the bind cache starts empty in each pass: Adreno does not keep the state a pass's draws set for the next pass (XC3 drew its lighting black)
     if (g_x_tracepass == -2) { g_x_listpasses = 1; list_reads("before it, dispatches");

@@ -11,6 +11,8 @@ Baseline: f02ceda. This first checkpoint is intentionally observation-only in th
 
 ## Phase 1 — physical images and lifetime
 
+Checkpoint P1a: private physical variants now have logical/physical dimensions, dedicated allocation accounting (64 MiB aggregate ceiling, including deferred retirement), monotonic generation, image views and submission-fence destruction. `DM_VK_RESOLUTION_PROBE=1` records a one-shot isolated clear of a candidate color/depth group at 75%, rolling back all allocations if any fails. This is not guest rendering or a correctness/readback test. No variant becomes authoritative; copy/coherence and real raster integration remain gated.
+
 - Introduce separate logical extents and physical image variants in `gfx_vk.h` / `gfx_vk_tex.c`; guest storage keys, offsets and sizes remain logical.
 - Track image version and authoritative representation, view generation, and deferred retirement fences. Account for actual allocation requirements (not logical guest byte count). Fail closed for unsupported aliases, multisampling, compressed/linear/sparse resources and unclassified accesses.
 - Validate with offscreen paired color/depth render targets, copies, partial clears, readbacks and allocation-failure injection. Never use global idle waits per scale change. Do not enable arbitrary game workloads until the next phases pass.

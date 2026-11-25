@@ -1370,6 +1370,7 @@ static void slot_recycle(vksub_t *s) {   // the GPU has passed this slot's last 
         else if (d->kind == 4) { void img_sub_free_(void *); vkDestroyImage(V.dev, (VkImage)d->a, NULL); img_sub_free_(d->b); }
         else if (d->kind == 2) vkDestroyImageView(V.dev, (VkImageView)d->a, NULL);
         else if (d->kind == 3) vkDestroyBufferView(V.dev, (VkBufferView)d->a, NULL);
+        else if (d->kind == 5) vk_rs_variant_destroy((vk_rs_variant *)d->a);
     }
     free(df);
     for (int i = 0; i < s->nblk; i++) s->blk[i].used = 0;
@@ -1459,6 +1460,7 @@ static void df_add(int kind, void *a, void *b) {
         else if (kind == 1) { vkDestroyImage(V.dev, (VkImage)a, NULL); if (b) vkFreeMemory(V.dev, (VkDeviceMemory)b, NULL); }
         else if (kind == 4) { void img_sub_free_(void *); vkDestroyImage(V.dev, (VkImage)a, NULL); img_sub_free_(b); }
         else if (kind == 2) vkDestroyImageView(V.dev, (VkImageView)a, NULL);
+        else if (kind == 5) vk_rs_variant_destroy((vk_rs_variant *)a);
         else vkDestroyBufferView(V.dev, (VkBufferView)a, NULL);
     }
 }
@@ -1508,6 +1510,7 @@ VkDeviceMemory vk_image_memory(const VkMemoryRequirements *req, uint32_t type, V
 static void img_sub_free(imgsub *s) {   // the slot is free again; blocks are kept (the next images of the class take them)
     pthread_mutex_lock(&g_imgblk_mu); s->b->bits[s->slot >> 6] |= 1ull << (s->slot & 63); s->b->nfree++; pthread_mutex_unlock(&g_imgblk_mu); free(s);
 }
+void vk_rs_variant_retire(vk_rs_variant *v) { if (v) df_add(5, v, NULL); }
 void vk_defer_free_buffer(VkBuffer b, VkDeviceMemory m) { df_add(0, (void *)b, (void *)m); }
 void vk_defer_free_image_sub(VkImage i, void *sub) { df_add(4, (void *)i, sub); }
 void img_sub_free_(void *s) { img_sub_free((imgsub *)s); }

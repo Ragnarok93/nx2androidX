@@ -6,6 +6,7 @@
 //   Version 1 keeps every image in VK_IMAGE_LAYOUT_GENERAL after its first use, ordered by whole-pipeline barriers.
 #include "gfx_vk.h"
 #include "gfx_vk_d24_copy.h"
+#include "gfx_vk_resolution_budget.h"
 #include "nvn_tex.h"
 #include "../gfx/tex/nvn_deswizzle.h"
 #include "nvn_hmap.h"
@@ -304,6 +305,81 @@ static vkimg_t *img_new(const tex_t *t, const vkfmt_t *f) {
     VKCHK(vkBindImageMemory(V.dev, im->img, im->mem, moff));
     im->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     return im;
+}
+// P1: allocate isolated physical variants. Dedicated allocations make the
+// budget equal to actual Vulkan allocation sizes, including deferred frees.
+static nx_rs_budget g_rs_budget;
+static uint64_t g_rs_generation;
+#define NX_RS_BUDGET_BYTES (64ull * 1024 * 1024)
+vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t h) {
+    if (!logical || !w || !h || !vk_sub_open() || logical->novl || logical->packaged ||
+        logical->lin_mem || logical->target != NVN_TEXTURE_TARGET_2D ||
+        logical->d != 1 || logical->layers != 1 || logical->levels != 1 || logical->samples != 1 ||
+        logical->bc_draw || logical->bc_of || !logical->pool ||
+        (logical->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_IMAGE))) return NULL;
+    const vkfmt_t *fmt = vk_fmt(logical->nvn_format);
+    if (!fmt || fmt->compressed || fmt->is_int || !logical->aspect) return NULL;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    usage |= logical->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if ((logical->usage & usage) != usage) return NULL;
+    VkImageFormatProperties props;
+    if (vkGetPhysicalDeviceImageFormatProperties(V.pd, logical->fmt, VK_IMAGE_TYPE_2D,
+            VK_IMAGE_TILING_OPTIMAL, usage, 0, &props) != VK_SUCCESS ||
+        w > props.maxExtent.width || h > props.maxExtent.height ||
+        w > V.props.limits.maxFramebufferWidth || h > V.props.limits.maxFramebufferHeight ||
+        !(props.sampleCounts & VK_SAMPLE_COUNT_1_BIT)) return NULL;
+    vk_rs_variant *v = calloc(1, sizeof *v);
+    if (!v) return NULL;
+    v->logical_w = logical->w; v->logical_h = logical->h;
+    v->physical_w = w; v->physical_h = h; v->format = logical->fmt; v->aspect = logical->aspect;
+    v->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D,
+        v->format, {w,h,1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+        usage, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+    if (vkCreateImage(V.dev, &ci, NULL, &v->image) != VK_SUCCESS) goto fail;
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(V.dev, v->image, &req);
+    uint32_t type = vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    if (type == UINT32_MAX || !nx_rs_reserve(&g_rs_budget, req.size, NX_RS_BUDGET_BYTES)) goto fail;
+    v->bytes = req.size;
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, type};
+    if (vkAllocateMemory(V.dev, &ai, NULL, &v->memory) != VK_SUCCESS) { v->memory = VK_NULL_HANDLE; goto fail; }
+    if (vkBindImageMemory(V.dev, v->image, v->memory, 0) != VK_SUCCESS) goto fail;
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, v->image,
+        VK_IMAGE_VIEW_TYPE_2D, v->format, {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, {v->aspect, 0, 1, 0, 1}};
+    if (vkCreateImageView(V.dev, &vi, NULL, &v->view) != VK_SUCCESS) { v->view = VK_NULL_HANDLE; goto fail; }
+    v->generation = ++g_rs_generation;
+    return v;
+fail:
+    vk_rs_variant_destroy(v); // never recorded or published
+    return NULL;
+}
+void vk_rs_variant_destroy(vk_rs_variant *v) {
+    if (!v) return;
+    if (v->view) vkDestroyImageView(V.dev, v->view, NULL);
+    if (v->image) vkDestroyImage(V.dev, v->image, NULL);
+    if (v->memory) vkFreeMemory(V.dev, v->memory, NULL);
+    if (v->bytes) nx_rs_release(&g_rs_budget, v->bytes);
+    free(v);
+}
+void vk_rs_variant_clear(VkCommandBuffer cb, vk_rs_variant *v) {
+    if (!v || v->layout != VK_IMAGE_LAYOUT_UNDEFINED) return;
+    VkImageSubresourceRange range = {v->aspect, 0, 1, 0, 1};
+    VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, v->image, range};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, NULL, 0, NULL, 1, &b);
+    if (v->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+        VkClearColorValue value = {{0,0,0,0}};
+        vkCmdClearColorImage(cb, v->image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+    } else {
+        VkClearDepthStencilValue value = {0.625f, 0};
+        vkCmdClearDepthStencilImage(cb, v->image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+    }
+    vk_img_barrier_all(cb);
+    v->layout = VK_IMAGE_LAYOUT_GENERAL;
 }
 void vk_tex_prepare(VkCommandBuffer cb, vkimg_t *im) {
     if (im->layout == VK_IMAGE_LAYOUT_GENERAL) return;

@@ -137,6 +137,24 @@ struct vkimg {
     struct vkimg *ovl[8]; int novl;   // the other images over some of the same memory (a texture of another description over it: on the Switch it sees these texels)
     uint64_t wseq, rseen;             // when it was last rendered to (gfx_vk_tex.c g_wseq); the newest overlapping write already reported
 };
+// Physical resolution variants are deliberately separate from guest storage keys.
+typedef struct vk_rs_variant {
+    VkImage image;
+    VkImageView view;
+    VkDeviceMemory memory;
+    VkDeviceSize bytes;
+    VkImageLayout layout;
+    VkFormat format;
+    VkImageAspectFlags aspect;
+    uint32_t logical_w, logical_h, physical_w, physical_h;
+    uint64_t generation;
+} vk_rs_variant;
+// Replay thread, outside any render pass. Variants are private scratch until
+// raster/shader/alias virtualization is implemented; never substitute vk_tex().
+vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical, uint32_t w, uint32_t h);
+void vk_rs_variant_clear(VkCommandBuffer cb, vk_rs_variant *v);
+void vk_rs_variant_retire(vk_rs_variant *v);
+void vk_rs_variant_destroy(vk_rs_variant *v); // only after fence or before any recording
 vkimg_t *vk_tex(const tex_t *t);                                 // the image of a texture object (created, uploaded or refreshed as needed)
 void vk_lrz_forget(vkimg_t *im);                                 // an image is being dropped: the pass code forgets it (gfx_vk_exec.c)
 int vk_window_bottom_up(void);                                   // the game draws in lower-left origin mode: its window image is stored bottom-up (gfx_vk_exec.c)
