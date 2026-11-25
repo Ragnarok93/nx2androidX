@@ -43,7 +43,8 @@ static struct {
     uint64_t ticket, retry_after, measured_ticket;
     uint64_t query_ticket[SP_SLOTS];
     double gpu_ms;
-    int submit_failed;
+    int submit_failed, report_physical;
+    VkExtent2D report_input;
 } g_spatial;
 
 #if SP_TEMPORAL
@@ -455,6 +456,9 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     spatial_image *output = &g_spatial.image[SP_OUTPUT];
     if (g_spatial.ticket == ticket) return output;
     g_spatial.ticket = 0;
+    g_spatial.report_input = (VkExtent2D){crop[2] > 0 ? (uint32_t)crop[2] : 0,
+                                         crop[3] > 0 ? (uint32_t)crop[3] : 0};
+    g_spatial.report_physical = 0;
     int requested = dm_spatial_mode();
     int wants_flow = requested == SP_SGSR2;
     int mode = wants_flow ? SP_SGSR1 : requested;
@@ -483,6 +487,8 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         valid[3] = (int)physical->valid.extent.height;
         crop = valid;
         flip_y = physical->flip_y;
+        g_spatial.report_input = physical->valid.extent;
+        g_spatial.report_physical = 1;
     } else physical = NULL;
     if (crop[2] <= 0 || crop[3] <= 0 || crop[0] < 0 || crop[1] < 0 ||
         (uint64_t)crop[0] + crop[2] > sw || (uint64_t)crop[1] + crop[3] > sh ||

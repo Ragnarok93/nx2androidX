@@ -62,6 +62,13 @@ int main(void) {
         self.assertIn('if (dm_menu_rs_live()) menu_rs_mode_step(1);',front)
         self.assertIn('dyn_min=%d',front)
 
+    def test_reopening_menu_invalidates_recorded_scale_readout(self):
+        front = (ANDROID / 'front_android.c').read_text()
+        opened = front.split('static void menu_open(int hi) {', 1)[1].split('static void menu_close', 1)[0]
+        refresh = opened.index('atomic_fetch_add(&g_menu_cfg_ver, 1)')
+        self.assertLess(opened.index('hold_sync();'), refresh)
+        self.assertLess(refresh, opened.index('dm_overlay_redraw();'))
+
     def test_fps_switch_writes_engine_and_presentation_policy(self):
         fps=(HOST/'hle_fpslock.c').read_text()
         nvn=(GFX/'hle_nvn.c').read_text()

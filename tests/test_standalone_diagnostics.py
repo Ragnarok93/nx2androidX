@@ -88,6 +88,7 @@ public final class DiagnosticArchiveFixture {
             Files.createSymbolicLink(root.resolve("pass_02.ppm"), root.resolve("shaders.dmsv"));
         } catch (UnsupportedOperationException | SecurityException | IOException ignored) { }
         put(root, "capture_timeline.tsv", bytes("present\n1500\n1501\n"));
+        put(root, "scaling_frames.tsv", bytes("ticket\tlatched_pct\n1500\t75\n"));
         Path completed = Files.createDirectory(root.resolve("diagnostic-capture-0"));
         put(completed, "complete", new byte[0]);
         put(completed, "pass_dump_manifest.tsv", bytes("dump\tpresent\n0\t1399\n"));
@@ -102,11 +103,28 @@ public final class DiagnosticArchiveFixture {
         put(later, "surface_usage.tsv", bytes("completed without images"));
         put(later, "pass_00.raw", bytes("stale image in cleared slot"));
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        DiagnosticArchive.write(root.toFile(), output, "driver=RADV Xclipse\n");
+        OutputStream mutableLogs = new FilterOutputStream(output) {
+            private boolean rotated, truncated;
+            @Override public void write(byte[] b, int off, int len) throws IOException {
+                String entry = len < 30 ? new String(b, off, len, StandardCharsets.US_ASCII) : "";
+                if (!rotated && entry.equals("logs/log.txt")) {
+                    rotated = true;
+                    Files.move(root.resolve("log.txt"), root.resolve("log.rotated"));
+                    Files.write(root.resolve("log.txt"), bytes("replacement run"));
+                } else if (!truncated && entry.equals("logs/log.prev.txt")) {
+                    truncated = true;
+                    Files.write(root.resolve("log.prev.txt"), new byte[0]);
+                }
+                out.write(b, off, len);
+            }
+        };
+        DiagnosticArchive.write(root.toFile(), mutableLogs, "driver=RADV Xclipse\n");
         Map<String, byte[]> zip = unpack(output.toByteArray());
         check(zip.containsKey("README.txt") && zip.containsKey("archive-status.txt"), "report metadata");
         check(zip.containsKey("metadata/capture_meta.txt"), "capture settings metadata");
         check(zip.containsKey("metadata/capture_timeline.tsv"), "continuous timeline");
+        check(Arrays.equals(zip.get("metadata/scaling_frames.tsv"),
+            bytes("ticket\tlatched_pct\n1500\t75\n")), "scaling trace retained");
         check(Arrays.equals(zip.get("history/slot-0/captures/pass_00.raw"),
                             bytes("first rolling frame")), "completed frame");
         check(!zip.containsKey("history/slot-0/captures/pass_01.ppm"), "stale rolling image");
@@ -140,9 +158,12 @@ public final class DiagnosticArchiveFixture {
               zip.containsKey("logs/log.prev.3.txt"), "three prior runs");
         check(zip.get("logs/log.txt").length == DiagnosticArchive.LOG_TAIL, "tail bounded");
         check(zip.get("logs/log.txt")[0] == 'T', "tail retained");
-        check(zip.get("logs/log.txt.startup.txt")[0] == 'H', "driver startup retained");
+        check(zip.get("logs/log.txt.startup.txt")[0] == 'H', "tail and driver startup use the same opened log after rotation");
+        check(zip.get("logs/log.prev.txt").length == 0, "truncated log does not break the ZIP");
+        check(new String(zip.get("archive-status.txt"), StandardCharsets.UTF_8)
+            .contains("log.prev.txt: log shortened during export"), "truncated log is reported");
         check(new String(zip.get("README.txt"), StandardCharsets.UTF_8).contains(
-            "High-overhead full MRT"), "report explains opt-in");
+            "GPU snapshots adds full attachment readbacks"), "report explains opt-in");
 
         // When a new one-shot capture is armed but its GPU fence has not
         // retired, never mislabel stale files as belonging to the new run.

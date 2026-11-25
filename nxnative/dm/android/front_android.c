@@ -12,6 +12,7 @@
 #include "dm_input.h"
 #include "overlay_layout.h"
 #include "spatial_upscaler.h"
+#include "gfx_vk_capture_scale.h"
 #include "gfx_vk_resolution_live.h"
 #include "saves_android.h"
 #include "jni_android.h"
@@ -677,11 +678,11 @@ void dm_menu_radv_note(int index, char *out, int cap) {
         active ? "Test active" : "Use defaults";
     snprintf(out, (size_t)cap, "%s", value);
 }
-int vk_pass_dump_user_active(void);
 void dm_menu_diag_note(char *out, int cap) {
     if (cap <= 0) return;
     int status = atomic_load(&g_diag_status);
-    const char *name = status == DIAG_ARMED ? "Recording until export" :
+    const char *name = status == DIAG_ARMED ? (vk_pass_dump_user_active() == CAPTURE_SNAPSHOTS
+                                           ? "Recording GPU snapshots" : "Recording scaling") :
                        status == DIAG_EXPORTING ? "Saving ZIP..." :
                        status == DIAG_EXPORTED ? "ZIP saved" :
                        status == DIAG_FAILED ? "Export failed" : "Logs available";
@@ -727,7 +728,9 @@ static void menu_open(int hi) {
     if (g_pad_used) { g_btn = 0; memset(g_ax, 0, sizeof g_ax); pad_publish(); }
     for (int i = 0; i < 32; i++) g_ptr_ctl[i] = 0;
     dm_haptics_suspend(4, 1);   // (bits 1 and 2 are the iOS front end's reasons)
-    hold_sync(); dm_overlay_redraw();
+    hold_sync();
+    atomic_fetch_add(&g_menu_cfg_ver, 1);   // Refresh cached panel readouts after gameplay, including recorded scale.
+    dm_overlay_redraw();
     LOG("[menu] opened: the game is paused");
 }
 static void ed_cancel(void); static void sp_back(void);
@@ -852,11 +855,11 @@ static void fg_flow_step(int direction) {
     atomic_fetch_add(&g_menu_cfg_ver, 1);
     fg_apply();
 }
-int vk_pass_dump_user_begin(int delay);
+int vk_pass_dump_user_begin(int delay, int full);
 int vk_pass_dump_export_begin(void);
 void vk_pass_dump_export_end(int saved);
-static int diag_capture_arm(int delay) {
-    if (atomic_load(&g_diag_status) == DIAG_EXPORTING || !vk_pass_dump_user_begin(delay)) return 0;
+static int diag_capture_arm(int delay, int full) {
+    if (atomic_load(&g_diag_status) == DIAG_EXPORTING || !vk_pass_dump_user_begin(delay, full)) return 0;
     static const char *const settings[][2] = {
         {"DM_VK_PASSDUMP_FULL", "1"}, {"DM_VK_PASSDUMP_EFFECTS", "0"},
         {"DM_VK_PASSDUMP_DEPTH_STATE", "1"}, {"DM_VK_PASSDUMP_INPUTS", "1"},
@@ -875,7 +878,7 @@ static int diag_capture_arm(int delay) {
         snprintf(path, sizeof path, "%s/%s", g_root, reports[i]);
         unlink(path);
     }
-    for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
+    if (full) for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
         setenv(settings[i][0], settings[i][1], 1);
 
     extern uint64_t g_tex_frame;
@@ -884,18 +887,21 @@ static int diag_capture_arm(int delay) {
     FILE *f = fopen(path, "w");
     if (f) {
         const char *driver = dm_vk_driver_status();
-        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=continuous-rolling\nsnapshot_interval_presents=30\nsnapshot_slots=3\n"
-                   "max_gpu_readback_mb=64\nsurface_tile=16x16\n"
-                   "isolated_depth_transfer_control=0.625\n"
+        fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=%s\n"
                    "vulkan_driver=%s\nframe_generation_at_arm=%d\ncapture_delay_presents=%d\n",
-                (unsigned long long)frame, driver ? driver : "(unknown)", atomic_load(&g_set_fg), delay);
+                (unsigned long long)frame, full ? "continuous-rolling" : "scaling-metadata",
+                driver ? driver : "(unknown)", atomic_load(&g_set_fg), delay);
         radv_test_report(f);
-        for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
-            fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
+        if (full) {
+            fputs("snapshot_interval_presents=30\nsnapshot_slots=3\nsurface_tile=16x16\n"
+                  "isolated_depth_transfer_control=0.625\n", f);
+            for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
+                fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
+        }
         fclose(f);
     }
     atomic_store(&g_diag_status, DIAG_ARMED);
-    LOG("[diagnostics] continuous graphics capture started");
+    LOG("[diagnostics] %s capture started", full ? "GPU snapshot" : "scaling");
     diag_changed();
     return 1;
 }
@@ -970,8 +976,8 @@ static void menu_do(int item) {
     else if (item == OVM_DRIVER) { jni_save_document_picker("chooseVulkanDriver"); return; } // persisted for next process only
     else if (item == OVM_DIAG_OPEN) { atomic_store(&g_diag_flags_page, 1); atomic_store(&g_menu_hi, -1); }
     else if (item == OVM_DIAG_BACK) { atomic_store(&g_diag_flags_page, 0); atomic_store(&g_menu_hi, -1); }
-    else if (item == OVM_DIAG_CAPTURE || item == OVM_DIAG_DELAY) {
-        if (diag_capture_arm(item == OVM_DIAG_DELAY ? 120 : 0)) { dm_haptics_android_tap(); menu_close(); }
+    else if (item == OVM_DIAG_CAPTURE || item == OVM_DIAG_SNAPSHOT || item == OVM_DIAG_DELAY) {
+        if (diag_capture_arm(item == OVM_DIAG_DELAY ? 120 : 0, item != OVM_DIAG_CAPTURE)) { dm_haptics_android_tap(); menu_close(); }
         return;
     } else if (item == OVM_DIAG_FLAGS || item == OVM_FLAGS_BACK) {
         atomic_store(&g_diag_flags_page, item == OVM_DIAG_FLAGS ? 2 : 1);

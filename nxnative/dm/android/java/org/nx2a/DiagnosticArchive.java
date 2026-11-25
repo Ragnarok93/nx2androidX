@@ -2,6 +2,7 @@ package org.nx2a;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -27,7 +28,8 @@ final class DiagnosticArchive {
     static final long TOTAL_LIMIT = 384L << 20;
     static final int ENTRY_LIMIT = 1240;       // legacy files plus three completed rolling captures
     private static boolean metadataName(String name) {
-        return name.equals("capture_timeline.tsv") || name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
+        return name.equals("capture_timeline.tsv") || name.equals("scaling_frames.tsv") ||
+               name.equals("capture_meta.txt") || name.equals("pass_dump_manifest.tsv") ||
                name.equals("gpu_draw_inputs.tsv") || name.equals("surface_usage.tsv") ||
                name.equals("surface_samples.tsv") || name.equals("temporal-shaders.json");
     }
@@ -58,21 +60,20 @@ final class DiagnosticArchive {
         zip.write(data);
         zip.closeEntry();
     }
-    private static void copy(ZipOutputStream zip, String name, File file, long from, long len) throws IOException {
+    private static long copy(ZipOutputStream zip, String name, FileInputStream input,
+                             long from, long len, byte[] buffer) throws IOException {
+        input.getChannel().position(from);
         zip.putNextEntry(new ZipEntry(name));
-        try (FileInputStream input = new FileInputStream(file)) {
-            // FileInputStream.skip is permitted to return fewer bytes than requested.
-            input.getChannel().position(from);
-            byte[] buffer = new byte[64 * 1024];  // bounded irrespective of capture size
-            while (len > 0) {
-                int n = input.read(buffer, 0, (int)Math.min((long)buffer.length, len));
-                if (n < 0) throw new IOException("File shortened while exporting: " + file.getName());
-                if (n == 0) continue;
-                zip.write(buffer, 0, n);
-                len -= n;
-            }
+        long remaining = len;
+        while (remaining > 0) {
+            int n = input.read(buffer, 0, (int)Math.min((long)buffer.length, remaining));
+            if (n < 0) break;
+            if (n == 0) continue;
+            zip.write(buffer, 0, n);
+            remaining -= n;
         }
         zip.closeEntry();
+        return len - remaining;
     }
     private static boolean currentFile(File f, long captureTime) {
         return f.isFile() && !Files.isSymbolicLink(f.toPath()) && f.length() > 0 &&
@@ -130,7 +131,7 @@ final class DiagnosticArchive {
             if (name.equals("surface_usage.tsv") && !catalogCurrent) continue;
             if ((name.equals("surface_samples.tsv") || name.equals("surface_samples.raw")) &&
                     !surfacesCompleted) continue;
-            if (!archivePrefix.isEmpty() && (logName(name) || name.startsWith("frame_") || name.equals("temporal-shaders.json"))) continue;
+            if (!archivePrefix.isEmpty() && (logName(name) || name.startsWith("frame_") || name.equals("temporal-shaders.json") || name.equals("scaling_frames.tsv"))) continue;
             if (!f.getCanonicalPath().startsWith(prefix)) continue;
             inputs.add(new ArchiveInput(f, archivePrefix));
         }
@@ -161,8 +162,12 @@ final class DiagnosticArchive {
                     "gpu_draw_inputs.tsv contains completed GPU buffer copies taken after read-only passes.\n" +
                     "Index and vertex rows are binding prefixes. Rasterization requires separate evidence.\n" +
                     "CPU/shadow indirect diagnostics are explicitly non-authoritative.\n" +
-                    "High-overhead full MRT/depth readback starts when Capture graphics is pressed.\n" +
-                    "capture_timeline.tsv records every present after Capture graphics is pressed.\n" +
+                    "Capture graphics records scaling and reconstruction metadata without GPU readbacks.\n" +
+                    "scaling_frames.tsv retains up to 4096 NVN source-frame tickets and snapshots the trace when export begins.\n" +
+                    "Scaled dimensions are from the largest recorded scaled pass. Presentation shows the evaluated input, fitted output and active filter.\n" +
+                    "A physical candidate may be bypassed. When the active filter is None, ordinary presentation handles the frame.\n" +
+                    "Replay GPU time is the most recent available sample (-1 if missing). Reconstruction time has its own timing ticket (0 if missing).\n" +
+                    "GPU snapshots adds full attachment readbacks and capture_timeline.tsv. Snapshot frames can affect scaling and timing.\n" +
                     "history contains up to three completed full-frame snapshots with present numbers in their manifests.\n" +
                     "surface_usage.tsv lists attachment, shader image, transfer and presentation bindings.\n" +
                     "Alias rows pair the sampled view with a candidate producer's base subresource.\n" +
@@ -178,23 +183,42 @@ final class DiagnosticArchive {
                     "Logs may contain device identifiers, filesystem paths, shader keys and GPU addresses.\n" +
                     "Review the report before sharing it.\n\n" + systemInfo + "\n")
                     .getBytes(StandardCharsets.UTF_8));
+            byte[] buffer = new byte[64 * 1024]; // shared across all entries
             for (ArchiveInput input : inputs) {
                 File file = input.file;
-                long length = file.length();
-                if (length <= 0) continue;
-                boolean log = logName(file.getName());
-                long count = log ? Math.min(length, LOG_TAIL) : length;
-                if (count > FILE_LIMIT || count > TOTAL_LIMIT - total) {
-                    skipped.append(input.prefix).append(file.getName()).append(": exceeded export byte budget\n");
+                String name = file.getName();
+                boolean log = logName(name);
+                FileInputStream source;
+                try {
+                    source = new FileInputStream(file);
+                } catch (FileNotFoundException error) {
+                    if (!log) throw error;
+                    skipped.append(name).append(": log rotated before export\n");
                     continue;
                 }
-                long start = log ? length - count : 0;
-                copy(zip, input.prefix + entryName(file.getName()), file, start, count);
-                total += count;
-                collected++;
-                if (log && length > count && LOG_HEAD <= TOTAL_LIMIT - total) {
-                    copy(zip, "logs/" + file.getName() + ".startup.txt", file, 0, Math.min(length, LOG_HEAD));
-                    total += Math.min(length, LOG_HEAD);
+                try (FileInputStream stream = source) {
+                    // Both parts of a log use the same opened file and one
+                    // length snapshot, even if the pathname rotates or grows.
+                    long length = stream.getChannel().size();
+                    if (length <= 0) continue;
+                    long count = log ? Math.min(length, LOG_TAIL) : length;
+                    if (count > FILE_LIMIT || count > TOTAL_LIMIT - total) {
+                        skipped.append(input.prefix).append(name).append(": exceeded export byte budget\n");
+                        continue;
+                    }
+                    long copied = copy(zip, input.prefix + entryName(name), stream, length - count, count, buffer);
+                    if (copied != count) {
+                        if (!log) throw new IOException("File shortened while exporting: " + name);
+                        skipped.append(name).append(": log shortened during export\n");
+                    }
+                    total += copied;
+                    collected++;
+                    if (log && length > count && LOG_HEAD <= TOTAL_LIMIT - total) {
+                        long startup = Math.min(length, LOG_HEAD);
+                        copied = copy(zip, "logs/" + name + ".startup.txt", stream, 0, startup, buffer);
+                        if (copied != startup) skipped.append(name).append(": startup log shortened during export\n");
+                        total += copied;
+                    }
                 }
             }
             entry(zip, "archive-status.txt", ("files=" + collected + "\nsource_bytes=" + total +

@@ -199,7 +199,7 @@ static void run_spatial(void) {
     assert(mode == SP_NATIVE && spatial_mode_restore(SP_LEGACY_AUTO) == SP_SGSR2);
     spatial_image src = source_image(SRC);
     int crop[] = {2, 2, 16, 16};
-    uint8_t bilinear[OUT * OUT * 4];
+    uint8_t bilinear[OUT * OUT * 4], fsr[OUT * OUT * 4];
     static uint64_t ticket = 0;
     const int modes[] = {SP_BILINEAR, SP_FSR1, SP_SGSR1, SP_NATIVE};
     for (unsigned i = 0; i < sizeof modes / sizeof modes[0]; i++) {
@@ -217,7 +217,21 @@ static void run_spatial(void) {
         readback(out->texture.img, OUT, OUT);
         if (selected_mode == SP_BILINEAR) memcpy(bilinear, mapped, sizeof bilinear);
         else assert(memcmp(bilinear, mapped, sizeof bilinear));
-        if (selected_mode == SP_SGSR1) check_vivid(out);
+        if (selected_mode == SP_FSR1) memcpy(fsr, mapped, sizeof fsr);
+        if (selected_mode == SP_SGSR1) {
+            assert(memcmp(fsr, mapped, sizeof fsr));
+            check_vivid(out);
+        }
+    }
+    // Selecting an upscaler with an already native-sized picture must not
+    // submit a reconstruction pass, even when a previous frame used one.
+    unsigned slot = g_spatial.slot;
+    const int filters[] = {SP_BILINEAR, SP_FSR1, SP_SGSR1, SP_SGSR2};
+    for (unsigned i = 0; i < sizeof filters / sizeof filters[0]; i++) {
+        selected_mode = filters[i];
+        assert(!spatial_reconstruct(&src.texture, crop, 1, 16, 16, ++ticket, NULL));
+        assert(spatial_requested == selected_mode && spatial_active == SP_NATIVE);
+        assert(g_spatial.slot == slot);
     }
     selected_mode = SP_FSR1;
     sharpness = 0;

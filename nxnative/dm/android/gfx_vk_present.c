@@ -21,6 +21,7 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #include "gsr1_frag.spv.h"
 #include "vivid_frag.spv.h"
 #include "spatial_upscaler.h"
+#include "gfx_vk_capture_scale.h"
 
 __attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
 __attribute__((weak)) int dm_external_active(void) { return 0; }
@@ -461,7 +462,7 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling", [OVM_RS_MAX]="Maximum / fixed scale",
     [OVM_DIAG_OPEN]="Diagnostics", [OVM_DIAG_CAPTURE]="Capture graphics",
     [OVM_DIAG_EXPORT]="Export diagnostics", [OVM_DIAG_STATUS]="Capture status",
-    [OVM_DIAG_DELAY]="Delayed capture", [OVM_DIAG_FLAGS]="RADV test flags",
+    [OVM_DIAG_SNAPSHOT]="GPU snapshots", [OVM_DIAG_DELAY]="Delayed GPU snapshots", [OVM_DIAG_FLAGS]="RADV test flags",
     [OVM_DIAG_BACK]="Back", [OVM_FLAG_DLC]="Shader cache coherency",
     [OVM_FLAG_DCC]="Color compression off", [OVM_FLAG_BC]="CPU BC decode",
     [OVM_FLAG_HIZ]="Depth compression off", [OVM_FLAGS_BACK]="Back",
@@ -470,7 +471,7 @@ static const char *const OVM_LABELS[OVM_N] = {
 static const char *const OVM_BUTTONS[OVM_N] = {
     [OVM_EDIT]="Edit", [OVM_EXPORT]="Export", [OVM_IMPORT]="Import", [OVM_AUDIO]="Select",
     [OVM_DIAG_OPEN]="Open", [OVM_DIAG_CAPTURE]="Capture", [OVM_DIAG_EXPORT]="Save ZIP",
-    [OVM_DIAG_DELAY]="120 frames", [OVM_DIAG_FLAGS]="Open",
+    [OVM_DIAG_SNAPSHOT]="Capture", [OVM_DIAG_DELAY]="120 frames", [OVM_DIAG_FLAGS]="Open",
     [OVM_DIAG_BACK]="Back", [OVM_FLAGS_BACK]="Back"
 };
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
@@ -1407,6 +1408,15 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     if (reconstructed && fg_fence) reconstructed->last_use = fg_fence;
     atomic_store(&g_fg_out_ns, out_period > 0 ? (uint64_t)(out_period * 1e9) : 0);
     atomic_store(&g_fg_images, ng > 0 ? ng + 1 : 1);
+    if (vk_pass_dump_user_active()) {
+        vk_capture_scale_present(ticket, (vk_capture_scale_present_sample){
+            .requested = spatial_requested, .active = spatial_active,
+            .physical = g_spatial.report_physical, .generated = ng,
+            .source_w = g_spatial.report_input.width, .source_h = g_spatial.report_input.height,
+            .output_w = picture.width, .output_h = picture.height,
+            .timing_ticket = g_spatial.measured_ticket, .gpu_ms = g_spatial.gpu_ms, .reason = spatial_reason,
+        });
+    }
     int generated_rect[4] = {0, 0, rect[2], rect[3]};
     for (int g = 0; g < ng; g++)
         present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0);
@@ -1468,9 +1478,13 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
 void dm_perf_frame(double period); void dm_perf_window(ANativeWindow *w, double fps); void dm_perf_frame_cost(int64_t replay_ns, int64_t gpu_ns);   // perf_android.c
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     vk_init();
-    { uint64_t vk_replay_ns(void); double vk_gpu_ms_recent(void);   // what else the frame costs: its replay and its GPU time
-      static uint64_t last_exec; uint64_t ex = vk_replay_ns(), rp = ex - last_exec; last_exec = ex; double g = vk_gpu_ms_recent(); int64_t gn = g > 0 ? (int64_t)(g * 1e6) : 0;
-      dm_perf_frame_cost((int64_t)rp, gn); }
+    uint64_t vk_replay_ns(void);
+    double vk_gpu_ms_recent(void);
+    static uint64_t last_exec;
+    uint64_t ex = vk_replay_ns(), replay_ns = ex - last_exec;
+    last_exec = ex;
+    double gpu_ms = vk_gpu_ms_recent();
+    dm_perf_frame_cost((int64_t)replay_ns, gpu_ms > 0 ? (int64_t)(gpu_ms * 1e6) : 0);
     dm_perf_frame(period);   // paced to the game's frame period, and its work time reported to ADPF
     // A longer period goes to the window only once it has held for 60 presents; a shorter one at once. Super Mario Bros. Wonder's own controller (main+0xcfd24) asks
     // for interval 2 for a frame or a few and then 1 again: each ask was a vote (176 in 3 minutes of its first level on the Y700, 27-60 a run in issue #64's log of an
@@ -1546,6 +1560,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         void dm_vi_layer_crop(int c[4]); dm_vi_layer_crop(vcrop);
         if (vcrop[2] > 0 && vcrop[3] > 0 && vcrop[0] + vcrop[2] <= (int)im->w && vcrop[1] + vcrop[3] <= (int)im->h) crop = vcrop;
     }
+    if (vk_pass_dump_user_active()) vk_rs_capture_replay(n, replay_ns, gpu_ms);
     { void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4]);
       uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done(), im, crop); }
     vk_reconstruction_input physical;

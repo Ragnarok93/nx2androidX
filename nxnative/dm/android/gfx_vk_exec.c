@@ -649,9 +649,23 @@ static int g_pd_full, g_pd_effects, g_pd_shadow_reads;
 static int g_pd_mrt_written, g_pd_effect_passes, g_pd_small_effect_passes, g_pd_alias_images;
 static atomic_int g_pd_user_pending;
 static int g_pd_frame_has_scene;
+static nx_rs_raster g_capture_largest_scaled;
 static unsigned g_pd_scene_waited;
 enum { PD_SCENE_WAIT_LIMIT = 120 };
 #include "gfx_vk_capture_session.inc"
+void vk_rs_capture_replay(uint64_t ticket, uint64_t cpu_replay_ns, double recent_gpu_ms) {
+    unsigned dm_rs_live_config(void);
+    nx_rs_live_config cfg = nx_rs_live_unpack(dm_rs_live_config());
+    const nx_rs_raster *r = &g_capture_largest_scaled;
+    capture_scale_replay(ticket, (vk_capture_scale_replay_sample){
+        .mode = cfg.mode, .min = cfg.min, .max = cfg.max, .target = g_rs_frame.target,
+        .passes = g_rs_recorded_passes, .passes_total = g_vkst.passes,
+        .logical_w = r->lw, .logical_h = r->lh, .physical_w = r->pw, .physical_h = r->ph,
+        .renderer_available = vk_rs_live_available(), .gpu_snapshot = g_pd_state != 0,
+        .cpu_replay_ns = cpu_replay_ns, .source_time_ns = tnow(), .recent_replay_gpu_ms = recent_gpu_ms,
+    });
+    g_capture_largest_scaled = (nx_rs_raster){0};
+}
 static uint32_t g_pd_scene_w, g_pd_scene_h;
 static uint64_t g_pd_capture_id;
 static int g_pd_control_written; // bit per isolated format, never a scene attachment
@@ -1081,13 +1095,13 @@ static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31,
 static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const int crop[4]) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
     int had_scene = g_pd_frame_has_scene;
     g_pd_frame_has_scene = 0;
-    int recording = atomic_load(&g_pd_user_pending);
+    if (g_capture_exporting) return;
+    int recording = atomic_load(&g_pd_user_pending) == CAPTURE_SNAPSHOTS;
     if (recording && g_capture_timeline)
         fprintf(g_capture_timeline, "%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
                 (unsigned long long)g_tex_frame, (unsigned long long)g_set_epoch,
                 (unsigned long long)g_vkst.draws, (unsigned long long)g_vkst.passes,
                 (unsigned long long)g_vkst.dispatches, had_scene);
-    if (g_capture_exporting) return;
     const char *e = getenv("DM_VK_PASSDUMP");
     if (g_pd_state == 0 && !recording && e && atoi(e) > 1) {
         char n[16];
@@ -1381,14 +1395,19 @@ int vk_rs_pass_idle(void) { return S.pass_open==0; }
 void vk_end_pass(void) {
     if (g_x_listpasses && S.pass_open == 1) { Dl_info di; void *ra = __builtin_return_address(0); uintptr_t base = dladdr((void *)vk_end_pass, &di) ? (uintptr_t)di.dli_fbase : 0; VKLOG("    ended from %#llx (%llu draws)", (unsigned long long)((uintptr_t)ra - base), (unsigned long long)g_pass_draws); list_reads("it"); }   // (DM_VK_TRACE_PASS=-2: who ends each pass)
     if (S.pass_open == 1 && g_pass_draws >= 8 && P_ri.pDepthAttachment &&
-        atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed))
+        atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed) == CAPTURE_SNAPSHOTS)
         g_pd_frame_has_scene = 1;
     if (S.pass_open == 2 && P_cleared) (void)pass_commit();   // only clears: the pass still runs, for its load ops
     if (S.pass_open == 1) { if (S.rp_pass) vkCmdEndRenderPass(vk_cmd()); else vkCmdEndRendering(vk_cmd()); if (g_input_pending) input_capture_end_pass(); bc_draw_back(); void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(1, S.pass_w, S.pass_h, (uint32_t)S.cfmt[0], (uint32_t)g_pass_draws | (g_pass_draws ? (uint32_t)((g_pass_bb[2] - g_pass_bb[0]) & 0xffff) << 16 : 0));  pass_dump(); if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) { setenv("DM_VK_TRACE_PASS", "-1", 1); g_x_tracepass = -1; } }
     if (S.pass_open == 1 && g_lin_back && g_pass_draws) lin_back();
     if (S.pass_open == 1) crumb_mark(0);
-    if (g_rs_pass_scaled && S.pass_open==1 && g_pass_draws && g_rs_recorded_passes<(UINT32_MAX>>7))
+    if (g_rs_pass_scaled && S.pass_open==1 && g_pass_draws && g_rs_recorded_passes<(UINT32_MAX>>7)) {
         g_rs_recorded_passes++;
+        if (atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed) &&
+            (uint64_t)g_rs_raster.pw * g_rs_raster.ph >
+                (uint64_t)g_capture_largest_scaled.pw * g_capture_largest_scaled.ph)
+            g_capture_largest_scaled = g_rs_raster;
+    }
     S.pass_open = 0; S.bound_pipe = VK_NULL_HANDLE; g_tf_in_pass = 0;
     g_rs_pass_scaled = 0;
 }

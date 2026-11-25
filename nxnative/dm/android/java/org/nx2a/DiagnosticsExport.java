@@ -53,7 +53,7 @@ final class DiagnosticsExport {
                         "\nandroid=" + Build.VERSION.RELEASE + "\napi=" + Build.VERSION.SDK_INT +
                         "\nexport_time=" + new Date().toString() + "\n";
                 // No app-wide storage permission, no game content and no on-disk ZIP copy.
-                try (OutputStream stream = activity.getContentResolver().openOutputStream(target, "w")) {
+                try (OutputStream stream = activity.getContentResolver().openOutputStream(target, "wt")) {
                     if (stream == null) throw new IOException("Destination cannot be opened");
                     DiagnosticArchive.write(new File(root), stream, info);
                 }

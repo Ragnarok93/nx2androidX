@@ -126,7 +126,16 @@ depth/stencil attachments with `STORE_OP_NONE`. A separate writable pass
 handles clears and any later depth or stencil writes. This avoids attachment
 store operations racing shader reads of neighboring depth samples.
 
-The standalone Capture graphics action includes bounded full images for one
+The standalone Capture graphics action records scaling and reconstruction
+metadata in memory with no added GPU readbacks. The rolling buffer retains
+4096 source-frame tickets. The ZIP includes the saved mode and range, latched
+target, actual scaled pass geometry, requested and active filters,
+presentation dimensions, fallback reason, and available replay and
+reconstruction timings in `scaling_frames.tsv`. Compare Off, Fixed and
+Adaptive in the same capture. A frame with no certified scaled passes can
+still have a smaller presentation source from the game itself.
+
+The separate GPU snapshots action includes bounded full images for one
 geometry depth/stencil pass, one MRT pass, subsequent effect outputs and the
 source before Android composition. Small effect passes have a separate limit
 so a run of fog passes leaves room for the scene-resolution outputs. The source

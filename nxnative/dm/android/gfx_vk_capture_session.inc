@@ -1,3 +1,6 @@
+#include "gfx_vk_capture_scale.h"
+#include "spatial_upscaler.h"
+
 // The replay thread owns the Vulkan readbacks. The archive worker freezes
 // publication while it reads the files and leaves the session armed on failure.
 enum { CAPTURE_SLOTS = 3, CAPTURE_INTERVAL = 30 };
@@ -10,33 +13,122 @@ static int g_capture_rolling_dump;
 static char g_capture_slot[896];
 static FILE *g_capture_timeline;
 
+// One slot per source-frame ticket. Replay writes the row before enqueueing
+// presentation, which later joins its result to the same ticket.
+enum { SCALE_CAPTURE_FRAMES = 4096 };
+typedef struct {
+    uint64_t ticket;
+    vk_capture_scale_replay_sample replay;
+    vk_capture_scale_present_sample present;
+    int seen_present;
+} scale_capture_row;
+static scale_capture_row *g_scale_capture;
+static uint64_t g_scale_capture_ticket, g_scale_capture_overwritten;
+
+static void capture_scale_replay(uint64_t ticket, vk_capture_scale_replay_sample sample) {
+    pthread_mutex_lock(&g_capture_lock);
+    if (!g_capture_exporting && g_scale_capture && ticket) {
+        scale_capture_row *row = &g_scale_capture[ticket % SCALE_CAPTURE_FRAMES];
+        if (row->ticket && row->ticket != ticket) g_scale_capture_overwritten++;
+        *row = (scale_capture_row){.ticket = ticket, .replay = sample};
+        g_scale_capture_ticket = ticket;
+    }
+    pthread_mutex_unlock(&g_capture_lock);
+}
+
+void vk_capture_scale_present(uint64_t ticket, vk_capture_scale_present_sample sample) {
+    pthread_mutex_lock(&g_capture_lock);
+    if (!g_capture_exporting && g_scale_capture && ticket) {
+        scale_capture_row *row = &g_scale_capture[ticket % SCALE_CAPTURE_FRAMES];
+        if (row->ticket == ticket) {
+            row->present = sample;
+            row->seen_present = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_capture_lock);
+}
+
+static int capture_scale_write(const char *root) {
+    if (!g_scale_capture) return 1;
+    char path[1024], tmp[1024];
+    int n = snprintf(path, sizeof path, "%s/scaling_frames.tsv", root);
+    int m = snprintf(tmp, sizeof tmp, "%s/scaling_frames.tsv.tmp", root);
+    if (n < 0 || (size_t)n >= sizeof path || m < 0 || (size_t)m >= sizeof tmp) return 0;
+    FILE *out = fopen(tmp, "w");
+    if (!out) return 0;
+    fprintf(out, "# overwritten_rows=%llu\n"
+                 "ticket\tmode\tmin_pct\tmax_pct\tlatched_pct\tscaled_passes\tpasses_total\t"
+                 "largest_scaled_logical_w\tlargest_scaled_logical_h\tlargest_scaled_physical_w\t"
+                 "largest_scaled_physical_h\trenderer_available\tgpu_snapshot_in_flight\t"
+                 "replay_cpu_us\tsource_monotonic_us\trecent_replay_gpu_ms\t"
+                 "presentation_seen\trequested_upscaler\tactive_upscaler\tphysical_candidate\t"
+                 "source_w\tsource_h\toutput_w\toutput_h\tgenerated_frames\t"
+                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\n",
+            (unsigned long long)g_scale_capture_overwritten);
+    uint64_t end = g_scale_capture_ticket;
+    uint64_t first = end >= SCALE_CAPTURE_FRAMES ? end - SCALE_CAPTURE_FRAMES + 1 : 1;
+    static const char *const modes[] = {"Off", "Fixed", "Adaptive"};
+    for (uint64_t ticket = first; ticket <= end; ticket++) {
+        const scale_capture_row *row = &g_scale_capture[ticket % SCALE_CAPTURE_FRAMES];
+        if (row->ticket != ticket) continue;
+        const vk_capture_scale_replay_sample *r = &row->replay;
+        const vk_capture_scale_present_sample *p = &row->present;
+        fprintf(out, "%llu\t%s\t%u\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llu\t%.3f\t%d\t"
+                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\n",
+                (unsigned long long)ticket, r->mode < 3 ? modes[r->mode] : "-", r->min, r->max,
+                r->target, r->passes, (unsigned long long)r->passes_total, r->logical_w, r->logical_h,
+                r->physical_w, r->physical_h, r->renderer_available, r->gpu_snapshot,
+                (unsigned long long)(r->cpu_replay_ns / 1000), (unsigned long long)(r->source_time_ns / 1000),
+                r->recent_replay_gpu_ms,
+                row->seen_present, row->seen_present ? spatial_mode_name(p->requested) : "-",
+                row->seen_present ? spatial_mode_name(p->active) : "-", p->physical, p->source_w, p->source_h,
+                p->output_w, p->output_h, p->generated, (unsigned long long)p->timing_ticket, p->gpu_ms,
+                row->seen_present ? (p->reason ? p->reason : "ready") : "no presentation sample");
+    }
+    int ok = !ferror(out);
+    if (fclose(out) || !ok || rename(tmp, path)) {
+        unlink(tmp);
+        return 0;
+    }
+    return 1;
+}
+
 static const char *vk_pass_dump_root(void) {
     if (g_capture_rolling_dump) return g_capture_slot;
     const char *root = getenv("DM_ROOT");
     return root ? root : ".";
 }
 
-int vk_pass_dump_user_begin(int delay) {
+int vk_pass_dump_user_begin(int delay, int full) {
     pthread_mutex_lock(&g_capture_lock);
     if (g_capture_exporting || g_capture_rolling_dump || atomic_load(&g_pd_user_pending)) {
         pthread_mutex_unlock(&g_capture_lock);
         return 0;
     }
+    g_scale_capture = calloc(SCALE_CAPTURE_FRAMES, sizeof *g_scale_capture);
+    if (!g_scale_capture) {
+        pthread_mutex_unlock(&g_capture_lock);
+        return 0;
+    }
+    g_scale_capture_ticket = g_scale_capture_overwritten = 0;
     const char *root = vk_pass_dump_root();
     char path[1024];
     for (unsigned i = 0; i < CAPTURE_SLOTS; i++) {
         snprintf(path, sizeof path, "%s/diagnostic-capture-%u/complete", root, i);
         unlink(path);
     }
+    snprintf(path, sizeof path, "%s/scaling_frames.tsv", root);
+    unlink(path);
     snprintf(path, sizeof path, "%s/capture_timeline.tsv", root);
-    g_capture_timeline = fopen(path, "w");
+    unlink(path);
+    g_capture_timeline = full ? fopen(path, "w") : NULL;
     if (g_capture_timeline)
         fputs("present\tsubmission\tdraws_total\tpasses_total\tdispatches_total\tgeometry\n", g_capture_timeline);
     g_capture_delay = delay + 1; // let the pause overlay leave the screen
     g_capture_next_slot = 0;
     g_capture_next_present = 0;
     g_pd_scene_waited = 0;
-    atomic_store(&g_pd_user_pending, 1);
+    atomic_store(&g_pd_user_pending, full ? CAPTURE_SNAPSHOTS : CAPTURE_SCALING);
     pthread_mutex_unlock(&g_capture_lock);
     return 1;
 }
@@ -47,6 +139,9 @@ int vk_pass_dump_export_begin(void) {
     if (available) {
         g_capture_exporting = 1;
         if (g_capture_timeline) fflush(g_capture_timeline);
+        const char *root = getenv("DM_ROOT");
+        if (!capture_scale_write(root ? root : "."))
+            VKLOG("[diagnostics] could not write scaling_frames.tsv; exporting other reports");
     }
     pthread_mutex_unlock(&g_capture_lock);
     return available;
@@ -58,6 +153,8 @@ void vk_pass_dump_export_end(int saved) {
         atomic_store(&g_pd_user_pending, 0);
         if (g_capture_timeline) fclose(g_capture_timeline);
         g_capture_timeline = NULL;
+        free(g_scale_capture);
+        g_scale_capture = NULL;
     }
     g_capture_exporting = 0;
     pthread_mutex_unlock(&g_capture_lock);
