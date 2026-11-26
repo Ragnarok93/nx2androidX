@@ -11,6 +11,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nx.android.R
+import com.nx.android.core.ui.components.BuilderPage
+import com.nx.android.core.ui.components.Section
 import com.nx.android.appstate.RuntimeUpdatePhase
 import com.nx.android.appstate.RuntimeUpdateState
 import com.nx.android.feature.filepicker.PickerMode
@@ -49,30 +51,21 @@ fun UpgradeScreen(selection: UpgradeSelection, runtime: RuntimeUpdateState,
             selection.companion = runtime.apkData
         }
     }
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Text(stringResource(R.string.app_tab_upgrade), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text(stringResource(R.string.upgrade_description), style = MaterialTheme.typography.bodyMedium)
-        Surface(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)) {
-            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(stringResource(R.string.upgrade_pick_apk), fontWeight = FontWeight.Bold)
-                Text(selection.source.ifBlank { stringResource(R.string.upgrade_no_apk) }, style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(enabled = !busy, onClick = {
-                    onRequest(PickerRequest(PickerMode.FILE, setOf("apk"),
-                        selection.source.takeIf { it.isNotBlank() }?.let { File(it) }, pickTitle,
-                        onPicked = { file ->
-                            if (!runtime.running && runtime.apkUpgrade) runtime.dismiss()
-                            selection.select(file)
-                        }))
-                }) { Text(pickTitle) }
-                HorizontalDivider()
-                Text(stringResource(R.string.upgrade_pick_data), fontWeight = FontWeight.Bold)
-                Text(selection.companion.ifBlank { stringResource(R.string.upgrade_data_optional) }, style = MaterialTheme.typography.bodySmall)
+    BuilderPage {
+        Text(stringResource(R.string.upgrade_description), style = MaterialTheme.typography.bodyLarge)
+        Section(stringResource(R.string.builder_existing_port)) {
+            Text(selection.source.ifBlank { stringResource(R.string.upgrade_no_apk) })
+            OutlinedButton(enabled = !busy, onClick = {
+                onRequest(PickerRequest(PickerMode.FILE, setOf("apk"),
+                    selection.source.takeIf { it.isNotBlank() }?.let { File(it) }, pickTitle,
+                    onPicked = { file ->
+                        if (!runtime.running && runtime.apkUpgrade) runtime.dismiss()
+                        selection.select(file)
+                    }))
+            }) { Text(pickTitle) }
+            HorizontalDivider()
+            Text(selection.companion.ifBlank { stringResource(R.string.upgrade_data_optional) })
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !busy && selection.source.isNotBlank(), onClick = {
                     onRequest(PickerRequest(PickerMode.DIR, emptySet(),
                         selection.companion.takeIf { it.isNotBlank() }?.let { File(it) }
@@ -84,19 +77,17 @@ fun UpgradeScreen(selection: UpgradeSelection, runtime: RuntimeUpdateState,
                         Text(stringResource(R.string.upgrade_clear_data))
                     }
                 }
-                if (selection.source.isNotBlank()) {
-                    Text(stringResource(R.string.upgrade_output, RuntimeUpdateState.upgradedPath(selection.source)),
-                        style = MaterialTheme.typography.bodySmall)
-                }
-                if (!ready) Text(stringResource(R.string.upgrade_prepare_environment), color = MaterialTheme.colorScheme.error)
-                Button(
-                    enabled = !busy && ready && selection.source.isNotBlank(),
-                    onClick = {
-                        onUpgrade(File(selection.source), selection.companion.takeIf { it.isNotBlank() }?.let { File(it) })
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(stringResource(R.string.upgrade_start)) }
             }
+            if (selection.source.isNotBlank()) Text(stringResource(R.string.upgrade_output,
+                RuntimeUpdateState.upgradedPath(selection.source)))
+            if (!ready) Text(stringResource(R.string.upgrade_prepare_environment), color = MaterialTheme.colorScheme.error)
+            Button(
+                enabled = !busy && ready && selection.source.isNotBlank(),
+                onClick = {
+                    onUpgrade(File(selection.source), selection.companion.takeIf { it.isNotBlank() }?.let { File(it) })
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(stringResource(R.string.upgrade_start)) }
         }
         if (runtime.apkUpgrade && runtime.phase != RuntimeUpdatePhase.IDLE) {
             Surface(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,

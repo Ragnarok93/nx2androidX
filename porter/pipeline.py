@@ -598,6 +598,8 @@ class Port:
                  self.o.folder, self.work_root.parent / 'ports',
                  self.o.folder / 'nx2android-ports',
                  Path('/storage/emulated/0/Download/nx2android-ports')]
+        if private_ports := os.environ.get('NX2A_PREVIOUS_PACK_DIR'):
+            roots.append(Path(private_ports))
         seen = set()
         for root in roots:
             root = Path(root)
@@ -1455,7 +1457,7 @@ class Port:
                 archive.unlink(missing_ok=True)
                 if isinstance(e, OSError) and e.errno == errno.ENOSPC:
                     raise BuildError(f'not enough storage while compressing the data pack for the APK '
-                                     f'(output: {self.o.out}); cached compilation is preserved') from e
+                                     f'(output: {self.o.out})') from e
                 raise
             export_mode = self.aw / 'nx2a-export-mode'
             export_mode.write_text('1\n', encoding='ascii')

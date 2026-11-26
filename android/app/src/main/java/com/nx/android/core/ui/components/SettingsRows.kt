@@ -10,13 +10,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nx.android.R
 import com.nx.android.core.ui.theme.NxPalette
+import com.nx.android.core.ui.theme.LocalBuilderTheme
 
 /**
  * 设置页的行：一行一个设置项。
@@ -83,7 +90,7 @@ fun InfoRow(
             Text(
                 value,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (onClick != null) NxPalette.Cream else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (onClick != null) if (LocalBuilderTheme.current) MaterialTheme.colorScheme.onSurface else NxPalette.Cream else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.End,
@@ -125,7 +132,7 @@ fun ChoiceRow(
         Text(
             value,
             style = MaterialTheme.typography.titleMedium,
-            color = NxPalette.Cream,
+            color = if (LocalBuilderTheme.current) MaterialTheme.colorScheme.onSurface else NxPalette.Cream,
             modifier = Modifier
                 .widthIn(min = 80.dp)
                 .clip(RoundedCornerShape(8.dp))
@@ -147,6 +154,24 @@ fun SwitchRow(
     note: String? = null,
     onChange: (Boolean) -> Unit,
 ) {
+    if (LocalBuilderTheme.current) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                if (note != null) Text(note, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(checked, onCheckedChange = null, colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White, uncheckedThumbColor = Color.White))
+        }
+        return
+    }
     Row(
         Modifier.fillMaxWidth().padding(vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -161,7 +186,7 @@ fun SwitchRow(
             if (checked) androidx.compose.ui.res.stringResource(R.string.common_on)
             else androidx.compose.ui.res.stringResource(R.string.common_off),
             style = MaterialTheme.typography.titleMedium,
-            color = if (checked) NxPalette.Cream else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (checked) if (LocalBuilderTheme.current) MaterialTheme.colorScheme.onSurface else NxPalette.Cream else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier
                 .clip(RoundedCornerShape(50.dp))
                 .clickable { onChange(!checked) }
@@ -234,7 +259,7 @@ fun SubtitleRow(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.titleMedium,
-        color = NxPalette.Cream,
+        color = if (LocalBuilderTheme.current) MaterialTheme.colorScheme.onSurface else NxPalette.Cream,
         modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
     )
 }

@@ -57,16 +57,12 @@ data class ForkVersion(
 object UpdateVersion {
 
     /** The fork's own page on GitHub: the source, the issues and the releases all live there */
-    const val REPO_URL = "https://github.com/zFitness/nx2androidX"
+    const val REPO_URL = "https://github.com/Ragnarok93/nx2androidX"
 
-    /** The release page of the fork: it redirects to the newest release's tag */
-    const val RELEASES_LATEST_URL = "$REPO_URL/releases/latest"
-
-    /**
-     * The feed of the fork's releases (Atom): a plain page, no API and no rate limit. Every entry carries a
-     * release's tag and its own notes (the release's text, already rendered into HTML).
-     */
-    const val RELEASES_FEED_URL = "$REPO_URL/releases.atom"
+    /** Configure a release channel here when the fork starts publishing app updates. */
+    private val updateChannel: String? = null
+    val releasesLatestUrl get() = updateChannel?.let { "$it/releases/latest" }
+    val releasesFeedUrl get() = updateChannel?.let { "$it/releases.atom" }
 
     /** The fork's own shape: the base with a stage on it (v0.3.0-alpha02), or the base alone (v0.3.0) */
     private val TAG = Regex("^v?(\\d+)\\.(\\d+)\\.(\\d+)(?:-([a-z]+)(\\d+))?$", RegexOption.IGNORE_CASE)

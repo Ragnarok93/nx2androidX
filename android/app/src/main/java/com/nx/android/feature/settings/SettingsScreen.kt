@@ -1,61 +1,37 @@
 package com.nx.android.feature.settings
 
-import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.android.R
 import com.nx.android.appstate.OnboardingState
 import com.nx.android.feature.storage.StorageViewModel
 import com.nx.android.feature.storage.StorageSection
-import com.nx.android.feature.updates.UpdateViewModel
 import com.nx.android.data.AppLocale
 import com.nx.android.domain.drivers.Driver
 import com.nx.android.domain.drivers.DriverRepository
 import com.nx.android.data.LosslessDll
 import com.nx.android.app.AppActions
+import com.nx.android.core.ui.theme.BuilderThemeMode
+import com.nx.android.core.ui.components.BuilderListRow
+import com.nx.android.core.ui.components.BuilderPage
+import com.nx.android.core.ui.components.Section
 import com.nx.android.core.ui.LocalAppLocale
 import com.nx.android.core.ui.components.ActionRow
 import com.nx.android.core.ui.components.ChoiceRow
@@ -70,13 +46,9 @@ import com.nx.android.core.ui.components.QuietButton
 import com.nx.android.core.ui.components.StatusDot
 import com.nx.android.core.ui.components.SubtitleRow
 import com.nx.android.core.ui.components.SwitchRow
-import com.nx.android.core.ui.components.rememberPageScroll
 import com.nx.android.core.ui.components.step
 import com.nx.android.core.ui.failureText
-import com.nx.android.core.ui.nav.NavKey
-import com.nx.android.core.ui.nav.OnNavKey
 import com.nx.android.core.ui.theme.NxPalette
-import com.nx.android.feature.updates.UpdateCheckRow
 import com.nx.android.feature.updates.openRepo
 import kotlinx.coroutines.launch
 import java.io.File
@@ -108,155 +80,44 @@ enum class SettingsSection(@StringRes val title: Int) {
 }
 
 @Composable
-fun SettingsScreen(ob: OnboardingState, drivers: List<Driver>, driverRepository: DriverRepository, update: UpdateViewModel,
-                   storageViewModel: StorageViewModel,
-                   actions: AppActions, onRequest: (PickerRequest) -> Unit,
-                   onDrivers: () -> Unit,
-                   section: SettingsSection, onSelectSection: (SettingsSection) -> Unit,
-                   onDiagnosticLog: () -> Unit,
-                   onClose: () -> Unit, navActive: Boolean = false) {
-    val scroll = rememberPageScroll()
-    LaunchedEffect(section) { scroll.scrollTo(0) }
-    BackHandler { onClose() }
-    // 手柄的返回键：跟系统的返回键一条路（这一页只做「能关掉」）
-    OnNavKey(enabled = navActive) { key ->
-        if (key == NavKey.Back) onClose()
-    }
-
-    // 它是一页，不是一个浮在上面的东西：整块盖住，连边框圆角都不留
-    Box(Modifier.fillMaxSize().background(NxPalette.Surface)) {
-        Column(
-            Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            // 页头：这一页自己的名字与出去的入口
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    stringResource(R.string.app_tab_settings),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f),
-                )
-                CloseIcon(onClose)
+fun SettingsScreen(
+    ob: OnboardingState, drivers: List<Driver>, driverRepository: DriverRepository,
+    storageViewModel: StorageViewModel, actions: AppActions, onRequest: (PickerRequest) -> Unit,
+    onDrivers: () -> Unit, section: SettingsSection?, onSelectSection: (SettingsSection) -> Unit,
+    theme: BuilderThemeMode, onTheme: (BuilderThemeMode) -> Unit,
+) {
+    BuilderPage {
+        if (section == null) {
+            Section(stringResource(R.string.builder_setup)) {
+                val items = listOf(SettingsSection.ENVIRONMENT to R.string.builder_setup_environment,
+                    SettingsSection.STORAGE to R.string.builder_setup_storage,
+                    SettingsSection.DRIVERS to R.string.builder_setup_drivers)
+                items.forEachIndexed { index, (item, summary) ->
+                    if (index > 0) HorizontalDivider()
+                    BuilderListRow(stringResource(item.title), stringResource(summary)) { onSelectSection(item) }
+                }
             }
-            // On a phone the old 150.dp navigation rail left less than 200.dp
-            // for controls. Use scrolling section chips above full-width
-            // content; retain the rail on tablets and landscape screens.
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                if (maxWidth < 640.dp) {
-                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            SettingsSection.entries.forEach { s ->
-                                CompactSectionItem(stringResource(s.title), s == section) { onSelectSection(s) }
-                            }
-                        }
-                        Column(
-                            Modifier.fillMaxWidth().weight(1f).verticalScroll(scroll),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            SettingsSectionContent(section, ob, drivers, driverRepository, update,
-                                storageViewModel, actions, onRequest, onDrivers, onDiagnosticLog)
-                        }
-                    }
-                } else {
-                    Row(Modifier.fillMaxSize()) {
-                        Column(
-                            Modifier.width(150.dp).fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            SettingsSection.entries.forEach { s ->
-                                RailItem(stringResource(s.title), s == section) { onSelectSection(s) }
-                            }
-                        }
-                        Spacer(Modifier.width(16.dp))
-                        Column(
-                            Modifier.weight(1f).fillMaxHeight().verticalScroll(scroll),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            SettingsSectionContent(section, ob, drivers, driverRepository, update,
-                                storageViewModel, actions, onRequest, onDrivers, onDiagnosticLog)
-                        }
-                    }
+            Section(stringResource(R.string.builder_preferences)) {
+                BuilderListRow(stringResource(SettingsSection.DISPLAY.title), stringResource(R.string.builder_setup_display)) {
+                    onSelectSection(SettingsSection.DISPLAY)
+                }
+                HorizontalDivider()
+                BuilderListRow(stringResource(SettingsSection.ABOUT.title), stringResource(R.string.builder_setup_about)) {
+                    onSelectSection(SettingsSection.ABOUT)
+                }
+            }
+        } else {
+            Section(stringResource(R.string.builder_preferences)) {
+                when (section) {
+                    SettingsSection.ENVIRONMENT -> EnvironmentSection(ob, actions, onRequest)
+                    SettingsSection.STORAGE -> StorageSection(storageViewModel)
+                    SettingsSection.DRIVERS -> DriversSection(drivers, driverRepository, actions, onRequest, onDrivers)
+                    SettingsSection.DISPLAY -> DisplaySection(actions, onRequest, theme, onTheme)
+                    SettingsSection.ABOUT -> AboutSection(ob, actions)
                 }
             }
         }
     }
-}
-
-/** Full-width phone content and desktop-rail content share the same state. */
-@Composable
-private fun SettingsSectionContent(
-    section: SettingsSection,
-    ob: OnboardingState,
-    drivers: List<Driver>,
-    driverRepository: DriverRepository,
-    update: UpdateViewModel,
-    storageViewModel: StorageViewModel,
-    actions: AppActions,
-    onRequest: (PickerRequest) -> Unit,
-    onDrivers: () -> Unit,
-    onDiagnosticLog: () -> Unit,
-) {
-    when (section) {
-        SettingsSection.ENVIRONMENT -> EnvironmentSection(ob, actions, onRequest, onDiagnosticLog)
-        SettingsSection.STORAGE -> StorageSection(storageViewModel)
-        SettingsSection.DRIVERS -> DriversSection(drivers, driverRepository, actions, onRequest, onDrivers)
-        SettingsSection.DISPLAY -> DisplaySection(actions, onRequest)
-        SettingsSection.ABOUT -> AboutSection(ob, update, actions)
-    }
-}
-
-/** A single-line, touch-friendly section chip for portrait screens. */
-@Composable
-private fun CompactSectionItem(label: String, selected: Boolean, onClick: () -> Unit) {
-    Text(
-        label,
-        style = MaterialTheme.typography.titleMedium,
-        color = if (selected) NxPalette.Background else MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 1,
-        modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (selected) NxPalette.Cream else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-    )
-}
-
-/** 页头的关闭：一个圆按钮里的叉 */
-@Composable
-private fun CloseIcon(onClick: () -> Unit) {
-    Box(
-        Modifier.clip(RoundedCornerShape(50)).clickable(onClick = onClick).padding(10.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            Icons.Filled.Close,
-            stringResource(R.string.common_close),
-            Modifier.size(22.dp),
-            tint = MaterialTheme.colorScheme.onBackground,
-        )
-    }
-}
-
-/** 左栏的一个分区条目 */
-@Composable
-private fun RailItem(label: String, selected: Boolean, onClick: () -> Unit) {
-    Text(
-        label,
-        style = MaterialTheme.typography.titleMedium,
-        color = if (selected) NxPalette.Background else MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 2,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (selected) NxPalette.Cream else Color.Transparent)
-            .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    )
 }
 
 /**
@@ -265,8 +126,7 @@ private fun RailItem(label: String, selected: Boolean, onClick: () -> Unit) {
  * 环境检查的入口是顶栏的胶囊（另有一处），这一行是设置页里改路径的地方。
  */
 @Composable
-private fun EnvironmentSection(ob: OnboardingState, actions: AppActions, onRequest: (PickerRequest) -> Unit,
-                               onDiagnosticLog: () -> Unit) {
+private fun EnvironmentSection(ob: OnboardingState, actions: AppActions, onRequest: (PickerRequest) -> Unit) {
     val locale = LocalAppLocale.current
     var confirmReset by remember { mutableStateOf(false) }
 
@@ -280,7 +140,7 @@ private fun EnvironmentSection(ob: OnboardingState, actions: AppActions, onReque
         },
         leading = {
             if (ob.unpacking) {
-                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = NxPalette.Cream)
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
             } else {
                 StatusDot(if (ob.envReady) NxPalette.Ready else NxPalette.Danger)
             }
@@ -307,13 +167,6 @@ private fun EnvironmentSection(ob: OnboardingState, actions: AppActions, onReque
         onClear = { actions.onClearFirmware() },
     )
     FirmwareHint()
-    ActionRow(title = stringResource(R.string.settings_diagnostic_log), label = stringResource(R.string.builds_log_view),
-        onClick = onDiagnosticLog)
-    ActionRow(title = stringResource(R.string.settings_diagnostic_log), label = stringResource(R.string.common_share),
-        onClick = actions.onShareLog)
-    ActionRow(title = stringResource(R.string.settings_diagnostic_log), label = stringResource(R.string.common_delete),
-        onClick = actions.onClearLog)
-
     if (confirmReset) {
         AlertDialog(
             onDismissRequest = { confirmReset = false },
@@ -401,7 +254,22 @@ private fun DriversSection(drivers: List<Driver>, repository: DriverRepository, 
  * 选择后校验并复制（不内置、不下载）。
  */
 @Composable
-private fun DisplaySection(actions: AppActions, onRequest: (PickerRequest) -> Unit) {
+private fun DisplaySection(
+    actions: AppActions, onRequest: (PickerRequest) -> Unit,
+    theme: BuilderThemeMode, onTheme: (BuilderThemeMode) -> Unit,
+) {
+    val modes = BuilderThemeMode.entries.toList()
+    ChoiceRow(
+        title = stringResource(R.string.builder_theme),
+        value = stringResource(when (theme) {
+            BuilderThemeMode.SYSTEM -> R.string.set_language_system
+            BuilderThemeMode.LIGHT -> R.string.builder_theme_light
+            BuilderThemeMode.DARK -> R.string.builder_theme_dark
+        }),
+        onPrev = { onTheme(step(modes, theme, -1)) },
+        onNext = { onTheme(step(modes, theme, 1)) },
+    )
+    HorizontalDivider()
     val locale = LocalAppLocale.current
     val context = androidx.compose.ui.platform.LocalContext.current
     var model by remember { mutableStateOf(LosslessDll.ensure(context)?.absolutePath) }
@@ -432,7 +300,7 @@ private fun DisplaySection(actions: AppActions, onRequest: (PickerRequest) -> Un
  * 语言是 App 自己的语言，跟游戏自己的语言是两件事：游戏的语言在库页的抽屉里，一个游戏一个。
  */
 @Composable
-private fun AboutSection(ob: OnboardingState, update: UpdateViewModel, actions: AppActions) {
+private fun AboutSection(ob: OnboardingState, actions: AppActions) {
     val ctx = LocalContext.current
     val locale = LocalAppLocale.current
     // 文件管理器能不能看见 App 的私有目录（运行时、存档、日志）。这一份跟着设置走。
@@ -442,7 +310,7 @@ private fun AboutSection(ob: OnboardingState, update: UpdateViewModel, actions: 
     InfoRow(title = stringResource(R.string.set_version), value = actions.version(), onClick = { openRepo(ctx) })
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
     // 有没有新版本：玩家自己查一次，结果当场摆出来
-    UpdateCheckRow(update)
+    InfoRow(title = stringResource(R.string.builder_update_checks), note = stringResource(R.string.builder_updates_disabled))
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
     // 界面语言：玩家选的那个，没选就是跟随系统。换了立刻生效（整棵树读的资源换一份）
     val modes = AppLocale.Mode.entries.toList()

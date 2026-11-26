@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -98,6 +99,12 @@ fun GlassPanel(
     contentPadding: androidx.compose.ui.unit.Dp = 16.dp,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    if (LocalBuilderTheme.current) {
+        Surface(modifier, shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface) {
+            androidx.compose.foundation.layout.Column(Modifier.padding(contentPadding), content = content)
+        }
+        return
+    }
     Box(modifier.clip(shape).border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape)) {
         Box(
             Modifier
@@ -132,6 +139,12 @@ fun GlassSheet(
     shape: Shape = RoundedCornerShape(20.dp),
     content: @Composable BoxScope.() -> Unit,
 ) {
+    if (LocalBuilderTheme.current) {
+        Surface(modifier, shape = shape, color = MaterialTheme.colorScheme.surface) {
+            Box(content = content)
+        }
+        return
+    }
     Box(
         modifier
             .clip(shape)

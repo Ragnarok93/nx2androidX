@@ -8,10 +8,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from porter import datapack, pipeline
+from porter import cli, datapack, pipeline
+from porter.upstream import BuildError, nsp
 
 
 class ApkStorageRecoveryTests(unittest.TestCase):
+    def test_tool_kill_propagates_as_interruption(self):
+        for code, expected in ((-9, 137), (-15, 143), (1, 1), (-11, 1)):
+            with self.subTest(code=code):
+                def build():
+                    try:
+                        raise nsp.BuildToolError("compiler stopped", code)
+                    except BuildError as error:
+                        raise BuildError("stage failed") from error
+                self.assertEqual(cli._with_progress("off", build), expected)
+
     def test_standalone_pack_is_staged_in_private_workspace(self):
         with tempfile.TemporaryDirectory() as root:
             port = object.__new__(pipeline.Port)

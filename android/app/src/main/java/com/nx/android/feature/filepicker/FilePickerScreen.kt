@@ -95,7 +95,7 @@ fun FilePickerScreen(req: PickerRequest, volumes: List<Pair<String, File>>, stor
 
     BackHandler { onCancel() }
 
-    Column(Modifier.fillMaxSize().background(NxPalette.Background)) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         PickerTopBar(req.title, current, volumes, canGoUp, onUp = {
             current = browsed.parentFile ?: browsed
         }, onVolume = { current = it })
@@ -158,7 +158,7 @@ private fun PickerTopBar(title: String, current: File, volumes: List<Pair<String
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(48.dp).clip(RoundedCornerShape(50)).background(NxPalette.Surface)
+            Modifier.size(48.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surface)
                 .clickable(enabled = canGoUp, onClick = onUp),
             contentAlignment = Alignment.Center,
         ) {
@@ -177,7 +177,7 @@ private fun PickerTopBar(title: String, current: File, volumes: List<Pair<String
         if (volumes.size > 1) {
             Box {
                 Row(
-                    Modifier.clip(RoundedCornerShape(50)).background(NxPalette.Surface)
+                    Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surface)
                         .clickable { volumeMenu = true }
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -197,7 +197,7 @@ private fun PickerTopBar(title: String, current: File, volumes: List<Pair<String
                             text = {
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     if (on) Icon(Icons.Filled.Check, null, Modifier.size(16.dp), tint = NxPalette.Ready)
-                                    Text(label, color = if (on) NxPalette.Cream else MaterialTheme.colorScheme.onBackground)
+                                    Text(label, color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onBackground)
                                 }
                             },
                             onClick = {
@@ -227,14 +227,14 @@ private fun PickerTile(
 ) {
     Column(
         Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(14.dp))
-            .background(NxPalette.Surface)
+            .background(MaterialTheme.colorScheme.surface)
             .clickable(enabled = actionable, onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(pickerIcon(directory), null, Modifier.size(20.dp),
-                tint = if (actionable) NxPalette.Cream else NxPalette.Unbuilt)
+                tint = if (actionable) MaterialTheme.colorScheme.primary else NxPalette.Unbuilt)
             if (picked) {
                 Spacer(Modifier.width(6.dp))
                 Icon(Icons.Filled.Check, null, Modifier.size(16.dp), tint = NxPalette.Ready)

@@ -30,8 +30,8 @@ object UpdateChecker {
      */
     suspend fun latestTag(): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val finalUrl = head(UpdateVersion.RELEASES_LATEST_URL)
-                ?: get(UpdateVersion.RELEASES_LATEST_URL)
+            val url = UpdateVersion.releasesLatestUrl ?: throw IOException("No update channel configured")
+            val finalUrl = head(url) ?: get(url)
                 ?: throw IOException("no answer")
             UpdateVersion.tagFromUrl(finalUrl) ?: throw IOException("no tag in $finalUrl")
         }
@@ -55,7 +55,10 @@ object UpdateChecker {
      * no API's rate limit - asked only when there is a new version to describe.
      */
     suspend fun releaseFeed(): Result<String> = withContext(Dispatchers.IO) {
-        runCatching { body(UpdateVersion.RELEASES_FEED_URL) ?: throw IOException("no answer") }
+        runCatching {
+            val url = UpdateVersion.releasesFeedUrl ?: throw IOException("No update channel configured")
+            body(url) ?: throw IOException("no answer")
+        }
     }
 
     /** The page's own text; a failure is a failure - the caller stays quiet about it */

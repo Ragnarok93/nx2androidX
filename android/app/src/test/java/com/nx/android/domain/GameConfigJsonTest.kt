@@ -94,4 +94,15 @@ class GameConfigJsonTest {
         assertEquals(legacy, configs["0100000000020000"])
         assertFalse(configs.containsKey("game.nsp"))
     }
+    @Test
+    fun `a new build keeps output preferences and drops previous overrides`() {
+        val snapshot = GameConfig(touch = true, fps60 = true, experimental = true,
+            allowDamagedMedia = true, aliasHeadroom = 16, sharedFont = "/sdcard/custom.ttf",
+            mtReplay = true, vulkanDriver = "/sdcard/driver.so")
+        assertEquals(GameConfig(touch = true, fps60 = true), snapshot.forNewBuilderDraft())
+        assertTrue(snapshot.mtReplay)
+        assertTrue(snapshot.diagnosticVariables().contains("sharedFont=[redacted]"))
+        assertFalse(snapshot.diagnosticVariables().contains("custom.ttf"))
+    }
+
 }

@@ -32,6 +32,7 @@ class PrefsStore @Inject constructor(@ApplicationContext ctx: Context) {
         const val LEGACY_EXPERIMENTAL = "experimental"
         // the app's own language: "" follows the phone, "zh" and "en" are the player's own choice
         const val LANG = "lang"
+        const val BUILDER_THEME = "builder.theme"
         // the library's memory
         const val LIB_CONFIGS = "lib.configs"
         const val LIB_PORTS = "lib.ports"

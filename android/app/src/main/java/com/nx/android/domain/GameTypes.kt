@@ -64,6 +64,20 @@ data class GameConfig(
     val allowDamagedMedia: Boolean = false,
 )
 
+/** Keep regular output options and begin every source selection or retry with fresh overrides. */
+fun GameConfig.forNewBuilderDraft() = GameConfig(touch = touch, fps60 = fps60)
+
+internal val buildAliasChoices = listOf(ALIAS_AUTO, 0, 8, 16, 24, 32, 48)
+
+/** Allowlisted effective values for diagnostic exports, with local paths masked. */
+internal fun GameConfig.diagnosticVariables(): String = buildString {
+    appendLine("experimental=$experimental")
+    appendLine("allowDamagedMedia=$allowDamagedMedia")
+    appendLine("aliasHeadroom=${if (aliasHeadroom == ALIAS_AUTO) "Auto" else aliasHeadroom}")
+    appendLine("sharedFont=${if (sharedFont.isEmpty()) "Bundled" else "[redacted]"}")
+    appendLine("mtReplay=$mtReplay")
+}
+
 /**
  * 按游戏配置的存取：JSON 一个游戏一条。纯值，不碰 Android，测试跑在 JVM 上。
  * 旧版本存下的配置没有 "alias" 这一项，读出来是 Auto，构建行为与那时一致；

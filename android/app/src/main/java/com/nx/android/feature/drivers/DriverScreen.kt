@@ -96,7 +96,7 @@ fun DriverScreen(
                         }
                         if (working) {
                             LinearProgressIndicator(progress = { state.progress }, modifier = Modifier.fillMaxWidth(),
-                                color = NxPalette.Cream)
+                                color = MaterialTheme.colorScheme.primary)
                         }
                     }
                     state.message?.let { result ->
@@ -106,7 +106,7 @@ fun DriverScreen(
                                 failureText(locale, result.cause))
                         }
                         Text(text, Modifier.clickable(onClick = onDismissMessage),
-                            style = MaterialTheme.typography.bodySmall, color = NxPalette.Cream)
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                     }
                     Spacer(Modifier.height(4.dp))
                 }

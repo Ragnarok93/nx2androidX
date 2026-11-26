@@ -91,6 +91,9 @@ class PortService : Service() {
 
     @Inject lateinit var operations: com.nx.android.appstate.LibraryOperationCoordinator
 
+    @Inject lateinit var workspaces: com.nx.android.data.porting.BuildWorkspaces
+    @Inject lateinit var buildSessions: com.nx.android.data.porting.BuildSessionRepository
+
     private var runner: PortRunner? = null
     private lateinit var nm: NotificationManager
     @Inject
@@ -124,21 +127,14 @@ class PortService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // The cancel comes as a plain Intent: kill the porter first, then mark the state, then end the service
-        // 取消是一条普通 Intent：先杀掉移植器，再标记状态，最后结束服务
+        // Keep the service alive until the worker has stopped and discarded the workspace.
         if (intent?.action == ACTION_CANCEL) {
-            val cancelled = runner
-            val cancelledId = port.buildId
-            runner = null
-            port.cancel()
-            cancelled?.cancel()
-            port.history.firstOrNull { it.id == cancelledId }?.let(completionCoordinator::complete)
-            stopShown()
-            stopSelf(startId)
+            runner?.cancel()
+            if (runner == null) stopSelf(startId)
             return START_NOT_STICKY
         }
         val game = intent?.getStringExtra(GAME) ?: return stop()
-        if (port.running) return START_NOT_STICKY
+        if (port.running || runner != null) return START_NOT_STICKY
         if (com.nx.android.data.Player.playProcessAlive(this)) {
             startForeground(1, notification())
             stopShown()
@@ -188,10 +184,16 @@ class PortService : Service() {
                 intent.getBooleanExtra(MT, false),
                 intent.getStringExtra(DRIVER) ?: "",
                 intent.getBooleanExtra("allowDamagedMedia", false),
-            ) {
+                workspaces, paths.ports, buildSessions.stageLogDirectory(taskId),
+            ) { interrupted, cancelled ->
                 handler.post {
                     if (runner === taskRunner) {
-                        port.finish()
+                        runner = null
+                        when {
+                            cancelled -> port.cancel()
+                            interrupted -> port.markInterrupted()
+                            else -> port.finish()
+                        }
                         port.history.firstOrNull { it.id == taskId }?.let(completionCoordinator::complete)
                         nm.notify(1, notification())
                         stopShown()

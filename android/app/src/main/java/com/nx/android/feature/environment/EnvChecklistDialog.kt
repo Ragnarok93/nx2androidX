@@ -49,6 +49,7 @@ import com.nx.android.core.ui.components.FirmwareHint
 import com.nx.android.core.ui.components.QuietButton
 import com.nx.android.core.ui.components.StatusDot
 import com.nx.android.core.ui.theme.NxPalette
+import com.nx.android.core.ui.theme.LocalBuilderTheme
 
 /**
  * The checklist behind the top bar's chip: the two cheap checks and the doctor's rows.
@@ -84,7 +85,7 @@ fun EnvChecklistDialog(
             Modifier.widthIn(max = 520.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp))
-                .background(NxPalette.Surface.copy(alpha = 0.9f))
+                .background((if (LocalBuilderTheme.current) MaterialTheme.colorScheme.surface else NxPalette.Surface).copy(alpha = 0.9f))
                 .clickable(enabled = false) {},
         ) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -135,7 +136,7 @@ fun EnvChecklistDialog(
                     when {
                         state.running -> Row(verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = NxPalette.Cream)
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = (if (LocalBuilderTheme.current) MaterialTheme.colorScheme.primary else NxPalette.Cream))
                             Text(stringResource(R.string.runner_checking_tools), style = MaterialTheme.typography.bodySmall,
                                  color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -151,7 +152,7 @@ fun EnvChecklistDialog(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (state.running) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = NxPalette.Cream)
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = (if (LocalBuilderTheme.current) MaterialTheme.colorScheme.primary else NxPalette.Cream))
                     } else {
                         QuietButton(stringResource(R.string.env_check_recheck), viewModel::runDoctor, enabled = canRun(state, portRunning))
                     }

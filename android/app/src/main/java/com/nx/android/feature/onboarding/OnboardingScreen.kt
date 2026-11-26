@@ -124,7 +124,7 @@ internal fun OnboardingContent(uiState: OnboardingUiState, actions: OnboardingAc
                         .background(
                             when {
                                 i < uiState.step.ordinal -> NxPalette.Ready
-                                i == uiState.step.ordinal -> NxPalette.Cream
+                                i == uiState.step.ordinal -> MaterialTheme.colorScheme.primary
                                 else -> NxPalette.Unbuilt.copy(alpha = 0.4f)
                             },
                             RoundedCornerShape(50)

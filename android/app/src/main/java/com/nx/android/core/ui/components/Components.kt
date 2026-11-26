@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import com.nx.android.R
 import com.nx.android.core.ui.theme.GlassPanel
 import com.nx.android.core.ui.theme.NxPalette
+import com.nx.android.core.ui.theme.LocalBuilderTheme
 
 /** A titled section: the screen is a few glass cards, each with its heading */
 @Composable
@@ -67,10 +69,10 @@ fun CapsuleButton(
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
-            disabledContainerColor = NxPalette.Surface,
-            disabledContentColor = NxPalette.Unbuilt,
+            disabledContainerColor = if (LocalBuilderTheme.current) MaterialTheme.colorScheme.surfaceContainer else NxPalette.Surface,
+            disabledContentColor = if (LocalBuilderTheme.current) MaterialTheme.colorScheme.onSurfaceVariant else NxPalette.Unbuilt,
         ),
-        modifier = modifier.height(46.dp),
+        modifier = if (LocalBuilderTheme.current) modifier.heightIn(min = 48.dp) else modifier.height(46.dp),
     ) {
         Text(text, fontWeight = FontWeight.Bold, fontSize = 15.sp)
     }
@@ -94,7 +96,7 @@ fun QuietButton(
         onClick = onClick,
         enabled = enabled,
         shape = RoundedCornerShape(50),
-        modifier = modifier.height(44.dp),
+        modifier = if (LocalBuilderTheme.current) modifier.heightIn(min = 48.dp) else modifier.height(44.dp),
     ) {
         if (trailing == null) {
             Text(text, fontSize = 14.sp)

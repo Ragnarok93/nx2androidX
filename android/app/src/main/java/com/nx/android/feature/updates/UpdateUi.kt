@@ -46,7 +46,7 @@ import com.nx.android.core.ui.theme.NxPalette
  */
 fun openReleases(context: Context) {
     try {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(UpdateVersion.RELEASES_LATEST_URL)))
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(UpdateVersion.releasesLatestUrl ?: return)))
     } catch (e: Exception) {
         // 没有浏览器：App 里没有别的路可以走到那里，安静地过去
     }

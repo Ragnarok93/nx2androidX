@@ -132,4 +132,23 @@ class LogBundleTest {
         val mem = LogBundle.memoryText()   // no /proc here: it must not throw
         if (File("/proc/meminfo").isFile) assertTrue("the memory is in it: $mem", mem.contains("MemTotal"))
     }
+    @Test
+    fun `captures stop and option paths are removed from bundle entries`() {
+        val secret = "/storage/My fonts/game.ttf"
+        val log = tmpFile("log.txt", "")
+        AppLog.init(log)
+        AppLog.startCapture()
+        AppLog.line("font=$secret")
+        val capture = AppLog.stopCapture()
+        AppLog.line("message after stop")
+        assertEquals(capture, AppLog.stopCapture())
+        val zip = LogBundle.build("device", "test", tmp("work"), emptyList(), tmp("out"),
+            diagnostics = listOf("capture.txt" to capture), sensitiveValues = listOf(secret))
+        ZipFile(checkNotNull(zip)).use { bundle ->
+            fun entry(name: String) = bundle.getInputStream(bundle.getEntry(name)).bufferedReader().use { it.readText() }
+            assertEquals("font=[redacted]\n", entry("capture.txt"))
+            assertTrue(entry("log.txt").contains("font=[redacted]"))
+        }
+    }
+
 }

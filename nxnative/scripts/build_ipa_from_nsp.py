@@ -62,6 +62,12 @@ class BuildError(Exception):
     pass
 
 
+class BuildToolError(BuildError):
+    def __init__(self, message, returncode):
+        super().__init__(message)
+        self.returncode = returncode
+
+
 def clock():
     return time.strftime('%H:%M:%S')
 
@@ -342,7 +348,8 @@ def run(cmd, log, env=None, cwd=None, on_line=None):
         if reds: PROG.say(f'---- red lines of {log} ----\n' + '\n'.join(reds[-20:]))
         PROG.say(f'---- last lines of {log} ----\n' + ''.join(tail).rstrip('\n'))
         tool = Path(cmd[1] if cmd[0] in (sys.executable, 'bash') else cmd[0]).name
-        raise BuildError(f'{tool} exit code {p.returncode}' + (f': {reds[-1]}' if reds else '') + f' (full output: {log})')
+        detail = f'{tool} exit code {p.returncode}' + (f': {reds[-1]}' if reds else '') + f' (full output: {log})'
+        raise BuildToolError(detail, p.returncode)
 
 
 def build_id(nso):

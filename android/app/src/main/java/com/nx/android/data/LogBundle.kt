@@ -37,14 +37,22 @@ object LogBundle {
      * @param buildLogs the logs to share under "builds/", named for their entries
      * @param tag what the bundle is about (the game, the build), for the file's name
      */
-    fun build(context: Context, work: File, buildLogs: List<Pair<String, File>>, out: File, tag: String = ""): File? =
-        build(deviceText(context), AppVersion.of(context), work, buildLogs, out, tag, File(context.filesDir, "nx2a/port_exit.txt"))
+    fun build(
+        context: Context, work: File, buildLogs: List<Pair<String, File>>, out: File, tag: String = "",
+        diagnostics: List<Pair<String, String>> = emptyList(), sensitiveValues: List<String> = emptyList(),
+        preservedStages: List<Pair<String, File>> = emptyList(),
+    ): File? = build(deviceText(context), AppVersion.of(context), work, buildLogs, out, tag,
+        File(context.filesDir, "nx2a/port_exit.txt"), diagnostics, sensitiveValues, preservedStages)
 
     /** The bundle itself: the device's facts as text (the app's own context gives them) */
-    fun build(device: String, version: String, work: File, buildLogs: List<Pair<String, File>>, out: File, tag: String = "", portStatus: File? = null): File? {
-        val stages = stageLogs(work)
+    fun build(
+        device: String, version: String, work: File, buildLogs: List<Pair<String, File>>, out: File,
+        tag: String = "", portStatus: File? = null, diagnostics: List<Pair<String, String>> = emptyList(),
+        sensitiveValues: List<String> = emptyList(), preservedStages: List<Pair<String, File>> = emptyList(),
+    ): File? {
+        val stages = stageLogs(work) + preservedStages.map { (name, file) -> "stage-logs/$name" to file }
         val main = AppLog.logFile()?.takeIf { it.isFile && it.length() > 0 }   // an empty log is no log
-        if (stages.isEmpty() && buildLogs.isEmpty() && main == null) return null
+        if (stages.isEmpty() && buildLogs.isEmpty() && main == null && diagnostics.isEmpty()) return null
         out.mkdirs()
         out.listFiles()?.filter { it.isFile && it.lastModified() < System.currentTimeMillis() - KEEP_MILLIS }
             ?.forEach { it.delete() }
@@ -55,7 +63,8 @@ object LogBundle {
         val texts = mutableListOf("device.txt" to device)
         // how the last port ended: a port the system killed (out of memory) says so here, the porter itself had no chance to write it
         portStatus?.takeIf { it.isFile && it.length() > 0 }?.let { texts.add("port.txt" to it.readText()) }
-        return pack(out, fileName(version, tag), texts, files)
+        texts.addAll(diagnostics)
+        return pack(out, fileName(version, tag), texts, files, sensitiveValues)
     }
 
     /**
@@ -75,13 +84,18 @@ object LogBundle {
     }
 
     /** Writes the zip: the texts as they are, the files capped (a big one gives its tail) */
-    private fun pack(out: File, name: String, texts: List<Pair<String, String>>, files: List<Triple<String, File, Long>>): File? {
+    private fun pack(
+        out: File, name: String, texts: List<Pair<String, String>>, files: List<Triple<String, File, Long>>,
+        sensitiveValues: List<String> = emptyList(),
+    ): File? {
+        val masks = sensitiveValues.filter(String::isNotEmpty).distinct().sortedByDescending(String::length)
+        fun redact(text: String): String = masks.fold(text) { value, sensitive -> value.replace(sensitive, "[redacted]") }
         out.mkdirs()
         val zip = File(out, name)
         return try {
             ZipOutputStream(zip.outputStream().buffered()).use { zos ->
-                for ((n, t) in texts) putText(zos, n, t)
-                for ((n, f, limit) in files) put(zos, n, f, limit)
+                for ((n, t) in texts) putText(zos, n, redact(t))
+                for ((n, f, limit) in files) put(zos, n, f, limit, if (masks.isEmpty()) null else ::redact)
             }
             zip
         } catch (e: Exception) {
@@ -227,11 +241,25 @@ object LogBundle {
      * Writes a file as an entry: the whole file, or its last limit bytes when it is bigger (a log's
      * beginning is the least interesting part).
      */
-    private fun put(zos: ZipOutputStream, name: String, file: File, limit: Long) {
+    private fun put(zos: ZipOutputStream, name: String, file: File, limit: Long, redact: ((String) -> String)?) {
         if (!file.isFile) return
         val len = file.length()
         zos.putNextEntry(ZipEntry(name))
-        if (len <= limit) {
+        if (redact != null) {
+            RandomAccessFile(file, "r").use { raf ->
+                val start = (len - limit).coerceAtLeast(0)
+                raf.seek((start - 1).coerceAtLeast(0))
+                val startsOnNewline = start == 0L || raf.read() == '\n'.code
+                val bytes = ByteArray((len - start).toInt())
+                raf.readFully(bytes)
+                // Suppress partial lines at the start of a capped tail before looking for secrets.
+                val offset = if (startsOnNewline) 0 else bytes.indexOf('\n'.code.toByte()).let {
+                    if (it < 0) bytes.size else it + 1
+                }
+                val text = String(bytes, offset, bytes.size - offset, Charsets.UTF_8)
+                zos.write(redact(text).toByteArray(Charsets.UTF_8))
+            }
+        } else if (len <= limit) {
             file.inputStream().use { it.copyTo(zos) }
         } else {
             RandomAccessFile(file, "r").use { raf ->

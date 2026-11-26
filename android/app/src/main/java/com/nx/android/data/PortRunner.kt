@@ -5,6 +5,7 @@ import com.nx.android.R
 import com.nx.android.domain.GameSource
 import com.nx.android.domain.environment.EnvironmentSetup
 import com.nx.android.domain.environment.GuestProcessLauncher
+import com.nx.android.data.porting.BuildWorkspaces
 import java.io.File
 
 /**
@@ -30,13 +31,35 @@ class PortRunner(
         sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
         vulkanDriver: String = "",
         allowDamagedMedia: Boolean = false,
-        onEnd: () -> Unit,
+        workspaces: BuildWorkspaces,
+        privatePorts: File,
+        diagnostics: File,
+        onEnd: (interrupted: Boolean, cancelled: Boolean) -> Unit,
     ): Thread {
         val args = portArgs(gameFile, keys, touch, fps60, experimental, aliasHeadroom, !BuildConfig.NX_LSFG,
             sharedFont, firmware, mtReplay, deviceLanguage(), vulkanDriver, allowDamagedMedia)
         // A file in a netdisk's folder is not there yet in its middle: the port would read it as a broken dump
         GameSource.cloudFolder(gameFile)?.let { onLine(locale.str(R.string.runner_cloud_folder, it)) }
-        return start(args, onEnd)
+        return Thread {
+            var workspace: File? = null
+            var code: Int? = null
+            try {
+                workspace = workspaces.prepare(gameFile)
+                if (!cancelled) code = runGuest(args, mapOf(
+                    "NX2A_WORK" to workspace.absolutePath,
+                    "NX2A_PREVIOUS_PACK_DIR" to privatePorts.absolutePath,
+                ))
+            } catch (e: Exception) {
+                onLine("[RED] ${e.message}")
+            } finally {
+                val requestedCancel = cancelled
+                val interrupted = !requestedCancel && isInterruptedExit(code)
+                if (!interrupted && workspace != null) {
+                    workspaces.discard(workspace, diagnostics) { onLine("[RED] $it") }
+                }
+                onEnd(interrupted, requestedCancel)
+            }
+        }.also(Thread::start)
     }
 
     /**
@@ -60,6 +83,8 @@ class PortRunner(
          * The player's own overrides: the system font (a .ttf; empty = the app's own, which has the CJK
          * glyphs), the firmware dump's system content folder (empty = none) and the multithread replay.
          */
+        internal fun isInterruptedExit(code: Int?): Boolean = code == 130 || code == 137 || code == 143 || code == 129
+
         fun portArgs(gameFile: String, keys: String, touch: Boolean, fps60: Boolean,
                      experimental: Boolean, aliasHeadroom: Int, noLsfg: Boolean,
                      sharedFont: String = "", firmware: String = "", mtReplay: Boolean = false,
@@ -104,29 +129,34 @@ class PortRunner(
         return t
     }
 
-    private fun start(args: List<String>, onEnd: () -> Unit, extra: Map<String, String> = emptyMap()): Thread {
-        val t = Thread {
-            try {
-                if (cancelled) return@Thread
-                val p = guestLauncher.guest(args, extra = extra)
-                proc = p
-                if (cancelled) {
-                    p.destroyForcibly()
-                    return@Thread
-                }
-                p.inputStream.bufferedReader().forEachLine { onLine(it) }
-                val code = runCatching { p.waitFor() }.getOrDefault(-1)
-                if (code != 0) onLine(exitLine(code))
-                statusFile?.let { writeStatus(it, code) }
-            } catch (e: Exception) {
-                onLine("[RED] ${e.message}")
-            } finally {
-                proc = null
-                onEnd()
-            }
+    private fun start(args: List<String>, onEnd: () -> Unit): Thread = Thread {
+        try {
+            if (!cancelled) runGuest(args)
+        } catch (e: Exception) {
+            onLine("[RED] ${e.message}")
+        } finally {
+            onEnd()
         }
-        t.start()
-        return t
+    }.also(Thread::start)
+
+    private fun runGuest(args: List<String>, extra: Map<String, String> = emptyMap()): Int {
+        val process = guestLauncher.guest(args, extra = extra)
+        proc = process
+        try {
+            if (cancelled) process.destroyForcibly()
+            process.inputStream.bufferedReader().useLines { lines -> lines.forEach(onLine) }
+            val code = process.waitFor()
+            if (code != 0) onLine(exitLine(code))
+            statusFile?.let { writeStatus(it, code) }
+            return code
+        } finally {
+            // A log-reading error must never leave a writer in a workspace being reclaimed.
+            if (process.isAlive) {
+                process.destroyForcibly()
+                process.waitFor()
+            }
+            proc = null
+        }
     }
 
     /**

@@ -52,6 +52,7 @@ import com.nx.android.data.PhantomFix
 import com.nx.android.core.ui.components.CapsuleButton
 import com.nx.android.core.ui.components.QuietButton
 import com.nx.android.core.ui.theme.NxPalette
+import com.nx.android.core.ui.theme.LocalBuilderTheme
 
 /**
  * The way out of the child-process limit: the automatic fix (the phone pairs with itself over Wireless
@@ -90,7 +91,7 @@ fun PhantomFixDialog(onDismiss: () -> Unit) {
             Modifier.widthIn(max = 520.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp))
-                .background(NxPalette.Surface.copy(alpha = 0.9f))
+                .background((if (LocalBuilderTheme.current) MaterialTheme.colorScheme.surface else NxPalette.Surface).copy(alpha = 0.9f))
                 .clickable(enabled = false) {},
         ) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -171,7 +172,7 @@ private fun FixProgress(st: PhantomFix.State) {
             QuietButton(stringResource(R.string.phantom_start_fix), onClick = { PhantomFix.openDeveloperOptions(ctx) })
         }
         is PhantomFix.State.Working -> Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = NxPalette.Cream)
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = (if (LocalBuilderTheme.current) MaterialTheme.colorScheme.primary else NxPalette.Cream))
             Spacer(Modifier.width(10.dp))
             Text(st.step, style = MaterialTheme.typography.bodyMedium)
         }

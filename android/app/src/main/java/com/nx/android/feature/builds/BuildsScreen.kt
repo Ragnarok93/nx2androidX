@@ -2,29 +2,22 @@ package com.nx.android.feature.builds
 
 import com.nx.android.domain.porting.PortPhase
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,8 +27,6 @@ import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,52 +39,36 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.android.R
-import com.nx.android.appstate.LibraryState
 import com.nx.android.appstate.PortState
-import com.nx.android.data.AppLog
-import com.nx.android.domain.ALIAS_AUTO
-import com.nx.android.domain.drivers.Driver
 import com.nx.android.domain.GameFile
 import com.nx.android.domain.GameIdentity
 import com.nx.android.domain.GameInfo
 import com.nx.android.domain.GameProfileStatus
 import com.nx.android.domain.GAME_FILE_EXTENSIONS
 import com.nx.android.domain.GameStatus
-import com.nx.android.domain.LibraryLogic
-import com.nx.android.domain.Ported
 import com.nx.android.app.AppActions
+import com.nx.android.core.ui.components.BuilderListRow
+import com.nx.android.core.ui.components.BuilderPage
+import com.nx.android.core.ui.components.SwitchRow
 import com.nx.android.core.ui.LocalAppLocale
 import com.nx.android.core.ui.components.CapsuleButton
-import com.nx.android.core.ui.components.FirmwareRow
 import com.nx.android.core.ui.components.Hint
 import com.nx.android.feature.filepicker.PickerMode
 import com.nx.android.feature.filepicker.PickerRequest
-import com.nx.android.core.ui.components.PickRow
 import com.nx.android.core.ui.components.QuietButton
 import com.nx.android.core.ui.components.Section
 import com.nx.android.core.ui.components.StatusDot
-import com.nx.android.core.ui.components.rememberPageScroll
 import com.nx.android.core.ui.elapsedSecs
-import com.nx.android.core.ui.theme.GlassPanel
 import com.nx.android.core.ui.theme.NxPalette
 import java.io.File
 
-/** A filename that includes a title ID must agree with the card being rebuilt. Renamed files are allowed. */
-private fun sourceMatchesTarget(target: File, candidate: File): Boolean {
-    val expected = GameIdentity.titleIdIn(target.name) ?: return true
-    return LibraryLogic.sourceMatchesTitle(candidate.name, expected)
-}
-
-/**
- * 构建页：发起与跟踪移植的工作台，按移植的顺序排卡——目标（游戏与它的参数）、进度与取消、产物、日志、历史。
- * 游戏库里点「▶ 构建」把游戏带进来（buildsTarget）；开始按钮在这里，前提的检查与说明也在这里。
- */
+/** Select and review source files, then follow the build through APK export. */
 @Composable
-fun BuildsRoute(viewModel: BuildsViewModel, keys: String, envReady: Boolean, installedDrivers: List<Driver>,
-                actions: AppActions, onRequest: (PickerRequest) -> Unit, onLog: (String) -> Unit) {
+fun BuildsRoute(viewModel: BuildsViewModel, keys: String, envReady: Boolean,
+                actions: AppActions, onRequest: (PickerRequest) -> Unit, onLog: (String) -> Unit,
+                busy: Boolean, onVariables: () -> Unit, onSetup: () -> Unit) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val locale = LocalAppLocale.current
-    LaunchedEffect(uiState.running) { if (uiState.running) viewModel.buildStarted() }
     // 页面自己要说的话（没有档案的游戏被勾上了实验性移植）：屏幕把它念出来
     LaunchedEffect(viewModel.noticeSeq) {
         when (viewModel.notice) {
@@ -104,54 +79,44 @@ fun BuildsRoute(viewModel: BuildsViewModel, keys: String, envReady: Boolean, ins
             null -> Unit
         }
     }
-    BuildsScreen(viewModel.library, viewModel, uiState, keys, envReady, installedDrivers, actions, onRequest, onLog)
+    BuildsScreen(viewModel, uiState, keys, envReady, actions, onRequest, onLog, busy, onVariables, onSetup)
 }
 
 @Composable
-private fun BuildsScreen(lib: LibraryState, viewModel: BuildsViewModel, uiState: BuildsUiState,
-                         keys: String, envReady: Boolean, installedDrivers: List<Driver>, actions: AppActions,
-                         onRequest: (PickerRequest) -> Unit, onLog: (String) -> Unit) {
+private fun BuildsScreen(
+    viewModel: BuildsViewModel, uiState: BuildsUiState, keys: String, envReady: Boolean,
+    actions: AppActions, onRequest: (PickerRequest) -> Unit, onLog: (String) -> Unit,
+    busy: Boolean, onVariables: () -> Unit, onSetup: () -> Unit,
+) {
     val locale = LocalAppLocale.current
-    val running = uiState.running
-    val target = uiState.target?.let(::File) ?: uiState.gameFile.takeIf { running }?.let { File(it) }
     val selected = uiState.history.firstOrNull { it.id == viewModel.selectedBuildId }
     val current = uiState.history.firstOrNull { it.id == viewModel.port.buildId }
-
-    // Keep the page comfortable in portrait while preventing very wide landscape layouts from stretching
-    // every card across the entire display. Compose still uses density-independent sizing on compact screens.
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-        Column(
-            Modifier.fillMaxWidth().widthIn(max = 760.dp)
-                .verticalScroll(rememberPageScroll()).padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            when {
+    fun chooseSource() = onRequest(PickerRequest(PickerMode.FILE, GAME_FILE_EXTENSIONS, File("/storage"),
+        locale.str(R.string.builds_choose_game_file), onPicked = { viewModel.setTarget(it) }))
+    BuilderPage {
+        when {
             selected != null -> {
-                TaskDetail(lib, selected, viewModel, actions, onLog, active = selected.id == viewModel.port.buildId && running)
-                QuietButton(stringResource(R.string.common_back), { viewModel.closeBuild() })
+                TaskDetail(selected, viewModel, actions, onLog, active = selected.id == current?.id && uiState.running)
+                QuietButton(stringResource(R.string.common_back), viewModel::closeBuild)
             }
-            target != null && viewModel.preparing && !running ->
-                TargetCard(lib, uiState, viewModel, keys, envReady, target, installedDrivers, actions, onRequest)
-            current != null -> TaskDetail(lib, current, viewModel, actions, onLog, active = running)
-            running -> ProgressCard(uiState, actions)
+            uiState.running && current != null -> TaskDetail(current, viewModel, actions, onLog, active = true)
+            uiState.running -> ProgressCard(uiState, actions)
+            viewModel.hasDraft && uiState.target != null -> TargetCard(
+                viewModel, keys, envReady, File(uiState.target), actions, busy, onVariables, onSetup, ::chooseSource)
             else -> {
                 Section(stringResource(R.string.builds_start_title)) {
                     Text(stringResource(R.string.builds_start_hint), style = MaterialTheme.typography.bodyMedium)
-                    CapsuleButton(stringResource(R.string.builds_choose_game_file), onClick = {
-                        onRequest(PickerRequest(PickerMode.FILE, GAME_FILE_EXTENSIONS, File("/storage"),
-                            locale.str(R.string.builds_choose_game_file), onPicked = { viewModel.setTarget(it) }))
-                    })
+                    CapsuleButton(stringResource(R.string.builds_choose_game_file), ::chooseSource, enabled = !busy)
                 }
+                if (current != null) TaskDetail(current, viewModel, actions, onLog, active = false)
                 if (uiState.history.isNotEmpty()) History(uiState, viewModel)
             }
-        }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }
 
 @Composable
-private fun TaskDetail(lib: LibraryState, record: PortState.Record, viewModel: BuildsViewModel,
+private fun TaskDetail(record: PortState.Record, viewModel: BuildsViewModel,
                        actions: AppActions, onLog: (String) -> Unit, active: Boolean) {
     val lines = viewModel.logTail(record.id)
     // 进行中的这一轮：秒表从它的起点算（record.seconds 是结束时才写下的时长，进行中永远是 0）
@@ -160,105 +125,62 @@ private fun TaskDetail(lib: LibraryState, record: PortState.Record, viewModel: B
         Text(File(record.game).name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Text(stringResource(R.string.builds_history_seconds, (secs / 60).toString(), (secs % 60).toString()))
         PhaseChip(if (active) PortPhase.RUNNING else record.phase)
-        if (active && viewModel.port.stageName.isNotEmpty()) {
-            Text(viewModel.port.stageName, style = MaterialTheme.typography.bodySmall)
-            LinearProgressIndicator(progress = { viewModel.port.progress }, modifier = Modifier.fillMaxWidth().height(6.dp))
-            QuietButton(stringResource(R.string.builds_cancel_port), actions.onCancelPort, modifier = Modifier.fillMaxWidth())
+        if (active) {
+            val port = viewModel.port
+            if (port.stages > 0) Text(stringResource(R.string.port_stage_of, port.stageOf, port.stages, port.stageName))
+            if (port.stageStep.isNotBlank()) Text(port.stageStep, style = MaterialTheme.typography.bodyMedium)
+            if (port.stages > 0) LinearProgressIndicator(progress = { port.progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+            else LinearProgressIndicator(Modifier.fillMaxWidth())
+            QuietButton(stringResource(R.string.builds_cancel_port), actions.onCancelPort)
         }
-        record.config?.let { config ->
-            val options = listOfNotNull(
-                stringResource(R.string.builds_touch_game).takeIf { config.touch },
-                stringResource(R.string.builds_60fps).takeIf { config.fps60 },
-                stringResource(R.string.builds_experimental).takeIf { config.experimental },
-                if (config.aliasHeadroom >= 0) stringResource(R.string.builds_alias_short, config.aliasHeadroom) else null,
-                config.sharedFont.takeIf { it.isNotBlank() }?.let { stringResource(R.string.builds_shared_font_short, File(it).name) },
-                stringResource(R.string.builds_mt_replay).takeIf { config.mtReplay },
-            ).ifEmpty { listOf(stringResource(R.string.builds_default_options)) }
-            Hint(stringResource(R.string.builds_used_options, options.joinToString(" · ")))
-        }
+        record.config?.let { Hint(buildVariablesSummary(it)) }
         if (record.legacy) Text(stringResource(R.string.builds_log_legacy), style = MaterialTheme.typography.bodySmall)
         else if (!record.logAvailable) Text(stringResource(R.string.builds_log_unavailable), style = MaterialTheme.typography.bodySmall,
             color = NxPalette.Danger)
         LogTail(lines)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { onLog(record.id) }) { Text(stringResource(R.string.builds_log_view)) }
-            if (record.logAvailable && lines.isNotEmpty()) TextButton(onClick = { actions.onShareBuildLog(record.id) }) {
+            if (record.logAvailable) TextButton(onClick = { actions.onShareBuildLog(record.id) }) {
                 Text(stringResource(R.string.builds_log_share))
             }
-        }
-        if (!active && File(record.game).isFile()) {
-            QuietButton(stringResource(R.string.builds_build_again), {
-                viewModel.setTarget(File(record.game), record.config, savedConfigMissing = record.config == null)
-            })
-        }
-        if (!active && !File(record.game).isFile()) QuietButton(stringResource(R.string.builds_build_again), {
-            viewModel.setTarget(File(record.game), record.config, savedConfigMissing = record.config == null)
-        })
-        if (record.phase == PortPhase.DONE && record.out.isNotEmpty()) {
-            val artifact = File(record.out)
-            if (record.out.endsWith(".apk", ignoreCase = true)) {
-                if (artifact.isFile) {
-                    Hint(stringResource(R.string.builds_artifact_path, artifact.absolutePath), size = 11.sp)
-                    CapsuleButton(stringResource(R.string.builds_export_apk), { actions.onExportApk(artifact) }, modifier = Modifier.fillMaxWidth())
-                } else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
-                    color = NxPalette.Danger)
-            } else {
-                val currentPack = lib.portFromPack(artifact)
-                if (currentPack != null) QuietButton(stringResource(R.string.builds_run_action), {
-                    actions.onRun(currentPack.pack, GameIdentity.labelFor(File(record.game), currentPack))
-                })
-                else Text(stringResource(R.string.lib_artifact_missing_state), style = MaterialTheme.typography.bodySmall,
-                    color = NxPalette.Danger)
+            if (!active && !viewModel.port.running && File(record.game).isFile) {
+                TextButton(onClick = { viewModel.setTarget(File(record.game), record.config) }) {
+                    Text(stringResource(R.string.builds_build_again))
+                }
             }
         }
-        if (record.phase != PortPhase.DONE && lib.portOf(File(record.game)) != null)
-            Hint(stringResource(R.string.builds_old_pack_still_usable))
+        if (record.phase == PortPhase.DONE && record.out.endsWith(".apk", ignoreCase = true)) {
+            val apk = File(record.out)
+            if (apk.isFile) {
+                Text(apk.absolutePath, style = MaterialTheme.typography.bodyMedium)
+                CapsuleButton(stringResource(R.string.builds_export_apk), { actions.onExportApk(apk) })
+            } else Text(stringResource(R.string.lib_artifact_missing_state), color = MaterialTheme.colorScheme.error)
+        }
     }
 }
 
 // ---- 目标卡（未运行时）：游戏与参数，开始按钮 ------------------------------------------------------------------
 
 @Composable
-private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: BuildsViewModel, keys: String, envReady: Boolean,
-                       f: File, installedDrivers: List<Driver>, actions: AppActions, onRequest: (PickerRequest) -> Unit) {
-    val locale = LocalAppLocale.current
-    val status = lib.statusOf(f)
-    var cfg by remember(f.absolutePath, viewModel.preparedConfig) {
-        mutableStateOf(viewModel.preparedConfig ?: lib.configOf(f))
-    }
-    // 配置默认展开：选中游戏后玩家一眼看到当前选项
-    var configOpen by remember(f.absolutePath) { mutableStateOf(true) }
-    val storageOk = actions.storageOk()
-    val canStart = f.isFile && f.canRead() && envReady && storageOk && !port.running && keys.isNotBlank() && status != GameStatus.PORTING
+private fun TargetCard(
+    viewModel: BuildsViewModel, keys: String, envReady: Boolean, f: File, actions: AppActions,
+    busy: Boolean, onVariables: () -> Unit, onSetup: () -> Unit, onChoose: () -> Unit,
+) {
+    val cfg = viewModel.draft
     val info = viewModel.gameInfo.info
+    val storageOk = actions.storageOk()
+    val canStart = f.isFile && f.canRead() && envReady && storageOk && !busy &&
+        keys.isNotBlank() && !viewModel.gameInfo.reading &&
+        (cfg.sharedFont.isBlank() || isBuildFont(File(cfg.sharedFont)))
 
-    // 三张卡，一件事一张：目标（是哪个游戏、文件在哪）· 识别到的文件 · 构建选项
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Section(stringResource(R.string.builds_target)) {
-            // 身份块：状态徽章、游戏名、title ID、库的状态
-            TargetIdentity(f, info, status, lib.portOf(f))
-
-            // 来源行：文件在哪（整条路径，省略中间的目录；按一下看全的）＋ 更换 / 清除
-            // 名字就是文件名的时候（没有档案），路径只给到文件夹——文件名上面已经写着
-            val source = if (info?.name?.isNotEmpty() == true) f.absolutePath else (f.parentFile?.path ?: f.absolutePath)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    stringResource(R.string.builds_source, shortPath(source)),
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).clickable { actions.onToast(f.absolutePath) },
-                )
-                QuietButton(stringResource(R.string.builds_change), onClick = {
-                    onRequest(PickerRequest(PickerMode.FILE, GAME_FILE_EXTENSIONS,
-                        File("/storage"), locale.str(R.string.builds_choose_game_file),
-                        onPicked = { nf ->
-                            if (sourceMatchesTarget(f, nf)) viewModel.setTarget(nf)
-                            else actions.onToast(locale.str(R.string.lib_source_mismatch))
-                        }))
-                })
-                QuietButton(stringResource(R.string.builds_clear), onClick = { viewModel.setTarget(null) })
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Section(stringResource(R.string.builder_sources)) {
+            TargetIdentity(f, info)
+            Text(f.absolutePath, style = MaterialTheme.typography.bodyMedium)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onChoose) { Text(stringResource(R.string.builds_change)) }
+                TextButton(onClick = { viewModel.setTarget(null) }) { Text(stringResource(R.string.builds_clear)) }
             }
-            if (viewModel.preparedConfigWasMissing) Hint(stringResource(R.string.builds_config_missing_saved))
         }
 
         // 识别到的文件：移植器认出了什么、从哪认出的、这一轮打哪个版本，以及文件该怎么放
@@ -283,85 +205,31 @@ private fun TargetCard(lib: LibraryState, port: BuildsUiState, viewModel: Builds
             }
         }
 
-        // 构建选项：选项（可收起）与开始按钮
-        OptionsCard(open = configOpen, onToggle = { configOpen = !configOpen }) {
-            if (configOpen) {
-                ConfigRow(stringResource(R.string.builds_touch_game), cfg.touch) { cfg = cfg.copy(touch = it); lib.setConfig(f, cfg) }
-                ConfigRow(stringResource(R.string.builds_60fps), cfg.fps60) { cfg = cfg.copy(fps60 = it); lib.setConfig(f, cfg) }
-                ConfigRow(stringResource(R.string.builds_experimental), cfg.experimental) { cfg = cfg.copy(experimental = it); lib.setConfig(f, cfg) }
-                ConfigRow(stringResource(R.string.builds_allow_damaged_media), cfg.allowDamagedMedia) { cfg = cfg.copy(allowDamagedMedia = it); lib.setConfig(f, cfg) }
-                Hint(stringResource(R.string.builds_allow_damaged_media_hint), size = 11.sp)
-                AliasRow(cfg.aliasHeadroom) { cfg = cfg.copy(aliasHeadroom = it); lib.setConfig(f, cfg) }
-                Hint(stringResource(R.string.builds_alias_hint), size = 11.sp)
-                // 玩家自己的覆盖：系统字体、固件 dump、多线程回放
-                PathOptionRow(
-                    label = stringResource(R.string.builds_shared_font),
-                    value = cfg.sharedFont,
-                    empty = stringResource(R.string.builds_shared_font_default),
-                    onPick = {
-                        onRequest(PickerRequest(PickerMode.FILE, setOf("ttf"), null,
-                            locale.str(R.string.builds_shared_font_pick), onPicked = { file ->
-                                cfg = cfg.copy(sharedFont = file.absolutePath); lib.setConfig(f, cfg)
-                            }))
-                    },
-                    onClear = { cfg = cfg.copy(sharedFont = ""); lib.setConfig(f, cfg) },
-                )
-                Hint(stringResource(R.string.builds_shared_font_hint), size = 11.sp)
-                // 固件：整机级的一份（环境里导入的，迁移器统一带上），这里只是换一份 / 导入
-                FirmwareRow(
-                    imported = actions.firmware(),
-                    onImport = {
-                        onRequest(PickerRequest(PickerMode.FILE, setOf("zip"), null,
-                            locale.str(R.string.fw_pick), onPicked = { f -> actions.onImportFirmware(f) }))
-                    },
-                    onClear = { actions.onClearFirmware() },
-                )
-                Hint(stringResource(R.string.fw_hint), size = 11.sp)
-                ConfigRow(stringResource(R.string.builds_mt_replay), cfg.mtReplay) { cfg = cfg.copy(mtReplay = it); lib.setConfig(f, cfg) }
-                Hint(stringResource(R.string.builds_mt_replay_hint), size = 11.sp)
-                Hint("Select or import Vulkan drivers in the exported game’s Graphics menu. Driver changes apply after restarting the game.", size = 11.sp)
-            }
-
+        Section(stringResource(R.string.builder_review)) {
+            SwitchRow(stringResource(R.string.builds_touch_game), cfg.touch, onChange = { viewModel.changeOptions(touch = it) })
+            HorizontalDivider()
+            SwitchRow(stringResource(R.string.builds_60fps), cfg.fps60, onChange = { viewModel.changeOptions(fps60 = it) })
+            HorizontalDivider()
+            BuilderListRow(stringResource(R.string.builder_variables), buildVariablesSummary(cfg), onClick = onVariables)
+            Text(stringResource(R.string.builder_output_location), style = MaterialTheme.typography.bodyMedium)
             if (!canStart) {
-                Text(
-                    when {
-                        !envReady -> stringResource(R.string.builds_need_env)
-                        !storageOk -> stringResource(R.string.builds_need_storage)
-                        keys.isBlank() -> stringResource(R.string.builds_need_keys)
-                        !f.isFile -> stringResource(R.string.builds_source_missing)
-                        !f.canRead() -> stringResource(R.string.builds_needs_storage)
-                        port.running -> stringResource(R.string.builds_one_at_a_time, File(port.gameFile).name)
-                        else -> ""
-                    },
-                    color = NxPalette.Building, style = MaterialTheme.typography.bodySmall,
-                )
+                Text(when {
+                    busy -> stringResource(R.string.runtime_busy)
+                    !envReady -> stringResource(R.string.builds_need_env)
+                    !storageOk -> stringResource(R.string.builds_need_storage)
+                    keys.isBlank() -> stringResource(R.string.builds_need_keys)
+                    !f.isFile -> stringResource(R.string.builds_source_missing)
+                    !f.canRead() -> stringResource(R.string.builds_needs_storage)
+                    viewModel.gameInfo.reading -> stringResource(R.string.builds_files_reading)
+                    else -> stringResource(R.string.builder_font_invalid)
+                }, style = MaterialTheme.typography.bodyMedium)
+                if (!envReady || !storageOk || keys.isBlank()) {
+                    TextButton(onClick = onSetup) { Text(stringResource(R.string.env_section)) }
+                }
             }
-            if (status != GameStatus.PORTING) {
-                CapsuleButton(stringResource(R.string.builds_start_action), {
-                    actions.onStartPort(f, cfg)
-                }, enabled = canStart, modifier = Modifier.fillMaxWidth())
-            } else {
-                Hint(stringResource(R.string.builds_porting))
-            }
+            CapsuleButton(stringResource(R.string.builder_compile), { actions.onStartPort(f, cfg) },
+                enabled = canStart, modifier = Modifier.fillMaxWidth())
         }
-    }
-}
-
-/** 构建选项卡：标题行点一下收起/展开选项，下面永远是开始构建的按钮 */
-@Composable
-private fun OptionsCard(open: Boolean, onToggle: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
-    GlassPanel(modifier = Modifier.fillMaxWidth(), contentPadding = 16.dp) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().clickable { onToggle() },
-        ) {
-            Text(stringResource(R.string.builds_options_title),
-                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Spacer(Modifier.height(4.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { content() }
     }
 }
 
@@ -414,33 +282,12 @@ private fun GameFile.detail(): String =
  * 移植器的读数没回来之前不显示猜测出来的东西：徽章、计数与打包版本都等它。
  */
 @Composable
-private fun TargetIdentity(f: File, info: GameInfo?, status: GameStatus, ported: Ported?) {
-    // 名字：读数回来后用档案里的（没有就用文件名的）
-    val name = info?.name?.takeIf { it.isNotEmpty() } ?: GameIdentity.labelFor(f, ported)
+private fun TargetIdentity(f: File, info: GameInfo?) {
+    val name = info?.name?.takeIf { it.isNotEmpty() } ?: GameIdentity.displayName(f)
     val titleId = info?.titleId?.takeIf { it.isNotEmpty() } ?: GameIdentity.titleIdIn(f.name)
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (info != null) ProfileChip(info.status)
-            Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        }
-        if (titleId != null || status != GameStatus.NOT_PORTED) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (titleId != null) {
-                    Text(titleId, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
-                }
-                // 库的状态：只有非常态才出现（"未移植" 是默认态，不占位）
-                if (status != GameStatus.NOT_PORTED) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        StatusDot(statusColor(status), 8.dp)
-                        Text(statusLabel(status), style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
-                    }
-                }
-            }
-        }
-    }
+    Text(name, style = MaterialTheme.typography.titleMedium)
+    if (titleId != null) Text(titleId, style = MaterialTheme.typography.bodySmall)
+    if (info != null) ProfileChip(info.status)
 }
 
 /** 档案状态：一种状态一个颜色，与游戏库那张卡上的是同一套 */
@@ -510,39 +357,6 @@ private fun ProgressCard(port: BuildsUiState, actions: AppActions) {
     }
 }
 
-// ---- 日志模块（尾部 + 展开 + 查看/分享/清空） -----------------------------------------------
-
-/**
- * 日志模块：工具说过的话的尾部，加上把它带走的三个动作——查看全部、分享日志、清空日志。
- *
- * 屏幕上给的是内存里的那一份（移植进行中它最新）；App 重启之后内存里空了，就退回文件里那一份
- * （上一轮留下的）。「查看全部」与「分享日志」给的始终是文件里的内容，不只是屏幕上这些行。
- */
-@Composable
-private fun LogCard(port: BuildsUiState, actions: AppActions, onView: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    // 内存里没有输出时（App 重启之后），读文件里那一份
-    var fileTail by remember { mutableStateOf(listOf<String>()) }
-    LaunchedEffect(port.log.isEmpty()) {
-        if (port.log.isEmpty()) fileTail = AppLog.text(400).lines()
-    }
-    val lines = if (port.log.isNotEmpty()) port.log else fileTail
-    Section(stringResource(R.string.common_log)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(stringResource(R.string.builds_log_hint), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            QuietButton(if (open) stringResource(R.string.builds_collapse) else stringResource(R.string.builds_expand), { open = !open })
-        }
-        LogTail(lines, if (open) 320.dp else 160.dp, if (open) 200 else 30)
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = onView) { Text(stringResource(R.string.builds_log_view)) }
-            TextButton(onClick = { actions.onShareLog() }) { Text(stringResource(R.string.builds_log_share)) }
-            // 清空：文件与屏幕上这份一起清（动作里清的是内存那份，这里清的是文件那份的读出）
-            TextButton(onClick = { actions.onClearLog(); fileTail = listOf() }) { Text(stringResource(R.string.builds_log_clear)) }
-        }
-    }
-}
-
-/** The log's last lines (mono, the failures red) */
 @Composable
 fun LogTail(log: List<String>, height: Dp = 160.dp, lines: Int = 30) {
     Surface(
@@ -570,40 +384,6 @@ fun LogTail(log: List<String>, height: Dp = 160.dp, lines: Int = 30) {
                             fontSize = 11.sp,
                         )
                     }
-                }
-            }
-        }
-    }
-}
-
-// ---- 产物卡（已完成）/ 结果 -------------------------------------------------------------------------------------
-
-@Composable
-private fun OutcomeCard(lib: LibraryState, port: BuildsUiState, f: File, actions: AppActions) {
-    val locale = LocalAppLocale.current
-    val status = lib.statusOf(f)
-    when (status) {
-        GameStatus.DONE -> {
-            val ported = lib.portOf(f) ?: return
-            Section(locale.str(R.string.builds_artifact)) {
-                Hint(locale.str(R.string.builds_artifact_path, ported.pack.absolutePath), size = 11.sp)
-                CapsuleButton(locale.str(R.string.builds_run_action), { actions.onRun(ported.pack, GameIdentity.labelFor(f, ported)) }, modifier = Modifier.fillMaxWidth())
-            }
-        }
-        else -> {
-            val last = port.history.firstOrNull { it.game == f.absolutePath }
-            if (last != null && last.phase != PortPhase.DONE) {
-                Section(locale.str(R.string.builds_result)) {
-                    Text(
-                        when (last.phase) {
-                            PortPhase.FAILED -> locale.str(R.string.builds_prev_failed)
-                            PortPhase.CANCELLED -> locale.str(R.string.builds_prev_cancelled)
-                            PortPhase.INTERRUPTED -> locale.str(R.string.builds_prev_interrupted)
-                            else -> return@Section
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = NxPalette.Building,
-                    )
                 }
             }
         }
@@ -643,50 +423,6 @@ private fun statusLabel(s: GameStatus): String = when (s) {
     GameStatus.PORTING -> stringResource(R.string.common_porting)
     GameStatus.DONE -> stringResource(R.string.common_done)
     GameStatus.NEEDS_BUILD -> stringResource(R.string.lib_needs_build_status)
-}
-
-@Composable
-private fun ConfigRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = onChange)
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-    }
-}
-
-/**
- * 一行「玩家的覆盖」：标签 + 现在的值（空时写默认）+ 选 / 清。
- * 字体是文件、固件是文件夹；清掉就是回到默认（自带的那份字体 / 不带固件）。
- */
-@Composable
-private fun PathOptionRow(label: String, value: String, empty: String, onPick: () -> Unit, onClear: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        Text(
-            if (value.isBlank()) empty else shortPath(value),
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-        )
-        QuietButton(stringResource(R.string.builds_change), onClick = onPick)
-        if (value.isNotBlank()) QuietButton(stringResource(R.string.builds_clear), onClick = onClear)
-    }
-}
-
-/**
- * 额外地址空间（别名区）：Auto 或玩家手动指定的 GB 数。Auto 不带数值，移植器自己决定
- * （档案调通过的版本不加，没调通过的加 8 GB）；它编译进宿主的内存布局，改了要重新构建。
- */
-private val ALIAS_CHOICES = listOf(ALIAS_AUTO, 0, 8, 16, 24, 32, 48)
-
-@Composable
-private fun AliasRow(headroom: Int, onChange: (Int) -> Unit) {
-    val auto = stringResource(R.string.builds_alias_auto)
-    PickRow(
-        label = stringResource(R.string.builds_alias_headroom),
-        options = ALIAS_CHOICES.map { it.toString() to (if (it < 0) auto else "$it GB") },
-        current = headroom.toString(),
-        onSelect = { onChange(it.toIntOrNull() ?: ALIAS_AUTO) },
-        fallback = auto,
-    )
 }
 
 /** Recent attempts: one row opens the result and log belonging to that attempt. */

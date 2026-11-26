@@ -122,7 +122,7 @@ private fun SummaryRow(total: Long, lowerBound: Boolean) {
         Text(
             if (lowerBound) stringResource(R.string.storage_partial_value, sizeText(total))
             else sizeText(total),
-            style = MaterialTheme.typography.titleMedium, color = NxPalette.Cream,
+            style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary,
         )
     }
 }
@@ -157,9 +157,9 @@ private fun StorageItemRow(item: StorageUsage.Item, biggest: Long) {
     // 占比条：相对最大的一项，谁大谁小一眼就看出来
     if (item.bytes > 0L && biggest > 0L) {
         Box(Modifier.fillMaxWidth().padding(top = 6.dp).height(4.dp)
-            .clip(RoundedCornerShape(2.dp)).background(NxPalette.Background)) {
+            .clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.background)) {
             Box(Modifier.fillMaxWidth(item.bytes.toFloat() / biggest.toFloat())
-                .fillMaxHeight().background(NxPalette.Cream))
+                .fillMaxHeight().background(MaterialTheme.colorScheme.primary))
         }
     }
 }
@@ -169,14 +169,14 @@ private fun StorageItemRow(item: StorageUsage.Item, biggest: Long) {
 private fun Thumb(item: StorageUsage.Item) {
     val icon by rememberGameIcon(item.icon.takeIf { it.isNotEmpty() }, 128)
     Box(
-        Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)).background(NxPalette.Background),
+        Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.background),
         contentAlignment = Alignment.Center,
     ) {
         val bitmap = icon
         if (bitmap != null) {
             Image(bitmap, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         } else if (item.id == StorageUsage.ORPHAN_ID) {
-            Icon(Icons.Filled.Folder, null, Modifier.size(20.dp), tint = NxPalette.Cream)
+            Icon(Icons.Filled.Folder, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
         } else {
             Text(
                 item.name.take(1).uppercase(),

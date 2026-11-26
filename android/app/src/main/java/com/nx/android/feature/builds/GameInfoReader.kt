@@ -34,17 +34,18 @@ class GameInfoReader(
     var reads by mutableStateOf(0)
         private set
 
-    private val cache = HashMap<String, GameInfo>()
+    private val cache = HashMap<Pair<String, String>, GameInfo>()
     private var job: Job? = null
 
-    @Volatile private var current: String = ""
+    private var requestId = 0
 
     /** Reads the file (or takes the answer from the cache). */
     fun read(file: File, keys: String) {
         val path = file.absolutePath
-        current = path
+        val source = path to keys
+        val request = ++requestId
         job?.cancel()
-        val cached = cache[path]
+        val cached = cache[source]
         if (cached != null) {
             info = cached
             reading = false
@@ -55,8 +56,8 @@ class GameInfoReader(
         reading = true
         job = scope.launch {
             val result = runCatching { inspector.inspect(path, keys) }.getOrNull()
-            if (path != current) return@launch   // the player picked another file: this answer is late
-            if (result != null) cache[path] = result
+            if (request != requestId) return@launch   // the player picked another file: this answer is late
+            if (result != null) cache[source] = result
             info = result
             reading = false
             reads++
@@ -65,7 +66,7 @@ class GameInfoReader(
 
     /** Nothing is selected any more. */
     fun clear() {
-        current = ""
+        requestId++
         job?.cancel()
         info = null
         reading = false

@@ -10,7 +10,7 @@ import java.io.File
 import com.nx.android.domain.porting.PortPhase
 import com.nx.android.domain.BuildOptions
 import com.nx.android.domain.GameConfig
-import com.nx.android.domain.GameInfo
+import com.nx.android.domain.forNewBuilderDraft
 import com.nx.android.domain.GameInspector
 import com.nx.android.data.PrefsStore
 import com.nx.android.data.porting.BuildSessionRepository
@@ -47,7 +47,7 @@ enum class BuildsNotice {
 
 @HiltViewModel
 class BuildsViewModel @Inject constructor(
-    val library: LibraryState,
+    private val library: LibraryState,
     val port: PortState,
     private val sessions: BuildSessionRepository,
     inspector: GameInspector,
@@ -55,12 +55,14 @@ class BuildsViewModel @Inject constructor(
 ) : ViewModel() {
     var selectedBuildId by mutableStateOf("")
         private set
-    var preparedConfig by mutableStateOf<GameConfig?>(null)
+    private var targetFile by mutableStateOf<File?>(null)
+    private var inspectedKeys: String? = null
+    var draft by mutableStateOf(GameConfig())
         private set
-    var preparedConfigWasMissing by mutableStateOf(false)
+    var draftRevision by mutableStateOf(0)
         private set
-    var preparing by mutableStateOf(false)
-        private set
+    val hasDraft get() = targetFile != null && !port.running
+    val experimentalRequired get() = gameInfo.info?.experimental == true
 
     /** What the selected game file holds (the porter's own reading of it) */
     val gameInfo = GameInfoReader(inspector, viewModelScope)
@@ -74,7 +76,7 @@ class BuildsViewModel @Inject constructor(
     // Eagerly：这一页不在眼前时也跟着一份状态（切回来时第一帧就是选中的那个游戏，不是空的那一页）
     val uiState: StateFlow<BuildsUiState> = snapshotFlow {
         BuildsUiState(
-            target = library.buildsTarget?.absolutePath,
+            target = targetFile?.absolutePath,
             phase = port.phase,
             progress = port.progress,
             gameFile = port.gameFile,
@@ -93,20 +95,59 @@ class BuildsViewModel @Inject constructor(
     init {
         // 每读完一次游戏信息就照着它做一次决定（读到的答案属于当前选中的那个文件）
         viewModelScope.launch {
-            snapshotFlow { gameInfo.reads }.collect { applyProfile(gameInfo.info) }
+            snapshotFlow { gameInfo.reads }.collect { applyProfile() }
+        }
+        val initialBuildId = port.buildId
+        viewModelScope.launch {
+            snapshotFlow { port.buildId }.collect { id ->
+                if (id.isNotBlank() && id != initialBuildId && targetFile?.absolutePath == port.gameFile) {
+                    setTarget(null)
+                }
+            }
+        }
+        viewModelScope.launch {
+            snapshotFlow { prefs.keys }.collect { keys ->
+                val file = targetFile
+                if (file != null && keys != inspectedKeys && !port.running) inspect(file, keys)
+            }
         }
     }
 
-    fun setTarget(file: File?, config: GameConfig? = null, savedConfigMissing: Boolean = false) {
+    fun setTarget(file: File?, previous: GameConfig? = null) {
+        if (file != null && port.running) return
         selectedBuildId = ""
-        preparedConfig = config
-        preparedConfigWasMissing = savedConfigMissing
-        preparing = file != null
-        library.buildsTarget = file
-        if (file == null) gameInfo.clear() else gameInfo.read(file, prefs.keys)
+        targetFile = file
+        draftRevision++
+        draft = (previous ?: file?.let(library::configOf) ?: GameConfig()).forNewBuilderDraft()
+        if (file == null) {
+            inspectedKeys = null
+            gameInfo.clear()
+        } else {
+            inspect(file, prefs.keys)
+        }
+        applyProfile()
     }
 
-    fun buildStarted() { preparing = false }
+    private fun inspect(file: File, keys: String) {
+        inspectedKeys = keys
+        gameInfo.read(file, keys)
+    }
+
+    fun changeOptions(touch: Boolean = draft.touch, fps60: Boolean = draft.fps60) {
+        val file = targetFile ?: return
+        if (!hasDraft) return
+        draft = draft.copy(touch = touch, fps60 = fps60)
+        // Preserve existing regular build preferences; the advanced variables live only in this draft.
+        library.setConfig(file, library.configOf(file).copy(touch = touch, fps60 = fps60))
+    }
+
+    fun changeVariables(expectedRevision: Int = draftRevision, change: (GameConfig) -> GameConfig) {
+        if (!hasDraft || expectedRevision != draftRevision) return
+        val updated = change(draft)
+        draft = if (experimentalRequired) updated.copy(experimental = true) else updated
+    }
+
+    fun resetVariables() = changeVariables { it.forNewBuilderDraft() }
 
     fun openBuild(id: String) { selectedBuildId = id }
     fun closeBuild() { selectedBuildId = "" }
@@ -121,18 +162,10 @@ class BuildsViewModel @Inject constructor(
     /** The screen has said the notice out loud. */
     fun clearNotice() { notice = null }
 
-    /**
-     * The game the porter has no profile for: the port can only run as an experimental one, so the option is
-     * ticked for the player and the reason is given. The choice is written to the game's own options, so the
-     * library's panel and the next build say the same.
-     */
-    private fun applyProfile(info: GameInfo?) {
-        if (info == null) return
-        val file = library.buildsTarget ?: return
-        val config = preparedConfig ?: library.configOf(file)
-        val updated = BuildOptions.withExperimental(config, info) ?: return
-        library.setConfig(file, updated)
-        preparedConfig = updated
+    private fun applyProfile() {
+        if (!hasDraft) return
+        val updated = BuildOptions.withExperimental(draft, gameInfo.info) ?: return
+        draft = updated
         notice = BuildsNotice.EXPERIMENTAL_AUTO
         noticeSeq++
     }

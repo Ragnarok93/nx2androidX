@@ -113,7 +113,7 @@ internal fun EnvStep(uiState: OnboardingUiState, onUnpack: () -> Unit) {
     Section(stringResource(R.string.onb_runtime)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (uiState.unpacking) {
-                CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = NxPalette.Cream)
+                CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
             } else {
                 StatusDot(if (ready) NxPalette.Ready else NxPalette.Building)
             }
@@ -198,7 +198,7 @@ internal fun KeysStep(
                 }
             }
             if (uiState.keysChecking) {
-                CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = NxPalette.Cream)
+                CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
             } else {
                 QuietButton(stringResource(R.string.onb_choose_file), onClick = onChooseKeysFile)
             }

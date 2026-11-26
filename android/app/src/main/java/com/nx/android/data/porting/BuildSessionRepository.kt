@@ -103,6 +103,18 @@ class BuildSessionRepository @Inject constructor(
         }
     }
 
+    internal fun stageLogDirectory(id: String): File = File(dir(id), "stages")
+
+    fun preservedStageLogs(buildId: String? = null): List<Pair<String, File>> =
+        mutableSessions.value.filter { buildId == null || it.id == buildId }.flatMap { session ->
+            val stages = stageLogDirectory(session.id)
+            stages.listFiles().orEmpty().flatMap { build ->
+                build.listFiles().orEmpty().filter(File::isFile).map { log ->
+                    "${session.id}/${build.name}/${log.name}" to log
+                }
+            }
+        }
+
     fun logFile(id: String): File? {
         val s = mutableSessions.value.firstOrNull { it.id == id } ?: return null
         return File(dir(id), LOG).takeIf { s.logAvailable && it.isFile }

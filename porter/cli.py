@@ -178,7 +178,14 @@ def _with_progress(mode, fn):
     try:
         fn(); return 0
     except BuildError as e:
-        PROG.close(ok=False); PROG.say(f'[RED] {e}'); return 1
+        PROG.close(ok=False)
+        PROG.say(f'[RED] {e}')
+        cause = e
+        while cause is not None:
+            if isinstance(cause, nsp.BuildToolError) and cause.returncode in (-1, -2, -9, -15):
+                return 128 - cause.returncode
+            cause = cause.__cause__
+        return 1
     except KeyboardInterrupt:
         PROG.close(ok=False); PROG.say('[RED] interrupted'); return 130
     except Exception as e:
