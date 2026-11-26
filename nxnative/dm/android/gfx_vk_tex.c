@@ -9,6 +9,7 @@
 #include "gfx_vk_d24_copy.h"
 #include "gfx_vk_resolution_budget.h"
 #include "gfx_vk_resolution_scope.h"
+#include "gfx_vk_resolution_window.h"
 #include "ownership_exchange.h"
 #include "gfx_vk_resolution_restore.h"
 #include "gfx_vk_resolution_preflight.h"
@@ -1888,12 +1889,16 @@ typedef struct { samp_par p; uint64_t seq; } sreg_ver;
 static uint64_t *g_sseq; static sreg_ver *g_sold; static uint64_t g_sregs;   // the current version's count, SREG_OLD older ones per ID (newest first)
 uint64_t mtl_samp_seq(void) { return __atomic_load_n(&g_sregs, __ATOMIC_ACQUIRE); }
 static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_rs_sync_cv=PTHREAD_COND_INITIALIZER;
+static int g_rs_sync_freeze;
 __attribute__((weak)) uint64_t nvn_jobs_queued(void) { return 0; }
 __attribute__((weak)) uint64_t nvn_replaying_job(void) { return 0; }
+__attribute__((weak)) uint64_t nvn_rs_window_last_job(void) {return 0;}
 void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     if (tid < 0) return;
-    uint64_t seq = nvn_jobs_queued();
     pthread_mutex_lock(&g_rmu);
+    while (g_rs_sync_freeze) pthread_cond_wait(&g_rs_sync_cv,&g_rmu);
+    uint64_t seq=nvn_jobs_queued();
     if (tid >= g_ntreg) { int n = tid + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     g_tex_gen++; treg_t *r = &g_treg[tid];
     if (r->cur.ok && seq) {   // keep the one replaced for the jobs queued before this registration
@@ -1908,12 +1913,19 @@ static __thread treg_ver t_treg;   // the version a lookup found, copied (the ta
 // Only the replay thread uses this bounded scratch. Snapshot all shader
 // texture IDs used by a candidate scope before publishing scaled owners.
 enum { RS_FREEZE_MAX=96 };
-typedef struct { unsigned n; int active,sealed; struct { int tid; treg_ver ver; } e[RS_FREEZE_MAX]; } rs_freeze_table;
+typedef struct { unsigned n; int active,sealed,sync_guard; struct { int tid; treg_ver ver; } e[RS_FREEZE_MAX]; } rs_freeze_table;
 static __thread rs_freeze_table *t_rs_freeze;
 int vk_rs_scope_freeze_begin(void) {
     if (!t_rs_freeze) t_rs_freeze=calloc(1,sizeof *t_rs_freeze);
     if (!t_rs_freeze || t_rs_freeze->active) return 0;
-    t_rs_freeze->n=0; t_rs_freeze->sealed=0; t_rs_freeze->active=1; return 1;
+    t_rs_freeze->sync_guard=0;
+    if (!nvn_replaying_job()) {
+        pthread_mutex_lock(&g_rmu);
+        if (g_rs_sync_freeze) {pthread_mutex_unlock(&g_rmu);return 0;}
+        g_rs_sync_freeze=1;t_rs_freeze->sync_guard=1;
+        pthread_mutex_unlock(&g_rmu);
+    }
+    t_rs_freeze->n=0;t_rs_freeze->sealed=0;t_rs_freeze->active=1;return 1;
 }
 void vk_rs_scope_freeze_seal(void) {
     t_rs_freeze->sealed=1;
@@ -1921,8 +1933,13 @@ void vk_rs_scope_freeze_seal(void) {
 }
 void vk_rs_scope_freeze_end(void) {
     if (!t_rs_freeze || !t_rs_freeze->active) return;
-    if (t_rs_freeze->sealed) { pthread_mutex_lock(&g_rmu); g_tex_gen++; pthread_mutex_unlock(&g_rmu); }
-    t_rs_freeze->active=t_rs_freeze->sealed=0; t_rs_freeze->n=0;
+    if (t_rs_freeze->sealed || t_rs_freeze->sync_guard) {
+        pthread_mutex_lock(&g_rmu);
+        if (t_rs_freeze->sealed) g_tex_gen++;
+        if (t_rs_freeze->sync_guard) {g_rs_sync_freeze=0;pthread_cond_broadcast(&g_rs_sync_cv);}
+        pthread_mutex_unlock(&g_rmu);
+    }
+    t_rs_freeze->active=t_rs_freeze->sealed=t_rs_freeze->sync_guard=0;t_rs_freeze->n=0;
 }
 vkimg_t *vk_tex_by_id(int tid, const view_t **view_out, const tex_t **tex_out) {
     rs_freeze_table *freeze=t_rs_freeze;
@@ -1941,7 +1958,9 @@ vkimg_t *vk_tex_by_id(int tid, const view_t **view_out, const tex_t **tex_out) {
     if (r && job && r->seq >= job && g_treg[tid].old)   // registered after this job was queued: the newest earlier one
         for (int k = 0; k < TREG_OLD; k++) { const treg_ver *o = &g_treg[tid].old[k]; if (!o->ok) break; r = o; if (o->seq < job) break; }
     int ok = r && r->ok;
-    if (freeze && freeze->active && (!job || (r && r->seq>=job))) ok=0;
+    if (ok && freeze && freeze->active &&
+        !nx_rs_window_descriptor(job,nvn_rs_window_last_job(),r->seq,
+                                 r==&g_treg[tid].cur,freeze->sync_guard)) ok=0;
     if (ok) t_treg = *r;
     pthread_mutex_unlock(&g_rmu);
     if (ok && freeze && freeze->active) {

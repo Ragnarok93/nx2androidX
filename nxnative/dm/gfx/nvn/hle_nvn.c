@@ -19,6 +19,7 @@
 #ifdef __ANDROID__
 #include "gfx_vk_resolution_adaptive.h"
 #include "gfx_vk_resolution_live.h"
+#include "gfx_vk_resolution_window.h"
 #endif
 #include "gfx_vk_resolution_plan.h"
 #include "../../host/front.h"
@@ -1313,22 +1314,83 @@ static uint64_t g_job_enq, g_job_done, g_job_fence[JOB_RING];   // jobs queued a
 static pthread_mutex_t g_job_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_job_cv = PTHREAD_COND_INITIALIZER, g_jobdone_cv = PTHREAD_COND_INITIALIZER;
 static int nvn_async(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_ASYNC"); on = e && atoi(e); } return on; }
 static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h);
+#ifdef __ANDROID__
+static void submit_now_window(NVNqueue *q,int n,const NVNcommandHandle *h,int window_n,int held);
+int vk_rs_wants_sync_snapshot(void);
+extern int vk_rs_scope_cross_submission_active(void) __attribute__((weak));
+static __thread uint64_t g_rs_window_last_job;
+uint64_t nvn_rs_window_last_job(void) {return g_rs_window_last_job;}
+#endif
 static _Atomic uint64_t g_fs_replay_ns;   // replay time accrued between JOB_PRESENTs so fstep_tick sees replay-thread saturation even when pq_ns hides it
+// Retain the previous job's immutable records exactly as before, and
+// publish a distinct completion fence for each original guest submission.
+static void replay_complete_job(void) {
+    pthread_mutex_lock(&g_job_mu);
+    memmove(g_jobs,g_jobs+1,sizeof *g_jobs*(size_t)--g_njob);
+    g_job_done++;g_job_fence[g_job_done%JOB_RING]=mtl_last_fence();
+    pthread_cond_broadcast(&g_jobdone_cv);pthread_mutex_unlock(&g_job_mu);
+}
 static void *replay_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "nvn replay"); dm_perf_replay_thread();
-    { void crash_thread_init(void); crash_thread_init(); }   // the signal alternate stack is per thread (dm.h)
-    uint64_t fs_racc = 0;
+    { void crash_thread_init(void); crash_thread_init(); }
+    uint64_t fs_racc=0;
+    static nvn_job prev;
     for (;;) {
-        pthread_mutex_lock(&g_job_mu); while (!g_njob) pthread_cond_wait(&g_job_cv, &g_job_mu);
-        nvn_job j = g_jobs[0]; pthread_mutex_unlock(&g_job_mu);
-        if (j.kind == JOB_SUBMIT) { uint64_t ts = now_ns(); __atomic_store_n(&g_replaying, g_job_done + 1, __ATOMIC_RELAXED); submit_now(j.q, j.n, (const NVNcommandHandle *)j.h); __atomic_store_n(&g_replaying, 0, __ATOMIC_RELAXED);
-            static nvn_job prev; if (prev.h) { for (int i = 0; i < prev.n; i++) free((void *)(uintptr_t)prev.h[i]); free(prev.h); }   // the copies (rec_copy) go one submission later
-            prev = j; uint64_t te = now_ns(); fs_racc += te - ts; g_tl_enq = j.t_enq; g_tl_start = ts; g_tl_end = te; }
-        else { dm_perf_replay_thread();   // (again while its cores were refused: perf_android.c)
-            gfx_enter(); uint64_t t0 = now_ns(); uint64_t tk = mtl_present(j.tex, j.period, j.crop); __atomic_store_n(j.ticket, tk, __ATOMIC_RELEASE); gfx_leave(); uint64_t dt = now_ns() - t0; atomic_fetch_add(&g_nvn_ns, dt); atomic_store(&g_fs_replay_ns, fs_racc + dt); fs_racc = 0; }
-        pthread_mutex_lock(&g_job_mu);
-        memmove(g_jobs, g_jobs + 1, sizeof *g_jobs * (size_t)--g_njob); g_job_done++; g_job_fence[g_job_done % JOB_RING] = mtl_last_fence();
-        pthread_cond_broadcast(&g_jobdone_cv); pthread_mutex_unlock(&g_job_mu);
+        pthread_mutex_lock(&g_job_mu);while (!g_njob) pthread_cond_wait(&g_job_cv,&g_job_mu);
+        nvn_job j=g_jobs[0];
+#ifdef __ANDROID__
+        nvn_job next={0};
+        uint64_t window[NX_RS_WINDOW_HANDLES];
+        unsigned window_n=0;
+        if (g_njob>=2 && j.kind==JOB_SUBMIT && g_jobs[1].kind==JOB_SUBMIT &&
+            vk_rs_scope_cross_submission_active && vk_rs_wants_sync_snapshot()) {
+            next=g_jobs[1];
+            window_n=nx_rs_window_handles(window,j.h,j.n,next.h,next.n,j.q==next.q);
+        }
+#endif
+        pthread_mutex_unlock(&g_job_mu);
+        if (j.kind==JOB_SUBMIT) {
+#ifdef __ANDROID__
+            if (window_n) {
+                // Pool finalization, raw readback and virtual mapping may not
+                // interleave with an open certificate. Do not wait for new
+                // jobs: both original submissions already exist.
+                gfx_enter();pthread_mutex_lock(&g_sub_mu);
+                g_rs_window_last_job=g_job_done+2;
+                uint64_t ts=now_ns();
+                __atomic_store_n(&g_replaying,g_job_done+1,__ATOMIC_RELAXED);
+                submit_now_window(j.q,j.n,(const NVNcommandHandle *)window,(int)window_n,1);
+                __atomic_store_n(&g_replaying,0,__ATOMIC_RELAXED);
+                if (prev.h) {for (int k=0;k<prev.n;k++) free((void *)(uintptr_t)prev.h[k]);free(prev.h);}
+                prev=j;uint64_t te=now_ns();fs_racc+=te-ts;g_tl_enq=j.t_enq;g_tl_start=ts;g_tl_end=te;
+                int live=vk_rs_scope_cross_submission_active();
+                if (!live) mtl_exec_rest(NULL,0);
+                replay_complete_job();
+                if (live) {
+                    ts=now_ns();
+                    __atomic_store_n(&g_replaying,g_job_done+1,__ATOMIC_RELAXED);
+                    submit_now_window(next.q,next.n,(const NVNcommandHandle *)(window+j.n),next.n,1);
+                    __atomic_store_n(&g_replaying,0,__ATOMIC_RELAXED);
+                    for (int k=0;k<prev.n;k++) free((void *)(uintptr_t)prev.h[k]);free(prev.h);
+                    prev=next;te=now_ns();fs_racc+=te-ts;g_tl_enq=next.t_enq;g_tl_start=ts;g_tl_end=te;
+                    replay_complete_job();
+                }
+                g_rs_window_last_job=0;
+                pthread_mutex_unlock(&g_sub_mu);gfx_leave();
+                continue;
+            }
+#endif
+            uint64_t ts=now_ns();__atomic_store_n(&g_replaying,g_job_done+1,__ATOMIC_RELAXED);
+            submit_now(j.q,j.n,(const NVNcommandHandle *)j.h);__atomic_store_n(&g_replaying,0,__ATOMIC_RELAXED);
+            if (prev.h) {for (int k=0;k<prev.n;k++) free((void *)(uintptr_t)prev.h[k]);free(prev.h);}
+            prev=j;uint64_t te=now_ns();fs_racc+=te-ts;g_tl_enq=j.t_enq;g_tl_start=ts;g_tl_end=te;
+        } else {
+            dm_perf_replay_thread();
+            gfx_enter();uint64_t t0=now_ns();uint64_t tk=mtl_present(j.tex,j.period,j.crop);
+            __atomic_store_n(j.ticket,tk,__ATOMIC_RELEASE);gfx_leave();uint64_t dt=now_ns()-t0;
+            atomic_fetch_add(&g_nvn_ns,dt);atomic_store(&g_fs_replay_ns,fs_racc+dt);fs_racc=0;
+        }
+        replay_complete_job();
     }
     return NULL;
 }
@@ -1446,10 +1508,9 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
         job_push((nvn_job){JOB_SUBMIT, n, c, q}); return; }
     submit_now(q, n, h);
 }
-static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h) {
+static void submit_now_window(NVNqueue *q,int n,const NVNcommandHandle *h,int window_n,int held) {
     SEQ("submit queue=%p count=%d first_handle=%#llx", (void *)q, n, n > 0 ? (unsigned long long)h[0] : 0ull);
-    gfx_enter();
-    pthread_mutex_lock(&g_sub_mu);
+    if (!held) {gfx_enter();pthread_mutex_lock(&g_sub_mu);}
     uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
     int async = nvn_async();
     if (!async) ((queue_t *)q)->submits++;
@@ -1468,8 +1529,12 @@ static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h) {
     mtl_sub_begin(); ft_del_drain();
     nvn_ft_poll();
     mtl_sub_index((const uint64_t *)h, n);
-    for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
-    mtl_exec_rest(NULL, 0);
+    for (int i=0;i<n;i++) {
+        mtl_exec_rest((const uint64_t *)h+i+1,window_n-i-1);
+        mtl_exec((const uint8_t *)h[i]);
+    }
+    if (window_n>n) mtl_exec_rest(h+n,window_n-n);
+    else mtl_exec_rest(NULL,0);
     mtl_sub_commit();
 #ifdef __ANDROID__
     if (snapshot) vk_rs_set_sync_snapshot(0);
@@ -1478,14 +1543,17 @@ static void submit_now(NVNqueue *q, int n, const NVNcommandHandle *h) {
     previous_snapshot = snapshot;
     previous_count = snapshot ? n : 0;
 #endif
-    pthread_mutex_unlock(&g_sub_mu);
+    if (!held) pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
     uint64_t i1, y1; thr_counts(&i1, &y1); uint64_t dc = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0, di = i1 - i0;
     atomic_fetch_add(&g_cum_sub_cyc, y1 - y0); atomic_fetch_add(&g_cum_sub_sys_ns, thr_sys_ns() - s0); atomic_fetch_add(&g_cum_sub_wall_ns, dw);
     atomic_fetch_add(&g_sub_cpu_ns, dc); atomic_fetch_add(&g_cum_sub_cpu_ns, dc);
     atomic_fetch_add(&g_sub_instr, di); atomic_fetch_add(&g_cum_sub_instr, di);
-    gfx_leave();
+    if (!held) gfx_leave();
+}
+static void submit_now(NVNqueue *q,int n,const NVNcommandHandle *h) {
+    submit_now_window(q,n,h,n,0);
 }
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
