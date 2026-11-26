@@ -1,5 +1,6 @@
 package com.nx.android.appstate
 
+import com.nx.android.data.ApkUpgradeRequest
 import com.nx.android.data.library.GameCleanupFiles
 import com.nx.android.data.library.LibraryFileScanner
 import com.nx.android.data.library.PackMoverFiles
@@ -34,9 +35,9 @@ class LibraryOperationCoordinator @Inject constructor(
         runtime.begin(pack, name)
     }
 
-    fun beginApkUpgrade(source: String, data: String, output: String = "", key: String = ""): Boolean = synchronized(moving) {
+    fun beginApkUpgrade(request: ApkUpgradeRequest): Boolean = synchronized(moving) {
         if (moving.isNotEmpty() || port.running || player.running || runtime.running) return@synchronized false
-        runtime.beginApk(source, data, output, key)
+        runtime.beginApk(request)
     }
 
     fun beginPlay(titleId: String, name: String): Boolean = synchronized(moving) {

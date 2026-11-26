@@ -70,7 +70,7 @@ void dm_java_window_drop(void) {
 
 void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freeze_for(int reason, int on); void dm_gfx_suspend(int on);
 // ---- settings (the pause menu's), kept in the files folder as KEY=VALUE lines ----
-static char g_root[512];
+static char g_root[512], g_settings_file[700];
 const char *dm_front_root(void) { return g_root; }   // overlay_theme.c: the player's path has no APK assets, the theme comes from the pack's overlay/
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // gamepad, rumble, frame rate
 static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalone FG preferences
@@ -127,7 +127,12 @@ static void settings_load(void) {
     if ((fg_env = getenv("DM_FSR_SHARPNESS"))) {
         int v = atoi(fg_env); atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
     }
-    char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
+    char path[600], line[128];
+    FILE *f = g_settings_file[0] ? fopen(g_settings_file, "r") : NULL;
+    if (!f) {
+        snprintf(path, sizeof path, "%s/settings.txt", g_root);
+        f = fopen(path, "r");
+    }
     if (!f) return;
     int saved_upscaler = -1;
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
@@ -164,7 +169,10 @@ static void settings_load(void) {
     fclose(f);
 }
 static void settings_save(void) {
-    char p[600], tmp[610]; snprintf(p, sizeof p, "%s/settings.txt", g_root); snprintf(tmp, sizeof tmp, "%s.new", p);
+    char p[700], tmp[710];
+    if (g_settings_file[0]) snprintf(p, sizeof p, "%s", g_settings_file);
+    else snprintf(p, sizeof p, "%s/settings.txt", g_root);
+    snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
     int upscaler = dm_spatial_mode();
     fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\nfsr=%d\nupscaler=%d\nfsr_sharp=%d\nfps_mode=%d\ndyn_scale=%d\ndyn_min=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
@@ -1763,6 +1771,7 @@ static void host_start_common(JNIEnv *E, JavaVM *vm, jobject actctx, const char 
     // The per-game private selection wins over the immutable original pack.
     // Never apply it to the shared in-app player or change a live VkDevice.
     if (!sub[0] && !g_play) {
+        snprintf(g_settings_file, sizeof g_settings_file, "%s/player-settings.txt", internal);
         char selected[1024];
         int selection = dm_driver_selection(internal, selected, sizeof selected);
         if (selection == DM_DRIVER_CUSTOM) setenv("DM_VK_DRIVER", selected, 1);

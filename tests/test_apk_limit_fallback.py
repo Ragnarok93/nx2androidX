@@ -20,7 +20,7 @@ class FakePort:
         self.aw = root / 'work'
         (self.aw / 'embed-pack').mkdir(parents=True)
         (self.aw / 'embed-pack' / 'nx2a-data.json').write_text('{}')
-        self.o = SimpleNamespace(app=False, self_contained=True,
+        self.o = SimpleNamespace(app=False, self_contained=True, game_update=None,
                                  out=root / 'exports', vercode_offset=0,
                                  vulkan_driver=None, external_display=False,
                                  native_keyboard=False, debug=False)

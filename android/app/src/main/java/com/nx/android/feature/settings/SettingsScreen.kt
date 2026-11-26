@@ -2,6 +2,9 @@ package com.nx.android.feature.settings
 
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import com.nx.android.core.ui.components.EnvironmentFileRow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -171,7 +174,7 @@ private fun EnvironmentSection(ob: OnboardingState, actions: AppActions, onReque
         AlertDialog(
             onDismissRequest = { confirmReset = false },
             title = { Text(locale.str(R.string.env_reset_confirm)) },
-            text = { Text(locale.str(R.string.env_reset_what)) },
+            text = { Text(locale.str(R.string.env_reset_what), Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = {
                 TextButton(onClick = {
                     confirmReset = false
@@ -189,17 +192,16 @@ private fun EnvironmentSection(ob: OnboardingState, actions: AppActions, onReque
 private fun KeysRow(actions: AppActions, onRequest: (PickerRequest) -> Unit) {
     val locale = LocalAppLocale.current
     val keys = actions.keys()
-    InfoRow(
+    EnvironmentFileRow(
         title = "prod.keys",
         value = keys.ifEmpty { stringResource(R.string.set_keys_not_set) },
-        leading = { StatusDot(if (keys.isNotBlank() && File(keys).isFile()) NxPalette.Ready else NxPalette.Danger, 8.dp) },
-        trailing = {
-            QuietButton(stringResource(R.string.common_modify), onClick = {
-                onRequest(PickerRequest(PickerMode.FILE, emptySet(), null, locale.str(R.string.onb_choose_prod_keys),
-                    onPicked = { f -> actions.onSetKeys(f.path) }))
-            })
-        },
-    )
+        ready = keys.isNotBlank() && File(keys).isFile,
+    ) {
+        QuietButton(stringResource(R.string.common_modify), onClick = {
+            onRequest(PickerRequest(PickerMode.FILE, emptySet(), null, locale.str(R.string.onb_choose_prod_keys),
+                onPicked = { f -> actions.onSetKeys(f.path) }))
+        })
+    }
 }
 
 /**

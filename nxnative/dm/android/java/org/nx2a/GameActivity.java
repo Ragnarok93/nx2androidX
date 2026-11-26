@@ -266,6 +266,7 @@ public class GameActivity extends NativeActivity {
             expected = new String(b, 0, Math.max(0, n), StandardCharsets.US_ASCII).trim().toLowerCase(Locale.ROOT);
         }
         if (!expected.matches("[0-9a-f]{64}")) throw new IOException("invalid embedded data checksum");
+        CompanionImporter.preservePlayerSettings(activity, null);
         File base = activity.getFilesDir();
         File target = new File(base, "nx2a-data");
         File partial = new File(base, "nx2a-data.partial");

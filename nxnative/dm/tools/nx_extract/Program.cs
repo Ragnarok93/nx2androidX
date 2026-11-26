@@ -13,6 +13,7 @@
 // Title keys come from the common tickets (.tik) inside the NSPs, so only prod.keys is needed; key values are never printed.
 // The base game may also be a cartridge dump (.xci, Monster Hunter Rise): its secure partition holds the NCAs, which carry their keys in the key area (no ticket).
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -112,6 +113,8 @@ static class P {
     }
 
     static int Extract(string[] a) {
+        if (a.Length == 3 && a[1] == "--patch-meta")
+            return PatchMetadata(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
         g_allowMedia = Array.IndexOf(a, "--allow-damaged-media") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged-media");
@@ -236,6 +239,43 @@ static class P {
         Directory.CreateDirectory(outDir);
         Copy(new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid)), outDir, null);
         return Damaged();
+    }
+
+    // Read the content meta, not the dump filename or a display version from NACP.
+    // Standard NSZ/XCZ dumps leave the small meta NCA uncompressed.
+    static int PatchMetadata(KeySet keys, string path) {
+        const byte Application = 0x80, Patch = 0x81;
+        bool hasBase = false;
+        byte[] header = new byte[0x18];
+        var records = new HashSet<(ulong Title, uint Version, ulong Application)>();
+        foreach (Nca nca in OpenNsp(keys, path)) {
+            if (nca.Header.ContentType != NcaContentType.Meta) continue;
+            IFileSystem fs = nca.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+            foreach (DirectoryEntryEx entry in fs.EnumerateEntries("*", SearchOptions.Default)) {
+                if (!entry.Name.EndsWith(".cnmt", StringComparison.OrdinalIgnoreCase)) continue;
+                using var file = new UniqueRef<IFile>();
+                fs.OpenFile(ref file.Ref, entry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                file.Get.Read(out long read, 0, header, ReadOption.None).ThrowIfFailure();
+                hasBase |= read == header.Length && header[0xC] == Application;
+                if (read == header.Length && header[0xC] == Patch &&
+                    BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(0xE)) >= 8) {
+                    var title = BinaryPrimitives.ReadUInt64LittleEndian(header);
+                    if (title != nca.Header.TitleId) {
+                        Console.Error.WriteLine("[RED] Patch content meta title does not match its NCA.");
+                        return 2;
+                    }
+                    records.Add((title, BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(8)),
+                        BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(0x10))));
+                }
+            }
+        }
+        if (hasBase || records.Count != 1) {
+            Console.Error.WriteLine("[RED] Select a separate dump containing exactly one readable game update.");
+            return 2;
+        }
+        foreach (var item in records)
+            Console.WriteLine($"patch {item.Title:X16} {item.Version} {item.Application:X16}");
+        return 0;
     }
 
     // Open an NSP (PFS0) or the secure partition of an XCI, import the common tickets, list all NCAs

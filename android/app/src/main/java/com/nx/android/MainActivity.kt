@@ -28,6 +28,7 @@ import com.nx.android.data.AppLog
 import com.nx.android.data.AppVersion
 import com.nx.android.data.LogBundle
 import com.nx.android.data.PrefsStore
+import com.nx.android.data.UpgradeApks
 import com.nx.android.data.porting.BuildSessionRepository
 import com.nx.android.core.storage.AppPaths
 import androidx.core.content.FileProvider
@@ -63,6 +64,7 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var buildSessions: BuildSessionRepository
     @Inject lateinit var buildWorkspaces: com.nx.android.data.porting.BuildWorkspaces
     @Inject lateinit var paths: AppPaths
+    @Inject lateinit var upgradeApks: UpgradeApks
     @Inject lateinit var onboarding: OnboardingState
     @Inject lateinit var environmentSetup: com.nx.android.domain.environment.EnvironmentSetup
     @Inject lateinit var drivers: com.nx.android.domain.drivers.DriverRepository
@@ -84,6 +86,16 @@ class MainActivity : ComponentActivity() {
         if (!prefs.bool(PrefsStore.OB_COMPLETED)) onboarding.open()
         AppLog.init(this)
         port.attach()   // a port the system killed shows up as interrupted
+        if (runtime.interrupted) {
+            val staging = prefs.str(PrefsStore.RUNTIME_PENDING_APK_STAGE)
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching { upgradeApks.removeInterruptedStage(staging) }.onFailure {
+                    AppLog.line("[RED] Upgrade staging cleanup failed: ${it.message}")
+                }
+                if (prefs.str(PrefsStore.RUNTIME_PENDING_APK_STAGE) == staging)
+                    prefs.put(PrefsStore.RUNTIME_PENDING_APK_STAGE, null)
+            }
+        }
         lifecycleScope.launch(Dispatchers.IO) {
             buildWorkspaces.reconcile { AppLog.line("[RED] $it") }
         }
@@ -128,23 +140,36 @@ class MainActivity : ComponentActivity() {
         },
         onCancelPort = { PortService.cancel(this) },
         onExportApk = { apk -> exportApk(apk) },
-        onInstallUpgrade = { apk -> installUpgrade(apk) },
-        onUpgradeApk = { apk, companion, output, key ->
-            if (!environmentSetup.ready) {
-                toast(locale.str(R.string.upgrade_prepare_environment))
-            } else if (!apk.isFile || !apk.canRead()) {
-                toast(locale.str(R.string.builds_needs_storage))
-                askStorage()
-            } else if (!operations.beginApkUpgrade(apk.absolutePath, companion?.absolutePath.orEmpty(),
-                    output?.absolutePath.orEmpty(), key?.absolutePath.orEmpty())) {
-                toast(locale.str(R.string.runtime_busy))
-            } else {
-                try {
-                    RuntimeUpdateService.start(this)
-                } catch (error: Exception) {
-                    runtime.finish(false, error.message.orEmpty())
+        onUpgradeApk = { target, companion, game, key ->
+            when {
+                !environmentSetup.ready -> toast(locale.str(R.string.upgrade_prepare_environment))
+                !storageGranted() -> {
+                    toast(locale.str(R.string.builds_needs_storage))
+                    askStorage()
+                }
+                !target.apk.canRead() -> toast(locale.str(R.string.lib_artifact_missing_state))
+                game != null && prefs.keys.isBlank() -> toast(locale.str(R.string.builds_need_keys))
+                else -> {
+                    val request = upgradeApks.newRequest(target, companion, game, key)
+                    if (!operations.beginApkUpgrade(request)) toast(locale.str(R.string.runtime_busy))
+                    else try {
+                        RuntimeUpdateService.start(this)
+                    } catch (error: Exception) {
+                        runtime.finish(false, error.message.orEmpty())
+                    }
                 }
             }
+        },
+        onCancelUpgrade = {
+            val request = runtime.apkRequest
+            if (runtime.running && request != null) {
+                runCatching { request.cancellation.createNewFile() }
+                    .onFailure { toast(it.message.orEmpty()) }
+            }
+        },
+        onInstallUpgrade = { installUpgrade() },
+        onExportUpgrade = {
+            exportApk(File(runtime.apkOutput), runtime.apkData.takeIf(String::isNotBlank)?.let(::File))
         },
         onToast = { toast(it) },
         version = { versionName() },
@@ -351,29 +376,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun installUpgrade(apk: File) {
-        val allowed = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "nx2android")
-        try {
-            if (!apk.isFile || apk.canonicalFile.parentFile != allowed.canonicalFile) {
-                toast(locale.str(R.string.lib_artifact_missing_state))
-                return
-            }
-            if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
-                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
-                toast(locale.str(R.string.upgrade_install_permission))
-                return
-            }
-            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
-            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
-        } catch (error: Exception) {
-            toast(locale.str(R.string.upgrade_install_failed, error.message.orEmpty()))
+    private fun installUpgrade() {
+        val request = runtime.apkRequest ?: return
+        if (runtime.phase != com.nx.android.appstate.RuntimeUpdatePhase.SUCCEEDED) return
+        val apk = File(runtime.apkOutput)
+        lifecycleScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    upgradeApks.verifyResult(request.target, upgradeApks.archiveIdentity(apk), request.game != null)
+                }
+                if (!packageManager.canRequestPackageInstalls()) {
+                    toast(locale.str(R.string.upgrade_allow_installs))
+                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                } else {
+                    val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", apk)
+                    startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                }
+            }.onFailure { toast(it.message ?: locale.str(R.string.upgrade_failed)) }
         }
     }
 
-    private fun exportApk(apk: File) {
+    private fun exportApk(apk: File, companion: File? = null) {
         if (!apk.isFile) { toast(locale.str(R.string.lib_artifact_missing_state)); return }
-        val dataFolder = File(apk.parentFile, "${apk.nameWithoutExtension}-data")
+        val dataFolder = companion ?: File(apk.parentFile, "${apk.nameWithoutExtension}-data")
         if (dataFolder.isDirectory) {
             // Android cannot install ZIP64 APKs. A large game uses the original
             // per-game APK + companion data export instead: never suggest the

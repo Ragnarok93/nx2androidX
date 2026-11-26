@@ -6,14 +6,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,7 +33,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.android.R
@@ -97,7 +95,7 @@ fun EnvChecklistDialog(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                 Column(
-                    Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                    Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     CheckLine(
@@ -150,13 +148,12 @@ fun EnvChecklistDialog(
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (state.running) {
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = (if (LocalBuilderTheme.current) MaterialTheme.colorScheme.primary else NxPalette.Cream))
                     } else {
                         QuietButton(stringResource(R.string.env_check_recheck), viewModel::runDoctor, enabled = canRun(state, portRunning))
                     }
-                    Spacer(Modifier.width(8.dp))
                     // The checklist fixes one thing at a time; the setup walks through all of it (the permission,
                     // the space, the battery) with the reasons behind it. It is the way out when a row here has none.
                     QuietButton(stringResource(R.string.set_rerun_onboarding), onRunOnboarding)
@@ -169,7 +166,7 @@ fun EnvChecklistDialog(
                     if (why.isNotEmpty()) {
                         Text(why, style = MaterialTheme.typography.labelSmall,
                              color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
-                             textAlign = TextAlign.End, modifier = Modifier.weight(1f).padding(start = 10.dp))
+                             modifier = Modifier.fillMaxWidth())
                     }
                 }
             }
@@ -245,31 +242,24 @@ private fun CheckLine(
     action: String? = null,
     onAction: (() -> Unit)? = null,
 ) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        StatusDot(
-            when (level) {
-                EnvCheck.Level.OK -> NxPalette.Ready
-                EnvCheck.Level.HINT -> NxPalette.Building
-                EnvCheck.Level.BAD -> NxPalette.Danger
-            },
-            10.dp,
-        )
-        Column(Modifier.weight(1f)) {
-            Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (fix.isNotEmpty()) {
-                Text(fix, style = MaterialTheme.typography.bodySmall, color = NxPalette.Building, fontSize = 11.sp)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            StatusDot(
+                when (level) {
+                    EnvCheck.Level.OK -> NxPalette.Ready
+                    EnvCheck.Level.HINT -> NxPalette.Building
+                    EnvCheck.Level.BAD -> NxPalette.Danger
+                },
+                10.dp,
+            )
+            Column(Modifier.weight(1f)) {
+                Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (fix.isNotEmpty()) {
+                    Text(fix, style = MaterialTheme.typography.bodySmall, color = NxPalette.Building, fontSize = 11.sp)
+                }
             }
         }
-        if (action != null && onAction != null) {
-            Text(
-                action,
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.secondary)
-                    .clickable { onAction() }.padding(horizontal = 14.dp, vertical = 8.dp),
-            )
-        }
+        if (action != null && onAction != null) QuietButton(action, onAction)
     }
 }

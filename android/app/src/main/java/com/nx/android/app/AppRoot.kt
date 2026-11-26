@@ -2,23 +2,16 @@ package com.nx.android.app
 
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Upgrade
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.key
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.semantics.heading
 import com.nx.android.appstate.RuntimeUpdateState
 import com.nx.android.core.ui.theme.BuilderTheme
 import com.nx.android.core.ui.theme.BuilderThemeMode
@@ -41,7 +34,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -69,8 +62,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.text.style.TextOverflow
+import com.nx.android.core.ui.components.LocalBuilderBottomPadding
+import com.nx.android.core.ui.components.BuilderTopAppBar
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -78,6 +78,8 @@ import com.nx.android.R
 import com.nx.android.appstate.PortState
 import com.nx.android.appstate.OnboardingState
 import com.nx.android.data.AppLocale
+import com.nx.android.data.GameUpdateInputs
+import com.nx.android.data.UpgradeTarget
 import com.nx.android.data.PrefsStore
 import com.nx.android.data.StorageVolumes
 import com.nx.android.domain.GameConfig
@@ -133,8 +135,10 @@ data class AppActions(
     val isBuildActive: (String) -> Boolean,
     val emptyBuildLogMessage: (String) -> String,
     val titleBuildLog: (String) -> String,
-    val onUpgradeApk: (File, File?, File?, File?) -> Unit = { _, _, _, _ -> },
-    val onInstallUpgrade: (File) -> Unit = {},
+    val onUpgradeApk: (UpgradeTarget, File?, GameUpdateInputs?, File?) -> Unit = { _, _, _, _ -> },
+    val onCancelUpgrade: () -> Unit = {},
+    val onInstallUpgrade: () -> Unit = {},
+    val onExportUpgrade: () -> Unit = {},
     // the firmware: one for the machine (imported from a zip into the app's own folder, optional)
     val firmware: () -> String = { "" },
     val onImportFirmware: (File) -> Unit = {},
@@ -216,24 +220,19 @@ fun AppRoot(
                         if (!storageOk) {
                             BackHandler { pickerReq = null }
                             // 内置文件管理器读不了没有全文件访问的存储：给授权入口
-                            Column(
-                                Modifier.fillMaxSize().padding(24.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-                            ) {
-                                Spacer(Modifier.weight(1f))
-                                Text(stringResource(R.string.app_storage_permission_needed),
-                                     style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                                Text(
-                                    stringResource(R.string.app_storage_permission_picker),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                )
-                                Spacer(Modifier.weight(1f))
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Spacer(Modifier.weight(1f))
+                            Column(Modifier.fillMaxSize().padding(24.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Text(stringResource(R.string.app_storage_permission_needed),
+                                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                    Text(stringResource(R.string.app_storage_permission_picker),
+                                        style = MaterialTheme.typography.bodyMedium)
+                                }
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
+                                    modifier = Modifier.fillMaxWidth()) {
                                     QuietButton(stringResource(R.string.common_cancel), onClick = { pickerReq = null })
-                                    CapsuleButton(stringResource(R.string.app_grant_permission), onClick = {
-                                        actions.onAskStorage()
-                                    })
+                                    CapsuleButton(stringResource(R.string.app_grant_permission), onClick = actions.onAskStorage)
                                 }
                             }
                         } else {
@@ -336,8 +335,10 @@ fun AppRoot(
 private fun OpenSourceNoticeDialog(onClose: () -> Unit, onRepo: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
+        shape = MaterialTheme.shapes.large,
+        containerColor = MaterialTheme.colorScheme.surface,
         title = { Text(stringResource(R.string.oss_notice_title), fontWeight = FontWeight.Bold) },
-        text = { Text(stringResource(R.string.oss_notice_body)) },
+        text = { Text(stringResource(R.string.oss_notice_body), Modifier.verticalScroll(rememberScrollState())) },
         confirmButton = {
             TextButton(onClick = onClose) { Text(stringResource(R.string.oss_notice_ok), color = MaterialTheme.colorScheme.primary) }
         },
@@ -394,12 +395,18 @@ private fun MainScreen(
         settingsSection = null
     }
     fun closeDetail() {
+        if (destination == Tab.BUILD) {
+            builds.closeBuild()
+            return
+        }
         if (variablesOpen && variablesFromBuild) select(Tab.BUILD) else select(destination)
     }
-    val detail = (destination == Tab.DEBUG && variablesOpen) ||
+    val buildDetail = destination == Tab.BUILD && builds.selectedBuildId.isNotEmpty()
+    val detail = buildDetail || (destination == Tab.DEBUG && variablesOpen) ||
         (destination == Tab.SETTINGS && settingsSection != null)
     BackHandler(enabled = detail) { closeDetail() }
     val title = when {
+        buildDetail -> R.string.builds_result
         destination == Tab.DEBUG && variablesOpen -> R.string.builder_variables
         destination == Tab.SETTINGS -> settingsSection?.title ?: destination.label
         else -> destination.label
@@ -408,7 +415,6 @@ private fun MainScreen(
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val wide = maxWidth >= 600.dp
         val railOnSide = wide || maxHeight < 430.dp
-        val compactHeight = maxHeight < 545.dp
         Row(Modifier.fillMaxSize()) {
             if (railOnSide) NavigationRail(
                 modifier = Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp),
@@ -425,29 +431,17 @@ private fun MainScreen(
                 }
             }
             Column(Modifier.weight(1f)) {
-                key(destination, title) {
-                    val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
-                    Column(Modifier.weight(1f).nestedScroll(behavior.nestedScrollConnection)) {
-                        val back: @Composable () -> Unit = {
-                            if (detail) IconButton(onClick = { closeDetail() }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.common_back))
-                            }
-                        }
-                        val heading: @Composable () -> Unit = {
-                            Text(stringResource(title), modifier = Modifier.semantics { heading() })
-                        }
-                        val barColors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.background,
-                            scrolledContainerColor = MaterialTheme.colorScheme.background,
-                        )
-                        if (compactHeight || detail || port.running && destination == Tab.BUILD) {
-                            TopAppBar(title = heading, navigationIcon = back, colors = barColors,
-                                windowInsets = WindowInsets(0, 0, 0, 0))
-                        } else {
-                            LargeTopAppBar(title = heading, navigationIcon = back, colors = barColors,
-                                windowInsets = WindowInsets(0, 0, 0, 0), scrollBehavior = behavior)
-                        }
-                        Box(Modifier.weight(1f)) {
+                BuilderTopAppBar(stringResource(title), onBack = if (detail) ::closeDetail else null)
+                if (destination != Tab.BUILD && port.running) TextButton(onClick = { select(Tab.BUILD) }) {
+                    Text(stringResource(R.string.builds_porting))
+                }
+                var pillHeight by remember { mutableIntStateOf(0) }
+                val bottomPadding = if (railOnSide) 0.dp else with(LocalDensity.current) {
+                    if (pillHeight > 0) pillHeight.toDp() else 92.dp
+                }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    key(destination, title) {
+                        CompositionLocalProvider(LocalBuilderBottomPadding provides bottomPadding) {
                             when (destination) {
                                 Tab.BUILD -> BuildsRoute(builds, prefs.keys, ready, actions,
                                     onRequest, onLog, busy = runtime.running,
@@ -458,7 +452,7 @@ private fun MainScreen(
                                     },
                                     onSetup = { select(Tab.SETTINGS); settingsSection = SettingsSection.ENVIRONMENT })
                                 Tab.UPGRADE -> UpgradeScreen(upgrade, runtime, port.running || runtime.running,
-                                    ready, onRequest, actions.onUpgradeApk, actions.onExportApk, actions.onInstallUpgrade)
+                                    ready, port.history, onRequest, actions)
                                 Tab.SETTINGS -> SettingsScreen(onboarding, installedDrivers, drivers, storage,
                                     actions, onRequest, onDrivers, settingsSection, { settingsSection = it }, theme, onTheme)
                                 Tab.DEBUG -> if (variablesOpen) {
@@ -472,23 +466,33 @@ private fun MainScreen(
                             }
                         }
                     }
-                }
-                if (destination != Tab.BUILD && port.running) TextButton(onClick = { select(Tab.BUILD) }) {
-                    Text(stringResource(R.string.builds_porting))
-                }
-                if (!railOnSide) NavigationBar(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                        .clip(MaterialTheme.shapes.large),
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    windowInsets = WindowInsets(0, 0, 0, 0),
-                ) {
-                    Tab.entries.forEach { tab ->
-                        NavigationBarItem(
-                            selected = destination == tab,
-                            onClick = { select(tab) },
-                            icon = { Icon(tab.icon, contentDescription = null) },
-                            label = { Text(stringResource(tab.label)) },
-                        )
+                    if (!railOnSide) {
+                        val background = MaterialTheme.colorScheme.background
+                        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+                            Box(Modifier.matchParentSize().background(Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                0.65f to background.copy(alpha = 0.26f),
+                                1f to background,
+                            )))
+                            NavigationBar(
+                                modifier = Modifier.onSizeChanged { pillHeight = it.height }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    .clip(MaterialTheme.shapes.large),
+                                containerColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.78f),
+                                tonalElevation = 0.dp,
+                                windowInsets = WindowInsets(0, 0, 0, 0),
+                            ) {
+                                Tab.entries.forEach { tab ->
+                                    NavigationBarItem(
+                                        selected = destination == tab,
+                                        onClick = { select(tab) },
+                                        icon = { Icon(tab.icon, contentDescription = null) },
+                                        label = { Text(stringResource(tab.label), maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis) },
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -18,7 +18,7 @@ if _apk_tools not in sys.path:
     sys.path.insert(0, _apk_tools)
 from apkdriver import source_certificate
 from apksign import (derive_signer_v1, persistent_signer, read_signer, signing_lock,
-                     spki, version_directory, write_signing_state)
+                     spki, version_directory, package_receipt, write_signing_state)
 
 
 def title_key(legacy, title):
@@ -63,8 +63,11 @@ def provision_title_key(legacy, key, *, expected=None):
     return key
 
 
-def package_receipt(key, package):
-    return version_directory(key) / hashlib.sha256(package.encode('utf-8')).hexdigest()
+def saved_version_floor(key, package):
+    try:
+        return int(package_receipt(key, package).read_text(encoding='ascii'))
+    except FileNotFoundError:
+        return 0
 
 
 def imported_keys(key):

@@ -20,9 +20,9 @@ class BuildWorkspaces(private val root: File) {
     @Inject constructor(paths: AppPaths) : this(File(paths.work, "standalone"))
 
     @Synchronized
-    fun prepare(source: String): File {
+    fun prepare(source: String, namespace: String = ""): File {
         check(!Files.isSymbolicLink(root.toPath())) { "Invalid standalone workspace root" }
-        val workspace = workspaceFor(source)
+        val workspace = workspaceFor(source, namespace)
         check(!Files.isSymbolicLink(workspace.toPath())) { "Invalid standalone workspace" }
         val marker = File(workspace, DISCARD)
         if (Files.exists(marker.toPath(), NOFOLLOW_LINKS)) deleteWorkspace(workspace, marker)
@@ -61,10 +61,11 @@ class BuildWorkspaces(private val root: File) {
     fun stageLogs(source: String): List<Pair<String, File>> =
         workspaceLogs(workspaceFor(source))
 
-    private fun workspaceFor(source: String): File {
+    private fun workspaceFor(source: String, namespace: String = ""): File {
         val file = File(source)
         val path = runCatching { file.canonicalPath }.getOrElse { file.absolutePath }
-        val key = MessageDigest.getInstance("SHA-256").digest(path.toByteArray()).joinToString("") { "%02x".format(it) }
+        val identity = if (namespace.isEmpty()) path else "$namespace\u0000$path"
+        val key = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray()).joinToString("") { "%02x".format(it) }
         return File(root, key)
     }
 

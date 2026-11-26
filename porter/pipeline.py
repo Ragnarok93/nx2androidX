@@ -56,6 +56,16 @@ def public_split_export_dir(path):
     return path
 
 
+@dataclass(frozen=True)
+class GameUpdate:
+    patch: Path
+    title: str
+    old_version: str
+    version_floor: int
+    key: Path
+    previous_companion: tuple[str, str] | None = None
+
+
 @dataclass
 class Options:
     folder: Path                       # the game's folder: the base game, its updates and DLC
@@ -67,6 +77,7 @@ class Options:
     app_name: str = ''                 # the launcher label (default: the game's name in its control data)
     app: bool = False                  # the nx2android app's mode: no APK and no install — the pack carries the host (libdmplay.so), the drivers and the icon; the app runs the game itself
     self_contained: bool = False       # build a per-game APK with its data pack embedded; first launch extracts it privately
+    game_update: GameUpdate = None     # exact, signed upgrade target for a standalone export
     install: bool = False              # install on the device after packing
     device: str = ''                   # adb serial
     replace_signer: bool = False       # uninstall an app of the same package signed with another key
@@ -535,6 +546,8 @@ class Port:
         root = Path(os.environ.get('NX2A_WORK', '')).expanduser() if os.environ.get('NX2A_WORK') else o.folder
         self.work_root = root
         self.work = root / f'{tid}_build'
+        if o.game_update:
+            self.select_game_update(tid)
         if self.work.is_dir():
             say(f'checking cached build products in {self.work}')
         g, ap = profiles.by_title(self.app)
@@ -570,7 +583,13 @@ class Port:
             if self.pkg_ver not in builds: self.derived = f'{self.pkg_ver} is not a version game profile {g.id} registers ({", ".join(f"{v} {b["display"]}" for v, b in builds.items())})'
             elif not all(v in have for v in need): self.derived = f'the folder has no {", ".join(v for v in need if v not in have)}, whose files the profile\'s shader tables were made from'
             if self.derived: say(f'{self.derived}: packing {self.pkg_ver} from a profile derived from it')
+        if o.game_update and self.derived:
+            raise BuildError(f'This game update needs a supported profile and its source dumps: {self.derived}.')
         self.versions = [self.pkg_ver] if self.derived else need + ([self.pkg_ver] if self.pkg_ver not in need else [])
+        if o.game_update:
+            # Older sibling updates are useful only if they supply a version used by the profile.
+            needed = {have[v] for v in self.versions}
+            self.fam['updates'] = [(v, p) for v, p in self.fam['updates'] if p in needed]
         self.have = have
         # Resolve the final split-export destination before looking for earlier data.
         if not o.app and not o.self_contained:
@@ -585,6 +604,54 @@ class Port:
         # DM_GAME picks the profile for every tool; WORK keeps their temporary folders inside the build folder (the shader translator writes thousands of files)
         self.env.update(DM_GAME=g.id, DM_ROOT=str(self.work), WORK=str(self.work / 'tmp'))
 
+
+    def select_game_update(self, title):
+        o, request = self.o, self.o.game_update
+        if title != request.title or o.game is None:
+            raise BuildError(f'The original base dump must belong to title {request.title}.')
+        header_key = nsp.header_key(o.keys)
+        if not header_key:
+            raise BuildError('The selected prod.keys needs header_key to identify the original base dump.')
+        base_titles = nsp.meta_titles(o.game, header_key)
+        if int(title, 16) not in base_titles or (int(title, 16) | 0x800) in base_titles:
+            raise BuildError(f'Choose an original base dump for {title} without an update merged into it.')
+        self.fam['base'] = o.game
+        self.fam.pop('merged', None)
+
+        # Scope cached extraction to exact source files. An interrupted update may
+        # be resumed, but a normal build or another update cannot supply its results.
+        paths = {o.game, request.patch, *(p for _, p in self.fam['updates']),
+                 *(p for _, _, p in self.fam['dlc'])}
+        identity = [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(paths)]
+        suffix = hashlib.sha256(repr(identity).encode()).hexdigest()[:24]
+        self.work = self.work.with_name(f'{title}_update_{suffix}')
+        logs = self.work / 'logs'
+        nx = nsp.build_nx_extract(NXNATIVE, self.work, logs, self.env)
+        self.update_extractor = nx
+        output = logs / 'update_metadata.log'
+        nsp.run([nx, o.keys, '--patch-meta', request.patch], output, env=self.env)
+        match = re.search(r'^patch ([0-9A-F]{16}) (\d+) ([0-9A-F]{16})$', output.read_text(), re.M)
+        if not match:
+            raise BuildError('Could not read the update title and version from its content meta.')
+        patch_title, number, application = match.groups()
+        if application != title or int(patch_title, 16) != (int(title, 16) | 0x800):
+            raise BuildError(f'This game update belongs to title {application}. The selected port is {title}.')
+        version = f'v{number}'
+        if nsp.vnum(version) <= nsp.vnum(request.old_version):
+            raise BuildError(f'Game update {version} must be newer than the selected port ({request.old_version}).')
+        game, android = profiles.by_title(self.app)
+        if not (game and android and version in game.builds()):
+            raise BuildError(f'Game update {version} has no supported Android build for title {title}.')
+        code = version_code(version)
+        ceiling = min(code + VERCODE_OFFSET_MAX, 2147483647)
+        floor = max(request.version_floor, signing.saved_version_floor(request.key, o.package))
+        if code > ceiling or floor > ceiling:
+            raise BuildError(f'Game update {version} cannot meet Android version code {floor} without exceeding {ceiling}.')
+        o.vercode_offset = max(0, floor - code)
+        o.version = version
+        self.fam['updates'] = [(v, p) for v, p in self.fam['updates']
+                               if p != request.patch and v != int(number)]
+        self.fam['updates'].append((int(number), request.patch))
 
     def find_previous_companion(self):
         """Recognize a completed companion of the exact title/package/version.
@@ -801,7 +868,9 @@ class Port:
         needs_extraction = (not all(fresh(v) for v in self.versions) or
                             (bool(self.fam['dlc']) and not dlc_reused) or
                             bool(o.firmware and self.ap.sysdata))
-        nx = nsp.build_nx_extract(NXNATIVE, self.work, self.logs, self.env) if needs_extraction else None
+        nx = None
+        if needs_extraction:
+            nx = getattr(self, 'update_extractor', None) or nsp.build_nx_extract(NXNATIVE, self.work, self.logs, self.env)
         PROG.end('skipped (existing extraction)' if nx is None else '')
         if nx is not None and getattr(self, 'previous_companion', None):
             for ver in self.versions:
@@ -810,6 +879,8 @@ class Port:
         self.dirs = {ver: nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g, allow_damaged_media=o.allow_damaged_media) for ver in self.versions}
         for d in self.dirs.values(): nsp.require_64bit(d / 'ExeFS', f'{g.get("name", g.id)} ({g.id})')
         bad = [] if self.derived else [f'{v}: {x}' for v in self.versions for x in nsp.build_mismatch(self.dirs[v], v, g)]
+        if bad and self.o.game_update:
+            raise BuildError(f'Game update executable inputs do not match the registered builds: {"; ".join(bad)}')
         if bad and self.provisional: raise BuildError(f'not the builds the provisional profile registers: {"; ".join(bad)}')
         if bad:
             self.derived = f'not the builds game profile {g.id} registers: {"; ".join(bad)}'
@@ -1398,7 +1469,8 @@ class Port:
             PROG.stage('APK')
         stem = app_stem(self.g, self.app_name)
         self.apk_path = self.o.out / f'{stem}.apk'; self.o.out.mkdir(parents=True, exist_ok=True)
-        key = signing.export_key(f'{self.app:016X}', package=self.package, previous_apk=self.apk_path)
+        key = (self.o.game_update.key if self.o.game_update else
+               signing.export_key(f'{self.app:016X}', package=self.package, previous_apk=self.apk_path))
         icon = self.icon()
         code = version_code(self.pkg_ver, self.o.vercode_offset)
         if self.o.vercode_offset: say(f'versionCode {code} ({self.pkg_ver} + 1 + offset {self.o.vercode_offset})')
@@ -1475,6 +1547,12 @@ class Port:
         if '--launcher-activity' not in external:
             external += ['--launcher-activity', 'org.nx2a.BootstrapActivity']
         data_assets += ['--asset', f'nx2a-player-activity={player_activity_file}']
+        if self.o.game_update and self.o.game_update.previous_companion:
+            previous_path, previous_hash = self.o.game_update.previous_companion
+            previous = self.aw / 'nx2a-previous-companion.json'
+            previous.write_text(json.dumps({'path': previous_path, 'manifest_sha256': previous_hash}),
+                                encoding='utf-8')
+            data_assets += ['--asset', f'nx2a-previous-companion.json={previous}']
         # Resolve all driver and loader libraries before running the file-backed APK signer.
         # A prebuilt loader comes from tools/adrenotools, NOT this game's host output.
         # Adding both paths used to request host/libadrenotools.so even when it did not
@@ -1482,6 +1560,8 @@ class Port:
         vulkan_libs = self.apk_vulkan_libraries()
         cmd = [PY, DM / 'android/apk/mkapk.py', self.so, self.apk_path, key, '--package', self.package, '--label', self.app_name, '--lib', 'dmhost',
                '--version-code', str(code), '--preserve-version-floor', '--version-name', self.display]
+        if self.o.game_update:
+            cmd += ['--upgrade-version-ceiling', str(min(version_code(self.pkg_ver, VERCODE_OFFSET_MAX), 2147483647))]
         if self.o.self_contained:
             cmd += data_assets
         else:

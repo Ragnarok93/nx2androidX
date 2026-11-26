@@ -15,7 +15,11 @@ class PortraitShellHeaderTests(unittest.TestCase):
         self.assertIn("NavigationRailItem(", source)
         self.assertIn("NavigationBarItem(", source)
         self.assertEqual(source.count("Tab.entries.forEach"), 2)
-        self.assertIn("TopAppBarDefaults.exitUntilCollapsedScrollBehavior()", source)
+        self.assertIn("TopAppBar(", source)
+        self.assertNotIn("LargeTopAppBar(", source)
+        self.assertNotIn("nestedScroll(", source)
+        self.assertIn("LocalBuilderBottomPadding provides bottomPadding", source)
+        self.assertIn("Brush.verticalGradient", source)
         self.assertIn("Icons.Outlined.Build", source)
         for destination in ("BUILD", "UPGRADE", "SETTINGS", "DEBUG"):
             self.assertIn(f"Tab.{destination}", source)

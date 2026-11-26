@@ -103,7 +103,7 @@ fun PhantomFixDialog(onDismiss: () -> Unit) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                 Column(
-                    Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                    Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Text(stringResource(R.string.phantom_fix_text), style = MaterialTheme.typography.bodyMedium,

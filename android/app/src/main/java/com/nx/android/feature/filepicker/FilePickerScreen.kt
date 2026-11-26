@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -122,12 +123,10 @@ fun FilePickerScreen(req: PickerRequest, volumes: List<Pair<String, File>>, stor
                 }
             }
         }
-        Row(
+        FlowRow(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
         ) {
-            Spacer(Modifier.weight(1f))
             QuietButton(stringResource(R.string.common_cancel), onClick = onCancel, modifier = Modifier.heightIn(min = 48.dp))
             CapsuleButton(
                 if (req.mode == PickerMode.FILE) stringResource(R.string.picker_pick_file) else stringResource(R.string.picker_pick_folder),

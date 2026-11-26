@@ -87,6 +87,18 @@ def _parser():
     up.add_argument('--jobs', type=int, default=None)
     up.add_argument('--no-lsfg', action='store_true')
     up.add_argument('--debug', action='store_true')
+    up.add_argument('--game-update', help='game update dump to apply through the port pipeline')
+    up.add_argument('--base', help='original base dump for --game-update')
+    up.add_argument('--package', help='package ID of the selected APK for --game-update')
+    up.add_argument('--version-floor', type=int, default=0)
+    up.add_argument('--keys')
+    up.add_argument('--firmware')
+    up.add_argument('--touch', action='store_true')
+    up.add_argument('--fps60', action='store_true')
+    up.add_argument('--mt-replay', action='store_true')
+    up.add_argument('--alias-headroom', type=int)
+    up.add_argument('--shared-font')
+    up.add_argument('--cancel-file', help=argparse.SUPPRESS)
     ins = sub.add_parser('install', help='install a port made earlier'); ins.add_argument('data', help='the data pack folder (<App>-data)'); ins.add_argument('--apk', help='the APK (default: <App>.apk beside the pack)')
     ins.add_argument('--device', default=''); ins.add_argument('--replace-signer', action='store_true'); ins.add_argument('--progress', default='auto', choices=('auto', 'bar', 'lines', 'json', 'off'))
     _romfs_at(ins)
@@ -347,15 +359,64 @@ def cmd_driver(a):   # porter driver and porter host: the installed APK rebuilt 
 
 
 def cmd_upgrade_apk(a):
-    import subprocess, zipfile
-    from porter.upgrade_apk import upgrade
-    from porter.upstream import BuildError
+    import signal
+    import struct
+    import subprocess
+    import threading
+    import zipfile
+    from porter.upgrade_apk import upgrade, upgrade_game
+    from porter.upstream import BuildError, PROG
+
+    done = threading.Event()
+    def cancel_when_requested():
+        while not done.wait(0.2):
+            if Path(a.cancel_file).is_file():
+                os.killpg(os.getpgrp(), signal.SIGTERM)
+                return
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+
     try:
-        print(upgrade(a.apk, a.out, data=a.data, key=a.key, jobs=a.jobs, no_lsfg=a.no_lsfg, debug=a.debug))
+        if a.cancel_file:
+            # Only the upgrade and the compiler processes it starts share this session.
+            os.setsid()
+            signal.signal(signal.SIGTERM, interrupt)
+            threading.Thread(target=cancel_when_requested, daemon=True).start()
+        common = dict(data=a.data, key=a.key, jobs=a.jobs, no_lsfg=a.no_lsfg)
+        if a.game_update:
+            if not (a.base and a.package):
+                raise BuildError('Choose the original base game dump and target APK package.')
+            PROG.mode = 'lines'
+            # The builder owns this staging directory. Use exactly the chosen patch,
+            # even if the base dump's folder contains a different or newer update.
+            output = upgrade_game(a.apk, a.out, package=a.package, version_floor=a.version_floor,
+                patch=a.game_update, base=a.base, keys=a.keys, firmware=a.firmware,
+                touch=a.touch, fps60=a.fps60, mt_replay=a.mt_replay,
+                alias_headroom=a.alias_headroom, shared_font=a.shared_font, **common)
+        else:
+            output = upgrade(a.apk, a.out, debug=a.debug, **common)
+        print(output, flush=True)
         return 0
-    except (BuildError, OSError, ValueError, KeyError, subprocess.CalledProcessError, zipfile.BadZipFile) as e:
-        print(f'Runtime APK upgrade failed: {e}', file=sys.stderr)
+    except KeyboardInterrupt:
+        print('APK upgrade cancelled.', file=sys.stderr)
+        return 130
+    except (BuildError, OSError, ValueError, TypeError, KeyError, struct.error,
+            subprocess.CalledProcessError, zipfile.BadZipFile) as e:
+        print(f'APK upgrade failed: {e}', file=sys.stderr)
+        cause = e
+        while cause is not None:
+            status = getattr(cause, 'returncode', 1)
+            if status in (-1, -2, -9, -15):
+                return 128 - status
+            if status in (129, 130, 137, 143):
+                return status
+            cause = cause.__cause__
         return 1
+    finally:
+        done.set()
+        if a.game_update:
+            PROG.close(ok=False)
 
 
 def main(argv):

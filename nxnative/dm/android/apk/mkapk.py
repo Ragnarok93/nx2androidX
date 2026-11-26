@@ -20,6 +20,7 @@ _p.add_argument('--release', action='store_true', help='not debuggable')
 _p.add_argument('--game-mode-performance', action='store_true', help='declare Performance Game Mode (requires the native NVN pacing policy)')
 _p.add_argument('--version-code', type=int, default=1, help='Android APK versionCode')
 _p.add_argument('--preserve-version-floor', action='store_true', help='never lower versionCode for an existing package signed by this key')
+_p.add_argument('--upgrade-version-ceiling', type=int, help='highest code for this game version, using the existing signer')
 _p.add_argument('--version-name', default='1.0', help='versionName: the version the player sees (the game\'s display version)'); ARGS = _p.parse_args()
 PKG, LIB, LABEL = ARGS.package, ARGS.lib, ARGS.label
 if ARGS.activity != 'android.app.NativeActivity' and not ARGS.dex: _p.error('--activity requires --dex')
@@ -172,13 +173,16 @@ def walk_attrs(n):
     for a in n[1]: yield a
     for k in n[2]: yield from walk_attrs(k)
 
-from apksign import build_zip_file, persistent_signer, sign_v2_file, upgrade_version
+from apksign import build_zip_file, persistent_signer, read_signer, sign_v2_file, upgrade_version
 
 def main():
     key_path = ARGS.key or os.path.join(os.path.dirname(os.path.abspath(ARGS.out)), 'probe-signing-key.json')
-    key, certificate = persistent_signer(key_path)
+    if ARGS.upgrade_version_ceiling is None:
+        key, certificate = persistent_signer(key_path)
+    else:
+        key, certificate = read_signer(key_path)
     if ARGS.preserve_version_floor:
-        with upgrade_version(key_path, PKG, ARGS.version_code) as version_code:
+        with upgrade_version(key_path, PKG, ARGS.version_code, ceiling=ARGS.upgrade_version_ceiling) as version_code:
             if version_code > ARGS.version_code:
                 print(f'versionCode {version_code} preserves the previous export of {PKG}')
             build_apk(key, certificate, version_code)

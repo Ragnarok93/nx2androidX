@@ -162,6 +162,10 @@ class StreamingApkTests(unittest.TestCase):
                 self.assertEqual(signing.original_key(first, title=title), key)
                 key.unlink()
                 seed_path.unlink()
+                original_digest = hashlib.sha256(first.read_bytes()).digest()
+                with self.assertRaisesRegex(BuildError, "signing key is unavailable"):
+                    signing.original_key(first, title=title)
+                self.assertEqual(hashlib.sha256(first.read_bytes()).digest(), original_digest)
                 with self.assertRaisesRegex(BuildError, "signing seed is missing"):
                     signing.export_key(title)
                 self.assertFalse(seed_path.exists())

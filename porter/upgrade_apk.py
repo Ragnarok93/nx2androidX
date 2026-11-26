@@ -1,5 +1,6 @@
 """Upgrade the existing standalone APK without a guest recompilation or asset extraction."""
 import hashlib
+import io
 import json
 import os
 import re
@@ -32,11 +33,52 @@ def check_shader_header(header, size):
         raise BuildError('The existing translated shader bundle is incompatible with this runtime.')
 
 
-def metadata(apk, data):
+class StoredAsset(io.RawIOBase):
+    """A seekable view of a stored APK asset. ZipExtFile.seek rescans from byte zero."""
+    def __init__(self, stream, entry):
+        self.stream = stream
+        stream.seek(entry.header_offset)
+        header = stream.read(30)
+        if len(header) != 30 or header[:4] != b'PK\x03\x04':
+            raise BuildError('Invalid standalone APK asset header.')
+        name, extra = struct.unpack_from('<HH', header, 26)
+        self.start = entry.header_offset + len(header) + name + extra
+        self.size = entry.file_size
+        self.offset = 0
+
+    def tell(self):
+        return self.offset
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        origin = {io.SEEK_SET: 0, io.SEEK_CUR: self.offset, io.SEEK_END: self.size}[whence]
+        if origin + offset < 0:
+            raise OSError('seek before asset')
+        self.offset = origin + offset
+        return self.offset
+
+    def read(self, size=-1):
+        left = max(0, self.size - self.offset)
+        self.stream.seek(self.start + min(self.size, self.offset))
+        result = self.stream.read(left if size < 0 else min(size, left))
+        self.offset += len(result)
+        return result
+
+
+def metadata(apk, data, *, runtime=True):
     shader = 'shaders.dmsv'
 
     def read_pack(names, read, shader_header):
         manifest = json.loads(read('nx2a-data.json'))
+        if not isinstance(manifest, dict):
+            raise BuildError('Invalid standalone game manifest.')
+        if not runtime:
+            return manifest, '', []
         revision = manifest.get('player_api_revision')
         if revision is not None and (type(revision) is not int or not 1 <= revision <= PLAYER_API_REVISION):
             raise BuildError(f'Unsupported original APK runtime interface revision: {revision}.')
@@ -55,12 +97,13 @@ def metadata(apk, data):
             with z.open('lib/arm64-v8a/libdmhost.so') as lib:
                 check_runtime_abi(lib.read(20))
             if 'assets/nx2a-data.zip' in z.namelist():
-                with z.open('assets/nx2a-data.zip') as stream, zipfile.ZipFile(stream) as pack:
-                    def shader_header():
-                        with pack.open(shader) as src:
-                            return src.read(12), pack.getinfo(shader).file_size
+                entry = z.getinfo('assets/nx2a-data.zip')
+                if entry.compress_type == zipfile.ZIP_STORED:
+                    with Path(apk).open('rb') as source, StoredAsset(source, entry) as stream:
+                        return read_embedded(stream, read_pack, shader)
+                with z.open(entry) as stream:
+                    return read_embedded(stream, read_pack, shader)
 
-                    return read_pack(set(pack.namelist()), pack.read, shader_header)
             if data is None:
                 raise BuildError('For a companion-data APK, pass --data pointing to its existing data folder.')
             data = Path(data)
@@ -79,6 +122,61 @@ def metadata(apk, data):
             return read_pack(names, lambda name: (data/name).read_bytes(), shader_header)
         except KeyError as exc:
             raise BuildError(f'Original standalone APK or data is missing {exc}.') from exc
+
+
+def read_embedded(stream, read_pack, shader):
+    with zipfile.ZipFile(stream) as pack:
+        def shader_header():
+            with pack.open(shader) as src:
+                return src.read(12), pack.getinfo(shader).file_size
+
+        return read_pack(set(pack.namelist()), pack.read, shader_header)
+
+
+def upgrade_game(apk, output, *, package, version_floor, patch, base, keys, data=None,
+                 key=None, jobs=None, no_lsfg=False, firmware=None, touch=False,
+                 fps60=False, mt_replay=False, alias_headroom=None, shared_font=None):
+    from porter import dumps
+    from porter.pipeline import GameUpdate, Options, Port
+    apk, output = Path(apk).resolve(), Path(output).resolve()
+    if not output.is_dir() or any(output.iterdir()):
+        raise BuildError('Game upgrades require an empty, separate staging directory.')
+    manifest, _, _ = metadata(apk, data, runtime=False)
+    title, current = str(manifest.get('title_id', '')).upper(), str(manifest.get('version', ''))
+    if not host.TITLE_ID.fullmatch(title) or not re.fullmatch(r'v[0-9]+', current):
+        raise BuildError('The selected APK is missing its original game title or version.')
+    if package != manifest.get('package'):
+        raise BuildError('The selected APK package does not match its game manifest.')
+    key = signing.original_key(apk, title=title, explicit=key)
+    patch, base = Path(patch).resolve(), Path(base).resolve()
+    for path in (base, patch):
+        if not path.is_file() or path.suffix.lower().lstrip('.') not in dumps.EXTS:
+            raise BuildError(f'Unsupported or unavailable game dump: {path.name}')
+    if patch == base:
+        raise BuildError('Choose separate original base and game update dumps.')
+    with zipfile.ZipFile(apk) as archive:
+        embedded = 'assets/nx2a-data.zip' in archive.namelist()
+        previous = None
+        if not embedded:
+            descriptor = json.loads(archive.read('assets/nx2a-companion.json'))
+            baked = 'assets/nx2a-data.txt'
+            old_path = archive.read(baked).decode().strip() if baked in archive.namelist() else ''
+            if not old_path or not Path(old_path).is_dir():
+                old_path = str(Path(data).resolve())
+            previous = (old_path, descriptor['manifest_sha256'])
+    result = Port(Options(
+        folder=base, out=output, keys=Path(keys) if keys else None, package=package,
+        self_contained=embedded, language=manifest.get('language') or '', no_lsfg=no_lsfg,
+        firmware=firmware, jobs=resources.safe_jobs(jobs), touch=touch, fps60=fps60,
+        mt_replay=mt_replay, alias_headroom=alias_headroom, shared_font=shared_font,
+        game_update=GameUpdate(patch, title, current, version_floor, key, previous),
+    )).run()
+    built = Path(result['apk'])
+    with zipfile.ZipFile(apk) as source, zipfile.ZipFile(built) as candidate:
+        from apkdriver import source_certificate
+        if source_certificate(apk, source.start_dir) != source_certificate(built, candidate.start_dir):
+            raise BuildError('The completed APK has a different signing certificate.')
+    return built
 
 
 def activity_dex(apk, scratch):

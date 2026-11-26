@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.nx.android.data.PrefsStore
+import com.nx.android.data.ApkUpgradeRequest
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -15,17 +16,20 @@ enum class RuntimeUpdatePhase { IDLE, RUNNING, SUCCEEDED, FAILED }
 class RuntimeUpdateState private constructor(
     private val savePending: (String?) -> Unit,
     pending: String?,
+    private val saveStaging: (String?) -> Unit,
 ) {
     @Inject constructor(prefs: PrefsStore) : this(
         { prefs.put(PrefsStore.RUNTIME_PENDING_PACK, it) },
         prefs.str(PrefsStore.RUNTIME_PENDING_PACK).takeIf { it.isNotBlank() },
+        { prefs.put(PrefsStore.RUNTIME_PENDING_APK_STAGE, it) },
     )
 
-    constructor(pending: String? = null) : this({}, pending)
+    constructor(pending: String? = null) : this({}, pending, {})
 
     var apkUpgrade by mutableStateOf(pending?.startsWith("apk:") == true); private set
     var pack by mutableStateOf(pending.orEmpty().removePrefix("apk:")); private set
     var name by mutableStateOf(pending?.let { File(it.removePrefix("apk:")).name }.orEmpty()); private set
+    var apkRequest by mutableStateOf<ApkUpgradeRequest?>(null); private set
     var apkData by mutableStateOf(""); private set
     var apkOutput by mutableStateOf(if (apkUpgrade) upgradedPath(pack) else ""); private set
     var apkLog by mutableStateOf<List<String>>(emptyList()); private set
@@ -42,6 +46,20 @@ class RuntimeUpdateState private constructor(
         if (running || source.isBlank() || !source.endsWith(".apk", ignoreCase = true)) return false
         if (output.isNotBlank() && File(output).absolutePath == File(source).absolutePath) return false
         return beginInternal(source, File(source).name, apk = true, data = data, output = output, key = key)
+    }
+
+    fun beginApk(request: ApkUpgradeRequest): Boolean {
+        if (!beginApk(request.target.apk.absolutePath, request.data?.absolutePath.orEmpty())) return false
+        apkRequest = request
+        name = request.target.label
+        apkOutput = ""
+        saveStaging(request.staging.absolutePath)
+        return true
+    }
+
+    fun completeApk(output: File, data: File?) {
+        apkOutput = output.absolutePath
+        apkData = data?.absolutePath.orEmpty()
     }
 
     fun appendApkLog(line: String) {
@@ -64,6 +82,7 @@ class RuntimeUpdateState private constructor(
                               output: String = "", key: String = ""): Boolean {
         if (running || path.isBlank()) return false
         apkUpgrade = apk
+        apkRequest = null
         apkData = if (apk) data else ""
         apkOutput = if (apk) output.ifBlank { upgradedPath(path) } else ""
         apkKey = if (apk) key else ""
@@ -80,6 +99,7 @@ class RuntimeUpdateState private constructor(
 
     fun finish(success: Boolean, why: String = "", profileDrift: Boolean = false) {
         if (!running) return
+        saveStaging(null)
         savePending(null)
         reason = if (success) "" else why
         this.profileDrift = profileDrift
@@ -105,6 +125,7 @@ class RuntimeUpdateState private constructor(
         savePending(null)
         phase = RuntimeUpdatePhase.IDLE
         apkUpgrade = false
+        apkRequest = null
         apkData = ""
         apkOutput = ""
         apkKey = ""

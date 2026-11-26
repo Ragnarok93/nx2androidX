@@ -67,14 +67,19 @@ def persistent_signer(path, derive=None):
         print(f'new signing key {path} ({time.monotonic() - t:.1f} s)')
         return key, certificate
 
+def package_receipt(key_path, package):
+    return version_directory(key_path) / hashlib.sha256(package.encode('utf-8')).hexdigest()
+
+
 @contextmanager
-def upgrade_version(key_path, package, requested):
-    directory = version_directory(key_path)
-    directory.mkdir(exist_ok=True)
-    path = directory / hashlib.sha256(package.encode('utf-8')).hexdigest()
+def upgrade_version(key_path, package, requested, *, ceiling=None):
+    path = package_receipt(key_path, package)
+    path.parent.mkdir(exist_ok=True)
     with signing_lock(path.with_suffix('.lock')):
         previous = int(path.read_text(encoding='ascii')) if path.exists() else 0
         version = max(previous, requested)
+        if ceiling is not None and version > ceiling:
+            raise ValueError(f"The APK would need version code {version}, above this game version's limit of {ceiling}.")
         # Reserve a high-water mark before any bytes under this version are
         # published. A retry can still use exactly the same version.
         if version != previous:

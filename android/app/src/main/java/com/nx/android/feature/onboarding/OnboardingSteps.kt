@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -18,7 +17,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.nx.android.R
-import com.nx.android.core.ui.PreviewSurface
 import com.nx.android.core.ui.components.FirmwareHint
 import com.nx.android.core.ui.components.FirmwareRow
 import com.nx.android.core.ui.components.Hint
@@ -26,6 +24,7 @@ import com.nx.android.core.ui.components.QuietButton
 import com.nx.android.core.ui.components.Section
 import com.nx.android.core.ui.components.StatusDot
 import com.nx.android.core.ui.theme.NxPalette
+import com.nx.android.core.ui.theme.GlassPanel
 import com.nx.android.domain.ObFacts
 import com.nx.android.domain.ObStep
 
@@ -46,9 +45,11 @@ internal fun WelcomeStep(facts: ObFacts, onAskStorage: () -> Unit, onAskBattery:
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
-            if (!facts.storageOk) QuietButton(stringResource(R.string.onb_grant_access), onAskStorage)
         }
-        Hint(stringResource(R.string.onb_grant_access_where))
+        if (!facts.storageOk) {
+            Hint(stringResource(R.string.onb_grant_access_where))
+            QuietButton(stringResource(R.string.onb_grant_access), onAskStorage)
+        }
     }
     Section(stringResource(R.string.onb_disk_space)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -71,9 +72,11 @@ internal fun WelcomeStep(facts: ObFacts, onAskStorage: () -> Unit, onAskBattery:
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
-            if (!facts.batteryOk) QuietButton(stringResource(R.string.onb_open_battery_settings), onAskBattery)
         }
-        Hint(stringResource(R.string.onb_battery_hint))
+        if (!facts.batteryOk) {
+            Hint(stringResource(R.string.onb_battery_hint))
+            QuietButton(stringResource(R.string.onb_open_battery_settings), onAskBattery)
+        }
     }
 }
 
@@ -81,7 +84,7 @@ internal fun WelcomeStep(facts: ObFacts, onAskStorage: () -> Unit, onAskBattery:
 @Preview(name = "Step, storage not granted", widthDp = 1280, heightDp = 420, showBackground = true)
 @Composable
 private fun WelcomeStepPreview() {
-    PreviewSurface {
+    OnboardingPreview {
         Column(Modifier.fillMaxWidth()) {
             WelcomeStep(
                 facts = previewState(ObStep.WELCOME, storageOk = false, freeGB = 42).facts,
@@ -96,7 +99,7 @@ private fun WelcomeStepPreview() {
 @Preview(name = "Step, battery not exempt", widthDp = 1280, heightDp = 520, showBackground = true)
 @Composable
 private fun WelcomeStepBatteryPreview() {
-    PreviewSurface {
+    OnboardingPreview {
         Column(Modifier.fillMaxWidth()) {
             WelcomeStep(
                 facts = previewState(ObStep.WELCOME, batteryOk = false).facts,
@@ -125,10 +128,10 @@ internal fun EnvStep(uiState: OnboardingUiState, onUnpack: () -> Unit) {
                 },
                 style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
             )
-            if (!ready && !uiState.unpacking) QuietButton(stringResource(R.string.onb_prepare_env), onUnpack)
         }
+        if (!ready && !uiState.unpacking) QuietButton(stringResource(R.string.onb_prepare_env), onUnpack)
         if (uiState.unpacking) {
-            LinearProgressIndicator(Modifier.fillMaxWidth().height(5.dp), color = NxPalette.Building)
+            LinearProgressIndicator(Modifier.fillMaxWidth().height(4.dp))
         }
         if (uiState.unpackError.isNotEmpty()) {
             Text(
@@ -146,7 +149,7 @@ internal fun EnvStep(uiState: OnboardingUiState, onUnpack: () -> Unit) {
 @Preview(name = "Step, unpacking", widthDp = 1280, heightDp = 300, showBackground = true)
 @Composable
 private fun EnvStepUnpackingPreview() {
-    PreviewSurface {
+    OnboardingPreview {
         Column(Modifier.fillMaxWidth()) {
             EnvStep(
                 uiState = previewState(ObStep.ENV, unpacking = true, unpackStep = "rootfs"),
@@ -160,7 +163,7 @@ private fun EnvStepUnpackingPreview() {
 @Preview(name = "Step, unpack failed", widthDp = 1280, heightDp = 300, showBackground = true)
 @Composable
 private fun EnvStepErrorPreview() {
-    PreviewSurface {
+    OnboardingPreview {
         Column(Modifier.fillMaxWidth()) {
             EnvStep(
                 uiState = previewState(ObStep.ENV, unpackError = "IOException: no space left on device"),
@@ -177,6 +180,7 @@ internal fun KeysStep(
     onKeysSkippedChange: (Boolean) -> Unit,
     firmware: String = "",
     onChooseFirmwareFile: () -> Unit = {},
+    onClearFirmware: () -> Unit = {},
 ) {
     Section(stringResource(R.string.onb_prod_keys)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -199,16 +203,17 @@ internal fun KeysStep(
             }
             if (uiState.keysChecking) {
                 CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
-            } else {
-                QuietButton(stringResource(R.string.onb_choose_file), onClick = onChooseKeysFile)
             }
         }
         Hint(stringResource(R.string.onb_keys_common_places))
+        if (!uiState.keysChecking) QuietButton(stringResource(R.string.onb_choose_file), onClick = onChooseKeysFile)
+    }
+    GlassPanel(modifier = Modifier.fillMaxWidth(), contentPadding = 16.dp) {
         // 固件（可选）：整机级的一份。读主机系统数据的游戏才需要它，导入了就用，不导入也能过
         FirmwareRow(
             imported = firmware,
             onImport = onChooseFirmwareFile,
-            onClear = {},
+            onClear = onClearFirmware,
         )
         FirmwareHint()
     }
@@ -224,7 +229,7 @@ internal fun KeysStep(
 @Preview(name = "Step, checking the keys", widthDp = 1280, heightDp = 300, showBackground = true)
 @Composable
 private fun KeysStepCheckingPreview() {
-    PreviewSurface {
+    OnboardingPreview {
         Column(Modifier.fillMaxWidth()) {
             KeysStep(
                 uiState = previewState(ObStep.KEYS, keysChecking = true, keysPath = "/sdcard/switch/prod.keys"),
@@ -239,7 +244,7 @@ private fun KeysStepCheckingPreview() {
 @Preview(name = "Step, the keys file is wrong", widthDp = 1280, heightDp = 320, showBackground = true)
 @Composable
 private fun KeysStepWrongPreview() {
-    PreviewSurface {
+    OnboardingPreview {
         Column(Modifier.fillMaxWidth()) {
             KeysStep(
                 uiState = previewState(
@@ -257,11 +262,6 @@ private fun KeysStepWrongPreview() {
 @Composable
 internal fun DoneStep() {
     Section(stringResource(R.string.onb_done)) {
-        Text(
-            stringResource(R.string.onb_done_text) + "\n" +
-                stringResource(R.string.onb_done_next),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Hint(stringResource(R.string.onb_skipped_steps))
+        Text(stringResource(R.string.onb_done_next), style = MaterialTheme.typography.bodyMedium)
     }
 }

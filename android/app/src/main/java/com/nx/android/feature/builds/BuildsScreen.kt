@@ -14,9 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -35,7 +33,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.android.R
@@ -97,7 +94,6 @@ private fun BuildsScreen(
         when {
             selected != null -> {
                 TaskDetail(selected, viewModel, actions, onLog, active = selected.id == current?.id && uiState.running)
-                QuietButton(stringResource(R.string.common_back), viewModel::closeBuild)
             }
             uiState.running && current != null -> TaskDetail(current, viewModel, actions, onLog, active = true)
             uiState.running -> ProgressCard(uiState, actions)
@@ -358,32 +354,25 @@ private fun ProgressCard(port: BuildsUiState, actions: AppActions) {
 }
 
 @Composable
-fun LogTail(log: List<String>, height: Dp = 160.dp, lines: Int = 30) {
+private fun LogTail(log: List<String>) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = Color.Black.copy(alpha = 0.35f),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        val scroll = rememberScrollState()
-        LaunchedEffect(log.size) { scroll.scrollTo(log.size * 1000) }
-        Box(
-            Modifier.fillMaxWidth().heightIn(min = 60.dp, max = height)
-                .verticalScroll(scroll).padding(10.dp)
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                val shown = log.takeLast(lines)
-                if (shown.isEmpty()) {
-                    Text(stringResource(R.string.builds_no_output), style = MaterialTheme.typography.bodySmall,
-                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    for (line in shown) {
-                        Text(
-                            line,
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            color = if (line.startsWith("[RED]")) NxPalette.Danger else MaterialTheme.colorScheme.onSurface,
-                            fontSize = 11.sp,
-                        )
-                    }
+        Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            val shown = log.takeLast(8)
+            if (shown.isEmpty()) {
+                Text(stringResource(R.string.builds_no_output), style = MaterialTheme.typography.bodySmall,
+                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                for (line in shown) {
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = if (line.startsWith("[RED]")) NxPalette.Danger else MaterialTheme.colorScheme.onSurface,
+                        fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

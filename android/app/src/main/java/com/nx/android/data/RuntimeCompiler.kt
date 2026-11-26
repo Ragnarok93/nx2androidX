@@ -1,13 +1,17 @@
 package com.nx.android.data
 
 import com.nx.android.BuildConfig
+import com.nx.android.domain.GameConfig
 import com.nx.android.domain.PortEvents
+import com.nx.android.data.porting.BuildWorkspaces
 import com.nx.android.domain.environment.GuestProcessLauncher
 import java.io.File
 import javax.inject.Inject
 
 /** The outcome of a runtime update: whether it worked, and the reason it did not. */
 data class RuntimeUpdateResult(val success: Boolean, val reason: String = "", val profileDrift: Boolean = false)
+
+data class ApkUpgradeResult(val apk: File, val companion: File?)
 
 /** Executes only rebuild-runtime; a successful process must also report the requested pack. */
 class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProcessLauncher) {
@@ -48,29 +52,89 @@ class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProces
         }
     }
 
-    fun upgradeApk(source: String, output: String, data: String = "", noLsfg: Boolean = !BuildConfig.NX_LSFG,
-                   key: String = "", log: (String) -> Unit = AppLog::line): RuntimeUpdateResult {
-        return try {
-            var reported = false
+    fun upgradeApk(request: ApkUpgradeRequest, keys: String, firmware: String, config: GameConfig?,
+                   workspaces: BuildWorkspaces, upgradeApks: UpgradeApks, log: (String) -> Unit): ApkUpgradeResult {
+        val (target, data, game, key, stage, cancellation) = request
+        check(upgradeApks.archiveIdentity(target.apk) == target.identity) {
+            "The selected APK changed. Choose it again."
+        }
+        check(target.embedded || (data != null && upgradeApks.matchesCompanion(data, target.companionDigest))) {
+            "The selected companion folder does not match the game APK."
+        }
+        val installed = if (game == null) {
+            upgradeApks.requireInstallableVersion(target.identity)
+            if (target.apk.length() + (64L shl 20) > android.os.StatFs(stage.parentFile!!.absolutePath).availableBytes) {
+                error("Not enough storage to stage the runtime-upgraded APK.")
+            }
+            null
+        } else {
+            check(target.identity.versionCode < Int.MAX_VALUE) {
+                "The selected port's version code is too high to build a newer standalone APK."
+            }
+            upgradeApks.installedVersionFor(target.identity)
+        }
+        val output = if (game == null) File(stage, "${target.identity.packageName}-upgraded.apk") else stage
+        val args = apkArgs(target.apk.absolutePath, output.absolutePath,
+            data?.absolutePath.orEmpty(), !BuildConfig.NX_LSFG, key?.absolutePath.orEmpty()).toMutableList()
+        args += listOf("--cancel-file", cancellation.absolutePath)
+
+        val workspace = game?.let {
+            args += listOf("--game-update", it.patch.absolutePath, "--base", it.base.absolutePath,
+                "--package", target.identity.packageName, "--version-floor",
+                maxOf(target.identity.versionCode + 1, installed ?: 0).toString())
+            if (keys.isNotBlank()) args += listOf("--keys", keys)
+            if (firmware.isNotBlank()) args += listOf("--firmware", firmware)
+            if (config != null) {
+                if (config.touch) args += "--touch"
+                if (config.fps60) args += "--fps60"
+                if (config.mtReplay) args += "--mt-replay"
+                if (config.aliasHeadroom >= 0) args += listOf("--alias-headroom", config.aliasHeadroom.toString())
+                if (File(config.sharedFont).isFile) args += listOf("--shared-font", config.sharedFont)
+            }
+            workspaces.prepare(it.base.absolutePath, "game-update:${it.patch.canonicalPath}")
+        }
+        var code: Int? = null
+        try {
+            check(!cancellation.exists()) { "APK upgrade cancelled." }
+            val process = guestLauncher.guest(args,
+                workspace?.let { mapOf("NX2A_WORK" to it.absolutePath) }.orEmpty())
+            var reported: File? = null
             var reason = ""
-            val process = guestLauncher.guest(apkArgs(source, output, data, noLsfg, key))
-            process.inputStream.bufferedReader().useLines { lines ->
-                lines.forEach { line ->
-                    log(line)
-                    val reportedPath = line.trim()
-                    if (reportedPath.startsWith("/") && runCatching {
-                            File(reportedPath).canonicalFile == File(output).canonicalFile
-                        }.getOrDefault(false)) reported = true
-                    if (line.startsWith("Runtime APK upgrade failed:")) reason = line
+            try {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        log(line)
+                        if (line.startsWith("/") && line.endsWith(".apk")) reported = File(line)
+                        if (line.startsWith("APK upgrade failed:")) reason = line
+                    }
+                }
+                code = process.waitFor()
+            } finally {
+                if (process.isAlive) {
+                    cancellation.createNewFile()
+                    process.waitFor()
                 }
             }
-            val code = process.waitFor()
-            val success = code == 0 && reported && File(output).isFile && File(output).length() > 0
-            RuntimeUpdateResult(success, if (success) "" else reason.ifBlank {
-                if (code != 0) "APK runtime compiler exited with code $code" else "No completed upgrade APK was reported."
-            })
-        } catch (error: Exception) {
-            RuntimeUpdateResult(false, error.message.orEmpty())
+            check(!cancellation.exists()) { "APK upgrade cancelled." }
+            check(code == 0) { reason.ifBlank { "APK upgrade compiler exited with code $code." } }
+            val apk = checkNotNull(reported?.canonicalFile?.takeIf {
+                it.parentFile == stage.canonicalFile && it.isFile && it.length() > 0
+            }) { "No completed upgrade APK was reported." }
+            val verified = upgradeApks.inspect(apk)
+            upgradeApks.verifyResult(target, verified.identity, game != null)
+            val companion = if (game == null) data else {
+                apk.resolveSibling("${apk.nameWithoutExtension}-data").takeIf(File::isDirectory)
+            }
+            check(verified.embedded ||
+                (companion != null && upgradeApks.matchesCompanion(companion, verified.companionDigest))) {
+                "The completed upgrade is missing its companion game data."
+            }
+            check(!cancellation.exists()) { "APK upgrade cancelled." }
+            return ApkUpgradeResult(apk, companion)
+        } finally {
+            if (workspace != null && (cancellation.exists() || !PortRunner.isInterruptedExit(code))) {
+                workspaces.discard(workspace, null) { log("[RED] $it") }
+            }
         }
     }
 

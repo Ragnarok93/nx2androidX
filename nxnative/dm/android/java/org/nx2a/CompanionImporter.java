@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.ProgressDialog;
 import android.content.ContentResolver;
+import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
@@ -81,6 +82,57 @@ final class CompanionImporter {
         }
     }
 
+    private static File previousCompanion(Context context, File installed, File backup) {
+        try (InputStream stream = context.getAssets().open("nx2a-previous-companion.json")) {
+            byte[] buffer = new byte[8192];
+            int size = 0;
+            for (int count; size < buffer.length &&
+                    (count = stream.read(buffer, size, buffer.length - size)) > 0; size += count) {}
+            if (size == buffer.length) return null;
+            JSONObject previous = new JSONObject(new String(buffer, 0, size, StandardCharsets.UTF_8));
+            String digest = previous.getString("manifest_sha256");
+            if (cached(installed, digest)) return installed;
+            if (cached(backup, digest)) return backup;
+            File folder = new File(previous.getString("path"));
+            File manifest = new File(folder, MANIFEST);
+            if (folder.isAbsolute() && manifest.isFile() && manifest.length() <= (1 << 20) &&
+                    digest.equals(digestFile(manifest))) return folder;
+        } catch (java.io.FileNotFoundException ignored) {
+            // First install or a runtime-only update.
+        } catch (Exception error) {
+            Log.w("nx2a-companion", "Cannot read previous companion metadata", error);
+        }
+        return null;
+    }
+
+    // Settings of old ports lived inside their mutable data pack, including public
+    // zero-copy companions. Migrate them before an upgrade activates new data.
+    static synchronized void preservePlayerSettings(Context context, File activeCompanion) {
+        File files = context.getFilesDir();
+        File saved = new File(files, "player-settings.txt");
+        if (saved.exists()) return;
+        File installed = new File(files, "nx2a-data");
+        File backup = new File(files, "nx2a-data.backup");
+        File source = previousCompanion(context, installed, backup);
+        if (source == null) {
+            if (activeCompanion != null && !new File(installed, "nx2a-export.sha256").isFile())
+                source = activeCompanion;
+            else source = installed.isDirectory() ? installed : backup;
+        }
+        File settings = new File(source, "settings.txt");
+        if (!settings.isFile() || settings.length() > 64 * 1024) return;
+        File partial = new File(files, "player-settings.migrating");
+        try {
+            GameActivity.copyFile(settings, partial);
+            if (!saved.exists() && !partial.renameTo(saved))
+                throw new IOException("Cannot retain game settings");
+        } catch (IOException error) {
+            Log.w("nx2a-companion", "Could not migrate the previous game settings", error);
+        } finally {
+            partial.delete();
+        }
+    }
+
     static boolean prepare(Activity activity) {
         if (!exists(activity)) return false;
         final boolean bootstrap = activity instanceof BootstrapActivity;
@@ -95,6 +147,7 @@ final class CompanionImporter {
             if (!root.exists() && backup.isDirectory() && !backup.renameTo(root))
                 throw new IOException("Cannot recover the previous game data");
             if (cached(root, info.getString("manifest_sha256"))) {
+                preservePlayerSettings(activity, root);
                 GameActivity.preserveVulkanCache(activity.getFilesDir(), backup);
                 if (bootstrap) ((BootstrapActivity) activity).launchGame(null);
                 else GameActivity.embeddedPackReady();
@@ -132,6 +185,7 @@ final class CompanionImporter {
                         if (manifest.isFile() &&
                                 info.getString("manifest_sha256").equals(digestFile(manifest))) {
                             probe = File.createTempFile(".nx2a-write-", ".tmp", folder);
+                            preservePlayerSettings(activity, folder);
                             if (bootstrap) {
                                 ((BootstrapActivity) activity).launchGame(folder.getCanonicalPath());
                                 return true;
@@ -384,6 +438,7 @@ final class CompanionImporter {
             File copied = new File(partial, MANIFEST);
             if (!copied.isFile() || !expected.equals(digestFile(copied)))
                 throw new IOException("Game-data manifest changed or is incomplete");
+            preservePlayerSettings(activity, null);
             File existingSettings = new File(target, "settings.txt");
             if (existingSettings.isFile())
                 GameActivity.copyFile(existingSettings, new File(partial, "settings.txt"));

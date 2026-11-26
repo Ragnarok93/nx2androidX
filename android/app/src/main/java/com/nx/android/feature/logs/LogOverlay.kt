@@ -1,14 +1,14 @@
 package com.nx.android.feature.logs
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -62,6 +63,8 @@ internal fun LogOverlay(
     var fileLength by remember(buildId) { mutableLongStateOf(initialLength) }
     var following by remember(buildId) { mutableStateOf(active) }
     val scroll = rememberScrollState()
+    var seeking by remember(buildId) { mutableStateOf(false) }
+    var autoScrolling by remember(buildId) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(buildId, text, initialOffset, initialLength) {
@@ -75,20 +78,33 @@ internal fun LogOverlay(
                 delay(800)
                 val length = withContext(Dispatchers.IO) { latestLength() }
                 fileLength = length
-                if (following && length > 0) {
+                if (following && !seeking && length > 0) {
                     val start = (length - PAGE_BYTES).coerceAtLeast(0)
                     val latest = withContext(Dispatchers.IO) { readRange(start, PAGE_BYTES) }
-                    content = latest
-                    offset = start
-                    scroll.scrollTo(Int.MAX_VALUE)
+                    if (following && !seeking) {
+                        content = latest
+                        offset = start
+                    }
                 }
             }
         }
     }
-    LaunchedEffect(scroll, buildId) {
-        snapshotFlow { scroll.value to scroll.maxValue }.collect { (value, max) ->
-            if (max > 0) following = value >= max - 24
+    LaunchedEffect(content, following) {
+        if (following) {
+            autoScrolling = true
+            try {
+                withFrameNanos { }
+                scroll.scrollTo(Int.MAX_VALUE)
+            } finally {
+                autoScrolling = false
+            }
         }
+    }
+    LaunchedEffect(scroll, buildId) {
+        snapshotFlow {
+            if (scroll.isScrollInProgress && !autoScrolling && !seeking)
+                scroll.value >= scroll.maxValue - 24 else null
+        }.collect { nearEnd -> if (nearEnd != null) following = nearEnd }
     }
 
     Box(
@@ -104,32 +120,37 @@ internal fun LogOverlay(
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 if (buildId != null) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (offset > 0) TextButton(onClick = {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (offset > 0) TextButton(enabled = !seeking, onClick = {
                             val start = (offset - PAGE_BYTES).coerceAtLeast(0)
+                            val bytes = (offset - start).toInt()
+                            seeking = true
+                            following = false
                             scope.launch {
-                                val earlier = withContext(Dispatchers.IO) { readRange(start, (offset - start).toInt()) }
-                                following = false
-                                content = earlier + content
-                                offset = start
+                                try {
+                                    val earlier = withContext(Dispatchers.IO) { readRange(start, bytes) }
+                                    content = earlier + content
+                                    offset = start
+                                } finally { seeking = false }
                             }
                         }) { Text(stringResource(R.string.builds_log_earlier)) }
-                        Spacer(Modifier.weight(1f))
-                        if (active && !following) TextButton(onClick = {
+                        if (active && !following) TextButton(enabled = !seeking, onClick = {
+                            seeking = true
                             scope.launch {
-                                val length = withContext(Dispatchers.IO) { latestLength() }
-                                val start = (length - PAGE_BYTES).coerceAtLeast(0)
-                                content = withContext(Dispatchers.IO) { readRange(start, PAGE_BYTES) }
-                                offset = start
-                                fileLength = length
-                                following = true
-                                scroll.scrollTo(Int.MAX_VALUE)
+                                try {
+                                    val length = withContext(Dispatchers.IO) { latestLength() }
+                                    val start = (length - PAGE_BYTES).coerceAtLeast(0)
+                                    content = withContext(Dispatchers.IO) { readRange(start, PAGE_BYTES) }
+                                    offset = start
+                                    fileLength = length
+                                    following = true
+                                } finally { seeking = false }
                             }
                         }) { Text(stringResource(R.string.builds_log_latest)) }
                     }
                 }
                 Box(
-                    Modifier.weight(1f).verticalScroll(scroll)
+                    Modifier.fillMaxWidth().weight(1f).verticalScroll(scroll)
                         .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(12.dp)).padding(10.dp)
                 ) {
                     Text(
@@ -139,13 +160,15 @@ internal fun LogOverlay(
                     )
                 }
                 if (buildId != null && offset + content.toByteArray(Charsets.UTF_8).size < fileLength) {
-                    TextButton(onClick = {
+                    TextButton(enabled = !seeking, onClick = {
                         val nextOffset = offset + content.toByteArray(Charsets.UTF_8).size
                         val size = (fileLength - nextOffset).coerceAtMost(PAGE_BYTES.toLong()).toInt()
+                        seeking = true
+                        following = false
                         scope.launch {
-                            val later = withContext(Dispatchers.IO) { readRange(nextOffset, size) }
-                            following = false
-                            content += later
+                            try {
+                                content += withContext(Dispatchers.IO) { readRange(nextOffset, size) }
+                            } finally { seeking = false }
                         }
                     }) { Text(stringResource(R.string.builds_log_later)) }
                 }
