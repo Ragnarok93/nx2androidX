@@ -85,8 +85,20 @@ static void vk_rs_variant_destroy(vk_rs_variant *v) {
     }
 }
 
+static int fail_spatial_allocation;
+static VkResult allocate_spatial_memory(VkDevice device, const VkMemoryAllocateInfo *info,
+                                        const VkAllocationCallbacks *callbacks, VkDeviceMemory *memory) {
+    if (fail_spatial_allocation) {
+        fail_spatial_allocation = 0;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return vkAllocateMemory(device, info, callbacks, memory);
+}
+
 #define SPATIAL_HOST_PROBE 1
+#define vkAllocateMemory allocate_spatial_memory
 #include "gfx_vk_spatial.h"
+#undef vkAllocateMemory
 
 enum { SRC = 20, OUT = 32 };
 static VkCommandPool test_pool;
@@ -238,7 +250,34 @@ static void run_spatial(void) {
     spatial_image *resized = spatial_reconstruct(&src.texture, crop, 1, 24, OUT, ++ticket, NULL);
     assert(resized && resized->texture.w == 24);
     readback(resized->texture.img, 24, OUT);
+    uint8_t easu_only[24 * OUT * 4];
+    memcpy(easu_only, mapped, sizeof easu_only);
     sharpness = 50;
+    vkDestroyPipeline(V.dev, g_spatial.pipeline[SP_RCAS], NULL);
+    g_spatial.pipeline[SP_RCAS] = VK_NULL_HANDLE;
+    g_spatial.failed_passes |= 1u << SP_RCAS;
+    spatial_image *no_sharpness = spatial_reconstruct(&src.texture, crop, 1, 24, OUT, ++ticket, NULL);
+    assert(no_sharpness && spatial_active == SP_FSR1);
+    assert(!strcmp(spatial_reason, "FSR 1 sharpening unavailable"));
+    readback(no_sharpness->texture.img, 24, OUT);
+    assert(!memcmp(easu_only, mapped, sizeof easu_only));
+    g_spatial.failed_passes &= ~(1u << SP_RCAS);
+
+    // The same-size output and source already exist. Only the sharpening
+    // intermediate needs a new allocation.
+    fail_spatial_allocation = 1;
+    no_sharpness = spatial_reconstruct(&src.texture, crop, 1, 24, OUT, ++ticket, NULL);
+    assert(!fail_spatial_allocation && no_sharpness && spatial_active == SP_FSR1);
+    assert(!strcmp(spatial_reason, "FSR 1 sharpening unavailable"));
+    readback(no_sharpness->texture.img, 24, OUT);
+    assert(!memcmp(easu_only, mapped, sizeof easu_only));
+
+    fail_spatial_allocation = 1;
+    no_sharpness = spatial_reconstruct(&src.texture, crop, 1, 24, OUT, ++ticket, NULL);
+    assert(fail_spatial_allocation && no_sharpness && spatial_active == SP_FSR1);
+    assert(!strcmp(spatial_reason, "FSR 1 sharpening unavailable"));
+    fail_spatial_allocation = 0;
+
     selected_mode = SP_SGSR2;
     V.has_dynrender = 0;
     spatial_image *fallback = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket, NULL);

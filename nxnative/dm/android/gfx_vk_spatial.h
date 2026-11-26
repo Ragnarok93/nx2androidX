@@ -40,7 +40,7 @@ static struct {
     uint32_t timestamp_bits;
     unsigned slot, encoding;
     float flow_budget_ms;
-    uint64_t ticket, retry_after, measured_ticket;
+    uint64_t ticket, retry_after, rcas_retry_after, measured_ticket;
     uint64_t query_ticket[SP_SLOTS];
     double gpu_ms;
     int submit_failed, report_physical;
@@ -99,7 +99,7 @@ static void spatial_drop_images(void) {
 #endif
     for (unsigned i = 0; i < SP_SLOTS; i++) spatial_release_source(i);
     for (int i = 0; i < SP_IMAGE_COUNT; i++) spatial_image_drop(&g_spatial.image[i]);
-    g_spatial.ticket = g_spatial.retry_after = 0;
+    g_spatial.ticket = g_spatial.retry_after = g_spatial.rcas_retry_after = 0;
 }
 
 static VkFormat spatial_unorm_format(VkFormat fmt) {
@@ -524,9 +524,14 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (!flow && mode != SP_BILINEAR &&
         (iw < 16 || ih < 16 || (raster_features & sampling) != sampling ||
          !(raster_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ||
-         !spatial_pipeline_ready(first_pass) || (rcas && !spatial_pipeline_ready(SP_RCAS)))) {
+         !spatial_pipeline_ready(first_pass))) {
         mode = SP_BILINEAR;
         reason = "spatial shader unavailable";
+    }
+    if (mode == SP_FSR1 && rcas &&
+        (ticket < g_spatial.rcas_retry_after || !spatial_pipeline_ready(SP_RCAS))) {
+        rcas = 0;
+        reason = "FSR 1 sharpening unavailable";
     }
     if (!(src_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
         (dst_features & (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) !=
@@ -563,12 +568,16 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     VkImageUsageFlags out_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
         (raster ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     if (!spatial_image_ready(SP_OUTPUT, w, h, out_usage, raster ? sample_fmt : g_sfmt) ||
-        (stage_needed && !spatial_image_ready(SP_SOURCE, iw, ih, stage_usage, raster ? sample_fmt : g_sfmt)) ||
-        (rcas && !spatial_image_ready(SP_INTERMEDIATE, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                     VK_IMAGE_USAGE_SAMPLED_BIT, sample_fmt))) {
+        (stage_needed && !spatial_image_ready(SP_SOURCE, iw, ih, stage_usage, raster ? sample_fmt : g_sfmt))) {
         g_spatial.retry_after = ticket + 120;
         spatial_report(requested, SP_NATIVE, "image allocation unavailable", ticket);
         return NULL;
+    }
+    if (rcas && !spatial_image_ready(SP_INTERMEDIATE, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                    VK_IMAGE_USAGE_SAMPLED_BIT, sample_fmt)) {
+        rcas = 0;
+        g_spatial.rcas_retry_after = ticket + 120;
+        reason = "FSR 1 sharpening unavailable";
     }
 
     g_spatial.slot++;
@@ -662,7 +671,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (stage_needed) stage->last_use = fence;
     if (rcas) intermediate->last_use = fence;
     output->last_use = fence;
-    g_spatial.encoding = (unsigned)mode * 128u + (raster ? (unsigned)(sharpness * 100.0f + 0.5f) : 0u);
+    g_spatial.encoding = (unsigned)mode * 128u + (rcas ? (unsigned)(sharpness * 100.0f + 0.5f) : 0u);
     g_spatial.ticket = ticket;
     g_spatial.query_ticket[slot] = ticket;
     spatial_report(requested, mode, reason, ticket);

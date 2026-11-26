@@ -49,7 +49,6 @@ public class GameActivity extends NativeActivity {
         runOnUiThread(driverDocuments::choose);
     }
     private String diagnosticsRoot;
-    static native boolean diagnosticsExportStarted();
     static native void diagnosticsExported(int result); // 0 failed, 1 saved, 2 cancelled
 
     /** Called by the native pause-menu Diagnostics tab, never from gameplay. */
@@ -58,7 +57,7 @@ public class GameActivity extends NativeActivity {
         DiagnosticsExport.request(this);
     }
 
-    /** Called only by the Java archive worker, after the Android document picker. */
+    /** Completes the native export request for all picker and archive outcomes. */
     static void notifyDiagnosticsExport(int result) {
         try { diagnosticsExported(result); }
         catch (UnsatisfiedLinkError error) { Log.e("nx2a-diag", "Native export status unavailable", error); }

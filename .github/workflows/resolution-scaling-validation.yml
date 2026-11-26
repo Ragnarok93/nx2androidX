@@ -1,15 +1,7 @@
 name: Resolution scaling validation
 on:
-  push:
-    branches:
-      - android
-      - feature/universal-gsr2-20261124
-    paths:
-      - 'nxnative/dm/android/gfx_vk*'
-      - 'nxnative/dm/gfx/nvn/**'
-      - 'tests/**'
-      - '.github/workflows/resolution-scaling-validation.yml'
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:

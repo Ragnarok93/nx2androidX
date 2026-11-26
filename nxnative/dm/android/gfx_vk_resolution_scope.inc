@@ -425,8 +425,12 @@ static void rs_scope_try_begin(const uint8_t *next) {
     }
     group.w=dims.w;group.h=dims.h;
     nx_rs_extent ext;
+    nx_rs_raster raster;
+    // Check the same scalar SupportBuffer round trip used by pass setup
+    // before replacing any native attachment. Even an exact aspect ratio
+    // can fail this check (for example, 1920x1080 at 60%).
     if (!nx_rs_plan(&dims,(int)g_rs_frame.target,V.props.limits.maxFramebufferWidth,V.props.limits.maxFramebufferHeight,&ext) ||
-        (uint64_t)ext.w*group.h!=(uint64_t)ext.h*group.w || !vk_rs_scope_freeze_begin()) return;
+        !nx_rs_raster_init(&raster,group.w,group.h,ext.w,ext.h) || !vk_rs_scope_freeze_begin()) return;
     g_rs_scope_program_count=0;
     const uint8_t *end=rs_scope_scan(next,&group);
     if (!end || !vk_rs_allocate_fresh_group(group.target,ext.w,ext.h)) {

@@ -650,7 +650,7 @@ static _Atomic int g_sv_st, g_sv_n;                   // Export save: its outcom
 static _Atomic int g_diag_status, g_diag_ver, g_diag_flags_page;
 static _Atomic unsigned g_radv_pending, g_radv_applied;
 const char *dm_vk_driver_status(void);
-enum { DIAG_IDLE, DIAG_ARMED, DIAG_EXPORTING, DIAG_EXPORTED, DIAG_FAILED };
+enum { DIAG_IDLE, DIAG_ARMED, DIAG_EXPORTING, DIAG_EXPORTED, DIAG_FAILED, DIAG_STOPPED };
 static void diag_changed(void) { atomic_fetch_add_explicit(&g_diag_ver, 1, memory_order_relaxed); dm_overlay_redraw(); }
 static int menu_active_tab(void) {
     int sub = atomic_load(&g_diag_flags_page);
@@ -681,10 +681,12 @@ void dm_menu_radv_note(int index, char *out, int cap) {
 void dm_menu_diag_note(char *out, int cap) {
     if (cap <= 0) return;
     int status = atomic_load(&g_diag_status);
-    const char *name = status == DIAG_ARMED ? (vk_pass_dump_user_active() == CAPTURE_SNAPSHOTS
-                                           ? "Recording GPU snapshots" : "Recording scaling") :
-                       status == DIAG_EXPORTING ? "Saving ZIP..." :
+    int mode = vk_pass_dump_user_active();
+    const char *name = status == DIAG_ARMED ? (mode == CAPTURE_SNAPSHOTS ? "Recording GPU snapshots" :
+                       mode == CAPTURE_SCALING ? "Recording scaling" : "Capture stopped") :
+                       status == DIAG_EXPORTING ? "Export in progress" :
                        status == DIAG_EXPORTED ? "ZIP saved" :
+                       status == DIAG_STOPPED ? "Capture stopped" :
                        status == DIAG_FAILED ? "Export failed" : "Logs available";
     if (status == DIAG_IDLE) {
         // The report manifest is written after the GPU fence completes; the
@@ -856,8 +858,9 @@ static void fg_flow_step(int direction) {
     fg_apply();
 }
 int vk_pass_dump_user_begin(int delay, int full);
+void vk_pass_dump_user_stop(void);
 int vk_pass_dump_export_begin(void);
-void vk_pass_dump_export_end(int saved);
+void vk_pass_dump_export_end(void);
 static int diag_capture_arm(int delay, int full) {
     if (atomic_load(&g_diag_status) == DIAG_EXPORTING || !vk_pass_dump_user_begin(delay, full)) return 0;
     static const char *const settings[][2] = {
@@ -906,17 +909,15 @@ static int diag_capture_arm(int delay, int full) {
     return 1;
 }
 static void diag_export_request(void) {
-    if (atomic_load(&g_diag_status) == DIAG_EXPORTING) return;
+    if (!vk_pass_dump_export_begin()) return;
+    atomic_store(&g_diag_status, DIAG_EXPORTING);
     ANativeActivity *a = g_act;
-    if (!a || !a->vm || !a->clazz) {
-        atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return;
-    }
+    if (!a || !a->vm || !a->clazz) goto failed;
     fflush(stderr); // best-effort snapshot of the current run before SAF selection
     JNIEnv *E = jni_attach(a);
-    if (!E) { atomic_store(&g_diag_status, DIAG_FAILED); diag_changed(); return; }
+    if (!E) goto failed;
     jclass cls = (*E)->GetObjectClass(E, a->clazz);
     jmethodID call = cls ? (*E)->GetMethodID(E, cls, "exportDiagnostics", "(Ljava/lang/String;)V") : NULL;
-    atomic_store(&g_diag_status, DIAG_EXPORTING);
     int dispatched = 0;
     if (call) {
         jstring path = (*E)->NewStringUTF(E, g_root);
@@ -929,23 +930,24 @@ static void diag_export_request(void) {
     if ((*E)->ExceptionCheck(E) || !dispatched) {
         (*E)->ExceptionClear(E);
         LOG("[RED] [diagnostics] standalone Activity lacks the exportDiagnostics bridge");
-        atomic_store(&g_diag_status, DIAG_FAILED);
+        dispatched = 0;
     }
     if (cls) (*E)->DeleteLocalRef(E, cls);
     (*a->vm)->DetachCurrentThread(a->vm);
+    if (!dispatched) goto failed;
     diag_changed();
-}
-__attribute__((visibility("default"))) JNIEXPORT jboolean JNICALL
-Java_org_nx2a_GameActivity_diagnosticsExportStarted(JNIEnv *E, jclass cls) {
-    (void)E; (void)cls;
-    return vk_pass_dump_export_begin() ? JNI_TRUE : JNI_FALSE;
+    return;
+failed:
+    atomic_store(&g_diag_status, DIAG_FAILED);
+    vk_pass_dump_export_end();
+    diag_changed();
 }
 __attribute__((visibility("default"))) JNIEXPORT void JNICALL
 Java_org_nx2a_GameActivity_diagnosticsExported(JNIEnv *E, jclass cls, jint result) {
     (void)E; (void)cls;
-    vk_pass_dump_export_end(result == 1);
     atomic_store(&g_diag_status, result == 1 ? DIAG_EXPORTED :
-                 vk_pass_dump_user_active() ? DIAG_ARMED : result == 2 ? DIAG_IDLE : DIAG_FAILED);
+                 result == 2 ? DIAG_STOPPED : DIAG_FAILED);
+    vk_pass_dump_export_end();
     LOG("[diagnostics] report export %s", result == 1 ? "completed" : result == 2 ? "cancelled" : "failed");
     diag_changed();
 }
@@ -990,6 +992,14 @@ static void menu_do(int item) {
         diag_changed();
     }
     else if (item == OVM_DIAG_EXPORT) { diag_export_request(); return; }
+    else if (item == OVM_DIAG_STOP) {
+        if (vk_pass_dump_user_active()) {
+            vk_pass_dump_user_stop();
+            atomic_store(&g_diag_status, DIAG_STOPPED);
+            diag_changed();
+        }
+        return;
+    }
     else if (item == OVM_DIAG_STATUS) return;
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
     else if (item == OVM_EDIT) { dm_haptics_android_tap(); ed_open(); return; }

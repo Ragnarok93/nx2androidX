@@ -128,7 +128,11 @@ store operations racing shader reads of neighboring depth samples.
 
 The standalone Capture graphics action records scaling and reconstruction
 metadata in memory with no added GPU readbacks. The rolling buffer retains
-4096 source-frame tickets. The ZIP includes the saved mode and range, latched
+4096 source-frame tickets. Stop capture and Export diagnostics both stop
+recording and preserve the finalized reports. Export opens Android's document
+picker, and a canceled or failed save leaves the reports available for retry.
+An unfinished GPU snapshot is retired after its fence and omitted from the
+archive. The ZIP includes the saved mode and range, latched
 target, actual scaled pass geometry, requested and active filters,
 presentation dimensions, fallback reason, and available replay and
 reconstruction timings in `scaling_frames.tsv`. Compare Off, Fixed and
@@ -205,6 +209,9 @@ is active, and falls back to its original command stream if it cannot make
 the snapshot. Off and 100% skip the synchronous snapshot and lifetime scan.
 Only certified passes scale. The menu reports how many passes used smaller
 backing, and older shaders without scaling metadata may remain native.
+Admission begins at the first attachment clear and checks the same scalar
+geometry used by live replay. An extent that cannot round-trip through the
+SupportBuffer scale stays native before any backing is replaced.
 
 The Vulkan present thread identifies real frames by their game present tickets.
 It crops and orients the source, then passes the reconstructed picture to LSFG.
@@ -225,6 +232,18 @@ display copy preserves the guest texture for its other consumers and for
 fallback. The reconstruction queue and GPU submission retain the physical
 backing independently of the replay cache. Replay can reuse a discarded
 allocation once it is the sole owner.
+
+When the game draws into its final display texture, presentation receives
+the native output of that draw. At equal input and output sizes the upscaler
+is idle, even if earlier passes used smaller physical attachments. The FFR
+RADV reference capture shows a 1384×780 scene passing through a 1728×972 draw
+and then a 1920×1080 display draw. Its final draw needs a separate proof
+before a physical input can replace that display output.
+
+The signed Android workflow requires the resolution host tests, SPIR-V
+validation and software Vulkan readbacks. Those fixtures cover the replay
+geometry and reconstruction recorders. Gameplay coverage and output on
+Xclipse and Adreno require device traces.
 
 LSFG outputs and pause-menu redraws use the reconstructed images already available. Vivid applies display-referred SDR contrast and saturation after LSFG, followed by the runtime overlay. sRGB images use compatible UNORM views for the spatial shaders so they filter display-encoded values, then present and composite with their sRGB encoding intact.
 

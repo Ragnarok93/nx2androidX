@@ -70,6 +70,7 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        if (state != null) diagnosticsRoot = state.getString("nx2a.diagnosticsRoot");
         GameActivity.prepareEmbeddedPack(this);
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             try { pad = new OriginalPad(); } catch (IOException e) { android.util.Log.w("nx2a-dual", "original overlay unavailable", e); }
@@ -93,6 +94,10 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
         phonePad.setContentView(pad);
         external = new ExternalDisplay(this, this);
         external.start();
+    }
+    @Override protected void onSaveInstanceState(Bundle state) {
+        if (diagnosticsRoot != null) state.putString("nx2a.diagnosticsRoot", diagnosticsRoot);
+        super.onSaveInstanceState(state);
     }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);

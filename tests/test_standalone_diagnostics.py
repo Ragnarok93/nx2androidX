@@ -4,6 +4,7 @@ Requires only javac/java. Validates scoped artifact selection, manifest binding,
 crash log retention, archive integrity and bounded log handling. It does not
 make assumptions about source strings or invoke a game renderer.
 """
+import re
 import shutil
 import subprocess
 import tempfile
@@ -188,6 +189,21 @@ public final class DiagnosticArchiveFixture {
     }
 }
 """
+
+class StandaloneDocumentRoutingTests(unittest.TestCase):
+    def test_diagnostic_zip_cannot_be_routed_to_the_driver_importer(self):
+        handlers = ("GameActivity", "DiagnosticsExport", "DriverDocuments", "SaveDocuments", "CompanionImporter")
+        owners = {}
+        for handler in handlers:
+            source = ARCHIVE.with_name(handler + ".java").read_text(encoding="utf-8")
+            for name, value in re.findall(
+                    r"\bstatic final int (REQUEST\w*|EXPORT|IMPORT)\s*=\s*(0x[0-9a-fA-F]+)", source):
+                code = int(value, 16)
+                self.assertNotIn(code, owners, f"{handler}.{name} shares {value} with {owners.get(code)}")
+                owners[code] = f"{handler}.{name}"
+        self.assertIn("DiagnosticsExport.REQUEST", owners.values())
+        self.assertIn("DriverDocuments.REQUEST", owners.values())
+
 
 @unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "JDK required")
 class DiagnosticArchiveExecutableTests(unittest.TestCase):

@@ -2,7 +2,8 @@
 #include "spatial_upscaler.h"
 
 // The replay thread owns the Vulkan readbacks. The archive worker freezes
-// publication while it reads the files and leaves the session armed on failure.
+// publication while it reads the files. A stopped capture stays available
+// for export retry without continuing to collect samples.
 enum { CAPTURE_SLOTS = 3, CAPTURE_INTERVAL = 30 };
 static pthread_mutex_t g_capture_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_capture_exporting;
@@ -27,7 +28,7 @@ static uint64_t g_scale_capture_ticket, g_scale_capture_overwritten;
 
 static void capture_scale_replay(uint64_t ticket, vk_capture_scale_replay_sample sample) {
     pthread_mutex_lock(&g_capture_lock);
-    if (!g_capture_exporting && g_scale_capture && ticket) {
+    if (atomic_load(&g_pd_user_pending) && g_scale_capture && ticket) {
         scale_capture_row *row = &g_scale_capture[ticket % SCALE_CAPTURE_FRAMES];
         if (row->ticket && row->ticket != ticket) g_scale_capture_overwritten++;
         *row = (scale_capture_row){.ticket = ticket, .replay = sample};
@@ -38,7 +39,7 @@ static void capture_scale_replay(uint64_t ticket, vk_capture_scale_replay_sample
 
 void vk_capture_scale_present(uint64_t ticket, vk_capture_scale_present_sample sample) {
     pthread_mutex_lock(&g_capture_lock);
-    if (!g_capture_exporting && g_scale_capture && ticket) {
+    if (atomic_load(&g_pd_user_pending) && g_scale_capture && ticket) {
         scale_capture_row *row = &g_scale_capture[ticket % SCALE_CAPTURE_FRAMES];
         if (row->ticket == ticket) {
             row->present = sample;
@@ -105,11 +106,13 @@ int vk_pass_dump_user_begin(int delay, int full) {
         pthread_mutex_unlock(&g_capture_lock);
         return 0;
     }
-    g_scale_capture = calloc(SCALE_CAPTURE_FRAMES, sizeof *g_scale_capture);
-    if (!g_scale_capture) {
+    scale_capture_row *rows = calloc(SCALE_CAPTURE_FRAMES, sizeof *rows);
+    if (!rows) {
         pthread_mutex_unlock(&g_capture_lock);
         return 0;
     }
+    free(g_scale_capture);
+    g_scale_capture = rows;
     g_scale_capture_ticket = g_scale_capture_overwritten = 0;
     const char *root = vk_pass_dump_root();
     char path[1024];
@@ -133,29 +136,39 @@ int vk_pass_dump_user_begin(int delay, int full) {
     return 1;
 }
 
+static void capture_stop_locked(void) {
+    atomic_store(&g_pd_user_pending, CAPTURE_OFF);
+    if (g_capture_timeline && fclose(g_capture_timeline) != 0)
+        VKLOG("[diagnostics] could not finish capture_timeline.tsv");
+    g_capture_timeline = NULL;
+    const char *root = getenv("DM_ROOT");
+    if (capture_scale_write(root ? root : ".")) {
+        free(g_scale_capture);
+        g_scale_capture = NULL;
+    } else {
+        VKLOG("[diagnostics] could not write scaling_frames.tsv; retained samples for retry");
+    }
+}
+
+void vk_pass_dump_user_stop(void) {
+    pthread_mutex_lock(&g_capture_lock);
+    if (!g_capture_exporting) capture_stop_locked();
+    pthread_mutex_unlock(&g_capture_lock);
+}
+
 int vk_pass_dump_export_begin(void) {
     pthread_mutex_lock(&g_capture_lock);
     int available = !g_capture_exporting;
     if (available) {
         g_capture_exporting = 1;
-        if (g_capture_timeline) fflush(g_capture_timeline);
-        const char *root = getenv("DM_ROOT");
-        if (!capture_scale_write(root ? root : "."))
-            VKLOG("[diagnostics] could not write scaling_frames.tsv; exporting other reports");
+        capture_stop_locked();
     }
     pthread_mutex_unlock(&g_capture_lock);
     return available;
 }
 
-void vk_pass_dump_export_end(int saved) {
+void vk_pass_dump_export_end(void) {
     pthread_mutex_lock(&g_capture_lock);
-    if (g_capture_exporting && saved) {
-        atomic_store(&g_pd_user_pending, 0);
-        if (g_capture_timeline) fclose(g_capture_timeline);
-        g_capture_timeline = NULL;
-        free(g_scale_capture);
-        g_scale_capture = NULL;
-    }
     g_capture_exporting = 0;
     pthread_mutex_unlock(&g_capture_lock);
 }
@@ -184,7 +197,7 @@ static int capture_start_slot(void) {
 }
 
 static void capture_finish_slot(void) {
-    if (atomic_load(&g_pd_user_pending)) {
+    if (atomic_load(&g_pd_user_pending) == CAPTURE_SNAPSHOTS) {
         char path[1024];
         snprintf(path, sizeof path, "%s/complete", g_capture_slot);
         FILE *file = fopen(path, "w");

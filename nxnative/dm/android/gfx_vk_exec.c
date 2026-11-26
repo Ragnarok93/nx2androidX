@@ -809,6 +809,8 @@ static int pass_dump_image(const vkimg_t *im, VkFormat view_fmt, VkImageAspectFl
     if (!im || im->samples != 1 || !(im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
         im->layout != VK_IMAGE_LAYOUT_GENERAL || !(im->aspect & aspect) ||
         level >= im->levels || g_npd >= pass_dump_limit() - (g_pd_full && !present)) return 0;
+    if (im->rs_backing &&
+        (im->rs_backing->physical_w != im->w || im->rs_backing->physical_h != im->h)) return 0;
     uint32_t w = im->w >> level, h = im->h >> level;
     if (!w) w = 1;
     if (!h) h = 1;
@@ -1092,11 +1094,37 @@ static void pass_dump_depth(void) {
 static inline float half2f(uint16_t h) { uint32_t s = (uint32_t)(h >> 15) << 31, e = (h >> 10) & 31, m = h & 1023, f;
     if (!e) { if (!m) f = s; else { e = 1; while (!(m & 1024)) { m <<= 1; e--; } m &= 1023; f = s | ((e + 112) << 23) | (m << 13); } } else if (e == 31) f = s | 0x7f800000 | (m << 13); else f = s | ((e + 112) << 23) | (m << 13);
     float r; memcpy(&r, &f, 4); return r; }
+static void pass_dump_retire_stopped(uint64_t done_fence, uint64_t *capture_fence) {
+    // Present follows replay submission. Keep readback allocations until
+    // that work retires, even while Java is writing the archive.
+    if (g_pd_state == 1) {
+        g_pd_state = 2;
+        *capture_fence = mtl_last_fence();
+    }
+    if (done_fence < *capture_fence) return;
+    for (int i = 0; i < g_npd; i++) {
+        vkDestroyBuffer(V.dev, g_pd[i].b, NULL);
+        vkFreeMemory(V.dev, g_pd[i].m, NULL);
+    }
+    input_capture_free();
+    g_input_capture = 0;
+    g_input_count = g_input_pending = 0;
+    surface_capture_abort();
+    capture_finish_slot(); // stopped slots have no completion marker
+    g_pd_full = 0;
+    g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;
+}
+
 static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const int crop[4]) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
+    static uint64_t capture_fence;
     int had_scene = g_pd_frame_has_scene;
     g_pd_frame_has_scene = 0;
-    if (g_capture_exporting) return;
     int recording = atomic_load(&g_pd_user_pending) == CAPTURE_SNAPSHOTS;
+    if (g_capture_rolling_dump && !recording) {
+        pass_dump_retire_stopped(done_fence, &capture_fence);
+        return;
+    }
+    if (g_capture_exporting) return;
     if (recording && g_capture_timeline)
         fprintf(g_capture_timeline, "%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
                 (unsigned long long)g_tex_frame, (unsigned long long)g_set_epoch,
@@ -1123,7 +1151,8 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
             }
             g_capture_next_present = g_tex_frame + CAPTURE_INTERVAL;
             if (!capture_start_slot()) {
-                VKLOG("[diagnostics] could not open rolling capture slot");
+                VKLOG("[diagnostics] could not open rolling capture slot; stopping capture");
+                capture_stop_locked();
                 return;
             }
         }
@@ -1150,7 +1179,6 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
         VKLOG("pass dump: next submission from pass %d, limit %d images, %llu MB raw readback",
             g_pd_skip, pass_dump_limit(), (unsigned long long)(pass_dump_budget() / 1048576)); return; }
     if (g_pd_state == 1 && (g_npd || g_input_count) && --g_pd_frames > 0 && g_npd < pass_dump_limit() - 1) return;   // DM_VK_PASSDUMP_FRAMES=N: N presents in a row (with DM_VK_PASSDUMP_SIZE)
-    static uint64_t capture_fence;
     if (g_pd_state == 1 && (g_pd_full || g_npd || g_input_count)) {
         if (g_pd_full) {
             VKLOG("[diagnostics] captured present %llu: depth geometry %d, full prepass %d, full MRT %d, indexed inputs %u",
@@ -4464,10 +4492,8 @@ static void exec_ops(const uint8_t *p) {
         const uint8_t *a = p + 8;
         if (g_rs_scope_end==p && g_rs_scope_overwrite) {
             // The complete next clear sequence has already been proved.
-            // Close before recording any overwrite; reauthorize the new
-            // lifetime if possible, otherwise the normal native path runs.
+            // Close before replaying the clear that starts the next lifetime.
             rs_scope_close();
-            rs_scope_try_begin(p);
         }
         switch (h.op) {
         case OP_END:
@@ -4507,10 +4533,7 @@ static void exec_ops(const uint8_t *p) {
                 !resolution_raw_span(d,n,0)) resolution_restore_before_recording();
             vk_sub_update(d, a + 16, n);
             if (g_x_tracepass == -2) VKLOG("--- uniform update %#llx, %llu bytes, after pass %d", (unsigned long long)d, (unsigned long long)n, g_sub_pass - 1); break; }
-        case OP_SET_RT: set_rt((const p_set_rt *)a);
-            if (g_rs_scopes && !skip && !g_rs_scope_nested && !g_rs_scope_end && g_rs_frame.target<100)
-                rs_scope_try_begin(p+h.size);
-            break;
+        case OP_SET_RT: set_rt((const p_set_rt *)a); break;
         case OP_RS_DISCARD: {
             if (g_rs_scope_end) {
                 if (p==g_rs_scope_end) {
@@ -4531,8 +4554,16 @@ static void exec_ops(const uint8_t *p) {
                 }
             }
             break; }
-        case OP_CLEAR_COLOR: if (!g_rc_skip) clear_color((const p_clear_color *)a); break;
-        case OP_CLEAR_DS: if (!g_rc_skip) clear_ds((const p_clear_ds *)a); break;
+        case OP_CLEAR_COLOR: case OP_CLEAR_DS:
+            if (g_rc_skip) break;
+            // A new lifetime can start on targets that are still bound,
+            // including bindings inherited from an earlier submission.
+            if (g_rs_scopes && g_rs_frame.target<100 && !skip &&
+                !g_rs_scope_nested && !g_rs_scope_end && !S.pass_open)
+                rs_scope_try_begin(p);
+            if (h.op == OP_CLEAR_COLOR) clear_color((const p_clear_color *)a);
+            else clear_ds((const p_clear_ds *)a);
+            break;
         case OP_VIEWPORTS: { const p_viewports *v = (const p_viewports *)a; for (int i = 0; i < v->n && v->first + i < 16; i++) memcpy(S.vp[v->first + i], v->v[i], 16); break; }
         case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.sc_set = 1; break;
         case OP_DEPTH_RANGE: { const p_depth_range *d = (const p_depth_range *)a; S.dnear = d->n; S.dfar = d->f; break; }

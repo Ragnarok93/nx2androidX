@@ -49,13 +49,17 @@ class ScopeTests(unittest.TestCase):
         base=ROOT/"nxnative/dm/android"
         scope=(base/"gfx_vk_resolution_scope.inc").read_text()
         replay=(base/"gfx_vk_exec.c").read_text()
+        self.assertLess(scope.index("nx_rs_raster_init(&raster,"),scope.index("vk_rs_allocate_fresh_group(group.target"))
         self.assertLess(scope.index("rs_scope_scan(next,&group)"),scope.index("vk_rs_allocate_fresh_group(group.target"))
         self.assertIn("!nvn_replaying_job()",scope)
         self.assertIn("vk_rs_scope_freeze_seal();g_rs_scope_end=end",scope)
-        self.assertIn("rs_scope_try_begin(p+h.size)",replay)
         self.assertIn("vk_rs_suspend_discarded_group()",scope)
         self.assertIn("g_rs_scope_end==p && g_rs_scope_overwrite",replay)
-        self.assertIn("rs_scope_close();\n            rs_scope_try_begin(p);",replay)
+        clear_start = replay.index("case OP_CLEAR_COLOR: case OP_CLEAR_DS:")
+        clear_dispatch = replay[clear_start:replay.index("case OP_VIEWPORTS:", clear_start)]
+        self.assertIn("!g_rs_scope_end && !S.pass_open", clear_dispatch)
+        self.assertLess(clear_dispatch.index("rs_scope_try_begin(p)"), clear_dispatch.index("clear_color("))
+        self.assertLess(clear_dispatch.index("rs_scope_try_begin(p)"), clear_dispatch.index("clear_ds("))
 
     def test_synchronous_replay_copies_flat_handles(self):
         cc = shutil.which("cc") or shutil.which("clang")
@@ -177,12 +181,18 @@ static void draw(void) {p_draw d={.count=3,.instances=1};append(OP_DRAW,&d,sizeo
 static void bind(unsigned id,int deferred) {p_bind_handles b={.stage=1,.first=0,.n=1,.defer=deferred,.h={id}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);}
 static void compute(int aliased,uint64_t indirect) {p_bind_handles b={.stage=5,.first=0,.n=1,.h={7}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);b.h[0]=aliased?7:8;append(OP_BIND_IMG,&b,offsetof(p_bind_handles,h)+8);p_dispatch d={.x=8,.y=8,.z=1,.ind=indirect};append(OP_DISPATCH,&d,sizeof d);}
 static uint8_t *discard(void) {p_rs_discard d={.index=0};return append(OP_RS_DISCARD,&d,sizeof d);}
-static const uint8_t *scan(void) {rs_scope_group g={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};append(OP_END,NULL,0);return rs_scope_scan(commands,&g);}
+static const uint8_t *scan_from(const uint8_t *first) {rs_scope_group g={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};append(OP_END,NULL,0);return rs_scope_scan(first,&g);}
+static const uint8_t *scan(void) {return scan_from(commands);}
 static void producer(void) {clear(15);draw();}
 static void consumer(void) {rt(&t[1]);bind(7,0);draw();}
 int main(void) {
     reset();clear(15);rt(&t[0]);draw();consumer();rt(&t[2]);draw();rt(&t[0]);uint8_t *end=discard();assert(scan()==end);
     reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    // Replay has retained the render targets. A prior command with no
+    // attachment effect is outside the lifetime that starts at the clear.
+    reset();append(OP_RESET_COUNTER,NULL,0);uint8_t *first_clear=commands+at;
+    producer();consumer();rt(&t[0]);end=discard();
+    assert(!scan() && scan_from(first_clear)==end);
     reset();clear(7);draw();consumer();rt(&t[0]);discard();assert(!scan());
     reset();p_scissor sc={0,0,32,64};append(OP_SCISSOR,&sc,sizeof sc);producer();consumer();rt(&t[0]);discard();assert(!scan());
     reset();producer();consumer();rt(&t[0]);assert(!scan());

@@ -109,12 +109,21 @@ static void rot_drop_image(void) {
     if (g_rot.mem) vkFreeMemory(V.dev, g_rot.mem, NULL);
     g_rot.view = VK_NULL_HANDLE; g_rot.img = VK_NULL_HANDLE; g_rot.mem = VK_NULL_HANDLE;
 }
+static void present_wait_idle(void) {
+    extern pthread_mutex_t g_vk_queue_mu;
+    pthread_mutex_lock(&g_vk_queue_mu);
+    vkDeviceWaitIdle(V.dev);
+    pthread_mutex_unlock(&g_vk_queue_mu);
+}
 static void swap_destroy(void) {
     pace_reset();
     g_flow.ticket = 0;
     present_time_reset();
-    if (g_swap) { vkDeviceWaitIdle(V.dev); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
-                  vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE; rot_drop_image(); g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR; }
+    if (g_swap) { present_wait_idle(); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
+                  vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE; }
+    g_nsimg = 0;
+    rot_drop_image();
+    g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     if (g_surf) { vkDestroySurfaceKHR(V.inst, g_surf, NULL); g_surf = VK_NULL_HANDLE; }
 }
 // The objects of the rotated copy: the pipeline (once per swapchain format) and the image the frame is composed into (the window's size); 0 = not available
@@ -183,14 +192,22 @@ static int swap_make(void) {
     if (g_swap && ww > 0 && wh > 0 && ((uint32_t)ww != g_sext.width || (uint32_t)wh != g_sext.height)) swap_destroy();
     if (g_swap) return 1;
     VkAndroidSurfaceCreateInfoKHR si = {VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, NULL, 0, w};
-    if (vkCreateAndroidSurfaceKHR(V.inst, &si, NULL, &g_surf)) return 0;
-    VkSurfaceCapabilitiesKHR caps; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &caps);
-    uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(V.pd, g_surf, &nf, NULL); VkSurfaceFormatKHR sf[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(V.pd, g_surf, &nf, sf);
+    VkSurfaceKHR surface;
+    if (vkCreateAndroidSurfaceKHR(V.inst, &si, NULL, &surface)) return 0;
+    g_surf = surface;
+    VkSurfaceCapabilitiesKHR caps;
+    VkResult r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &caps);
+    if (r != VK_SUCCESS) goto surface_unavailable;
+    VkSurfaceFormatKHR sf[32];
+    uint32_t nf = sizeof sf / sizeof sf[0];
+    r = vkGetPhysicalDeviceSurfaceFormatsKHR(V.pd, g_surf, &nf, sf);
+    if (r < 0 || !nf) goto surface_unavailable;
     g_sfmt = sf[0].format; for (uint32_t i = 0; i < nf; i++) if (sf[i].format == VK_FORMAT_R8G8B8A8_UNORM) g_sfmt = sf[i].format;
     for (uint32_t i = 0; i < nf; i++) if (sf[i].format == g_want) g_sfmt = g_want;   // the window texture's sRGB-ness (g_want), so the blit copies its bytes as they are
     if (g_sfmt != g_want) VKRED_ONCE(95, "the surface offers no format %d for the window texture: its picture is %s", g_want, g_want == VK_FORMAT_R8G8B8A8_SRGB ? "darker" : "lighter");
-    g_sext = (VkExtent2D){(uint32_t)ANativeWindow_getWidth(w), (uint32_t)ANativeWindow_getHeight(w)};   // the window as it is now; Android's compositor rotates (identity transform)
-    if (!g_sext.width || !g_sext.height) g_sext = caps.currentExtent;
+    g_sext = ww > 0 && wh > 0 ? (VkExtent2D){(uint32_t)ww, (uint32_t)wh} : caps.currentExtent;
+    if (!g_sext.width || !g_sext.height || g_sext.width == UINT32_MAX || g_sext.height == UINT32_MAX)
+        goto surface_unavailable;
     uint32_t n = caps.minImageCount < 3 ? 3 : caps.minImageCount; if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
     int want = 1; { const char *e = getenv("DM_VK_PRETRANSFORM"); if (e && *e) want = atoi(e) != 0; }
     VkSurfaceTransformFlagBitsKHR turn = (VkSurfaceTransformFlagBitsKHR)(caps.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR));
@@ -199,11 +216,19 @@ static int swap_make(void) {
     VkSwapchainCreateInfoKHR ci = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, NULL, 0, g_surf, n, g_sfmt, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR, g_next, 1,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, g_pre,
         (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_PRESENT_MODE_FIFO_KHR, 1, VK_NULL_HANDLE};
-    VkResult r = vkCreateSwapchainKHR(V.dev, &ci, NULL, &g_swap);
+    VkSwapchainKHR swap;
+    r = vkCreateSwapchainKHR(V.dev, &ci, NULL, &swap);
     if (r) { VKLOG("[RED] swapchain creation failed: %d", r); swap_destroy(); return 0; }
-    g_nsimg = 8; vkGetSwapchainImagesKHR(V.dev, g_swap, &g_nsimg, g_simg);
+    g_swap = swap;
+    uint32_t images = sizeof g_simg / sizeof g_simg[0];
+    r = vkGetSwapchainImagesKHR(V.dev, g_swap, &images, g_simg);
+    if (r != VK_SUCCESS || !images) goto surface_unavailable;
+    g_nsimg = images;
     for (uint32_t i = 0; i < g_nsimg; i++) { VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, g_simg[i], VK_IMAGE_VIEW_TYPE_2D, g_sfmt, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-        VKCHK(vkCreateImageView(V.dev, &vi, NULL, &g_sview[i])); }
+        VkImageView view;
+        r = vkCreateImageView(V.dev, &vi, NULL, &view);
+        if (r != VK_SUCCESS) goto surface_unavailable;
+        g_sview[i] = view; }
     if (!g_ppool) {
         VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, V.qf}; VKCHK(vkCreateCommandPool(V.dev, &pci, NULL, &g_ppool));
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, g_ppool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 8}; VKCHK(vkAllocateCommandBuffers(V.dev, &ai, g_pcb));
@@ -215,6 +240,10 @@ static int swap_make(void) {
     if (g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) VKLOG("swapchain %ux%u format %d, %u images, pre-rotated (transform %#x; the window %ux%u)", g_next.width, g_next.height, g_sfmt, g_nsimg, (unsigned)g_pre, g_sext.width, g_sext.height);
     else VKLOG("swapchain %ux%u format %d, %u images%s", g_sext.width, g_sext.height, g_sfmt, g_nsimg, turn ? " (the compositor turns the picture)" : "");
     return 1;
+surface_unavailable:
+    VKRED_ONCE(96, "presentation surface unavailable: %d", r);
+    swap_destroy();
+    return 0;
 }
 static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to) {
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, from, to,
@@ -462,6 +491,7 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling", [OVM_RS_MAX]="Maximum / fixed scale",
     [OVM_DIAG_OPEN]="Diagnostics", [OVM_DIAG_CAPTURE]="Capture graphics",
     [OVM_DIAG_EXPORT]="Export diagnostics", [OVM_DIAG_STATUS]="Capture status",
+    [OVM_DIAG_STOP]="Stop capture",
     [OVM_DIAG_SNAPSHOT]="GPU snapshots", [OVM_DIAG_DELAY]="Delayed GPU snapshots", [OVM_DIAG_FLAGS]="RADV test flags",
     [OVM_DIAG_BACK]="Back", [OVM_FLAG_DLC]="Shader cache coherency",
     [OVM_FLAG_DCC]="Color compression off", [OVM_FLAG_BC]="CPU BC decode",
@@ -470,7 +500,7 @@ static const char *const OVM_LABELS[OVM_N] = {
 };
 static const char *const OVM_BUTTONS[OVM_N] = {
     [OVM_EDIT]="Edit", [OVM_EXPORT]="Export", [OVM_IMPORT]="Import", [OVM_AUDIO]="Select",
-    [OVM_DIAG_OPEN]="Open", [OVM_DIAG_CAPTURE]="Capture", [OVM_DIAG_EXPORT]="Save ZIP",
+    [OVM_DIAG_OPEN]="Open", [OVM_DIAG_CAPTURE]="Capture", [OVM_DIAG_EXPORT]="Save ZIP", [OVM_DIAG_STOP]="Stop",
     [OVM_DIAG_SNAPSHOT]="Capture", [OVM_DIAG_DELAY]="120 frames", [OVM_DIAG_FLAGS]="Open",
     [OVM_DIAG_BACK]="Back", [OVM_FLAGS_BACK]="Back"
 };
@@ -975,7 +1005,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
     ov_theme_upload(cb, k, lay);
     if (g_ov.w != w || g_ov.h != h || g_ov.lay != lay || (g_tt[lay].ready != 1 && g_ov.cver != dm_overlay_custom_ver())) {   // (re)rasterize for this window size and layout
         g_ov.cver = dm_overlay_custom_ver();   // (and, without a theme, the player's own layout: the outlines are in the static layer)
-        vkDeviceWaitIdle(V.dev);
+        present_wait_idle();
         if (g_ov.view) { vkDestroyImageView(V.dev, g_ov.view, NULL); vkDestroyImage(V.dev, g_ov.img, NULL); vkFreeMemory(V.dev, g_ov.mem, NULL); vkDestroyBuffer(V.dev, g_ov.up, NULL); vkFreeMemory(V.dev, g_ov.upm, NULL); }
         g_ov.lay = lay; uint32_t sh = ov_layout_sprites(w, h); float mr[4]; ov_menu_rect((float)g_sext.width, (float)g_sext.height, mr);
         g_ov.pw = (uint32_t)(mr[2] / 2) + 1; g_ov.ph = (uint32_t)(mr[3] / 2) + 1; if (g_ov.pw > w) g_ov.pw = w;
@@ -1166,6 +1196,7 @@ static void present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D 
     spatial_forget_fence(g_pfence[k]);
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return; }
     if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return; }
     int turned = g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;   // composed into g_rot.img, then copied turned into the swapchain image
     VkImage tgt = turned ? g_rot.img : g_simg[idx]; VkImageView tview = turned ? g_rot.view : g_sview[idx];
@@ -1255,7 +1286,7 @@ static void present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D 
         if (period >= 0)
             atomic_fetch_add_explicit(&g_fps_frames, 1, memory_order_relaxed);
     }
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) swap_destroy();
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) swap_destroy();
     else if (r == VK_SUBOPTIMAL_KHR && g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {   // the device turned over (ROTATE_90 <-> ROTATE_270): a swapchain for the new turn
         VkSurfaceCapabilitiesKHR c; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &c);
         if ((c.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) != (VkSurfaceTransformFlagsKHR)g_pre) swap_destroy();

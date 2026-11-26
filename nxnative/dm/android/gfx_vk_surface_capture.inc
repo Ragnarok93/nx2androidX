@@ -130,6 +130,15 @@ static void surface_capture_free(void) {
     if (g_sc.memory) vkFreeMemory(V.dev, g_sc.memory, NULL);
 }
 
+static void surface_capture_abort(void) {
+    if (g_sc.usage) {
+        fclose(g_sc.usage);
+        unlink(g_sc.temp);
+    }
+    surface_capture_free();
+    memset(&g_sc, 0, sizeof g_sc);
+}
+
 static int surface_capture_allocate(void) {
     if (g_sc.buffer) return 1;
     if (g_sc.alloc_failed) return 0;
@@ -250,6 +259,9 @@ static void surface_read(const char *role, const vkimg_t *im, surface_binding_t 
     if (!reason && im->samples != 1) reason = "multisampled";
     if (!reason && (!(im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
                      im->layout != VK_IMAGE_LAYOUT_GENERAL)) reason = "transfer-ineligible";
+    if (!reason && im->rs_backing &&
+        (im->rs_backing->physical_w != im->w || im->rs_backing->physical_h != im->h))
+        reason = "scaled-backing";
     if (!reason && (!b.layers || b.mip >= im->levels)) reason = "invalid-range";
     if (!reason && !(bpb = surface_block_bytes(im, b.aspect, &bw, &bh))) reason = "unsupported-format";
     if (reason) {

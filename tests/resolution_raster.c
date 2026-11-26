@@ -16,6 +16,11 @@ int main(void) {
     assert(out.y==534 && out.h==6);
     assert(!nx_rs_clip_scissor(&r,1300,0,1,1,0,&out));
     assert(!nx_rs_raster_init(&r,1279,720,960,540));
+    // The SupportBuffer scalar cannot round-trip these exact aspect ratios.
+    assert(!nx_rs_raster_init(&r,1920,1080,1152,648));
+    assert(!nx_rs_raster_init(&r,1920,1080,1248,702));
+    assert(nx_rs_raster_init(&r,1384,780,692,390));
+    assert(nx_rs_raster_init(&r,1384,780,1038,585));
     assert(nx_rs_raster_init(&r,1280,720,1280,720));
     v=(nx_rs_viewport){1,2,3,-4}; nx_rs_scale_viewport(&r,&v);
     assert(v.x==1 && v.y==2 && v.w==3 && v.h==-4);

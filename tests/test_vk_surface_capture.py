@@ -135,6 +135,12 @@ int main(int argc, char **argv) {
     im.samples = 4;
     surface_read("color", &im, surface_binding(&im, NULL, bc.vk, range, 2, -1, 0), NULL, NULL);
     assert(copies == 3 && invalidates == 0);
+    vk_rs_variant physical = {.physical_w=48, .physical_h=24};
+    im.samples = 1;
+    im.rs_backing = &physical;
+    surface_read("color", &im, surface_binding(&im, NULL, bc.vk, range, 3, -1, 0), NULL, NULL);
+    assert(copies == 3);
+    im.rs_backing = NULL;
     surface_uniform_queue(0x1234, 8, 2, (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)2, 256, 8192});
     surface_uniform_queue(0x1234, 9, 3, (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)2, 1, 4096});
     surface_compute_uniforms(vk_cmd());
@@ -188,9 +194,13 @@ int main(int argc, char **argv) {
     g_pd_bytes = pass_dump_budget() - 16u*1024u*1024u;
     assert(!pass_dump_color(0));
     const int crop[4] = {2, 4, 90, 40};
+    color.rs_backing = &physical;
+    assert(!pass_dump_image(&color,color.fmt,color.aspect,0,0,-202,-4,crop));
+    color.rs_backing = NULL;
     assert(pass_dump_image(&color,color.fmt,color.aspect,0,0,-202,-4,crop));
     assert(g_npd == 12 && captured[copies-1].imageExtent.width == 96);
     assert(g_pd[11].target == -4 && g_pd[11].crop[0] == 2 && g_pd[11].crop[3] == 40);
+    surface_capture_abort();
 }
 '''
         with tempfile.TemporaryDirectory(prefix="nx2a-surfaces-") as tmp:

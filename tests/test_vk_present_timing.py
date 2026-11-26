@@ -10,6 +10,64 @@ SOURCE = Path(__file__).resolve().parents[1] / 'nxnative/dm/android/gfx_vk_prese
 
 
 class PresentTiming(unittest.TestCase):
+    def test_surface_query_failure_retries_without_consuming_invalid_formats(self):
+        cc = shutil.which('cc') or shutil.which('clang')
+        if not cc:
+            self.skipTest('a C compiler is needed for the surface query check')
+        src = SOURCE.read_text(encoding='utf-8')
+        start = src.index('    VkSurfaceCapabilitiesKHR caps;', src.index('static int swap_make(void)'))
+        query = src[start:src.index('    if (g_sfmt != g_want)', start)]
+        harness = r'''
+#include <assert.h>
+#include <vulkan/vulkan_core.h>
+static struct { VkPhysicalDevice pd; } V;
+static VkSurfaceKHR g_surf;
+static VkFormat g_sfmt;
+static const VkFormat g_want = VK_FORMAT_R8G8B8A8_SRGB;
+static VkResult cap_result, format_result;
+static unsigned available, queried;
+
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+    VkPhysicalDevice d, VkSurfaceKHR s, VkSurfaceCapabilitiesKHR *caps) {
+    (void)d; (void)s; (void)caps;
+    return cap_result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
+    VkPhysicalDevice d, VkSurfaceKHR s, uint32_t *count, VkSurfaceFormatKHR *formats) {
+    (void)d; (void)s;
+    queried++;
+    if (format_result < 0) return format_result;
+    assert(*count >= available);
+    *count = available;
+    if (available) formats[0].format = g_want;
+    return format_result;
+}
+static int read_surface(void) {
+''' + query + r'''
+    return 1;
+surface_unavailable:
+    return 0;
+}
+int main(void) {
+    cap_result = VK_ERROR_SURFACE_LOST_KHR;
+    assert(!read_surface() && !queried);
+    cap_result = VK_SUCCESS;
+    format_result = VK_ERROR_SURFACE_LOST_KHR;
+    assert(!read_surface() && queried == 1 && g_sfmt == VK_FORMAT_UNDEFINED);
+    format_result = VK_SUCCESS;
+    assert(!read_surface() && queried == 2 && g_sfmt == VK_FORMAT_UNDEFINED);
+    available = 1;
+    assert(read_surface() && queried == 3 && g_sfmt == g_want);
+}
+'''
+        headers = SOURCE.parents[1] / 'third_party/vulkan-headers/include'
+        with tempfile.TemporaryDirectory(prefix='nx2a_surface_query_') as tmp:
+            c, exe = Path(tmp) / 'check.c', Path(tmp) / 'check'
+            c.write_text(harness, encoding='utf-8')
+            subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(headers),
+                            str(c), '-o', str(exe)], check=True)
+            subprocess.run([str(exe)], check=True)
+
     def test_swapchain_recreated_on_window_resize(self):
         cc = shutil.which('cc') or shutil.which('clang')
         if not cc:
