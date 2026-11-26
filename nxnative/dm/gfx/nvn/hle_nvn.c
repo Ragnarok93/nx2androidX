@@ -1364,6 +1364,9 @@ static void *replay_main(void *arg) {
                 if (prev.h) {for (int k=0;k<prev.n;k++) free((void *)(uintptr_t)prev.h[k]);free(prev.h);}
                 prev=j;uint64_t te=now_ns();fs_racc+=te-ts;g_tl_enq=j.t_enq;g_tl_start=ts;g_tl_end=te;
                 int live=vk_rs_scope_cross_submission_active();
+                // A proof can close before the boundary while still
+                // relying on subsequent full overwrites. In that case
+                // retain the replay gate through the queued second job.
                 if (!live) mtl_exec_rest(NULL,0);
                 replay_complete_job();
                 if (live) {
@@ -1371,7 +1374,8 @@ static void *replay_main(void *arg) {
                     __atomic_store_n(&g_replaying,g_job_done+1,__ATOMIC_RELAXED);
                     submit_now_window(next.q,next.n,(const NVNcommandHandle *)(window+j.n),next.n,1);
                     __atomic_store_n(&g_replaying,0,__ATOMIC_RELAXED);
-                    for (int k=0;k<prev.n;k++) free((void *)(uintptr_t)prev.h[k]);free(prev.h);
+                    for (int k=0;k<prev.n;k++) free((void *)(uintptr_t)prev.h[k]);
+                    free(prev.h);
                     prev=next;te=now_ns();fs_racc+=te-ts;g_tl_enq=next.t_enq;g_tl_start=ts;g_tl_end=te;
                     replay_complete_job();
                 }

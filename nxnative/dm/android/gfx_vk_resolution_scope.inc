@@ -5,6 +5,9 @@
 #include "gfx_vk_resolution_extent.h"
 static unsigned g_rs_scope_nested,g_rs_scope_program_count;
 static int g_rs_scope_overwrite;
+// A terminal-clear proof may use later handles even when its first clear
+// closes the active scope before the guest submission boundary.
+static int g_rs_scope_window_pin;
 static const uint64_t *g_rs_scope_rest;
 static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 enum { RS_SCOPE_PROGRAM_MAX=32, RS_SCOPE_OP_MAX=4096, RS_SCOPE_BYTES_MAX=4*1024*1024, RS_SCOPE_HANDLE_MAX=32 };
@@ -13,6 +16,7 @@ static rs_scope_program g_rs_scope_programs[RS_SCOPE_PROGRAM_MAX];
 typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph; } rs_scope_group;
 extern vkshader_t *vk_shader_cached(uint64_t,int);
 uint64_t nvn_replaying_job(void);
+uint64_t nvn_rs_window_last_job(void);
 static uint64_t rs_scope_addr(const tex_t *t) {
     if (!t || !t->serial || t->magic!=MAGIC('T','E','X',0) || !t->pool || !t->pool->mem ||
         !t->mem || t->off<0 || !t->L.size || (t->pool->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;
@@ -662,6 +666,7 @@ static void rs_scope_try_begin(const uint8_t *next) {
         g_rs_scope_program_count=0;g_rs_scope_crossed=0;g_rs_scope_overwrite=0;vk_rs_scope_freeze_end();return;
     }
     vk_rs_scope_freeze_seal();g_rs_scope_end=end;
+    if (nvn_rs_window_last_job()>nvn_replaying_job()) g_rs_scope_window_pin=1;
     if (vk_pass_dump_user_active()) {
         uint64_t bytes=vk_rs_backing_bytes();
         if (bytes>g_capture_peak_rs_bytes) g_capture_peak_rs_bytes=bytes;
@@ -713,6 +718,7 @@ static void rs_scope_try_compute_begin(const uint8_t *next,const p_dispatch *d) 
     if (S.pass_open) vk_end_pass();
     if (!vk_rs_allocate_fresh_group(group.target,NX_RS_SCOPE_OWNER_MAX,group.pw,group.ph)) goto refuse;
     vk_rs_scope_freeze_seal();g_rs_scope_end=end;
+    if (nvn_rs_window_last_job()>nvn_replaying_job()) g_rs_scope_window_pin=1;
     static unsigned accepted;
     if (++accepted<=16 || accepted%300==0)
         VKLOG("[resolution-scope] authorized constant-fill compute %ux%u -> %ux%u groups %ux%u",

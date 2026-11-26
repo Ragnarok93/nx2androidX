@@ -28,4 +28,7 @@ class WindowTests(unittest.TestCase):
         self.assertIn("mtl_exec_rest(h+n,window_n-n)",hle)
         self.assertIn("nx_rs_window_descriptor(job,nvn_rs_window_last_job()",tex)
         self.assertIn("while (g_rs_sync_freeze) pthread_cond_wait",tex)
-        self.assertIn("return g_rs_scope_end!=NULL;",replay)
+        scope=(base/"android/gfx_vk_resolution_scope.inc").read_text()
+        self.assertIn("g_rs_scope_end!=NULL || g_rs_scope_window_pin",replay)
+        self.assertIn("g_rs_scope_window_pin=0;",replay)
+        self.assertEqual(scope.count("if (nvn_rs_window_last_job()>nvn_replaying_job()) g_rs_scope_window_pin=1;"),2)

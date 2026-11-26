@@ -4474,7 +4474,11 @@ static void bind_handles_rec(uint32_t op, const void *a) {
 }
 uint32_t g_sub_ops[64];   // record ops replayed in the open submission, by op (logged when the driver refuses it)
 #include "gfx_vk_resolution_scope.inc"
-int vk_rs_scope_cross_submission_active(void) {return g_rs_scope_end!=NULL;}
+int vk_rs_scope_cross_submission_active(void) {
+    int keep=g_rs_scope_end!=NULL || g_rs_scope_window_pin;
+    g_rs_scope_window_pin=0;
+    return keep;
+}
 void mtl_exec_rest(const uint64_t *h,int n) {
     if (!g_rs_scopes) return;
     g_rs_scope_rest=h;g_rs_scope_rest_n=n>0?(unsigned)n:0;
