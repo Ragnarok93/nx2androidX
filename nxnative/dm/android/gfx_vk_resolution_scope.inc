@@ -26,7 +26,7 @@ static uint64_t rs_scope_addr(const tex_t *t) {
     return a && a==(uintptr_t)t->mem && n<=UINT64_MAX-a?a:0;
 }
 // -1 unknown/alias, 0 disjoint, positive one-based owner index.
-static int rs_scope_match(const rs_scope_group *g,const tex_t *t,const view_t *v) {
+static int rs_scope_match_access(const rs_scope_group *g,const tex_t *t,const view_t *v,int sampled) {
     uint64_t a=rs_scope_addr(t); if (!a || !vk_fmt(t->d.format)) return -1;
     int hit=0;
     for (unsigned i=0;i<NX_RS_SCOPE_OWNER_MAX;i++) if (g->target[i] &&
@@ -34,10 +34,13 @@ static int rs_scope_match(const rs_scope_group *g,const tex_t *t,const view_t *v
         const tex_t *o=g->target[i];
         if (hit || !nx_rs_view_equivalent(t,v) || t->has_layout || t->has_pkg_data || t->set_swz ||
             a!=g->addr[i] || t->pool!=o->pool || t->off!=o->off ||
-            !nx_rs_owner_description_equal(t,o)) return -1;
+            !(sampled?nx_rs_sampled_owner_description_equal(t,o):nx_rs_owner_description_equal(t,o))) return -1;
         hit=(int)i+1;
     }
     return hit;
+}
+static int rs_scope_match(const rs_scope_group *g,const tex_t *t,const view_t *v) {
+    return rs_scope_match_access(g,t,v,0);
 }
 static int rs_scope_raw(const rs_scope_group *g,uint64_t addr,uint64_t bytes,int tail) {
     if (!addr) return 0;
@@ -110,7 +113,7 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
                 int tid=(int)(h&0xfffff); if (!tid) break;
                 const tex_t *t=NULL; const view_t *v=NULL;
                 if (!vk_tex_by_id(tid,&v,&t) || !t) return 0;
-                int match=rs_scope_match(g,t,v);
+                int match=rs_scope_match_access(g,t,v,1);
                 if (match<0) return 0;
                 if (match) {
                     unsigned slot=0,flags=0;
@@ -161,7 +164,7 @@ static int rs_scope_compute_proof(rs_scope_group *g,const __typeof__(S) *look,co
         (uint32_t)d->z>V.props.limits.maxComputeWorkGroupCount[2]) return 0;
     tex_t pair[2];view_t views[2];
     if (resolution_compute_transform_targets(s,d,look->tex[5],look->img[5],pair,views)) {
-        int src=rs_scope_match(g,&pair[0],&views[0]),dst=rs_scope_match(g,&pair[1],&views[1]);
+        int src=rs_scope_match_access(g,&pair[0],&views[0],1),dst=rs_scope_match(g,&pair[1],&views[1]);
         if (src || dst) {
             if (src<=0 || dst<0 || src==dst) return 0;
             int geometry=rs_scope_require_compute_grid(g,s,d);
@@ -220,7 +223,7 @@ static int rs_scope_compute_proof(rs_scope_group *g,const __typeof__(S) *look,co
             if (!tid) {if (storage) return 0;break;}
             const tex_t *t=NULL;const view_t *v=NULL;
             if (!vk_tex_by_id(tid,&v,&t) || !t || t->d.target==NVN_TEXTURE_TARGET_BUFFER) return 0;
-            int match=rs_scope_match(g,t,v);
+            int match=rs_scope_match_access(g,t,v,!storage);
             if (match<0 || (match && storage)) return 0;
             if (storage && (!nx_rs_view_equivalent(t,v) || t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 ||
                 t->d.depth!=1 || t->d.samples>1 || b->dim!=1 || (b->flags&3) ||
@@ -786,7 +789,7 @@ static int rs_scope_physical_dispatch(const p_dispatch *d,uint32_t grid[3]) {
             resolution_compute_fill_grid(S.sh[5],d,extent.lw,extent.lh,extent.pw,extent.ph,grid);
     tex_t pair[2];view_t views[2];nx_rs_draw_extent source;
     if (!resolution_compute_transform_targets(S.sh[5],d,S.tex[5],S.img[5],pair,views) ||
-        vk_rs_preflight_view(&pair[0],&views[0],1,&source)!=1 ||
+        vk_rs_preflight_sampled_view(&pair[0],&views[0],1,&source)!=1 ||
         vk_rs_preflight_view(&pair[1],&views[1],1,&extent)!=1) return 0;
     return source.lw==extent.lw && source.lh==extent.lh &&
         source.pw==extent.pw && source.ph==extent.ph &&

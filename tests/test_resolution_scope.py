@@ -146,7 +146,7 @@ static struct {
     p_bind_buf ubo[6][16],ssbo[6][16]; NVNbufferRange vbuf[16];
     uint64_t tex[6][256],img[6][32];
 } S;
-typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph; } rs_scope_group;
+typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph,ax,ay; } rs_scope_group;
 typedef struct {int depth,stencil,compressed,dec,is_int;} vkfmt_t;
 static const vkfmt_t *vk_fmt(int fmt) {static const vkfmt_t f={.depth=1,.stencil=1},color={0};return fmt==NVN_FORMAT_BGRA8?&color:&f;}
 static uint8_t storage[4096*13];
@@ -248,6 +248,11 @@ int main(void) {
     wrapper.L.tileH++;assert(rs_scope_match(&owner_group,&wrapper,NULL)<0);
     wrapper=t[0];wrapper.d.flags|=NVN_TEXTURE_FLAGS_IMAGE;
     assert(rs_scope_match(&owner_group,&wrapper,NULL)<0);
+    t[0].d.flags=NVN_TEXTURE_FLAGS_IMAGE;wrapper=t[0];wrapper.d.flags=0;
+    assert(rs_scope_match_access(&owner_group,&wrapper,NULL,1)==1);
+    assert(rs_scope_match(&owner_group,&wrapper,NULL)<0);
+    wrapper.L.tileH++;
+    assert(rs_scope_match_access(&owner_group,&wrapper,NULL,1)<0);
     // An explicit selection of the sole mip/layer and identical format
     // must resolve to the same owner on a subsequent attachment bind.
     reset();producer();consumer();

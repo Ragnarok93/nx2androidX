@@ -33,7 +33,7 @@ class PointwiseTests(unittest.TestCase):
         replay=(base/"gfx_vk_exec.c").read_text()
         self.assertIn("if (proof==2)",scope)
         self.assertIn("if (src<=0 || dst<0 || src==dst",scope)
-        self.assertIn("vk_rs_preflight_view(&pair[0],&views[0],1,&source)!=1",scope)
+        self.assertIn("vk_rs_preflight_sampled_view(&pair[0],&views[0],1,&source)!=1",scope)
         self.assertIn("vk_rs_preflight_view(&pair[1],&views[1],1,&extent)!=1",scope)
         self.assertIn("source.pw==extent.pw && source.ph==extent.ph",scope)
         self.assertIn("!nx_rs_scope_sample(&life,sampled) || (writes && !nx_rs_scope_compute_write",scope)

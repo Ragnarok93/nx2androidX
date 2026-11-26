@@ -3051,7 +3051,7 @@ static int resolution_preflight_stages(int target_scaled) {
                     vk_shader_resolution_binding(s,b->binding,&slot,&flags) &&
                     slot!=NX_RS_REF_UNKNOWN && !(flags&(NX_RS_REF_UNSUPPORTED|NX_RS_REF_WRITES));
                 nx_rs_draw_extent ext;
-                int r=vk_rs_preflight_view(t,v,supported,&ext);
+                int r=vk_rs_preflight_sampled_view(t,v,supported,&ext);
                 if (r==2) return 0;
                 sample_scaled |= r==1;
                 break;
@@ -3995,7 +3995,7 @@ static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *
             vk_shader_resolution_binding(cs,b->binding,&slot,&flags) &&
             slot!=NX_RS_REF_UNKNOWN && !(flags&(NX_RS_REF_UNSUPPORTED|NX_RS_REF_WRITES));
         nx_rs_draw_extent extent;
-        int r=vk_rs_preflight_view(t,v,supported,&extent);
+        int r=storage?vk_rs_preflight_view(t,v,supported,&extent):vk_rs_preflight_sampled_view(t,v,supported,&extent);
         if (r==2) return 0;
         sampled_scaled|=r==1;
     }

@@ -1,6 +1,7 @@
 #ifndef NX_RS_VIEW_H
 #define NX_RS_VIEW_H
 #include "nvn_obj.h"
+#include "gfx_vk_resolution_storage_format.h"
 // A view is eligible only when it leaves the single physical subresource
 // and its sampling semantics unchanged. Never normalize guest objects in place.
 static inline int nx_rs_view_equivalent(const tex_t *t,const view_t *v) {
@@ -26,5 +27,17 @@ static inline int nx_rs_owner_description_equal(const tex_t *a,const tex_t *b) {
         a->L.size==b->L.size && a->L.layer_size==b->L.layer_size &&
         a->L.align==b->L.align && a->L.layers==b->L.layers && a->L.bpb==b->L.bpb &&
         a->L.tileH==b->L.tileH && a->L.tileD==b->L.tileD;
+}
+// Match the native cache's one-way sampled-wrapper rule. A storage write
+// never acquires IMAGE usage through a wrapper, and a distinct layout or
+// CPU-initialized interpretation is not the same physical owner.
+static inline int nx_rs_sampled_owner_description_equal(const tex_t *sample,const tex_t *owner) {
+    if (nx_rs_owner_description_equal(sample,owner)) return 1;
+    if ((sample->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || !(owner->d.flags&NVN_TEXTURE_FLAGS_IMAGE) ||
+        !nx_rs_storage_spv_format(sample->d.format) || sample->has_layout || sample->has_pkg_data ||
+        sample->set_swz || owner->has_layout || owner->has_pkg_data || owner->set_swz) return 0;
+    tex_t normalized=*sample;
+    normalized.d.flags|=NVN_TEXTURE_FLAGS_IMAGE;
+    return nx_rs_owner_description_equal(&normalized,owner);
 }
 #endif

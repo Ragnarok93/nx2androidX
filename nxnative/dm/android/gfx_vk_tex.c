@@ -1158,8 +1158,21 @@ vkimg_t *vk_tex_for_present(const tex_t *t) {
     }
     return im;
 }
+// g_img_mu held. Mirror the native read-only IMAGE-cleared wrapper fallback,
+// but only for a written, active physical owner; never substitute an
+// independent native texture or an integer reinterpretation.
+static vkimg_t *rs_sampled_peer(const akey *k,const tex_t *t) {
+    if ((k->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || !nx_rs_storage_spv_format(t->d.format) ||
+        t->has_layout || t->has_pkg_data || t->set_swz || !t->pool ||
+        !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) return NULL;
+    akey producer=*k;producer.d.flags|=NVN_TEXTURE_FLAGS_IMAGE;
+    vkimg_t *peer=rs_exact_owner(&producer);
+    return rs_is_scaled(peer) && peer->gpu_w && !peer->packaged && !peer->family_closed &&
+        peer->size==(int64_t)t->L.size && peer->nvn_format==t->d.format &&
+        nx_rs_active_contains(g_rs_live,(uintptr_t)peer)?peer:NULL;
+}
 // No image creation, upload, view creation, family mutation or guest writes.
-int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent) {
+static int rs_preflight_view_access(const tex_t *t,const view_t *v,int supported,int sampled,nx_rs_draw_extent *extent) {
     if (!t || !extent) return 2;
     *extent=(nx_rs_draw_extent){t->d.width,t->d.height,t->d.width,t->d.height,1};
     uint64_t guest=rs_guest_address(t);
@@ -1175,6 +1188,7 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     int result=0;
     pthread_mutex_lock(&g_img_mu);
     vkimg_t *exact_owner=rs_exact_owner(&k);
+    if (!exact_owner && sampled && supported && g_rs_live) exact_owner=rs_sampled_peer(&k,t);
     for (unsigned i=0;g_rs_live && i<g_rs_live->n;i++) {
         vkimg_t *im=(vkimg_t *)g_rs_live->owner[i];
         if (!rs_is_scaled(im)) { result=2; break; }
@@ -1195,6 +1209,12 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     int nvn_ft_written(const tex_t *);
     if (result==1 && (packaged_tex(t) || nvn_ft_written(t))) return 2;
     return result;
+}
+int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent) {
+    return rs_preflight_view_access(t,v,supported,0,extent);
+}
+int vk_rs_preflight_sampled_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent) {
+    return rs_preflight_view_access(t,v,supported,1,extent);
 }
 // Restricted to exact whole-image color clears, with no view override or
 // guest-visible upload. Never authorize initial downscaling from a clear.
@@ -1450,10 +1470,12 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
     // Last-line guard for callers that bypass draw preflight. In particular,
     // never create/evict an overlapping owner or mutate a format family
     // while its storage is represented by a scaled backing.
+    vkimg_t *physical_peer=NULL;
     if (g_rs_live) {
         uint64_t guest=rs_guest_address(t);
         int restore=!guest;
         vkimg_t *exact=rs_exact_owner(&k);
+        if (!exact && sampled) exact=physical_peer=rs_sampled_peer(&k,t);
         for (unsigned i=0;!restore && i<g_rs_live->n;i++) {
             vkimg_t *o=(vkimg_t *)g_rs_live->owner[i];
             if (!rs_is_scaled(o)) { restore=1; break; }
@@ -1468,7 +1490,8 @@ static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {
             return NULL;
         }
     }
-    vkimg_t *im = keyed ? texture_storage_lookup(&k, t) : nvn_hm_get(&g_by_serial, &t->serial);
+    vkimg_t *im = physical_peer && rs_is_scaled(physical_peer)?physical_peer:
+        keyed ? texture_storage_lookup(&k, t) : nvn_hm_get(&g_by_serial, &t->serial);
     // A sampled wrapper can use an already-written storage image when the
     // guest describes exactly the same layout with only IMAGE cleared.
     // Keep existing owners and independently initialized textures separate.

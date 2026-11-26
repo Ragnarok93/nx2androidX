@@ -42,6 +42,17 @@ class ViewTests(unittest.TestCase):
             subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I",str(inc),
                             "-I",str(inc/"include"),"-I",str(inc.parent/"tex"),str(c),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)
+    def test_sampled_wrapper_identity(self):
+        cc=shutil.which("cc") or shutil.which("clang")
+        if not cc:self.skipTest("C compiler required")
+        inc=ROOT/"nxnative/dm/gfx/nvn"
+        with tempfile.TemporaryDirectory() as d:
+            exe=Path(d)/"wrapper"
+            subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I",str(inc),
+                            "-I",str(inc/"include"),"-I",str(inc.parent/"tex"),
+                            str(ROOT/"tests/resolution_sampled_wrapper.c"),"-o",str(exe)],check=True)
+            subprocess.run([str(exe)],check=True)
+
     def test_shared_gate(self):
         base=ROOT/"nxnative/dm/android"
         scope=(base/"gfx_vk_resolution_scope.inc").read_text()

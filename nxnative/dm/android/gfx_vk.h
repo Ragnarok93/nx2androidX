@@ -196,6 +196,7 @@ int vk_rs_set_scale_request(unsigned percent);
 void vk_rs_publish_source_frame(uint64_t present);
 // Read-only preflight: 0 native, 1 compatible scaled owner, 2 restore.
 int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent);
+int vk_rs_preflight_sampled_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw_extent *extent);
 int vk_rs_preflight_buffer(uint64_t addr,uint64_t size); // 1 only when disjoint from active owners
 int vk_rs_cache_restore_all(void); // replay thread, closed pass; diagnostic fail-stop on allocation failure
 void vk_rs_variant_retire(vk_rs_variant *v);
