@@ -395,6 +395,13 @@ int main(void) {
     reset();t[0].d.format=NVN_FORMAT_BGRA8;consumer();
     append(OP_CLEAR_TEX,&finish_fill,sizeof finish_fill);append(OP_END,NULL,0);
     assert(!rs_scope_scan_initial(commands,&compute_group,0,&reason));
+    reset();t[0].d.format=NVN_FORMAT_BGRA8;
+    append(OP_BIND_IMG,&fill_bind,offsetof(p_bind_handles,h)+8);
+    append(OP_DISPATCH,&fill_dispatch,sizeof fill_dispatch);
+    rt_ds(&t[0],&t[1]);clear_depth();draw();consumer_two();
+    rt_ds(&t[0],&t[1]);discard();discard_slot(-1);append(OP_END,NULL,0);
+    compute_group=(rs_scope_group){.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64,.pw=32,.ph=32};
+    assert(!rs_scope_scan_initial(commands,&compute_group,0,&reason));
     // A lifetime can cross immutable handle boundaries, including between
     // producer and consumer and before the terminal discard.
     reset();producer();append(OP_END,NULL,0);uint8_t *h2=commands+at;

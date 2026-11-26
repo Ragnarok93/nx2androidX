@@ -568,6 +568,11 @@ static const uint8_t *rs_scope_scan_initial(const uint8_t *next, rs_scope_group 
         *reason="unproven command or open lifetime";
         const uint8_t *end=rs_scope_scan_once(next,group,initial,&budget,&expanded,reason);
         if (end) return end;
+        // Compute starts with no attachment-slot mapping. A later expanded
+        // owner could overlap an inherited native attachment; do not rescan
+        // with that incomplete initial mapping. Keep compute-only scopes
+        // single-output until inherited binding provenance is generalized.
+        if (!initial && expanded) return NULL;
     } while (expanded && budget);
     return NULL;
 }
@@ -692,6 +697,7 @@ static void rs_scope_try_compute_begin(const uint8_t *next,const p_dispatch *d) 
     // The unbound initial state is only accurate when no inherited
     // render attachment overlaps the output.
     for (unsigned i=0;i<9;i++) {
+        if (i<8 && i<(unsigned)S.rt_n && S.rt_bad[i]) goto refuse;
         if (i<8 && (i>=(unsigned)S.rt_n || !S.rt_has_col[i])) continue;
         if (i==8 && !S.rt_has_dep) continue;
         const tex_t *rt=i==8?&S.rt_dep:&S.rt_col[i];
