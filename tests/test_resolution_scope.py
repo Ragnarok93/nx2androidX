@@ -57,6 +57,16 @@ class ScopeTests(unittest.TestCase):
             c.write_text(SOURCE)
             subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I",str(ROOT/"nxnative/dm/gfx/nvn"),str(c),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)
+    def test_terminal_compute_state(self):
+        cc=shutil.which("cc") or shutil.which("clang")
+        if not cc:self.skipTest("C compiler required")
+        with tempfile.TemporaryDirectory() as d:
+            exe=Path(d)/"terminal_compute"
+            subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror",
+                "-I",str(ROOT/"nxnative/dm/gfx/nvn"),str(ROOT/"tests/resolution_compute_overwrite.c"),
+                "-o",str(exe)],check=True)
+            subprocess.run([str(exe)],check=True)
+
     def test_real_replay_seam(self):
         base=ROOT/"nxnative/dm/android"
         scope=(base/"gfx_vk_resolution_scope.inc").read_text()
@@ -67,6 +77,7 @@ class ScopeTests(unittest.TestCase):
         self.assertIn("vk_rs_scope_freeze_seal();g_rs_scope_end=end",scope)
         self.assertIn("vk_rs_suspend_discarded_group()",scope)
         self.assertIn("g_rs_scope_end==p && g_rs_scope_overwrite",replay)
+        self.assertIn("rs_scope_compute_terminal(g,&look,(const p_dispatch *)a,&life)",scope)
         clear_start = replay.index("case OP_CLEAR_COLOR: case OP_CLEAR_DS:")
         clear_dispatch = replay[clear_start:replay.index("case OP_VIEWPORTS:", clear_start)]
         self.assertIn("!g_rs_scope_end && S.pass_open!=2", clear_dispatch)
@@ -166,6 +177,12 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,in
     (void)g;(void)scaled;
     *sampled=s->tex[1][0]==7?1:s->tex[1][0]==9?2:0;
     return !s->rast_discard;
+}
+static int rs_scope_compute_terminal(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,const nx_rs_scope *life) {
+    // Mock only shader/descriptor authorization. Image 10 is an exact
+    // full output; texture 7 denotes a read of the existing owner.
+    return s->img[5][0]==10 && !d->ind && d->x==8 && d->y==8 && d->z==1 &&
+        nx_rs_scope_terminal_compute(life,g->mask,s->tex[5][0]==7?1:0);
 }
 static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,unsigned *sampled,unsigned *writes) {
     *writes=0;
@@ -386,6 +403,23 @@ int main(void) {
     reset();t[0].d.format=NVN_FORMAT_BGRA8;producer();consumer();
     raw.has_view=1;raw.view.set_levels=1;raw.view.base_level=1;raw.view.nlevels=1;
     append(OP_CLEAR_TEX,&raw,sizeof raw);assert(!scan());
+    // A complete certified compute overwrite can close a raster lifetime
+    // before the native dispatch, without a discard or subsequent clear.
+    reset();producer();consumer();
+    p_bind_handles terminal_bind={.stage=5,.first=0,.n=1,.h={10}};
+    p_dispatch terminal_dispatch={.x=8,.y=8,.z=1};
+    append(OP_BIND_IMG,&terminal_bind,offsetof(p_bind_handles,h)+8);
+    overwrite=append(OP_DISPATCH,&terminal_dispatch,sizeof terminal_dispatch);
+    assert(scan()==overwrite && g_rs_scope_overwrite);
+    reset();producer();consumer();
+    append(OP_BIND_IMG,&terminal_bind,offsetof(p_bind_handles,h)+8);
+    terminal_dispatch.x=7;append(OP_DISPATCH,&terminal_dispatch,sizeof terminal_dispatch);
+    assert(!scan());terminal_dispatch.x=8;
+    reset();producer();consumer();
+    append(OP_BIND_IMG,&terminal_bind,offsetof(p_bind_handles,h)+8);
+    terminal_bind.h[0]=7;append(OP_BIND_TEX,&terminal_bind,offsetof(p_bind_handles,h)+8);
+    append(OP_DISPATCH,&terminal_dispatch,sizeof terminal_dispatch);
+    assert(!scan());
     // An unbound compute producer must initialize before a scaled sample
     // and terminate at the exact output's complete texture overwrite.
     reset();t[0].d.format=NVN_FORMAT_BGRA8;

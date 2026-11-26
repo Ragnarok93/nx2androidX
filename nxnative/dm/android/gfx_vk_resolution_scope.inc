@@ -151,6 +151,28 @@ static int rs_scope_require_compute_grid(rs_scope_group *g,const vkshader_t *s,c
     if (result==2) {g->pw=raster.pw;g->ph=raster.ph;}
     return result;
 }
+// The terminal dispatch begins the NEXT lifetime. It runs through normal
+// replay after closure, so only its logical grid must be exact; do not
+// require the old physical extent to satisfy a future workgroup alignment.
+static int rs_scope_compute_terminal(const rs_scope_group *g,const __typeof__(S) *look,
+                                     const p_dispatch *d,const nx_rs_scope *life) {
+    if (!nx_rs_scope_terminal_compute(life,g->mask,0)) return 0;
+    const vkshader_t *s=look->sh[5];
+    if (!s || d->ind || d->x<=0 || d->y<=0 || d->z!=1 ||
+        (uint32_t)d->x>V.props.limits.maxComputeWorkGroupCount[0] ||
+        (uint32_t)d->y>V.props.limits.maxComputeWorkGroupCount[1] ||
+        V.props.limits.maxComputeWorkGroupCount[2]<1) return 0;
+    const uint32_t groups[3]={(uint32_t)d->x,(uint32_t)d->y,1};
+    uint32_t exact[3];
+    if (!nx_rs_compute_grid(groups,s->local,g->w,g->h,g->w,g->h,exact)) return 0;
+    const tex_t *fill=NULL;const view_t *v=NULL;
+    if (resolution_compute_fill_target(s,d,look->img[5],&fill,&v))
+        return rs_scope_match(g,fill,v)>0;
+    tex_t pair[2];view_t views[2];
+    return resolution_compute_transform_targets(s,d,look->tex[5],look->img[5],pair,views) &&
+        rs_scope_match_access(g,&pair[0],&views[0],1)==0 &&
+        rs_scope_match(g,&pair[1],&views[1])>0;
+}
 static int rs_scope_compute_proof(rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,unsigned *samples,unsigned *writes) {
     *samples=0;*writes=0;
     vkshader_t *s=look->sh[5];
@@ -587,6 +609,9 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             break; }
         case OP_DISPATCH: {
             RS_NEED(p_dispatch);unsigned sampled=0,writes=0;
+            if (rs_scope_compute_terminal(g,&look,(const p_dispatch *)a,&life)) {
+                g_rs_scope_crossed=crossed;g_rs_scope_overwrite=1;return p;
+            }
             int proof=rs_scope_compute_proof(g,&look,(const p_dispatch *)a,&sampled,&writes);
             if (proof==2) {
                 *expanded=1;*reason="compute output or grid expansion";return NULL;

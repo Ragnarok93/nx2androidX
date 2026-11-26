@@ -29,6 +29,14 @@ static inline int nx_rs_scope_compute_write(nx_rs_scope *s,unsigned owner) {
     return 1;
 }
 
+// A proven full compute overwrite can terminate a single-owner lifetime.
+// The new dispatch must not read any old owner contents. Exported backing
+// generations remain protected by the existing presentation references.
+static inline int nx_rs_scope_terminal_compute(const nx_rs_scope *s,unsigned owner,unsigned reads) {
+    return owner && !(owner&(owner-1)) && owner==s->owners &&
+        s->sampled && !s->discarded && !(reads&s->owners);
+}
+
 static inline int nx_rs_scope_clear_allowed(const nx_rs_scope *s, unsigned owner) {
     return owner && !(owner & (~s->bound | s->exported | s->discarded));
 }
