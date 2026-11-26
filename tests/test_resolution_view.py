@@ -42,6 +42,17 @@ class ViewTests(unittest.TestCase):
             subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I",str(inc),
                             "-I",str(inc/"include"),"-I",str(inc.parent/"tex"),str(c),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)
+    def test_depth_stencil_owner_identity(self):
+        cc=shutil.which("cc") or shutil.which("clang")
+        if not cc:self.skipTest("C compiler required")
+        inc=ROOT/"nxnative/dm/gfx/nvn"
+        with tempfile.TemporaryDirectory() as d:
+            exe=Path(d)/"depth_identity"
+            subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I",str(inc),
+                            "-I",str(inc/"include"),"-I",str(inc.parent/"tex"),
+                            str(ROOT/"tests/resolution_depth_identity.c"),"-o",str(exe)],check=True)
+            subprocess.run([str(exe)],check=True)
+
     def test_zero_count_single_subresource(self):
         cc=shutil.which("cc") or shutil.which("clang")
         if not cc:self.skipTest("C compiler required")

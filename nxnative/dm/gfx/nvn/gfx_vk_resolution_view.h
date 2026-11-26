@@ -19,12 +19,24 @@ static inline int nx_rs_view_equivalent(const tex_t *t,const view_t *v) {
     if (v->set_dsmode && v->dsmode!=(t->stencil?NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL:NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH)) return 0;
     return 1;
 }
-// Ignore only the compressibility hint, which the native cache key also
-// excludes. All other flags and the actual guest memory layout must match.
+// Depth/stencil images cannot be color storage images. Match the native
+// cache's IMAGE-hint normalization, while retaining exact depth/stencil
+// format, selected aspect and guest layout.
+static inline int nx_rs_depth_stencil_format(int format) {
+    switch (format) {
+    case NVN_FORMAT_STENCIL8: case NVN_FORMAT_DEPTH16: case NVN_FORMAT_DEPTH24:
+    case NVN_FORMAT_DEPTH32F: case NVN_FORMAT_DEPTH24_STENCIL8:
+    case NVN_FORMAT_DEPTH32F_STENCIL8: return 1;
+    default: return 0;
+    }
+}
+// All storage-affecting flags and the actual guest memory layout must match.
 static inline int nx_rs_owner_description_equal(const tex_t *a,const tex_t *b) {
     nvn_texdesc x=a->d,y=b->d;
     x.flags&=~NVN_TEXTURE_FLAGS_COMPRESSIBLE;
     y.flags&=~NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+    if (nx_rs_depth_stencil_format(x.format)) x.flags&=~NVN_TEXTURE_FLAGS_IMAGE;
+    if (nx_rs_depth_stencil_format(y.format)) y.flags&=~NVN_TEXTURE_FLAGS_IMAGE;
     return !memcmp(&x,&y,sizeof x) && a->stencil==b->stencil &&
         a->L.size==b->L.size && a->L.layer_size==b->L.layer_size &&
         a->L.align==b->L.align && a->L.layers==b->L.layers && a->L.bpb==b->L.bpb &&
