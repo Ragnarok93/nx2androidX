@@ -3909,13 +3909,13 @@ static int resolution_compute_fill_target(const vkshader_t *cs,const p_dispatch 
         cs->stage!=5 || cs->nbind!=1 || !cs->b) return 0;
     const dmsv_bind *b=cs->b;
     if (b->kind!=RK_IMG || b->desc!=RD_STORAGE || b->count!=1 || b->dim!=1 ||
-        (b->flags&3) || b->samp==RS_UBO || b->fmt!=1 || b->reg<0 || b->reg>=32 ||
-        !nx_rs_compute_constant_fill(cs->spv,cs->nspv,b->binding,cs->local)) return 0;
+        (b->flags&3) || b->samp==RS_UBO || !nx_rs_storage_spv_supported(b->fmt) || b->reg<0 || b->reg>=32 ||
+        !nx_rs_compute_constant_fill_format(cs->spv,cs->nspv,b->binding,cs->local,b->fmt)) return 0;
     int tid=(int)(images[b->reg]&0xfffff);
     const tex_t *t=NULL; const view_t *v=NULL;
     if (!tid || !vk_tex_by_id(tid,&v,&t) || !t || !t->pool ||
         !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
-        !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || t->d.format!=NVN_FORMAT_RGBA32F ||
+        !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || nx_rs_storage_spv_format(t->d.format)!=b->fmt ||
         t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
         t->set_swz || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
     *out=t;*view=v;

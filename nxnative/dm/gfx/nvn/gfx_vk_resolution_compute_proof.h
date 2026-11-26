@@ -2,15 +2,16 @@
 #define NX_RS_COMPUTE_PROOF_H
 #include <stdint.h>
 #include <string.h>
+#include "gfx_vk_resolution_storage_format.h"
 /* Deliberately small, auditable subset of already validated SPIR-V: a single
- * unconditional RGBA32F constant fill at GlobalInvocationId.xy. Not a general
+ * unconditional canonical float/UNORM constant fill at GlobalInvocationId.xy. Not a general
  * SPIR-V validator. No buffer access, sampling, branches or other side effects.
  * The caller must separately prove descriptor identity, exact grid coverage,
- * backing format/usage and lifetime. No allocation; only called in audit. */
-static inline int nx_rs_compute_constant_fill(const uint32_t *w,uint32_t n,
-                                              uint32_t binding,const uint32_t local[3]) {
+ * backing format/usage and lifetime. No allocation. */
+static inline int nx_rs_compute_constant_fill_format(const uint32_t *w,uint32_t n,
+                                              uint32_t binding,const uint32_t local[3],unsigned format) {
     enum { VOID=1,U32,F32,V2U,V3U,V4F,IMAGE,PTR_IN,PTR_IMG,FN,CONST_F,CONST_V,IN,OUT };
-    if (!w || !local || n<5 || n>4096 || w[0]!=0x07230203u || w[3]<2 || w[3]>256 ||
+    if (!nx_rs_storage_spv_supported(format) || !w || !local || n<5 || n>4096 || w[0]!=0x07230203u || w[3]<2 || w[3]>256 ||
         !local[0] || !local[1] || local[2]!=1) return 0;
     uint8_t tag[256]={0}; uint32_t bound=w[3], entry=0,gid=0,img=0,set=0,bind=0;
     uint32_t gidvar=0,imgvar=0,gload=0,coord=0,iload=0;
@@ -56,7 +57,7 @@ static inline int nx_rs_compute_constant_fill(const uint32_t *w,uint32_t n,
             else if(RS_TAG(o[2],F32) && o[3]==4) { if(!RS_NEW(o[1],V4F)) return 0; }
             else return 0;
             break;
-        case 25: if(wc!=9 || !RS_TAG(o[2],F32) || o[3]!=1 || o[4] || o[5] || o[6] || o[7]!=2 || o[8]!=1 || !RS_NEW(o[1],IMAGE)) return 0; break;
+        case 25: if(wc!=9 || !RS_TAG(o[2],F32) || o[3]!=1 || o[4] || o[5] || o[6] || o[7]!=2 || o[8]!=format || !RS_NEW(o[1],IMAGE)) return 0; break;
         case 32:
             if(wc!=4) return 0;
             if(o[2]==1 && RS_TAG(o[3],V3U)) { if(!RS_NEW(o[1],PTR_IN)) return 0; }
@@ -81,5 +82,9 @@ static inline int nx_rs_compute_constant_fill(const uint32_t *w,uint32_t n,
 #undef RS_TAG
 #undef RS_NEW
     return 0;
+}
+static inline int nx_rs_compute_constant_fill(const uint32_t *w,uint32_t n,
+                                              uint32_t binding,const uint32_t local[3]) {
+    return nx_rs_compute_constant_fill_format(w,n,binding,local,1);
 }
 #endif
