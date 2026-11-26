@@ -27,7 +27,7 @@ static int rs_scope_match(const rs_scope_group *g,const tex_t *t,const view_t *v
     for (unsigned i=0;i<NX_RS_SCOPE_OWNER_MAX;i++) if (g->target[i] &&
         nx_rs_range_overlap(a,t->L.size,g->addr[i],g->target[i]->L.size)) {
         const tex_t *o=g->target[i];
-        if (hit || v || t->has_layout || t->has_pkg_data || t->set_swz ||
+        if (hit || !nx_rs_view_equivalent(t,v) || t->has_layout || t->has_pkg_data || t->set_swz ||
             a!=g->addr[i] || t->pool!=o->pool || t->off!=o->off ||
             t->L.size!=o->L.size || memcmp(&t->d,&o->d,sizeof t->d)) return -1;
         hit=(int)i+1;
@@ -247,7 +247,8 @@ static int rs_scope_rt(rs_scope_group *g, const p_set_rt *r, unsigned slots[9], 
     for (unsigned i=0;i<9;i++) {
         const tex_t *t=new_targets[i];
         if (!t) continue;
-        if ((i==8?r->has_dview:r->has_cview[i]) || t->d.width!=g->w || t->d.height!=g->h ||
+        const view_t *v=i==8?(r->has_dview?&r->dview:NULL):(r->has_cview[i]?&r->cview[i]:NULL);
+        if (!nx_rs_view_equivalent(t,v) || t->d.width!=g->w || t->d.height!=g->h ||
             !rs_scope_addr(t) || !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
             t->has_layout || t->has_pkg_data || t->set_swz || rs_scope_match(&expanded,t,NULL)!=0)
             return -1;
@@ -526,11 +527,12 @@ static void rs_scope_try_begin(const uint8_t *next) {
         }
         if (i<8 && (i>=(unsigned)S.rt_n || !S.rt_has_col[i])) continue;
         if (i==8 && !S.rt_has_dep) continue;
-        if (i==8?S.rt_has_dview:S.rt_has_cview[i]) {
+        const tex_t *t=i==8?&S.rt_dep:&S.rt_col[i];
+        const view_t *v=i==8?(S.rt_has_dview?&S.rt_dview:NULL):(S.rt_has_cview[i]?&S.rt_cview[i]:NULL);
+        if (!nx_rs_view_equivalent(t,v)) {
             rs_scope_reject("attachment view");
             return;
         }
-        const tex_t *t=i==8?&S.rt_dep:&S.rt_col[i];
         if (!(group.addr[i]=rs_scope_addr(t)) || !t->pool ||
             !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || t->set_swz ||
             t->has_layout || t->has_pkg_data) {

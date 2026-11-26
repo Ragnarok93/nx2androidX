@@ -4554,9 +4554,10 @@ static void exec_ops(const uint8_t *p) {
             if (g_rc_skip || !g_rs_replay || !vk_rs_cache_has_scaled()) break;
             int i=((const p_rs_discard *)a)->index;
             const tex_t *t=NULL;
-            if (i==-1 && S.rt_has_dep && !S.rt_has_dview) t=&S.rt_dep;
-            else if (i>=0 && i<8 && i<S.rt_n && S.rt_has_col[i] && !S.rt_has_cview[i]) t=&S.rt_col[i];
-            if (t) {
+            const view_t *v=NULL;
+            if (i==-1 && S.rt_has_dep) { t=&S.rt_dep;v=S.rt_has_dview?&S.rt_dview:NULL; }
+            else if (i>=0 && i<8 && i<S.rt_n && S.rt_has_col[i]) { t=&S.rt_col[i];v=S.rt_has_cview[i]?&S.rt_cview[i]:NULL; }
+            if (t && nx_rs_view_equivalent(t,v)) {
                 nx_rs_draw_extent ext;
                 if (vk_rs_preflight_view(t,NULL,1,&ext)==1) {
                     vk_end_pass();

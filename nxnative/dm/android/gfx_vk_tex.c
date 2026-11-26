@@ -1157,7 +1157,7 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     if (!f) return 2;
     akey k; memset(&k,0,sizeof k); k.pool=(uint64_t)(uintptr_t)t->pool; k.off=t->off; k.d=t->d;
     k.d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (f->depth || f->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
-    if (v && (v->set_levels || v->set_layers || v->set_format || v->set_target || v->set_swizzle || v->set_dsmode)) supported=0;
+    if (supported && !nx_rs_view_equivalent(t,v)) supported=0;
     if (t->has_layout || t->has_pkg_data || (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) supported=0;
     int result=0;
     pthread_mutex_lock(&g_img_mu);

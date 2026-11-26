@@ -15,6 +15,7 @@
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
 #include "gfx_vk_resolution_draw.h"
+#include "gfx_vk_resolution_view.h"
 
 #define VKLOG(...) LOG("[vk] " __VA_ARGS__)
 #define VKRED_ONCE(id, ...) do { static int once_##id; if (!once_##id++) LOG("[RED] [vk] " __VA_ARGS__); } while (0)
@@ -185,7 +186,7 @@ void vk_rs_scope_freeze_seal(void);
 void vk_rs_scope_freeze_end(void);
 // Immediately followed by the same complete clear on the replay thread.
 vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c);
-int vk_rs_discard_target(const tex_t *t); // exact full unviewed target, outside a pass
+int vk_rs_discard_target(const tex_t *t); // exact full target (view equivalence checked by caller), outside a pass
 int vk_rs_pass_idle(void);
 int vk_rs_require_native(vkimg_t *im); // explicit native-only boundary, outside a pass
 uint64_t vk_rs_backing_bytes(void);

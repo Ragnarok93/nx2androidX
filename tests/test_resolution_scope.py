@@ -118,6 +118,7 @@ int main(void) {
 #include "gfx_vk_resolution_scope.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "gfx_vk_resolution_transfer.h"
+#include "gfx_vk_resolution_view.h"
 static int resolution_display_copy_format(const p_copy_t2t *c) {return nx_rs_display_copy_shape(c); }
 static const uint64_t *g_rs_scope_rest;
 static unsigned g_rs_scope_rest_n,g_rs_scope_crossed,g_rs_scope_program_count;
@@ -217,6 +218,17 @@ static void consumer(void) {rt(&t[1]);bind(7,0);draw();}
 int main(void) {
     reset();clear(15);rt(&t[0]);draw();consumer();rt(&t[2]);draw();rt(&t[0]);uint8_t *end=discard();assert(scan()==end);
     reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    // An explicit selection of the sole mip/layer and identical format
+    // must resolve to the same owner on a subsequent attachment bind.
+    reset();producer();consumer();
+    view_t same={.set_levels=1,.nlevels=1,.set_layers=1,.nlayers=1,
+        .set_format=1,.format=NVN_FORMAT_RGBA8,.set_target=1,.target=NVN_TEXTURE_TARGET_2D};
+    p_set_rt viewed={.n=1,.color={&t[0]},.has_cview={1},.cview={same}};
+    append(OP_SET_RT,&viewed,sizeof viewed);end=discard();assert(scan()==end);
+    reset();producer();consumer();viewed.cview[0].base_level=1;
+    append(OP_SET_RT,&viewed,sizeof viewed);discard();assert(!scan());
+    reset();producer();consumer();viewed.cview[0]=same;viewed.cview[0].format=NVN_FORMAT_RGBA8_SRGB;
+    append(OP_SET_RT,&viewed,sizeof viewed);discard();assert(!scan());
     // Replay has retained the render targets. A prior command with no
     // attachment effect is outside the lifetime that starts at the clear.
     reset();append(OP_RESET_COUNTER,NULL,0);uint8_t *first_clear=commands+at;
@@ -304,6 +316,15 @@ int main(void) {
     reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
     rt_ds(&t[2],&t[0]);clear(15);bind(7,0);draw();
     end=finish_depth_scope();assert(scan_depth()==end);
+    reset();clear_depth();draw();
+    p_set_rt expanded_view={.n=1,.color={&t[1]},.has_cview={1},.cview={same},.depth=&t[0]};
+    append(OP_SET_RT,&expanded_view,sizeof expanded_view);producer();
+    rt_ds(&t[2],&t[0]);clear(15);bind(7,0);draw();
+    end=finish_depth_scope();assert(scan_depth()==end);
+    reset();clear_depth();draw();expanded_view.cview[0].min_layer=1;
+    append(OP_SET_RT,&expanded_view,sizeof expanded_view);producer();
+    rt_ds(&t[2],&t[0]);clear(15);bind(7,0);draw();
+    finish_depth_scope();assert(!scan_depth());
     reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
     rt_ds(&t[2],&t[0]);producer();
     p_clear_ds stencil_only={.stencil_mask=255};
