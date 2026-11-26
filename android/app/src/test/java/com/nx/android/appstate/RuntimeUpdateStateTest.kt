@@ -20,6 +20,20 @@ class RuntimeUpdateStateTest {
         assertEquals("", state.apkOutput)
     }
 
+    @Test fun `installed upgrade uses separate writable output and optional recovery key`() {
+        val state = RuntimeUpdateState()
+        val source = "/data/app/org.nx2a.game/base.apk"
+        val output = "/storage/emulated/0/Download/nx2android/org.nx2a.game-upgraded.apk"
+        assertFalse(state.beginApk(source, "", source))
+        assertTrue(state.beginApk(source, "/games/Game-data", output, "/backup/title.json"))
+        assertEquals(source, state.pack)
+        assertEquals(output, state.apkOutput)
+        assertEquals("/backup/title.json", state.apkKey)
+        state.finish(true)
+        state.dismiss()
+        assertEquals("", state.apkKey)
+    }
+
     @Test fun `interrupted apk upgrade does not open the legacy pack update dialog`() {
         val state = RuntimeUpdateState("apk:/games/FFR.apk")
         assertTrue(state.apkUpgrade)

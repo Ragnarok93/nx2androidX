@@ -34,9 +34,9 @@ class LibraryOperationCoordinator @Inject constructor(
         runtime.begin(pack, name)
     }
 
-    fun beginApkUpgrade(source: String, data: String): Boolean = synchronized(moving) {
+    fun beginApkUpgrade(source: String, data: String, output: String = "", key: String = ""): Boolean = synchronized(moving) {
         if (moving.isNotEmpty() || port.running || player.running || runtime.running) return@synchronized false
-        runtime.beginApk(source, data)
+        runtime.beginApk(source, data, output, key)
     }
 
     fun beginPlay(titleId: String, name: String): Boolean = synchronized(moving) {

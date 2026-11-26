@@ -29,6 +29,7 @@ class RuntimeUpdateState private constructor(
     var apkData by mutableStateOf(""); private set
     var apkOutput by mutableStateOf(if (apkUpgrade) upgradedPath(pack) else ""); private set
     var apkLog by mutableStateOf<List<String>>(emptyList()); private set
+    var apkKey by mutableStateOf(""); private set
 
     companion object {
         fun upgradedPath(source: String): String {
@@ -37,9 +38,10 @@ class RuntimeUpdateState private constructor(
         }
     }
 
-    fun beginApk(source: String, data: String): Boolean {
+    fun beginApk(source: String, data: String, output: String = "", key: String = ""): Boolean {
         if (running || source.isBlank() || !source.endsWith(".apk", ignoreCase = true)) return false
-        return beginInternal(source, File(source).name, apk = true, data = data)
+        if (output.isNotBlank() && File(output).absolutePath == File(source).absolutePath) return false
+        return beginInternal(source, File(source).name, apk = true, data = data, output = output, key = key)
     }
 
     fun appendApkLog(line: String) {
@@ -58,11 +60,13 @@ class RuntimeUpdateState private constructor(
 
     fun begin(path: String, label: String): Boolean = beginInternal(path, label)
 
-    private fun beginInternal(path: String, label: String, apk: Boolean = false, data: String = ""): Boolean {
+    private fun beginInternal(path: String, label: String, apk: Boolean = false, data: String = "",
+                              output: String = "", key: String = ""): Boolean {
         if (running || path.isBlank()) return false
         apkUpgrade = apk
         apkData = if (apk) data else ""
-        apkOutput = if (apk) upgradedPath(path) else ""
+        apkOutput = if (apk) output.ifBlank { upgradedPath(path) } else ""
+        apkKey = if (apk) key else ""
         apkLog = emptyList()
         pack = path
         name = label
@@ -103,6 +107,7 @@ class RuntimeUpdateState private constructor(
         apkUpgrade = false
         apkData = ""
         apkOutput = ""
+        apkKey = ""
         apkLog = emptyList()
         pack = ""
         name = ""

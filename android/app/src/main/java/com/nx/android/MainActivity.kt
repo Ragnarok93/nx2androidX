@@ -128,13 +128,15 @@ class MainActivity : ComponentActivity() {
         },
         onCancelPort = { PortService.cancel(this) },
         onExportApk = { apk -> exportApk(apk) },
-        onUpgradeApk = { apk, companion ->
+        onInstallUpgrade = { apk -> installUpgrade(apk) },
+        onUpgradeApk = { apk, companion, output, key ->
             if (!environmentSetup.ready) {
                 toast(locale.str(R.string.upgrade_prepare_environment))
             } else if (!apk.isFile || !apk.canRead()) {
                 toast(locale.str(R.string.builds_needs_storage))
                 askStorage()
-            } else if (!operations.beginApkUpgrade(apk.absolutePath, companion?.absolutePath.orEmpty())) {
+            } else if (!operations.beginApkUpgrade(apk.absolutePath, companion?.absolutePath.orEmpty(),
+                    output?.absolutePath.orEmpty(), key?.absolutePath.orEmpty())) {
                 toast(locale.str(R.string.runtime_busy))
             } else {
                 try {
@@ -346,6 +348,26 @@ class MainActivity : ComponentActivity() {
                 AppLog.line("[RED] the game APK could not be saved: ${error.message}")
                 toast(locale.str(R.string.builds_apk_save_failed, error.message ?: source.name))
             }
+        }
+    }
+
+    private fun installUpgrade(apk: File) {
+        val allowed = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "nx2android")
+        try {
+            if (!apk.isFile || apk.canonicalFile.parentFile != allowed.canonicalFile) {
+                toast(locale.str(R.string.lib_artifact_missing_state))
+                return
+            }
+            if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                toast(locale.str(R.string.upgrade_install_permission))
+                return
+            }
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
+            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        } catch (error: Exception) {
+            toast(locale.str(R.string.upgrade_install_failed, error.message.orEmpty()))
         }
     }
 

@@ -34,6 +34,7 @@ class PortRunner(
         workspaces: BuildWorkspaces,
         privatePorts: File,
         diagnostics: File,
+        installedApks: () -> Map<String, String> = { emptyMap() },
         onEnd: (interrupted: Boolean, cancelled: Boolean) -> Unit,
     ): Thread {
         val args = portArgs(gameFile, keys, touch, fps60, experimental, aliasHeadroom, !BuildConfig.NX_LSFG,
@@ -48,6 +49,7 @@ class PortRunner(
                 if (!cancelled) code = runGuest(args, mapOf(
                     "NX2A_WORK" to workspace.absolutePath,
                     "NX2A_PREVIOUS_PACK_DIR" to privatePorts.absolutePath,
+                    "NX2A_INSTALLED_GAME_APKS" to org.json.JSONObject(installedApks()).toString(),
                 ))
             } catch (e: Exception) {
                 onLine("[RED] ${e.message}")

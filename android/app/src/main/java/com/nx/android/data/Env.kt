@@ -64,14 +64,7 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
     val dotnet: File get() = File(nxHome, "toolchains/dotnet/dotnet")
 
     private fun standaloneSigningKey(): File = synchronized(signingKeyLock) {
-        val legacy = File(nxHome, "signing-key.json")
-        val persistent = File(files, "standalone-signing-key.json")
-        if (!persistent.exists() && legacy.exists()) {
-            check(legacy.isFile && legacy.length() > 0L && legacy.renameTo(persistent)) {
-                "Cannot preserve the standalone APK signing key"
-            }
-        }
-        persistent
+        StandaloneSigningState.migrate(files, nxHome)
     }
 
     /** The environment every guest program gets */

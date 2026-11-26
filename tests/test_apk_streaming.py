@@ -133,10 +133,30 @@ class StreamingApkTests(unittest.TestCase):
                     signing.original_key(other_apk, title=title)
 
                 old, old_identity = build("legacy", legacy, 12)
-                later, later_identity = build("legacy-recompile", signing.export_key("01000000000CD000"), 1)
-                self.assertEqual(old_identity, later_identity)
+                legacy_title = "01000000000CD000"
+                self.assertEqual(signing.export_key(legacy_title, package=package), legacy)
+                self.assertEqual(signing.export_key(legacy_title, package=package, previous_apk=old), legacy)
+                fresh_title = "01000000000EF000"
+                fresh_key = signing.export_key(fresh_title, package="org.nx2a.newgame")
+                self.assertNotEqual(fresh_key, legacy)
+                _, fresh_identity = build("new-title-after-legacy", fresh_key, 1)
+                self.assertNotEqual(old_identity, fresh_identity)
                 self.assertEqual(signing.original_key(old, title=other), legacy)
+                recovered = signing.original_key(old, title=legacy_title, explicit=legacy)
+                self.assertNotEqual(recovered, legacy)
+                self.assertEqual(signing.read_signer(recovered), signing.read_signer(legacy))
+                self.assertEqual(signing.original_key(old, title=legacy_title), recovered)
+                with patch.dict(os.environ, {"NX2A_INSTALLED_GAME_APKS": json.dumps({package: str(old)})}):
+                    self.assertEqual(signing.export_key(legacy_title, package=package, previous_apk=first), recovered)
                 self.assertEqual(signing.export_key(title), key)
+                # A compiler reset can archive a conflicting older signing family.
+                archived = legacy.with_suffix(".recovery") / "older" / "signing-key.json"
+                archived.parent.mkdir(parents=True)
+                old_title_key = signing.title_key(archived, other)
+                old_title_key.parent.mkdir()
+                old_title_key.write_bytes(signing.title_key(legacy, other).read_bytes())
+                signing.title_key(legacy, other).unlink()
+                self.assertEqual(signing.original_key(other_apk, title=other), old_title_key)
 
                 key.unlink()
                 self.assertEqual(signing.original_key(first, title=title), key)

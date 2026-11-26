@@ -49,11 +49,11 @@ class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProces
     }
 
     fun upgradeApk(source: String, output: String, data: String = "", noLsfg: Boolean = !BuildConfig.NX_LSFG,
-                   log: (String) -> Unit = AppLog::line): RuntimeUpdateResult {
+                   key: String = "", log: (String) -> Unit = AppLog::line): RuntimeUpdateResult {
         return try {
             var reported = false
             var reason = ""
-            val process = guestLauncher.guest(apkArgs(source, output, data, noLsfg))
+            val process = guestLauncher.guest(apkArgs(source, output, data, noLsfg, key))
             process.inputStream.bufferedReader().useLines { lines ->
                 lines.forEach { line ->
                     log(line)
@@ -75,9 +75,10 @@ class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProces
     }
 
     companion object {
-        fun apkArgs(source: String, output: String, data: String, noLsfg: Boolean): List<String> {
+        fun apkArgs(source: String, output: String, data: String, noLsfg: Boolean, key: String = ""): List<String> {
             val args = mutableListOf("-m", "porter", "upgrade-apk", source, "-o", output)
             if (data.isNotBlank()) args += listOf("--data", data)
+            if (key.isNotBlank()) args += listOf("--key", key)
             if (noLsfg) args += "--no-lsfg"
             return args
         }

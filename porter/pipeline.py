@@ -1398,7 +1398,7 @@ class Port:
             PROG.stage('APK')
         stem = app_stem(self.g, self.app_name)
         self.apk_path = self.o.out / f'{stem}.apk'; self.o.out.mkdir(parents=True, exist_ok=True)
-        key = signing.export_key(f'{self.app:016X}')
+        key = signing.export_key(f'{self.app:016X}', package=self.package, previous_apk=self.apk_path)
         icon = self.icon()
         code = version_code(self.pkg_ver, self.o.vercode_offset)
         if self.o.vercode_offset: say(f'versionCode {code} ({self.pkg_ver} + 1 + offset {self.o.vercode_offset})')

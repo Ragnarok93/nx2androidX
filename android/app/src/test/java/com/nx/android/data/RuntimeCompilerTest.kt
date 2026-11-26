@@ -14,6 +14,9 @@ class RuntimeCompilerTest {
         assertEquals(listOf("-m", "porter", "upgrade-apk", "/games/FFR.apk", "-o",
             "/games/FFR-upgraded.apk"),
             RuntimeCompiler.apkArgs("/games/FFR.apk", "/games/FFR-upgraded.apk", "", false))
+        assertEquals(listOf("-m", "porter", "upgrade-apk", "/data/app/game/base.apk", "-o",
+            "/downloads/game-upgraded.apk", "--key", "/backup/title.json"),
+            RuntimeCompiler.apkArgs("/data/app/game/base.apk", "/downloads/game-upgraded.apk", "", false, "/backup/title.json"))
     }
 
     private fun compile(output: String, code: Int): RuntimeUpdateResult {

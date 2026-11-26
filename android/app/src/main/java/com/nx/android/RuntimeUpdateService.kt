@@ -62,12 +62,13 @@ class RuntimeUpdateService : Service() {
         val apkUpgrade = state.apkUpgrade
         val apkOutput = state.apkOutput
         val apkData = state.apkData
+        val apkKey = state.apkKey
         // 玩家点了「用当前档案继续」时这一轮才带上这个开关（第一次不带：照旧失败并说清原因）。
         // 这个选择只对这一次有效：别的重试照旧按档案核对。
         val allowDrift = state.takeDrift()
         val handler = Handler(mainLooper)
         Thread {
-            val result = if (apkUpgrade) compiler.upgradeApk(pack, apkOutput, apkData) { line ->
+            val result = if (apkUpgrade) compiler.upgradeApk(pack, apkOutput, apkData, key = apkKey) { line ->
                 com.nx.android.data.AppLog.line(line)
                 handler.post { state.appendApkLog(line) }
             } else compiler.rebuild(pack, allowProfileDrift = allowDrift)

@@ -185,6 +185,7 @@ class PortService : Service() {
                 intent.getStringExtra(DRIVER) ?: "",
                 intent.getBooleanExtra("allowDamagedMedia", false),
                 workspaces, paths.ports, buildSessions.stageLogDirectory(taskId),
+                installedApks = { com.nx.android.feature.upgrade.InstalledGameApks.signingSources(this) },
             ) { interrupted, cancelled ->
                 handler.post {
                     if (runner === taskRunner) {

@@ -82,7 +82,7 @@ class ApkLimitFallbackTests(unittest.TestCase):
         self.addCleanup(self.vercode.stop)
 
     def fake_mkapk(self, cmd, *args, **kwargs):
-        self.signing.assert_called_with('0100000000010000')
+        self.signing.assert_called_with('0100000000010000', package=self.port.package, previous_apk=Path(cmd[3]))
         self.assertEqual(cmd[4], self.root / 'signing.json')
         # Command index 3 is the exported APK path in the real mkapk invocation.
         self.assertIn('--data-root', cmd)

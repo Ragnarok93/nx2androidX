@@ -133,7 +133,8 @@ data class AppActions(
     val isBuildActive: (String) -> Boolean,
     val emptyBuildLogMessage: (String) -> String,
     val titleBuildLog: (String) -> String,
-    val onUpgradeApk: (File, File?) -> Unit = { _, _ -> },
+    val onUpgradeApk: (File, File?, File?, File?) -> Unit = { _, _, _, _ -> },
+    val onInstallUpgrade: (File) -> Unit = {},
     // the firmware: one for the machine (imported from a zip into the app's own folder, optional)
     val firmware: () -> String = { "" },
     val onImportFirmware: (File) -> Unit = {},
@@ -457,7 +458,7 @@ private fun MainScreen(
                                     },
                                     onSetup = { select(Tab.SETTINGS); settingsSection = SettingsSection.ENVIRONMENT })
                                 Tab.UPGRADE -> UpgradeScreen(upgrade, runtime, port.running || runtime.running,
-                                    ready, onRequest, actions.onUpgradeApk, actions.onExportApk)
+                                    ready, onRequest, actions.onUpgradeApk, actions.onExportApk, actions.onInstallUpgrade)
                                 Tab.SETTINGS -> SettingsScreen(onboarding, installedDrivers, drivers, storage,
                                     actions, onRequest, onDrivers, settingsSection, { settingsSection = it }, theme, onTheme)
                                 Tab.DEBUG -> if (variablesOpen) {
