@@ -9,6 +9,8 @@
 #include "gfx_vk_d24_copy.h"
 #include "gfx_vk_resolution_budget.h"
 #include "gfx_vk_resolution_scope.h"
+#include "gfx_vk_resolution_storage_format.h"
+_Static_assert(NVN_FORMAT_RGBA32F==0x2e && NVN_FORMAT_RGBA16F==0x29 && NVN_FORMAT_RGBA8==0x25, "resolution storage format table");
 #include "gfx_vk_resolution_window.h"
 #include "ownership_exchange.h"
 #include "gfx_vk_resolution_restore.h"
@@ -422,12 +424,11 @@ vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical,uint32_t w,uint32_t h
     const vkfmt_t *fmt = vk_fmt(logical->nvn_format);
     if (!fmt || fmt->compressed || fmt->is_int || !logical->aspect) return NULL;
     VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    int storage=(logical->flags&NVN_TEXTURE_FLAGS_IMAGE)!=0;
+    int storage=(logical->flags&NVN_TEXTURE_FLAGS_IMAGE)!=0 && logical->aspect==VK_IMAGE_ASPECT_COLOR_BIT;
     if (storage) {
-        // Only the exact constant-fill storage format can enter the
-        // certified live allocator; never relax arbitrary storage views.
-        if (logical->nvn_format!=NVN_FORMAT_RGBA32F || logical->fmt!=VK_FORMAT_R32G32B32A32_SFLOAT ||
-            logical->aspect!=VK_IMAGE_ASPECT_COLOR_BIT) return NULL;
+        // Admit canonical float/UNORM color storage only. Actual writes
+        // require a matching SPIR-V declaration and certified dispatch.
+        if (!nx_rs_storage_spv_format(logical->nvn_format) || logical->fmt!=fmt->vk) return NULL;
         usage|=VK_IMAGE_USAGE_STORAGE_BIT;
     } else {
         usage |= logical->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -1169,7 +1170,7 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     akey k; memset(&k,0,sizeof k); k.pool=(uint64_t)(uintptr_t)t->pool; k.off=t->off; k.d=t->d;
     k.d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (f->depth || f->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
     if (supported && !nx_rs_view_equivalent(t,v)) supported=0;
-    if (t->has_layout || t->has_pkg_data || ((t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) && t->d.format!=NVN_FORMAT_RGBA32F) ||
+    if (t->has_layout || t->has_pkg_data || ((t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) && !f->depth && !f->stencil && !nx_rs_storage_spv_format(t->d.format)) ||
         (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) supported=0;
     int result=0;
     pthread_mutex_lock(&g_img_mu);
@@ -1314,7 +1315,6 @@ int vk_rs_allocate_fresh_group(const tex_t *const *targets,unsigned count,uint32
             !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
             t->has_layout || t->has_pkg_data || t->d.target!=NVN_TEXTURE_TARGET_2D ||
             t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
-            ((t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) && t->d.format!=NVN_FORMAT_RGBA32F) ||
             (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) ||
             t->L.size>INT64_MAX || !(addr[i]=rs_guest_address(t)) ||
             packaged_tex(t) || nvn_ft_written(t)) return 0;
@@ -1322,7 +1322,8 @@ int vk_rs_allocate_fresh_group(const tex_t *const *targets,unsigned count,uint32
         // Only canonical UNORM family members are admitted. Any later
         // sRGB/X reinterpretation still requires native preflight.
         unsigned family=texture_family_bit(t->d.format);
-        if (!fmt || fmt->compressed || fmt->dec || fmt->is_int || (family && family!=1)) return 0;
+        if (!fmt || fmt->compressed || fmt->dec || fmt->is_int || (family && family!=1) ||
+            ((t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) && !fmt->depth && !fmt->stencil && !nx_rs_storage_spv_format(t->d.format))) return 0;
         formats[i]=fmt;
         nx_rs_draw_extent ext={t->d.width,t->d.height,w,h,1};
         if (w>=ext.lw || h>=ext.lh) return 0;

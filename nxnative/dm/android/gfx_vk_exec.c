@@ -2354,7 +2354,7 @@ static void resolution_collect_sample(int st,const dmsv_bind *b,vkimg_t *im,int 
     if (v->physical_w==im->w && v->physical_h==im->h) return;
     // A certified pointwise dispatch uses physical coordinates for both
     // storage writes and same-grid texelFetch; neither binding is remapped.
-    if (st==5 && g_rs_compute_fill_active && im->fmt==VK_FORMAT_R32G32B32A32_SFLOAT &&
+    if (st==5 && g_rs_compute_fill_active && nx_rs_storage_spv_format(im->nvn_format) &&
         v->image==im->img) return;
     nx_rs_raster r; unsigned slot,flags;
     int ok=((st>=0 && st<3) || st==5) && !storage && b->count==1 && b->dim==1 && !(b->flags&3) &&
@@ -3934,18 +3934,19 @@ static int resolution_compute_transform_targets(const vkshader_t *cs,const p_dis
         if ((!storage && b->kind!=RK_TEX) || bind[storage] ||
             b->desc!=(storage?RD_STORAGE:RD_SAMPLED) || b->count!=1 ||
             b->dim!=1 || (b->flags&3) || b->samp==RS_UBO ||
-            b->reg<0 || b->reg>=(storage?32:256) || (storage && b->fmt!=1)) return 0;
+            b->reg<0 || b->reg>=(storage?32:256) || (storage && !nx_rs_storage_spv_supported(b->fmt))) return 0;
         bind[storage]=b;
     }
     if (!bind[0] || !bind[1] ||
-        !nx_rs_compute_pointwise(cs->spv,cs->nspv,bind[0]->binding,bind[1]->binding,cs->local)) return 0;
+        !nx_rs_compute_pointwise_format(cs->spv,cs->nspv,bind[0]->binding,bind[1]->binding,cs->local,bind[1]->fmt)) return 0;
     for (unsigned i=0;i<2;i++) {
         uint64_t handle=i?images[bind[i]->reg]:vk_tex_slot_handle(textures,images,(unsigned)bind[i]->reg);
         int tid=(int)(handle&0xfffff);
         const tex_t *t=NULL;const view_t *v=NULL;
         if (!tid || !vk_tex_by_id(tid,&v,&t) || !t || !t->pool ||
             !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
-            (i && !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE)) || t->d.format!=NVN_FORMAT_RGBA32F ||
+            (i && !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE)) || !nx_rs_storage_spv_format(t->d.format) ||
+            (i && nx_rs_storage_spv_format(t->d.format)!=bind[1]->fmt) ||
             t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
             t->set_swz || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
         out[i]=*t;views[i]=v?*v:(view_t){0};

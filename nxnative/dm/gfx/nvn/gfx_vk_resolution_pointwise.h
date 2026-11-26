@@ -1,6 +1,7 @@
 #ifndef NX_RS_POINTWISE_H
 #define NX_RS_POINTWISE_H
 #include "gfx_vk_resolution_compute_transform.h"
+#include "gfx_vk_resolution_storage_format.h"
 // Operand positions containing IDs in the exact pointwise proof template.
 static inline unsigned nx_rs_pointwise_ids(unsigned op) {
     switch (op) {
@@ -18,11 +19,11 @@ static inline unsigned nx_rs_pointwise_ids(unsigned op) {
 // Only pixel-local float arithmetic over the fetched value and finite
 // constants is admitted. All image coordinates and resource accesses still
 // match the original template modulo bijective ID renaming.
-static inline int nx_rs_compute_pointwise(const uint32_t *w,uint32_t n,
-        unsigned src_binding,unsigned dst_binding,const uint32_t local[3]) {
+static inline int nx_rs_compute_pointwise_format(const uint32_t *w,uint32_t n,
+        unsigned src_binding,unsigned dst_binding,const uint32_t local[3],unsigned dst_format) {
     const uint32_t *ref=nx_rs_transform_shader;
     const unsigned rn=sizeof nx_rs_transform_shader/sizeof *ref;
-    if (!w || !local || n<5 || n>rn+256 || w[0]!=ref[0] || w[1]!=ref[1] ||
+    if (!nx_rs_storage_spv_supported(dst_format) || !w || !local || n<5 || n>rn+256 || w[0]!=ref[0] || w[1]!=ref[1] ||
         w[3]<2 || w[3]>256 || w[4] || src_binding==dst_binding ||
         !local[0] || !local[1] || local[2]!=1) return 0;
     enum { SCALAR=1,VECTOR=2,PIXEL=3 };
@@ -72,6 +73,8 @@ static inline int nx_rs_compute_pointwise(const uint32_t *w,uint32_t n,
                 else {if (used[to]) return 0;map[from]=(uint8_t)to;used[to]=1;}
             } else if (op==71 && r[2]==33 && j==3) {
                 if (a[j]!=(r[j]==6?src_binding:dst_binding)) return 0;
+            } else if (op==25 && r[7]==2 && j==8) {
+                if (a[j]!=dst_format) return 0;
             } else if (op==16 && j>=3) {
                 if (a[j]!=local[j-3]) return 0;
             } else if (op==79 && wc==9 && j>=5) {
@@ -82,5 +85,9 @@ static inline int nx_rs_compute_pointwise(const uint32_t *w,uint32_t n,
         i+=wc;k+=wc;
     }
     return i==n;
+}
+static inline int nx_rs_compute_pointwise(const uint32_t *w,uint32_t n,
+        unsigned src_binding,unsigned dst_binding,const uint32_t local[3]) {
+    return nx_rs_compute_pointwise_format(w,n,src_binding,dst_binding,local,1);
 }
 #endif
