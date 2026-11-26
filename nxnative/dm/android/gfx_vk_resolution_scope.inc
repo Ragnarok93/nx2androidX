@@ -13,7 +13,7 @@ static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 enum { RS_SCOPE_PROGRAM_MAX=32, RS_SCOPE_OP_MAX=4096, RS_SCOPE_BYTES_MAX=4*1024*1024, RS_SCOPE_HANDLE_MAX=32 };
 typedef struct { const uint8_t *record; const prog_t *prog; vkshader_t *sh[6]; } rs_scope_program;
 static rs_scope_program g_rs_scope_programs[RS_SCOPE_PROGRAM_MAX];
-typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph; } rs_scope_group;
+typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph,ax,ay; } rs_scope_group;
 extern vkshader_t *vk_shader_cached(uint64_t,int);
 uint64_t nvn_replaying_job(void);
 uint64_t nvn_rs_window_last_job(void);
@@ -135,6 +135,19 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
 // grid changes; indirect argument reads are bounded and disjoint.
 // Stable storage for descriptor-derived owners throughout one proof/rescan.
 static __thread tex_t g_rs_compute_targets[NX_RS_SCOPE_OWNER_MAX];
+// The original dispatch must exactly cover the logical owner; only the
+// physical extent may change. Preserve the accumulated alignment of all
+// earlier certified dispatches when a later shader imposes a new grid.
+static int rs_scope_require_compute_grid(rs_scope_group *g,const vkshader_t *s,const p_dispatch *d) {
+    uint32_t groups[3]={(uint32_t)d->x,(uint32_t)d->y,(uint32_t)d->z},grid[3];
+    nx_rs_raster raster;
+    if (d->ind || !nx_rs_compute_grid(groups,s->local,g->w,g->h,g->w,g->h,grid) ||
+        !nx_rs_raster_init(&raster,g->w,g->h,g->pw,g->ph)) return 0;
+    int result=nx_rs_require_grid(&raster,g_rs_frame.target,V.props.limits.maxFramebufferWidth,
+        V.props.limits.maxFramebufferHeight,&g->ax,&g->ay,s->local[0],s->local[1]);
+    if (result==2) {g->pw=raster.pw;g->ph=raster.ph;}
+    return result;
+}
 static int rs_scope_compute_proof(rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,unsigned *samples,unsigned *writes) {
     *samples=0;*writes=0;
     vkshader_t *s=look->sh[5];
@@ -149,10 +162,10 @@ static int rs_scope_compute_proof(rs_scope_group *g,const __typeof__(S) *look,co
     tex_t pair[2];view_t views[2];
     if (resolution_compute_transform_targets(s,d,look->tex[5],look->img[5],pair,views)) {
         int src=rs_scope_match(g,&pair[0],&views[0]),dst=rs_scope_match(g,&pair[1],&views[1]);
-        uint32_t grid[3];
         if (src || dst) {
-            if (src<=0 || dst<0 || src==dst ||
-                !resolution_compute_fill_grid(s,d,g->w,g->h,g->pw,g->ph,grid)) return 0;
+            if (src<=0 || dst<0 || src==dst) return 0;
+            int geometry=rs_scope_require_compute_grid(g,s,d);
+            if (geometry!=1) return geometry;
             if (!dst) {
                 // Restart the full proof with the output included, so earlier
                 // native reads/writes cannot be missed. Compute-only scopes
@@ -173,10 +186,10 @@ static int rs_scope_compute_proof(rs_scope_group *g,const __typeof__(S) *look,co
     const tex_t *fill=NULL;const view_t *fill_view=NULL;
     if (resolution_compute_fill_target(s,d,look->img[5],&fill,&fill_view)) {
         int match=rs_scope_match(g,fill,fill_view);
-        uint32_t grid[3];
         if (match<0) return 0;
         if (match) {
-            if (!resolution_compute_fill_grid(s,d,g->w,g->h,g->pw,g->ph,grid)) return 0;
+            int geometry=rs_scope_require_compute_grid(g,s,d);
+            if (geometry!=1) return geometry;
             *writes=1u<<(match-1);
             return 1;
         }
@@ -573,7 +586,7 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             RS_NEED(p_dispatch);unsigned sampled=0,writes=0;
             int proof=rs_scope_compute_proof(g,&look,(const p_dispatch *)a,&sampled,&writes);
             if (proof==2) {
-                *expanded=1;*reason="compute output group expansion";return NULL;
+                *expanded=1;*reason="compute output or grid expansion";return NULL;
             }
             if (!proof ||
                 !nx_rs_scope_sample(&life,sampled) || (writes && !nx_rs_scope_compute_write(&life,writes))) {
@@ -595,6 +608,7 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
 }
 static const uint8_t *rs_scope_scan_initial(const uint8_t *next, rs_scope_group *group, unsigned initial,const char **reason) {
     unsigned budget=2*RS_SCOPE_OP_MAX;
+    unsigned initial_owners=group->mask;
     int expanded;
     do {
         expanded=0;
@@ -606,7 +620,7 @@ static const uint8_t *rs_scope_scan_initial(const uint8_t *next, rs_scope_group 
         // owner could overlap an inherited native attachment; do not rescan
         // with that incomplete initial mapping. Keep compute-only scopes
         // single-output until inherited binding provenance is generalized.
-        if (!initial && expanded) return NULL;
+        if (!initial && expanded && group->mask!=initial_owners) return NULL;
     } while (expanded && budget);
     return NULL;
 }
@@ -687,6 +701,8 @@ static void rs_scope_try_begin(const uint8_t *next) {
     g_rs_scope_program_count=0;
     const char *reason=NULL;
     const uint8_t *end=rs_scope_scan(next,&group,&reason);
+    // The scanner may have selected a compatible workgroup-aligned extent.
+    ext=(nx_rs_extent){group.pw,group.ph};
     // A complete overwrite can start a new lifetime even with the old
     // native pass open. Prove the entire new lifetime first: an unsuccessful
     // scan must not split the native pass or change backing ownership.
@@ -739,7 +755,9 @@ static void rs_scope_try_compute_begin(const uint8_t *next,const p_dispatch *d) 
         const view_t *rv=i==8?(S.rt_has_dview?&S.rt_dview:NULL):(S.rt_has_cview[i]?&S.rt_cview[i]:NULL);
         if (rs_scope_match(&group,rt,rv)!=0) goto refuse;
     }
-    if (!nx_rs_choose_extent(&raster,group.w,group.h,g_rs_frame.target,V.props.limits.maxFramebufferWidth,V.props.limits.maxFramebufferHeight) ||
+    group.ax=S.sh[5]->local[0];group.ay=S.sh[5]->local[1];
+    if (!nx_rs_choose_extent_aligned(&raster,group.w,group.h,g_rs_frame.target,V.props.limits.maxFramebufferWidth,
+        V.props.limits.maxFramebufferHeight,group.ax,group.ay) ||
         !resolution_compute_fill_grid(S.sh[5],d,group.w,group.h,raster.pw,raster.ph,grid)) goto refuse;
     group.pw=raster.pw;group.ph=raster.ph;
     const char *reason=NULL;
@@ -749,6 +767,9 @@ static void rs_scope_try_compute_begin(const uint8_t *next,const p_dispatch *d) 
     if (!vk_rs_allocate_fresh_group(group.target,NX_RS_SCOPE_OWNER_MAX,group.pw,group.ph)) goto refuse;
     vk_rs_scope_freeze_seal();g_rs_scope_end=end;
     if (nvn_rs_window_last_job()>nvn_replaying_job()) g_rs_scope_window_pin=1;
+    // A later compute in the certified lifetime may have changed the grid.
+    if (!resolution_compute_fill_grid(S.sh[5],d,group.w,group.h,group.pw,group.ph,grid))
+        die("[vk] resolution: certified initial compute grid mismatch");
     static unsigned accepted;
     if (++accepted<=16 || accepted%300==0)
         VKLOG("[resolution-scope] authorized constant-fill compute %ux%u -> %ux%u groups %ux%u",
