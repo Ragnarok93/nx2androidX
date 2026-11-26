@@ -417,12 +417,22 @@ vk_rs_variant *vk_rs_variant_create(const vkimg_t *logical,uint32_t w,uint32_t h
         logical->lin_mem || logical->target != NVN_TEXTURE_TARGET_2D ||
         logical->d != 1 || logical->layers != 1 || logical->levels != 1 || logical->samples != 1 ||
         logical->bc_draw || logical->bc_of || !logical->pool ||
-        (logical->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_IMAGE))) return NULL;
+        (logical->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return NULL;
     const vkfmt_t *fmt = vk_fmt(logical->nvn_format);
     if (!fmt || fmt->compressed || fmt->is_int || !logical->aspect) return NULL;
     VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    usage |= logical->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    if ((logical->usage & usage) != usage || (logical->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return NULL;
+    int storage=(logical->flags&NVN_TEXTURE_FLAGS_IMAGE)!=0;
+    if (storage) {
+        // Only the exact constant-fill storage format can enter the
+        // certified live allocator; never relax arbitrary storage views.
+        if (logical->nvn_format!=NVN_FORMAT_RGBA32F || logical->fmt!=VK_FORMAT_R32G32B32A32_SFLOAT ||
+            logical->aspect!=VK_IMAGE_ASPECT_COLOR_BIT) return NULL;
+        usage|=VK_IMAGE_USAGE_STORAGE_BIT;
+    } else {
+        usage |= logical->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if (logical->usage & VK_IMAGE_USAGE_STORAGE_BIT) return NULL;
+    }
+    if ((logical->usage & usage) != usage) return NULL;
     return rs_variant_allocate(logical,w,h,0);
 }
 // A private storage control has no guest pool, address or cache owner. It
@@ -1158,7 +1168,8 @@ int vk_rs_preflight_view(const tex_t *t,const view_t *v,int supported,nx_rs_draw
     akey k; memset(&k,0,sizeof k); k.pool=(uint64_t)(uintptr_t)t->pool; k.off=t->off; k.d=t->d;
     k.d.flags &= NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT | (f->depth || f->stencil ? 0 : NVN_TEXTURE_FLAGS_IMAGE);
     if (supported && !nx_rs_view_equivalent(t,v)) supported=0;
-    if (t->has_layout || t->has_pkg_data || (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) supported=0;
+    if (t->has_layout || t->has_pkg_data || ((t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) && t->d.format!=NVN_FORMAT_RGBA32F) ||
+        (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) supported=0;
     int result=0;
     pthread_mutex_lock(&g_img_mu);
     vkimg_t *exact_owner=rs_exact_owner(&k);
@@ -1302,7 +1313,8 @@ int vk_rs_allocate_fresh_group(const tex_t *const *targets,unsigned count,uint32
             !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
             t->has_layout || t->has_pkg_data || t->d.target!=NVN_TEXTURE_TARGET_2D ||
             t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
-            (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) ||
+            ((t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) && t->d.format!=NVN_FORMAT_RGBA32F) ||
+            (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) ||
             t->L.size>INT64_MAX || !(addr[i]=rs_guest_address(t)) ||
             packaged_tex(t) || nvn_ft_written(t)) return 0;
         const vkfmt_t *fmt=vk_fmt(t->d.format);

@@ -2345,10 +2345,16 @@ static void resolution_note_binding(int st, const dmsv_bind *b, vkimg_t *im, int
 // metadata; never guess from a texture ID or a requested global percentage.
 typedef struct { nx_rs_draw_samples samples; int failed; } rs_stage_collect;
 static rs_stage_collect *g_rs_collect;
+// Scoped to one fully certified direct constant-fill dispatch.
+static int g_rs_compute_fill_active;
 static void resolution_collect_sample(int st,const dmsv_bind *b,vkimg_t *im,int storage) {
     if (!im || !im->rs_backing) return;
     const vk_rs_variant *v=im->rs_backing;
     if (v->physical_w==im->w && v->physical_h==im->h) return;
+    // The certified storage write uses physical invocation coordinates;
+    // unlike sampled inputs it must not receive a SupportBuffer scale.
+    if (storage && st==5 && g_rs_compute_fill_active && im->fmt==VK_FORMAT_R32G32B32A32_SFLOAT &&
+        v->image==im->img) return;
     nx_rs_raster r; unsigned slot,flags;
     int ok=((st>=0 && st<3) || st==5) && !storage && b->count==1 && b->dim==1 && !(b->flags&3) &&
         v->image==im->img && nx_rs_raster_init(&r,im->w,im->h,v->physical_w,v->physical_h) &&
@@ -3894,7 +3900,35 @@ static int dispatch_indirect_spans(uint64_t addr, VkBuffer src[3], VkBufferCopy 
 }
 // Retain unrelated scaled images for a narrowly classified direct dispatch.
 // Do not change group counts: no storage-image output grid is virtualized.
+// Only one exact storage descriptor and the bounded SPIR-V constant-fill
+// proof qualify. The immutable descriptor snapshot is shared with replay.
+static int resolution_compute_fill_target(const vkshader_t *cs,const p_dispatch *d,const uint64_t *images,
+                                           const tex_t **out,const view_t **view) {
+    if (!cs || !d || d->ind || d->x<=0 || d->y<=0 || d->z!=1 ||
+        cs->stage!=5 || cs->nbind!=1 || !cs->b) return 0;
+    const dmsv_bind *b=cs->b;
+    if (b->kind!=RK_IMG || b->desc!=RD_STORAGE || b->count!=1 || b->dim!=1 ||
+        (b->flags&3) || b->samp==RS_UBO || b->fmt!=1 || b->reg<0 || b->reg>=32 ||
+        !nx_rs_compute_constant_fill(cs->spv,cs->nspv,b->binding,cs->local)) return 0;
+    int tid=(int)(images[b->reg]&0xfffff);
+    const tex_t *t=NULL; const view_t *v=NULL;
+    if (!tid || !vk_tex_by_id(tid,&v,&t) || !t || !t->pool ||
+        !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+        !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || t->d.format!=NVN_FORMAT_RGBA32F ||
+        t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
+        t->set_swz || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
+    *out=t;*view=v;
+    return 1;
+}
+static int resolution_compute_fill_grid(const vkshader_t *cs,const p_dispatch *d,
+                                         uint32_t lw,uint32_t lh,uint32_t pw,uint32_t ph,uint32_t out[3]) {
+    uint32_t groups[3]={(uint32_t)d->x,(uint32_t)d->y,(uint32_t)d->z};
+    return pw<lw && ph<lh && nx_rs_compute_grid(groups,cs->local,lw,lh,pw,ph,out);
+}
 static int resolution_preflight_compute(const vkshader_t *cs, const p_dispatch *d) {
+    // exec_ops has checked the original logical dispatch against the actual
+    // published backing, and supplies only the proven physical grid here.
+    if (g_rs_compute_fill_active) return 1;
     if (!cs || !d || cs->stage!=5 || cs->nbind<0 || cs->nbind>96 ||
         (cs->nbind && !cs->b) || !nx_rs_compute_logical(cs->spv,cs->nspv) ||
         (d->ind && ((d->ind&3) || !resolution_raw_span(d->ind,12,0)))) return 0;
@@ -4616,7 +4650,19 @@ static void exec_ops(const uint8_t *p) {
         case OP_PRIM_RESTART: S.prim_restart = ((const p_prim_restart *)a)->on; break;
         case OP_DRAW: { if (g_rc_skip) break; p_draw t; draw(draw_rec(a, h.size, &t)); break; }
         case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; draw_idx(draw_idx_rec(a, h.size, &t)); break; }
-        case OP_DISPATCH: dispatch((const p_dispatch *)a); break;
+        case OP_DISPATCH: {
+            const p_dispatch *d=(const p_dispatch *)a;
+            if (g_rs_scopes && g_rs_frame.target<100 && !skip && !g_rs_scope_nested && !g_rs_scope_end)
+                rs_scope_try_compute_begin(p,d);
+            uint32_t groups[3];
+            if (g_rs_scope_end && rs_scope_physical_dispatch(d,groups)) {
+                p_dispatch physical=*d;
+                physical.x=(int32_t)groups[0];physical.y=(int32_t)groups[1];physical.z=(int32_t)groups[2];
+                g_rs_compute_fill_active=1;
+                dispatch(&physical);
+                g_rs_compute_fill_active=0;
+            } else dispatch(d);
+            break; }
         case OP_BARRIER: {   // the pass ends at every barrier: kept across XC3's fragment- and primitive-order barriers (0x1 0x2 0x4) its characters drew torn in some frames
             int32_t bits = *(const int32_t *)a;
             if (g_x_listpasses) VKLOG("    barrier %#x%s", bits, g_order_keep && S.pass_open == 1 && !(bits & ~0x7) ? " (order only: decided at the next draw)" : "");

@@ -10,7 +10,7 @@ static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
 enum { RS_SCOPE_PROGRAM_MAX=32, RS_SCOPE_OP_MAX=4096, RS_SCOPE_BYTES_MAX=4*1024*1024, RS_SCOPE_HANDLE_MAX=32 };
 typedef struct { const uint8_t *record; const prog_t *prog; vkshader_t *sh[6]; } rs_scope_program;
 static rs_scope_program g_rs_scope_programs[RS_SCOPE_PROGRAM_MAX];
-typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h; } rs_scope_group;
+typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph; } rs_scope_group;
 extern vkshader_t *vk_shader_cached(uint64_t,int);
 uint64_t nvn_replaying_job(void);
 static uint64_t rs_scope_addr(const tex_t *t) {
@@ -129,8 +129,8 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
 // storage destinations must be provably disjoint native images or explicit
 // bounded native SSBOs. No bindless handles, physical addressing, indirect
 // grid changes; indirect argument reads are bounded and disjoint.
-static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,unsigned *samples) {
-    *samples=0;
+static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,unsigned *samples,unsigned *writes) {
+    *samples=0;*writes=0;
     vkshader_t *s=look->sh[5];
     if (!s || s->stage!=5 || s->nbind<0 || s->nbind>96 || (s->nbind && !s->b) ||
         !nx_rs_compute_logical(s->spv,s->nspv)) return 0;
@@ -140,6 +140,17 @@ static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *l
         (uint32_t)d->x>V.props.limits.maxComputeWorkGroupCount[0] ||
         (uint32_t)d->y>V.props.limits.maxComputeWorkGroupCount[1] ||
         (uint32_t)d->z>V.props.limits.maxComputeWorkGroupCount[2]) return 0;
+    const tex_t *fill=NULL;const view_t *fill_view=NULL;
+    if (resolution_compute_fill_target(s,d,look->img[5],&fill,&fill_view)) {
+        int match=rs_scope_match(g,fill,fill_view);
+        uint32_t grid[3];
+        if (match<0) return 0;
+        if (match) {
+            if (!resolution_compute_fill_grid(s,d,g->w,g->h,g->pw,g->ph,grid)) return 0;
+            *writes=1u<<(match-1);
+            return 1;
+        }
+    }
     int support=0;
     for (int i=0;i<s->nbind;i++) {
         const dmsv_bind *b=&s->b[i];
@@ -379,7 +390,7 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
     unsigned slots[9];
     for (unsigned i=0;i<9;i++) slots[i]=initial&(1u<<i);
     nx_rs_scope life;
-    if (!nx_rs_scope_init(&life,g->mask,initial)) return NULL;
+    if (initial ? !nx_rs_scope_init(&life,g->mask,initial) : !nx_rs_scope_init_compute(&life,g->mask)) return NULL;
     size_t bytes=0;unsigned crossed=0;
     g_rs_scope_crossed=0;g_rs_scope_overwrite=0;
     for (unsigned op=0;op<RS_SCOPE_OP_MAX && *budget;op++) {
@@ -529,9 +540,9 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             }
             break; }
         case OP_DISPATCH: {
-            RS_NEED(p_dispatch);unsigned sampled=0;
-            if (!rs_scope_compute_proof(g,&look,(const p_dispatch *)a,&sampled) ||
-                !nx_rs_scope_sample(&life,sampled)) {
+            RS_NEED(p_dispatch);unsigned sampled=0,writes=0;
+            if (!rs_scope_compute_proof(g,&look,(const p_dispatch *)a,&sampled,&writes) ||
+                !nx_rs_scope_sample(&life,sampled) || (writes && !nx_rs_scope_compute_write(&life,writes))) {
                 *reason="compute access";
                 return NULL;
             }
@@ -548,8 +559,7 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
     }
     return NULL;
 }
-static const uint8_t *rs_scope_scan(const uint8_t *next, rs_scope_group *group, const char **reason) {
-    unsigned initial=group->mask;
+static const uint8_t *rs_scope_scan_initial(const uint8_t *next, rs_scope_group *group, unsigned initial,const char **reason) {
     unsigned budget=2*RS_SCOPE_OP_MAX;
     int expanded;
     do {
@@ -560,6 +570,10 @@ static const uint8_t *rs_scope_scan(const uint8_t *next, rs_scope_group *group, 
         if (end) return end;
     } while (expanded && budget);
     return NULL;
+}
+
+static const uint8_t *rs_scope_scan(const uint8_t *next,rs_scope_group *group,const char **reason) {
+    return rs_scope_scan_initial(next,group,group->mask,reason);
 }
 
 static void rs_scope_reject(const char *reason) {
@@ -626,6 +640,7 @@ static void rs_scope_try_begin(const uint8_t *next) {
         return;
     }
     ext=(nx_rs_extent){raster.pw,raster.ph};
+    group.pw=ext.w;group.ph=ext.h;
     if (!vk_rs_scope_freeze_begin()) {
         rs_scope_reject("descriptor snapshot unavailable");
         return;
@@ -656,4 +671,54 @@ static void rs_scope_close(void) {
     if (!vk_rs_suspend_discarded_group()) die("[vk] resolution: certified lifetime publication failed");
     g_rs_scope_end=NULL;g_rs_scope_program_count=0;g_rs_scope_crossed=0;g_rs_scope_overwrite=0;
     vk_rs_scope_freeze_end();
+}
+
+
+// A compute producer may start a certified lifetime without attachment
+// binding. Its single output is allocated physically before replay. The
+// same scanner proves all downstream consumers and a terminal overwrite.
+static void rs_scope_try_compute_begin(const uint8_t *next,const p_dispatch *d) {
+    if ((!g_rs_sync_snapshot && !nvn_replaying_job()) || S.pass_open==2 || vk_rs_cache_has_scaled() ||
+        g_rc_skip || g_tf_on || DM_GAME_RENDER_COND || g_bis_on || g_pd_state || g_x_listpasses ||
+        g_x_tracepass>=0 || g_td_off>=0 || g_x_nflat || g_x_nobar || g_x_depth || g_x_color ||
+        g_lrz_touch || g_ubolog_key || g_x_logfs || g_x_nodispbar || slot0_fill_on()) return;
+    if (!S.sh[5] || S.sh[5]->nbind!=1 || !vk_rs_scope_freeze_begin()) return;
+    const tex_t *t=NULL;const view_t *v=NULL;tex_t snapshot;
+    rs_scope_group group={0};nx_rs_raster raster;uint32_t grid[3];
+    if (!resolution_compute_fill_target(S.sh[5],d,S.img[5],&t,&v)) goto refuse;
+    snapshot=*t;group.target[0]=&snapshot;group.addr[0]=rs_scope_addr(&snapshot);
+    if (!group.addr[0]) goto refuse;
+    group.mask=1;group.w=t->d.width;group.h=t->d.height;
+    // The unbound initial state is only accurate when no inherited
+    // render attachment overlaps the output.
+    for (unsigned i=0;i<9;i++) {
+        if (i<8 && (i>=(unsigned)S.rt_n || !S.rt_has_col[i])) continue;
+        if (i==8 && !S.rt_has_dep) continue;
+        const tex_t *rt=i==8?&S.rt_dep:&S.rt_col[i];
+        const view_t *rv=i==8?(S.rt_has_dview?&S.rt_dview:NULL):(S.rt_has_cview[i]?&S.rt_cview[i]:NULL);
+        if (rs_scope_match(&group,rt,rv)!=0) goto refuse;
+    }
+    if (!nx_rs_choose_extent(&raster,group.w,group.h,g_rs_frame.target,V.props.limits.maxFramebufferWidth,V.props.limits.maxFramebufferHeight) ||
+        !resolution_compute_fill_grid(S.sh[5],d,group.w,group.h,raster.pw,raster.ph,grid)) goto refuse;
+    group.pw=raster.pw;group.ph=raster.ph;
+    const char *reason=NULL;
+    const uint8_t *end=rs_scope_scan_initial(next,&group,0,&reason);
+    if (!end) goto refuse;
+    if (S.pass_open) vk_end_pass();
+    if (!vk_rs_allocate_fresh_group(group.target,NX_RS_SCOPE_OWNER_MAX,group.pw,group.ph)) goto refuse;
+    vk_rs_scope_freeze_seal();g_rs_scope_end=end;
+    static unsigned accepted;
+    if (++accepted<=16 || accepted%300==0)
+        VKLOG("[resolution-scope] authorized constant-fill compute %ux%u -> %ux%u groups %ux%u",
+            group.w,group.h,group.pw,group.ph,grid[0],grid[1]);
+    return;
+refuse:
+    g_rs_scope_program_count=0;g_rs_scope_crossed=0;g_rs_scope_overwrite=0;vk_rs_scope_freeze_end();
+}
+
+static int rs_scope_physical_dispatch(const p_dispatch *d,uint32_t grid[3]) {
+    const tex_t *t=NULL;const view_t *v=NULL;nx_rs_draw_extent extent;
+    return resolution_compute_fill_target(S.sh[5],d,S.img[5],&t,&v) &&
+        vk_rs_preflight_view(t,v,1,&extent)==1 &&
+        resolution_compute_fill_grid(S.sh[5],d,extent.lw,extent.lh,extent.pw,extent.ph,grid);
 }

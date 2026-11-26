@@ -15,6 +15,20 @@ static inline int nx_rs_scope_init(nx_rs_scope *s, unsigned owners, unsigned bou
     return 1;
 }
 
+// Compute-only producers begin unbound. The caller must prove a complete
+// one-output dispatch and all consumers before physical publication.
+static inline int nx_rs_scope_init_compute(nx_rs_scope *s, unsigned owners) {
+    if (!owners || (owners & ~NX_RS_SCOPE_OWNER_MASK)) return 0;
+    *s=(nx_rs_scope){.owners=owners};
+    return 1;
+}
+static inline int nx_rs_scope_compute_write(nx_rs_scope *s,unsigned owner) {
+    if (!owner || (owner & (owner-1)) || (owner & (~s->owners | s->discarded | s->exported))) return 0;
+    s->initialized|=owner;
+    s->drawn|=owner;
+    return 1;
+}
+
 static inline int nx_rs_scope_clear_allowed(const nx_rs_scope *s, unsigned owner) {
     return owner && !(owner & (~s->bound | s->exported | s->discarded));
 }

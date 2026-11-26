@@ -11,6 +11,22 @@ SOURCE=r"""
 int main(void) {
     nx_rs_scope s;
     assert(!nx_rs_scope_init(&s, 1, 0));
+    assert(nx_rs_scope_init_compute(&s,1));
+    assert(!nx_rs_scope_sample(&s,1));
+    assert(!nx_rs_scope_compute_write(&s,0));
+    assert(!nx_rs_scope_compute_write(&s,2));
+    assert(nx_rs_scope_compute_write(&s,1));
+    assert(s.initialized==1 && s.drawn==1 && !s.bound);
+    assert(nx_rs_scope_sample(&s,1));
+    s.exported=1;assert(!nx_rs_scope_compute_write(&s,1));
+    assert(nx_rs_scope_discard(&s,1)==2);
+    assert(!nx_rs_scope_compute_write(&s,1));
+    assert(!nx_rs_scope_init_compute(&s,0));
+    assert(!nx_rs_scope_init_compute(&s,1u<<16));
+    assert(nx_rs_scope_init(&s,3,1));
+    assert(!nx_rs_scope_compute_write(&s,3));
+    assert(nx_rs_scope_compute_write(&s,2));
+    assert(nx_rs_scope_sample(&s,2));
     assert(!nx_rs_scope_init(&s, 1u<<16, 1u<<16));
     assert(nx_rs_scope_init(&s, 259, 256));
     assert(!nx_rs_scope_draw(&s, 0));
@@ -130,7 +146,7 @@ static struct {
     p_bind_buf ubo[6][16],ssbo[6][16]; NVNbufferRange vbuf[16];
     uint64_t tex[6][256],img[6][32];
 } S;
-typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h; } rs_scope_group;
+typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph; } rs_scope_group;
 typedef struct {int depth,stencil,compressed,dec,is_int;} vkfmt_t;
 static const vkfmt_t *vk_fmt(int fmt) {static const vkfmt_t f={.depth=1,.stencil=1},color={0};return fmt==NVN_FORMAT_BGRA8?&color:&f;}
 static uint8_t storage[4096*13];
@@ -151,7 +167,11 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,in
     *sampled=s->tex[1][0]==7?1:s->tex[1][0]==9?2:0;
     return !s->rast_discard;
 }
-static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,unsigned *sampled) {
+static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,unsigned *sampled,unsigned *writes) {
+    *writes=0;
+    // Isolate the scanner from the shader bytecode proof: image 10 denotes
+    // the fixture's single full-output compute producer.
+    if (s->img[5][0]==10) {*sampled=0;*writes=1;return !d->ind && d->x==8 && d->y==8 && d->z==1;}
     *sampled=s->tex[5][0]==7;
     const p_bind_buf *b=&s->ssbo[5][0];
     return (d->ind?(!(d->ind&3) && rs_scope_raw(g,d->ind,12,0)):(d->x>0 && d->y>0 && d->z>0)) && s->img[5][0]==8 &&
@@ -361,6 +381,20 @@ int main(void) {
     reset();t[0].d.format=NVN_FORMAT_BGRA8;producer();consumer();
     raw.has_view=1;raw.view.set_levels=1;raw.view.base_level=1;raw.view.nlevels=1;
     append(OP_CLEAR_TEX,&raw,sizeof raw);assert(!scan());
+    // An unbound compute producer must initialize before a scaled sample
+    // and terminate at the exact output's complete texture overwrite.
+    reset();t[0].d.format=NVN_FORMAT_BGRA8;
+    p_bind_handles fill_bind={.stage=5,.first=0,.n=1,.h={10}};
+    append(OP_BIND_IMG,&fill_bind,offsetof(p_bind_handles,h)+8);
+    p_dispatch fill_dispatch={.x=8,.y=8,.z=1};
+    append(OP_DISPATCH,&fill_dispatch,sizeof fill_dispatch);consumer();
+    p_clear_tex finish_fill={.tex=&t[0],.r={0,0,0,64,64,1},.mask=NVN_CLEAR_COLOR_MASK_RGBA};
+    overwrite=append(OP_CLEAR_TEX,&finish_fill,sizeof finish_fill);append(OP_END,NULL,0);
+    rs_scope_group compute_group={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64,.pw=32,.ph=32};
+    assert(rs_scope_scan_initial(commands,&compute_group,0,&reason)==overwrite && g_rs_scope_overwrite);
+    reset();t[0].d.format=NVN_FORMAT_BGRA8;consumer();
+    append(OP_CLEAR_TEX,&finish_fill,sizeof finish_fill);append(OP_END,NULL,0);
+    assert(!rs_scope_scan_initial(commands,&compute_group,0,&reason));
     // A lifetime can cross immutable handle boundaries, including between
     // producer and consumer and before the terminal discard.
     reset();producer();append(OP_END,NULL,0);uint8_t *h2=commands+at;
