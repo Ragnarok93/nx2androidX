@@ -10,6 +10,7 @@
 #include "gfx_vk_resolution_support.h"
 #include "gfx_vk_resolution_compute.h"
 #include "gfx_vk_resolution_compute_proof.h"
+#include "gfx_vk_resolution_pointwise.h"
 #define LOG(...) do { if (0) fprintf(stderr, __VA_ARGS__); } while (0)
 #define die(...) abort()
 #define DM_GAME_TEX_DYN_SLOTS 0
@@ -37,13 +38,14 @@ static unsigned g_compute_image_count;
 /* Native-only replay fixture: real scaling helpers compile, but any attempt
  * to enter the scaled Vulkan backend is an unexpected test failure. */
 int g_vk_rs_tracking;
-static int g_rs_replay, g_rs_audit, g_rs_pass_scaled;
+static int g_rs_replay, g_rs_audit, g_rs_pass_scaled, g_rs_compute_fill_active;
 static nx_rs_raster g_rs_raster;
 typedef struct { nx_rs_draw_samples samples; int failed; } rs_stage_collect;
 static rs_stage_collect *g_rs_collect;
 int vk_rs_cache_has_scaled(void) { return 0; }
 void vk_rs_variant_destroy(vk_rs_variant *variant) { (void)variant; abort(); }
 int vk_rs_preflight_view(const tex_t *t, const view_t *v, int supported, nx_rs_draw_extent *extent) { abort(); }
+int vk_rs_preflight_sampled_view(const tex_t *t, const view_t *v, int supported, nx_rs_draw_extent *extent) { abort(); }
 int vk_shader_resolution_binding(const vkshader_t *s, unsigned binding, unsigned *slot, unsigned *flags) { abort(); }
 int vk_shader_resolution_support(const vkshader_t *s, float target, const vk_rs_sample_scale *samples, unsigned count, VkDescriptorBufferInfo *out) { abort(); }
 static int resolution_preflight_buffer_binding(int st, const dmsv_bind *b) { abort(); }

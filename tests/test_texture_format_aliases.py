@@ -13,6 +13,7 @@ class TextureFormatAliases(unittest.TestCase):
         code=code.replace('/* CACHE KEYS */',part('static NVNformat texture_backing_format(', '// The sRGB / UNORM twin'))
         code=code.replace('/* RESOLUTION PROVENANCE */',part('static int rs_is_scaled(', 'static int ro_live_group_admit('))
         code=code.replace('/* CACHE LIFETIME */',part('enum { EVICT_KEEP', 'static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled);'))
+        code=code.replace('/* SAMPLED PEER */',part('static vkimg_t *rs_sampled_peer(', '// No image creation, upload, view creation'))
         code=code.replace('/* LOOKUP */',part('static vkimg_t *vk_tex_lookup(const tex_t *t, int sampled) {', '// Packaged textures give up'))
         code=code.replace('/* MATERIAL STORAGE */',part('static int mem_any(const uint8_t *p, uint64_t n) {', 'static int packaged_tex(const tex_t *t) {'))
         code=code.replace('/* DROP POOL */',part('void vk_tex_drop_pool(', '// CPU-written textures'))

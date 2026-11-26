@@ -5,6 +5,7 @@
 #include "gfx_vk_resolution_active.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "gfx_vk_resolution_ownership.h"
+#include "gfx_vk_resolution_storage_format.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +26,7 @@ typedef struct vkimg {
     void *img,*mem,*sub;
     struct vkimg *bc_draw; // No compressed-format stand-in in this family fixture.
     unsigned family_formats,family_closed;
-    int format,content;
+    int format,content,nvn_format;
     struct vk_rs_variant *rs_backing;
     uint32_t w,h;
     uint64_t rs_guest_addr;
@@ -36,7 +37,7 @@ static uint64_t dirty_now=1;
 static unsigned char retired[4096];
 static uint64_t g_tex_frame;
 static const vkfmt_t *vk_fmt(int format) {static vkfmt_t f;f=(vkfmt_t){.vk=format,.compressed=format==0x44,.dec=format==0x4d};return &f;}
-static vkimg_t *img_new(const tex_t *t,const vkfmt_t *f) {(void)t;vkimg_t *im=calloc(1,sizeof *im);assert(im);im->format=f->vk;im->img=(void*)(uintptr_t)++created;assert(created<sizeof retired);return im;}
+static vkimg_t *img_new(const tex_t *t,const vkfmt_t *f) {(void)t;vkimg_t *im=calloc(1,sizeof *im);assert(im);im->format=f->vk;im->nvn_format=t->d.format;im->img=(void*)(uintptr_t)++created;assert(created<sizeof retired);return im;}
 static void alias_link(vkimg_t *im) {(void)im;}
 static void alias_unlink(vkimg_t *im) {(void)im;}
 static void vk_lrz_forget(vkimg_t *im) {(void)im;}
@@ -73,6 +74,7 @@ static int vk_rs_require_native(vkimg_t *im) { (void)im; abort(); }
 /* CACHE KEYS */
 /* CACHE LIFETIME */
 /* MATERIAL STORAGE */
+/* SAMPLED PEER */
 /* LOOKUP */
 static vkimg_t *vk_tex_(const tex_t *t) { return vk_tex_lookup(t, 1); }
 /* DROP POOL */
