@@ -175,9 +175,9 @@ void vk_rs_group_retire(vk_rs_images *group);
 int vk_rs_cache_exchange(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
 // Real cache entry: native restoration only until future consumer/lifetime proof.
 int vk_rs_cache_exchange_live(vkimg_t *const owners[VK_RS_GROUP_SIZE], uint32_t w, uint32_t h);
-// Fresh real cache owners, no native memory allocation. Requires full lifetime
-// authorization and immediate full overwrite; not yet called by gameplay.
-int vk_rs_allocate_fresh_group(const tex_t *const targets[VK_RS_GROUP_SIZE],uint32_t w,uint32_t h);
+// Publish all owners of a certified lifetime transaction. Each owner must
+// receive a complete clear before its first access.
+int vk_rs_allocate_fresh_group(const tex_t *const *targets,unsigned count,uint32_t w,uint32_t h);
 int vk_rs_suspend_discarded_group(void); // only after complete certified discard
 void vk_rs_release_dormant(void); // retire discarded variants at target change
 int vk_rs_scope_freeze_begin(void);
@@ -188,6 +188,7 @@ vkimg_t *vk_rs_native_for_full_clear(const p_clear_tex *c);
 int vk_rs_discard_target(const tex_t *t); // exact full unviewed target, outside a pass
 int vk_rs_pass_idle(void);
 int vk_rs_require_native(vkimg_t *im); // explicit native-only boundary, outside a pass
+uint64_t vk_rs_backing_bytes(void);
 int vk_rs_cache_has_scaled(void);
 // Experimental request coordinator: target does not imply effective scale.
 int vk_rs_set_scale_request(unsigned percent);

@@ -10,30 +10,26 @@ SOURCE=r"""
 #include "gfx_vk_resolution_scope.h"
 int main(void) {
     nx_rs_scope s;
-    assert(!nx_rs_scope_init(&s,0) && !nx_rs_scope_init(&s,512));
-    assert(nx_rs_scope_init(&s,257));
-    assert(!nx_rs_scope_draw(&s,1,0));
-    assert(!nx_rs_scope_clear(&s,1,0));
-    assert(nx_rs_scope_clear(&s,1,1));
-    assert(!nx_rs_scope_switch(&s,0) && !nx_rs_scope_draw(&s,1,0));
-    assert(nx_rs_scope_clear(&s,256,1));
-    assert(!nx_rs_scope_draw(&s,0,0) && !nx_rs_scope_draw(&s,1,1));
-    assert(nx_rs_scope_draw(&s,1,0));
-    assert(nx_rs_scope_switch(&s,1));
-    assert(nx_rs_scope_switch(&s,0));
-    assert(nx_rs_scope_switch(&s,0));
-    assert(!nx_rs_scope_discard(&s,1));
-    assert(nx_rs_scope_draw(&s,1,0) && !nx_rs_scope_switch(&s,1));
-    assert(nx_rs_scope_draw(&s,1,1) && nx_rs_scope_switch(&s,1));
-    assert(!nx_rs_scope_draw(&s,1,1) && !nx_rs_scope_discard(&s,2));
-    assert(nx_rs_scope_discard(&s,256)==1 && !nx_rs_scope_discard(&s,256));
-    assert(nx_rs_scope_discard(&s,1)==2 && s.phase==3);
-    assert(!nx_rs_scope_discard(&s,1));
-    assert(nx_rs_scope_init(&s,1));assert(!nx_rs_scope_dispatch(&s,1,1));
-    assert(nx_rs_scope_clear(&s,1,1) && nx_rs_scope_draw(&s,1,0));
-    assert(nx_rs_scope_dispatch(&s,1,0) && s.phase==0 && !nx_rs_scope_dispatch(&s,0,1));
-    assert(nx_rs_scope_dispatch(&s,1,1) && !nx_rs_scope_draw(&s,1,0));
-    assert(nx_rs_scope_discard(&s,1)==2);
+    assert(!nx_rs_scope_init(&s, 1, 0));
+    assert(!nx_rs_scope_init(&s, 1u<<16, 1u<<16));
+    assert(nx_rs_scope_init(&s, 259, 256));
+    assert(!nx_rs_scope_draw(&s, 0));
+    assert(nx_rs_scope_clear(&s, 256));
+    assert(nx_rs_scope_draw(&s, 0));
+    s.bound = 257;
+    assert(!nx_rs_scope_draw(&s, 0));
+    assert(nx_rs_scope_clear(&s, 1));
+    assert(!nx_rs_scope_draw(&s, 1));
+    assert(nx_rs_scope_draw(&s, 0));
+    s.bound = 258;
+    assert(nx_rs_scope_clear(&s, 2));
+    assert(nx_rs_scope_draw(&s, 1));
+    assert(nx_rs_scope_discard(&s, 256) == 1);
+    assert(!nx_rs_scope_sample(&s, 256));
+    s.bound = 0;
+    assert(nx_rs_scope_draw(&s, 2));
+    assert(nx_rs_scope_discard(&s, 1) == 1);
+    assert(nx_rs_scope_discard(&s, 2) == 2);
 }
 """
 class ScopeTests(unittest.TestCase):
@@ -50,7 +46,7 @@ class ScopeTests(unittest.TestCase):
         scope=(base/"gfx_vk_resolution_scope.inc").read_text()
         replay=(base/"gfx_vk_exec.c").read_text()
         self.assertLess(scope.index("nx_rs_raster_init(&raster,"),scope.index("vk_rs_allocate_fresh_group(group.target"))
-        self.assertLess(scope.index("rs_scope_scan(next,&group)"),scope.index("vk_rs_allocate_fresh_group(group.target"))
+        self.assertLess(scope.index("rs_scope_scan(next,&group,&reason)"),scope.index("vk_rs_allocate_fresh_group(group.target"))
         self.assertIn("!nvn_replaying_job()",scope)
         self.assertIn("vk_rs_scope_freeze_seal();g_rs_scope_end=end",scope)
         self.assertIn("vk_rs_suspend_discarded_group()",scope)
@@ -124,30 +120,35 @@ int main(void) {
 #include "gfx_vk_resolution_transfer.h"
 static int resolution_display_copy_format(const p_copy_t2t *c) {return nx_rs_display_copy_shape(c); }
 static const uint64_t *g_rs_scope_rest;
-static unsigned g_rs_scope_rest_n,g_rs_scope_crossed;
+static unsigned g_rs_scope_rest_n,g_rs_scope_crossed,g_rs_scope_program_count;
 static int g_rs_scope_overwrite;
 static struct {
     p_scissor sc; int sc_set,rast_discard;
     p_bind_buf ubo[6][16],ssbo[6][16]; NVNbufferRange vbuf[16];
     uint64_t tex[6][256],img[6][32];
 } S;
-typedef struct { const tex_t *target[9]; uint64_t addr[9]; unsigned mask; uint32_t w,h; } rs_scope_group;
+typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h; } rs_scope_group;
 typedef struct {int depth,stencil;} vkfmt_t;
 static const vkfmt_t *vk_fmt(int fmt) {static const vkfmt_t f={1,1};(void)fmt;return &f;}
+static uint8_t storage[4096*13];
 static int rs_scope_raw(const rs_scope_group *g,uint64_t a,uint64_t n,int tail) {
-    uint64_t lo=g->addr[0],hi=lo+16384;
+    uint64_t lo=(uintptr_t)storage,hi=lo+sizeof storage;
     if (a<lo || a>=hi) return 0;
     if (tail) n=hi-a;
-    return n && n<=hi-a && !nx_rs_range_overlap(a,n,lo,g->target[0]->L.size);
+    if (!n || n>hi-a) return 0;
+    for (unsigned i=0;i<NX_RS_SCOPE_OWNER_MAX;i++) if (g->target[i] && nx_rs_range_overlap(a,n,g->addr[i],g->target[i]->L.size)) return 0;
+    return 1;
 }
 static int rs_scope_program_proof(__typeof__(S) *s,const uint8_t *p,const p_bind_program *b) {(void)s;(void)p;(void)b;return 1;}
 /* Isolate the real command walker and range matching from shader/Vulkan
  * proof dependencies. This stub makes the native consumer sample only
  * when its test texture binding is set. */
-static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,int scaled,int *sampled) {
-    (void)g;*sampled=s->tex[1][0]==7;return !s->rast_discard && (!scaled || !*sampled);
+static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,int scaled,unsigned *sampled) {
+    (void)g;(void)scaled;
+    *sampled=s->tex[1][0]==7?1:s->tex[1][0]==9?2:0;
+    return !s->rast_discard;
 }
-static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,int *sampled) {
+static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s,const p_dispatch *d,unsigned *sampled) {
     *sampled=s->tex[5][0]==7;
     const p_bind_buf *b=&s->ssbo[5][0];
     return (d->ind?(!(d->ind&3) && rs_scope_raw(g,d->ind,12,0)):(d->x>0 && d->y>0 && d->z>0)) && s->img[5][0]==8 &&
@@ -156,11 +157,10 @@ static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *s
 """
         code+=part("enum { RS_SCOPE_PROGRAM_MAX=", "typedef struct { const uint8_t *record;")
         code+=part("static uint64_t rs_scope_addr(","static int rs_scope_raw(")
-        code+=part("static int rs_scope_full_scissor(","static void rs_scope_try_begin(")
+        code+=part("static int rs_scope_full_scissor(","static void rs_scope_reject(")
         code+=r"""
-static uint8_t storage[16384];
-static pool_t pool={.mem=storage,.size=sizeof storage};
-static tex_t t[3];
+static pool_t pool={.mem=storage,.size=sizeof storage,.flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS};
+static tex_t t[13];
 static _Alignas(8) uint8_t commands[16384];
 static size_t at;
 static uint8_t *append(unsigned op,const void *payload,size_t n) {
@@ -173,15 +173,44 @@ static uint8_t *append(unsigned op,const void *payload,size_t n) {
 }
 static void reset(void) {
     at=0;memset(&S,0,sizeof S);g_rs_scope_rest=NULL;g_rs_scope_rest_n=g_rs_scope_crossed=0;
-    for(unsigned i=0;i<3;i++)t[i]=(tex_t){.magic=MAGIC('T','E','X',0),.serial=i+1,.pool=&pool,.mem=storage+4096*i,.off=4096*i,.L={.size=4096},.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=64,.height=64,.depth=1,.levels=1}};
+    for(unsigned i=0;i<13;i++)t[i]=(tex_t){.magic=MAGIC('T','E','X',0),.serial=i+1,.pool=&pool,.mem=storage+4096*i,.off=4096*i,.L={.size=4096},.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=64,.height=64,.depth=1,.levels=1}};
 }
-static void rt(tex_t *target) {p_set_rt r={.n=1,.color={target}};append(OP_SET_RT,&r,sizeof r);}
-static void clear(unsigned mask) {p_clear_color c={.index=0,.mask=mask};append(OP_CLEAR_COLOR,&c,sizeof c);}
+static void rt_ds(tex_t *color,tex_t *depth) {
+    p_set_rt r={.n=color?1:0,.color={color},.depth=depth};
+    append(OP_SET_RT,&r,sizeof r);
+}
+static void rt(tex_t *target) {rt_ds(target,NULL);}
+static void clear_depth(void) {
+    p_clear_ds d={.depth_mask=1,.stencil_mask=255};
+    append(OP_CLEAR_DS,&d,sizeof d);
+}
+static void clear_slot(unsigned slot,unsigned mask) {
+    p_clear_color c={.index=slot,.mask=mask};append(OP_CLEAR_COLOR,&c,sizeof c);
+}
+static void clear(unsigned mask) {clear_slot(0,mask);}
+static void mrt(unsigned first,unsigned n) {
+    p_set_rt r={.n=n,.depth=&t[0]};
+    for(unsigned i=0;i<n;i++)r.color[i]=&t[first+i];
+    append(OP_SET_RT,&r,sizeof r);
+}
 static void draw(void) {p_draw d={.count=3,.instances=1};append(OP_DRAW,&d,sizeof d);}
 static void bind(unsigned id,int deferred) {p_bind_handles b={.stage=1,.first=0,.n=1,.defer=deferred,.h={id}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);}
 static void compute(int aliased,uint64_t indirect) {p_bind_handles b={.stage=5,.first=0,.n=1,.h={7}};append(OP_BIND_TEX,&b,offsetof(p_bind_handles,h)+8);b.h[0]=aliased?7:8;append(OP_BIND_IMG,&b,offsetof(p_bind_handles,h)+8);p_dispatch d={.x=8,.y=8,.z=1,.ind=indirect};append(OP_DISPATCH,&d,sizeof d);}
-static uint8_t *discard(void) {p_rs_discard d={.index=0};return append(OP_RS_DISCARD,&d,sizeof d);}
-static const uint8_t *scan_from(const uint8_t *first) {rs_scope_group g={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};append(OP_END,NULL,0);return rs_scope_scan(first,&g);}
+static uint8_t *discard_slot(int slot) {p_rs_discard d={.index=slot};return append(OP_RS_DISCARD,&d,sizeof d);}
+static uint8_t *discard(void) {return discard_slot(0);}
+static const char *reason;
+static const uint8_t *scan_depth(void) {
+    rs_scope_group g={.target={[8]=&t[0]},.addr={[8]=(uintptr_t)t[0].mem},.mask=256,.w=64,.h=64};
+    append(OP_END,NULL,0);
+    return rs_scope_scan(commands,&g,&reason);
+}
+static uint8_t *finish_depth_scope(void) {
+    rt(&t[3]);bind(9,0);draw();
+    rt_ds(&t[2],&t[0]);discard();
+    rt_ds(&t[1],&t[0]);discard();
+    return discard_slot(-1);
+}
+static const uint8_t *scan_from(const uint8_t *first) {rs_scope_group g={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};append(OP_END,NULL,0);return rs_scope_scan(first,&g,&reason);}
 static const uint8_t *scan(void) {return scan_from(commands);}
 static void producer(void) {clear(15);draw();}
 static void consumer(void) {rt(&t[1]);bind(7,0);draw();}
@@ -245,10 +274,10 @@ int main(void) {
     consumer();rt(&t[0]);end=discard();assert(scan()==end);
     reset();clear(15);ix.mdi_i=0;ix.ibuf=(uintptr_t)storage;append(OP_DRAW_IDX,&ix,sizeof ix);
     consumer();rt(&t[0]);discard();assert(!scan());
-    reset();producer();compute(0,0);draw();discard();assert(!scan());
+    reset();producer();compute(0,0);draw();end=discard();assert(scan()==end);
     reset();producer();compute(0,0);uint8_t *overwrite=commands+at;clear(15);discard();assert(scan()==overwrite && g_rs_scope_overwrite);
     reset();producer();t[1].off=128;t[1].mem=storage+128;consumer();rt(&t[0]);discard();assert(!scan());
-    reset();producer();consumer();rt(&t[0]);draw();discard();assert(!scan());
+    reset();producer();consumer();rt(&t[0]);draw();discard();assert(!scan()); // bound feedback
     reset();producer();consumer();rt(&t[0]);append(OP_RS_DISCARD,NULL,0);assert(!scan());
     reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end && !g_rs_scope_overwrite);
     reset();producer();consumer();rt(&t[0]);overwrite=commands+at;clear(15);
@@ -257,11 +286,12 @@ int main(void) {
     // The terminal overwrite proof must cover every member and reject
     // intervening draws and partial depth/stencil clears.
     reset();rs_scope_group two={.target={&t[0],NULL,NULL,NULL,NULL,NULL,NULL,NULL,&t[1]},.mask=257,.w=64,.h=64};
+    unsigned slots[9]={1,[8]=256};
     clear(15);p_clear_ds depth={.depth_mask=1,.stencil_mask=255};append(OP_CLEAR_DS,&depth,sizeof depth);
-    assert(rs_scope_overwrite_run(commands,&two,&S,9,at));
-    assert(!rs_scope_overwrite_run(commands,&two,&S,1,at));
-    reset();clear(15);draw();append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_overwrite_run(commands,&two,&S,9,at));
-    reset();clear(15);depth.stencil_mask=127;append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_overwrite_run(commands,&two,&S,9,at));
+    assert(rs_scope_clear_run(commands,&two,slots,&S,257,9,at));
+    assert(!rs_scope_clear_run(commands,&two,slots,&S,257,1,at));
+    reset();clear(15);draw();append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_clear_run(commands,&two,slots,&S,257,9,at));
+    reset();clear(15);depth.stencil_mask=127;append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_clear_run(commands,&two,slots,&S,257,9,at));
     // A lifetime can cross immutable handle boundaries, including between
     // producer and consumer and before the terminal discard.
     reset();producer();append(OP_END,NULL,0);uint8_t *h2=commands+at;
@@ -269,7 +299,50 @@ int main(void) {
     uint64_t rest[]={ (uintptr_t)h2,(uintptr_t)h3 };
     g_rs_scope_rest=rest;g_rs_scope_rest_n=2;
     assert(scan()==end && g_rs_scope_crossed==2);
-    g_rs_scope_rest_n=1;assert(!rs_scope_scan(commands,&(rs_scope_group){.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64}));
+    g_rs_scope_rest_n=1;assert(!rs_scope_scan(commands,&(rs_scope_group){.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64},&reason));
+    // Depth stays live when two different color images are initialized.
+    reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
+    rt_ds(&t[2],&t[0]);clear(15);bind(7,0);draw();
+    end=finish_depth_scope();assert(scan_depth()==end);
+    reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
+    rt_ds(&t[2],&t[0]);producer();
+    p_clear_ds stencil_only={.stencil_mask=255};
+    append(OP_CLEAR_DS,&stencil_only,sizeof stencil_only);draw();
+    end=finish_depth_scope();assert(scan_depth()==end);
+    reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
+    rt_ds(&t[2],&t[0]);clear(7);draw();finish_depth_scope();
+    assert(!scan_depth() && !strcmp(reason,"attachment initialization or clear"));
+    reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
+    rt_ds(&t[2],&t[0]);draw();finish_depth_scope();
+    assert(!scan_depth() && !strcmp(reason,"uninitialized attachment, feedback or ended lifetime"));
+    reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
+    rt_ds(&t[2],&t[0]);clear(15);bind(9,0);draw();finish_depth_scope();
+    assert(!scan_depth());
+    reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
+    t[2].d.width=32;rt_ds(&t[2],&t[0]);producer();finish_depth_scope();
+    assert(!scan_depth() && !strcmp(reason,"attachment compatibility"));
+    reset();clear_depth();draw();rt_ds(&t[1],&t[0]);producer();
+    t[2].off=4160;t[2].mem=storage+4160;
+    rt_ds(&t[2],&t[0]);producer();finish_depth_scope();
+    assert(!scan_depth() && !strcmp(reason,"attachment compatibility"));
+    reset();clear_depth();draw();update[0]=(uintptr_t)t[2].mem;update[1]=8;
+    append(OP_UPDATE_UB,update,sizeof update);
+    rt_ds(&t[1],&t[0]);producer();rt_ds(&t[2],&t[0]);producer();finish_depth_scope();
+    assert(!scan_depth());
+    // Four then six distinct color owners exceed one framebuffer's slots.
+    reset();clear_depth();draw();append(OP_END,NULL,0);
+    uint8_t *scene=commands+at;
+    mrt(1,4);for(unsigned i=0;i<4;i++)clear_slot(i,15);draw();
+    mrt(5,6);for(unsigned i=0;i<6;i++)clear_slot(i,15);draw();
+    rt(&t[11]);bind(9,0);draw();
+    mrt(5,6);for(int i=0;i<6;i++)discard_slot(i);
+    mrt(1,4);for(int i=0;i<4;i++)discard_slot(i);
+    end=discard_slot(-1);
+    uint64_t scene_handles[]={(uintptr_t)scene};
+    g_rs_scope_rest=scene_handles;g_rs_scope_rest_n=1;
+    assert(scan_depth()==end && g_rs_scope_crossed==1);
+    g_rs_scope_rest_n=0;
+    assert(!scan_depth() && !strcmp(reason,"immutable replay window ended before lifetime termination"));
 }
 """
         with tempfile.TemporaryDirectory() as d:

@@ -152,3 +152,34 @@ reconstruction fence retires. Cropped or superseded display writes use the
 existing display texture. Software Vulkan readbacks cover 50% and 75% inputs
 and the 100% bypass. Device coverage, performance and temporal replay
 integration still require validation.
+
+
+## Image lifetimes across attachment changes
+
+The existing replay scanner now certifies up to 16 exact cache owners in a
+single immutable replay window. Pass slots map to those owners independently.
+A mixed attachment set may add same-extent owners when it retains a certified
+image, including depth/stencil. Each added owner must be fully initialized
+before attachment load or sampling. Rechecking the stream over the expanded
+set catches earlier buffer, image, or descriptor accesses to newly found
+owners. Discovery and validation use the existing bounded handle window and
+stop when command, descriptor, or owner limits are reached.
+
+This follows the per-image backing and per-pass compatibility model in
+Eden-xclipse's `RescaleRenderTargets` and uses the existing Ryujinx texture
+coordinate transformations and SupportBuffer ABI. It retains this project's
+proof requirement for guest-visible accesses. The existing cache transaction
+publishes physical backing only after every owner stages successfully. A
+discarded owner can be reused at the same scale or replaced at a different
+scale without copying its discarded contents. Unsupported aliases, views,
+storage accesses, attachment feedback, and lifetimes outside the available
+immutable commands remain native.
+[Eden-xclipse texture cache at dce1290](https://github.com/Ragnarok93/Eden-xclipse/blob/dce1290db6e32b20463da00c81fb17588ee824f1/src/video_core/texture_cache/texture_cache.h)
+
+The FFR capture shows depth retained through multiple render passes, including
+four- and six-target sets, and final 1920×1080 composition. The capture does not
+record the command-level proof failure. Capture graphics, with GPU snapshots
+disabled, now records the first rejection at the largest rejected extent and
+the checked allocation footprint. FFR's 692×390 scene rendering, native UI,
+Adaptive transitions, and performance still need device verification with a
+build that contains this change.

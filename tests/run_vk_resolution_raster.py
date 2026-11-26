@@ -21,13 +21,13 @@ void main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4
 "producer.frag":"""#version 450
 layout(push_constant) uniform PC {float scale;} pc;
 layout(location=0) out vec4 color;
-void main(){color=gl_FragCoord.x/pc.scale<128.0?vec4(1,0,0,1):vec4(0,1,0,1);}
+void main(){color=gl_FragCoord.x/pc.scale<692.0?vec4(1,0,0,1):vec4(0,1,0,1);}
 """,
 "consumer.frag":"""#version 450
 layout(set=0,binding=0) uniform sampler2D source;
 layout(push_constant) uniform PC {float scale;} pc;
 layout(location=0) out vec4 color;
-void main(){color=texelFetch(source,ivec2(gl_FragCoord.xy*pc.scale),0);}
+void main(){color=texelFetch(source,ivec2(gl_FragCoord.xy*vec2(textureSize(source,0))/vec2(1920,1080)),0);}
 """
 }
 def main():

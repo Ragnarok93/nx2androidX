@@ -126,6 +126,27 @@ depth/stencil attachments with `STORE_OP_NONE`. A separate writable pass
 handles clears and any later depth or stencil writes. This avoids attachment
 store operations racing shader reads of neighboring depth samples.
 
+Production internal scaling certifies image owners across a bounded window of
+immutable NVN commands. A depth prepass can keep its physical backing when
+later passes bind different color images. Every pass requires one consistent
+logical-to-physical mapping, and each new owner needs a full clear before its
+first load or sample. A second proof over the complete owner set checks for
+earlier accesses to any newly discovered image. Only then does the cache
+publish the entire transaction. The proof covers one mip and one layer and
+ends at explicit discard of all owners or a certified full overwrite. An
+unbind or render-pass break preserves the image lifetime. Unsupported views,
+storage access, feedback and lifetimes beyond the available immutable command
+window use native backing.
+
+Fixed and Adaptive use the same backing transaction and source-frame scale
+latch. Addresses, bindings and logical extents remain stable when physical
+backing changes. Prior backings and views remain alive through their fences.
+Existing exported data packs use the same format and signing identity.
+Individual shaders that lack valid RSCL reflection still render natively when
+a pass needs physical fragment-coordinate or texture-coordinate scaling.
+A native final composition follows the existing presentation path, including
+reconstruction eligibility before LSFG.
+
 The standalone Capture graphics action records scaling and reconstruction
 metadata in memory with no added GPU readbacks. The rolling buffer retains
 4096 source-frame tickets. Stop capture and Export diagnostics both stop
@@ -135,8 +156,13 @@ An unfinished GPU snapshot is retired after its fence and omitted from the
 archive. The ZIP includes the saved mode and range, latched
 target, actual scaled pass geometry, requested and active filters,
 presentation dimensions, fallback reason, and available replay and
-reconstruction timings in `scaling_frames.tsv`. Compare Off, Fixed and
-Adaptive in the same capture. A frame with no certified scaled passes can
+reconstruction timings in `scaling_frames.tsv`. It also records the first
+scope rejection at the largest rejected extent per frame, the charged
+resolution-backing bytes at the source frame, and their highest published
+value during that frame. These counters cover the resolution-backing budgets,
+including fence-retired variants, and exclude unrelated native Vulkan
+allocations. Compare Off, Fixed and Adaptive in the same capture, with GPU
+snapshots disabled for scaling admission. A frame with no certified scaled passes can
 still have a smaller presentation source from the game itself.
 
 The separate GPU snapshots action includes bounded full images for one

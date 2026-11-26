@@ -64,7 +64,7 @@ static int capture_scale_write(const char *root) {
                  "replay_cpu_us\tsource_monotonic_us\trecent_replay_gpu_ms\t"
                  "presentation_seen\trequested_upscaler\tactive_upscaler\tphysical_candidate\t"
                  "source_w\tsource_h\toutput_w\toutput_h\tgenerated_frames\t"
-                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\n",
+                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\n",
             (unsigned long long)g_scale_capture_overwritten);
     uint64_t end = g_scale_capture_ticket;
     uint64_t first = end >= SCALE_CAPTURE_FRAMES ? end - SCALE_CAPTURE_FRAMES + 1 : 1;
@@ -75,7 +75,7 @@ static int capture_scale_write(const char *root) {
         const vk_capture_scale_replay_sample *r = &row->replay;
         const vk_capture_scale_present_sample *p = &row->present;
         fprintf(out, "%llu\t%s\t%u\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llu\t%.3f\t%d\t"
-                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\n",
+                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\n",
                 (unsigned long long)ticket, r->mode < 3 ? modes[r->mode] : "-", r->min, r->max,
                 r->target, r->passes, (unsigned long long)r->passes_total, r->logical_w, r->logical_h,
                 r->physical_w, r->physical_h, r->renderer_available, r->gpu_snapshot,
@@ -84,7 +84,9 @@ static int capture_scale_write(const char *root) {
                 row->seen_present, row->seen_present ? spatial_mode_name(p->requested) : "-",
                 row->seen_present ? spatial_mode_name(p->active) : "-", p->physical, p->source_w, p->source_h,
                 p->output_w, p->output_h, p->generated, (unsigned long long)p->timing_ticket, p->gpu_ms,
-                row->seen_present ? (p->reason ? p->reason : "ready") : "no presentation sample");
+                row->seen_present ? (p->reason ? p->reason : "ready") : "no presentation sample",
+                r->scope_reason ? r->scope_reason : "-", r->rejected_w, r->rejected_h,
+                (unsigned long long)r->backing_bytes, (unsigned long long)r->peak_published_backing_bytes);
     }
     int ok = !ferror(out);
     if (fclose(out) || !ok || rename(tmp, path)) {

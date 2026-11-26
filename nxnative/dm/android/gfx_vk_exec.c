@@ -650,6 +650,9 @@ static int g_pd_mrt_written, g_pd_effect_passes, g_pd_small_effect_passes, g_pd_
 static atomic_int g_pd_user_pending;
 static int g_pd_frame_has_scene;
 static nx_rs_raster g_capture_largest_scaled;
+static const char *g_capture_scope_reason;
+static uint32_t g_capture_scope_w, g_capture_scope_h;
+static uint64_t g_capture_peak_rs_bytes;
 static unsigned g_pd_scene_waited;
 enum { PD_SCENE_WAIT_LIMIT = 120 };
 #include "gfx_vk_capture_session.inc"
@@ -657,14 +660,21 @@ void vk_rs_capture_replay(uint64_t ticket, uint64_t cpu_replay_ns, double recent
     unsigned dm_rs_live_config(void);
     nx_rs_live_config cfg = nx_rs_live_unpack(dm_rs_live_config());
     const nx_rs_raster *r = &g_capture_largest_scaled;
+    uint64_t bytes = vk_rs_backing_bytes();
     capture_scale_replay(ticket, (vk_capture_scale_replay_sample){
         .mode = cfg.mode, .min = cfg.min, .max = cfg.max, .target = g_rs_frame.target,
         .passes = g_rs_recorded_passes, .passes_total = g_vkst.passes,
         .logical_w = r->lw, .logical_h = r->lh, .physical_w = r->pw, .physical_h = r->ph,
+        .scope_reason = g_capture_scope_reason, .backing_bytes = bytes,
+        .rejected_w = g_capture_scope_w, .rejected_h = g_capture_scope_h,
+        .peak_published_backing_bytes = bytes > g_capture_peak_rs_bytes ? bytes : g_capture_peak_rs_bytes,
         .renderer_available = vk_rs_live_available(), .gpu_snapshot = g_pd_state != 0,
         .cpu_replay_ns = cpu_replay_ns, .source_time_ns = tnow(), .recent_replay_gpu_ms = recent_gpu_ms,
     });
     g_capture_largest_scaled = (nx_rs_raster){0};
+    g_capture_scope_reason = NULL;
+    g_capture_scope_w = g_capture_scope_h = 0;
+    g_capture_peak_rs_bytes = 0;
 }
 static uint32_t g_pd_scene_w, g_pd_scene_h;
 static uint64_t g_pd_capture_id;
