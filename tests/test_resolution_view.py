@@ -45,6 +45,11 @@ class ViewTests(unittest.TestCase):
     def test_shared_gate(self):
         base=ROOT/"nxnative/dm/android"
         scope=(base/"gfx_vk_resolution_scope.inc").read_text()
-        self.assertEqual(scope.count("nx_rs_view_equivalent(t,v)"),3)
+        # Verify the specific production gates, not the total number of
+        # calls: new safe consumer paths can legitimately add call sites.
+        self.assertIn("if (hit || !nx_rs_view_equivalent(t,v)",scope)
+        self.assertIn("if (!nx_rs_view_equivalent(t,v) || t->d.width",scope)
+        self.assertIn("if (!nx_rs_view_equivalent(t,v))",scope)
+        self.assertIn("if (storage && (!nx_rs_view_equivalent(t,v)",scope)
         self.assertIn("if (supported && !nx_rs_view_equivalent(t,v)) supported=0;",(base/"gfx_vk_tex.c").read_text())
         self.assertIn("if (t && nx_rs_view_equivalent(t,v))",(base/"gfx_vk_exec.c").read_text())

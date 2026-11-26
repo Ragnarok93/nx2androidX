@@ -337,6 +337,23 @@ static int rs_scope_clear_run(const uint8_t *p, const rs_scope_group *g, const u
                 mapped[j]=owner;
             }
             break; }
+        case OP_CLEAR_TEX: {
+            if (!terminal || h.size-8<sizeof(p_clear_tex)) return 0;
+            const p_clear_tex *c=(const p_clear_tex *)a;
+            const tex_t *t=c->tex;
+            int match=rs_scope_match(g,t,c->has_view?&c->view:NULL);
+            if (match<=0 || c->mask!=NVN_CLEAR_COLOR_MASK_RGBA ||
+                t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
+                c->r.xoffset || c->r.yoffset || c->r.zoffset || c->r.depth!=1 ||
+                c->r.width<=0 || c->r.height<=0 || (uint32_t)c->r.width!=t->d.width ||
+                (uint32_t)c->r.height!=t->d.height) return 0;
+            const vkfmt_t *f=vk_fmt(t->d.format);
+            if (!f || f->depth || f->stencil || f->compressed || f->dec || f->is_int) return 0;
+            unsigned owner=1u<<(match-1);
+            if (mask&owner) return 0;
+            mask|=owner;
+            if ((mask&required)==required) return 1;
+            break; }
         case OP_CLEAR_COLOR: case OP_CLEAR_DS: {
             unsigned owner=rs_scope_clear_owner(&h,a,g,mapped,1);
             if (!whole || !owner || (mask&owner)) return 0;
@@ -381,10 +398,10 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             if (!p) return NULL;
             continue;
         }
-        int clearing=h.op==OP_CLEAR_COLOR || h.op==OP_CLEAR_DS;
+        int clearing=h.op==OP_CLEAR_COLOR || h.op==OP_CLEAR_DS || h.op==OP_CLEAR_TEX;
         unsigned clear_ops=RS_SCOPE_OP_MAX-op;
         if (clear_ops>*budget+1) clear_ops=*budget+1;
-        if (life.bound && life.sampled && !life.discarded && clearing &&
+        if ((life.bound || h.op==OP_CLEAR_TEX) && life.sampled && !life.discarded && clearing &&
             rs_scope_clear_run(p,g,slots,&look,life.owners,clear_ops,RS_SCOPE_BYTES_MAX-(bytes-h.size),crossed,1)) {
             g_rs_scope_crossed=crossed;g_rs_scope_overwrite=1;return p;
         }
@@ -565,7 +582,7 @@ static void rs_scope_try_begin(const uint8_t *next) {
     // rec_copy makes immutable, flat handles with terminal OP_END records.
     // Both replay paths need a snapshot. Guest memory and nested calls are
     // not proof inputs. Diagnostic modes can inject extra accesses.
-    if ((!g_rs_sync_snapshot && !nvn_replaying_job()) || S.pass_open || vk_rs_cache_has_scaled() || g_rc_skip || g_tf_on ||
+    if ((!g_rs_sync_snapshot && !nvn_replaying_job()) || S.pass_open==2 || vk_rs_cache_has_scaled() || g_rc_skip || g_tf_on ||
         DM_GAME_RENDER_COND || g_bis_on || g_pd_state || g_x_listpasses || g_x_tracepass>=0 ||
         g_td_off>=0 || g_x_nflat || g_x_nobar || g_x_depth || g_x_color ||
         g_lrz_touch || g_ubolog_key || g_x_logfs || g_x_nodispbar || slot0_fill_on()) {
@@ -616,6 +633,10 @@ static void rs_scope_try_begin(const uint8_t *next) {
     g_rs_scope_program_count=0;
     const char *reason=NULL;
     const uint8_t *end=rs_scope_scan(next,&group,&reason);
+    // A complete overwrite can start a new lifetime even with the old
+    // native pass open. Prove the entire new lifetime first: an unsuccessful
+    // scan must not split the native pass or change backing ownership.
+    if (end && S.pass_open) vk_end_pass();
     if (!end || !vk_rs_allocate_fresh_group(group.target,NX_RS_SCOPE_OWNER_MAX,ext.w,ext.h)) {
         rs_scope_reject(end ? "backing eligibility or allocation" : reason);
         g_rs_scope_program_count=0;g_rs_scope_crossed=0;g_rs_scope_overwrite=0;vk_rs_scope_freeze_end();return;

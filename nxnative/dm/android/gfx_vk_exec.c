@@ -4571,7 +4571,7 @@ static void exec_ops(const uint8_t *p) {
             // A new lifetime can start on targets that are still bound,
             // including bindings inherited from an earlier submission.
             if (g_rs_scopes && g_rs_frame.target<100 && !skip &&
-                !g_rs_scope_nested && !g_rs_scope_end && !S.pass_open)
+                !g_rs_scope_nested && !g_rs_scope_end && S.pass_open!=2)
                 rs_scope_try_begin(p);
             if (h.op == OP_CLEAR_COLOR) clear_color((const p_clear_color *)a);
             else clear_ds((const p_clear_ds *)a);

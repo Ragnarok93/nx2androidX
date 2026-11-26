@@ -53,7 +53,9 @@ class ScopeTests(unittest.TestCase):
         self.assertIn("g_rs_scope_end==p && g_rs_scope_overwrite",replay)
         clear_start = replay.index("case OP_CLEAR_COLOR: case OP_CLEAR_DS:")
         clear_dispatch = replay[clear_start:replay.index("case OP_VIEWPORTS:", clear_start)]
-        self.assertIn("!g_rs_scope_end && !S.pass_open", clear_dispatch)
+        self.assertIn("!g_rs_scope_end && S.pass_open!=2", clear_dispatch)
+        self.assertLess(scope.index("rs_scope_scan(next,&group,&reason)"),scope.index("if (end && S.pass_open) vk_end_pass();"))
+        self.assertLess(scope.index("if (end && S.pass_open) vk_end_pass();"),scope.index("vk_rs_allocate_fresh_group(group.target"))
         self.assertLess(clear_dispatch.index("rs_scope_try_begin(p)"), clear_dispatch.index("clear_color("))
         self.assertLess(clear_dispatch.index("rs_scope_try_begin(p)"), clear_dispatch.index("clear_ds("))
 
@@ -129,8 +131,8 @@ static struct {
     uint64_t tex[6][256],img[6][32];
 } S;
 typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h; } rs_scope_group;
-typedef struct {int depth,stencil;} vkfmt_t;
-static const vkfmt_t *vk_fmt(int fmt) {static const vkfmt_t f={1,1};(void)fmt;return &f;}
+typedef struct {int depth,stencil,compressed,dec,is_int;} vkfmt_t;
+static const vkfmt_t *vk_fmt(int fmt) {static const vkfmt_t f={.depth=1,.stencil=1},color={0};return fmt==NVN_FORMAT_BGRA8?&color:&f;}
 static uint8_t storage[4096*13];
 static int rs_scope_raw(const rs_scope_group *g,uint64_t a,uint64_t n,int tail) {
     uint64_t lo=(uintptr_t)storage,hi=lo+sizeof storage;
@@ -215,6 +217,7 @@ static const uint8_t *scan_from(const uint8_t *first) {rs_scope_group g={.target
 static const uint8_t *scan(void) {return scan_from(commands);}
 static void producer(void) {clear(15);draw();}
 static void consumer(void) {rt(&t[1]);bind(7,0);draw();}
+static void consumer_two(void) {rt(&t[2]);bind(7,0);draw();}
 int main(void) {
     reset();clear(15);rt(&t[0]);draw();consumer();rt(&t[2]);draw();rt(&t[0]);uint8_t *end=discard();assert(scan()==end);
     reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end);
@@ -316,7 +319,7 @@ int main(void) {
     reset();clear(15);append(OP_END,NULL,0);
     uint8_t *clear_handle=commands+at;
     p_scissor full_sc={0,0,64,64};append(OP_SCISSOR,&full_sc,sizeof full_sc);
-    clear_depth();draw();consumer();rt_ds(&t[0],&t[1]);discard();end=discard_slot(-1);
+    clear_depth();draw();consumer_two();rt_ds(&t[0],&t[1]);discard();end=discard_slot(-1);
     append(OP_END,NULL,0);
     uint64_t clear_rest[]={(uintptr_t)clear_handle};
     g_rs_scope_rest=clear_rest;g_rs_scope_rest_n=1;
@@ -324,28 +327,40 @@ int main(void) {
     assert(rs_scope_scan(commands,&two,&reason)==end && g_rs_scope_crossed==1);
     g_rs_scope_rest_n=0;
     assert(!rs_scope_scan(commands,&two,&reason));
-    reset();clear(15);clear_depth();draw();consumer();rt_ds(&t[0],&t[1]);
+    reset();clear(15);clear_depth();draw();consumer_two();rt_ds(&t[0],&t[1]);
     overwrite=commands+at;clear(15);append(OP_END,NULL,0);
     clear_rest[0]=(uintptr_t)(commands+at);
     append(OP_SCISSOR,&full_sc,sizeof full_sc);clear_depth();append(OP_END,NULL,0);
     g_rs_scope_rest=clear_rest;g_rs_scope_rest_n=1;
     assert(rs_scope_scan(commands,&two,&reason)==overwrite && g_rs_scope_overwrite && !g_rs_scope_crossed);
-    reset();clear(15);clear_depth();draw();consumer();rt_ds(&t[0],&t[1]);
+    reset();clear(15);clear_depth();draw();consumer_two();rt_ds(&t[0],&t[1]);
     clear(15);append(OP_END,NULL,0);clear_rest[0]=(uintptr_t)(commands+at);
     full_sc.w=32;append(OP_SCISSOR,&full_sc,sizeof full_sc);clear_depth();append(OP_END,NULL,0);
     g_rs_scope_rest=clear_rest;g_rs_scope_rest_n=1;
     assert(!rs_scope_scan(commands,&two,&reason));
     // A multi-owner lifetime can close at the first full overwrite even
     // when the remaining exact owner is rebound and cleared separately.
-    reset();clear(15);clear_depth();draw();consumer();rt(&t[0]);
-    overwrite=commands+at;clear(15);rt_ds(NULL,&t[1]);clear_depth();
+    reset();clear(15);clear_depth();draw();consumer_two();rt(&t[0]);
+    overwrite=commands+at;clear(15);rt_ds(NULL,&t[1]);clear_depth();append(OP_END,NULL,0);
     assert(rs_scope_scan(commands,&two,&reason)==overwrite && g_rs_scope_overwrite);
-    reset();clear(15);clear_depth();draw();consumer();rt(&t[0]);
-    clear(15);rt_ds(NULL,&t[1]);draw();clear_depth();
+    reset();clear(15);clear_depth();draw();consumer_two();rt(&t[0]);
+    clear(15);rt_ds(NULL,&t[1]);draw();clear_depth();append(OP_END,NULL,0);
     assert(!rs_scope_scan(commands,&two,&reason));
-    reset();clear(15);clear_depth();draw();consumer();rt(&t[0]);
-    clear(15);rt_ds(NULL,&t[3]);clear_depth();
+    reset();clear(15);clear_depth();draw();consumer_two();rt(&t[0]);
+    clear(15);rt_ds(NULL,&t[3]);clear_depth();append(OP_END,NULL,0);
     assert(!rs_scope_scan(commands,&two,&reason));
+    // Full texture clears can end the sampled owner without rebinding it.
+    reset();t[0].d.format=NVN_FORMAT_BGRA8;producer();consumer();
+    p_clear_tex raw={.tex=&t[0],.r={0,0,0,64,64,1},.mask=NVN_CLEAR_COLOR_MASK_RGBA};
+    overwrite=append(OP_CLEAR_TEX,&raw,sizeof raw);
+    assert(scan()==overwrite && g_rs_scope_overwrite);
+    reset();t[0].d.format=NVN_FORMAT_BGRA8;producer();consumer();
+    raw.r.width=63;append(OP_CLEAR_TEX,&raw,sizeof raw);assert(!scan());raw.r.width=64;
+    reset();t[0].d.format=NVN_FORMAT_BGRA8;producer();consumer();
+    raw.mask=7;append(OP_CLEAR_TEX,&raw,sizeof raw);assert(!scan());raw.mask=NVN_CLEAR_COLOR_MASK_RGBA;
+    reset();t[0].d.format=NVN_FORMAT_BGRA8;producer();consumer();
+    raw.has_view=1;raw.view.set_levels=1;raw.view.base_level=1;raw.view.nlevels=1;
+    append(OP_CLEAR_TEX,&raw,sizeof raw);assert(!scan());
     // A lifetime can cross immutable handle boundaries, including between
     // producer and consumer and before the terminal discard.
     reset();producer();append(OP_END,NULL,0);uint8_t *h2=commands+at;
