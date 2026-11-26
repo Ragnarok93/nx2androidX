@@ -300,10 +300,34 @@ int main(void) {
     reset();rs_scope_group two={.target={&t[0],NULL,NULL,NULL,NULL,NULL,NULL,NULL,&t[1]},.mask=257,.w=64,.h=64};
     unsigned slots[9]={1,[8]=256};
     clear(15);p_clear_ds depth={.depth_mask=1,.stencil_mask=255};append(OP_CLEAR_DS,&depth,sizeof depth);
-    assert(rs_scope_clear_run(commands,&two,slots,&S,257,9,at));
-    assert(!rs_scope_clear_run(commands,&two,slots,&S,257,1,at));
-    reset();clear(15);draw();append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_clear_run(commands,&two,slots,&S,257,9,at));
-    reset();clear(15);depth.stencil_mask=127;append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_clear_run(commands,&two,slots,&S,257,9,at));
+    assert(rs_scope_clear_run(commands,&two,slots,&S,257,9,at,0));
+    assert(!rs_scope_clear_run(commands,&two,slots,&S,257,1,at,0));
+    reset();clear(15);draw();append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_clear_run(commands,&two,slots,&S,257,9,at,0));
+    reset();clear(15);depth.stencil_mask=127;append(OP_CLEAR_DS,&depth,sizeof depth);assert(!rs_scope_clear_run(commands,&two,slots,&S,257,9,at,0));
+    // Full color/depth initialization and overwrite may span immutable
+    // handles, but not draws, unknown barriers, or partial scissors.
+    reset();clear(15);append(OP_END,NULL,0);
+    uint8_t *clear_handle=commands+at;
+    p_scissor full_sc={0,0,64,64};append(OP_SCISSOR,&full_sc,sizeof full_sc);
+    clear_depth();draw();consumer();rt_ds(&t[0],&t[1]);discard();end=discard_slot(-1);
+    append(OP_END,NULL,0);
+    uint64_t clear_rest[]={(uintptr_t)clear_handle};
+    g_rs_scope_rest=clear_rest;g_rs_scope_rest_n=1;
+    two.addr[0]=(uintptr_t)t[0].mem;two.addr[8]=(uintptr_t)t[1].mem;
+    assert(rs_scope_scan(commands,&two,&reason)==end && g_rs_scope_crossed==1);
+    g_rs_scope_rest_n=0;
+    assert(!rs_scope_scan(commands,&two,&reason));
+    reset();clear(15);clear_depth();draw();consumer();rt_ds(&t[0],&t[1]);
+    overwrite=commands+at;clear(15);append(OP_END,NULL,0);
+    clear_rest[0]=(uintptr_t)(commands+at);
+    append(OP_SCISSOR,&full_sc,sizeof full_sc);clear_depth();append(OP_END,NULL,0);
+    g_rs_scope_rest=clear_rest;g_rs_scope_rest_n=1;
+    assert(rs_scope_scan(commands,&two,&reason)==overwrite && g_rs_scope_overwrite && !g_rs_scope_crossed);
+    reset();clear(15);clear_depth();draw();consumer();rt_ds(&t[0],&t[1]);
+    clear(15);append(OP_END,NULL,0);clear_rest[0]=(uintptr_t)(commands+at);
+    full_sc.w=32;append(OP_SCISSOR,&full_sc,sizeof full_sc);clear_depth();append(OP_END,NULL,0);
+    g_rs_scope_rest=clear_rest;g_rs_scope_rest_n=1;
+    assert(!rs_scope_scan(commands,&two,&reason));
     // A lifetime can cross immutable handle boundaries, including between
     // producer and consumer and before the terminal discard.
     reset();producer();append(OP_END,NULL,0);uint8_t *h2=commands+at;

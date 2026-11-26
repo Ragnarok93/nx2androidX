@@ -281,19 +281,48 @@ static unsigned rs_scope_clear_owner(const op_hdr *h, const uint8_t *a,
     return 0;
 }
 
+// Prove load-op initialization or terminal overwrite across harmless state
+// changes and immutable handles of this same submission. Never cross a GPU
+// operation or a submission boundary. The caller retains its own cursor.
 static int rs_scope_clear_run(const uint8_t *p, const rs_scope_group *g, const unsigned slots[9],
-                              const __typeof__(S) *look, unsigned required, unsigned ops, size_t bytes) {
-    if (!rs_scope_full_scissor(look,g)) return 0;
+                              const __typeof__(S) *look, unsigned required, unsigned ops, size_t bytes,
+                              unsigned crossed) {
+    int whole=rs_scope_full_scissor(look,g);
     unsigned mask=0;
-    for (unsigned i=0;i<9 && i<ops && bytes>=8;i++) {
+    for (unsigned i=0;i<64 && i<ops && bytes>=8;i++) {
         op_hdr h;
         memcpy(&h,p,sizeof h);
         if (h.size<8 || (h.size&7) || h.size>bytes) return 0;
-        unsigned owner=rs_scope_clear_owner(&h,p+8,g,slots,1);
-        if (!owner || (mask&owner)) return 0;
-        mask|=owner;
-        if ((mask&required)==required) return 1;
         bytes-=h.size;
+        const uint8_t *a=p+8;
+        switch (h.op) {
+        case OP_END:
+            if (h.size!=8 || !g_rs_scope_rest || crossed>=g_rs_scope_rest_n || crossed>=RS_SCOPE_HANDLE_MAX) return 0;
+            p=(const uint8_t *)(uintptr_t)g_rs_scope_rest[crossed++];
+            if (!p) return 0;
+            continue;
+        case OP_BEGIN: break;
+        case OP_SCISSOR: {
+            if (h.size-8<sizeof(p_scissor)) return 0;
+            const p_scissor *sc=(const p_scissor *)a;
+            whole=sc->x<=0 && sc->y<=0 && (int64_t)sc->x+sc->w>=g->w && (int64_t)sc->y+sc->h>=g->h;
+            break; }
+        case OP_VIEWPORTS: {
+            if (h.size-8<sizeof(p_viewports)) return 0;
+            const p_viewports *v=(const p_viewports *)a;
+            if (v->first<0 || v->first>16 || v->n<0 || v->n>16-v->first) return 0;
+            break; }
+        case OP_DEPTH_RANGE:
+            if (h.size-8<sizeof(p_depth_range)) return 0;
+            break;
+        case OP_CLEAR_COLOR: case OP_CLEAR_DS: {
+            unsigned owner=rs_scope_clear_owner(&h,a,g,slots,1);
+            if (!whole || !owner || (mask&owner)) return 0;
+            mask|=owner;
+            if ((mask&required)==required) return 1;
+            break; }
+        default: return 0;
+        }
         p+=h.size;
     }
     return 0;
@@ -331,8 +360,10 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             continue;
         }
         int clearing=h.op==OP_CLEAR_COLOR || h.op==OP_CLEAR_DS;
+        unsigned clear_ops=RS_SCOPE_OP_MAX-op;
+        if (clear_ops>*budget+1) clear_ops=*budget+1;
         if (life.bound==life.owners && life.sampled && !life.discarded && clearing &&
-            rs_scope_clear_run(p,g,slots,&look,life.owners,RS_SCOPE_OP_MAX-op,RS_SCOPE_BYTES_MAX-(bytes-h.size))) {
+            rs_scope_clear_run(p,g,slots,&look,life.owners,clear_ops,RS_SCOPE_BYTES_MAX-(bytes-h.size),crossed)) {
             g_rs_scope_crossed=crossed;g_rs_scope_overwrite=1;return p;
         }
 #define RS_NEED(T) do { if (n<sizeof(T)) return NULL; } while (0)
@@ -354,7 +385,7 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             unsigned owner=rs_scope_clear_owner(&h,a,g,slots,0);
             unsigned full=rs_scope_clear_owner(&h,a,g,slots,1);
             if (!owner || !nx_rs_scope_clear_allowed(&life,owner) ||
-                (missing && !rs_scope_clear_run(p,g,slots,&look,missing,RS_SCOPE_OP_MAX-op,RS_SCOPE_BYTES_MAX-(bytes-h.size)))) {
+                (missing && !rs_scope_clear_run(p,g,slots,&look,missing,clear_ops,RS_SCOPE_BYTES_MAX-(bytes-h.size),crossed))) {
                 *reason="attachment initialization or clear";
                 return NULL;
             }

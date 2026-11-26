@@ -183,3 +183,7 @@ disabled, now records the first rejection at the largest rejected extent and
 the checked allocation footprint. FFR's 692×390 scene rendering, native UI,
 Adaptive transitions, and performance still need device verification with a
 build that contains this change.
+
+### View-aware lifetime continuation
+
+Equivalent explicit single-subresource views now share the existing owner and preflight gates. Complete attachment initialization and terminal overwrite can span harmless viewport, scissor, depth-range and begin state records and immutable handles within one submission. Each clear must still cover the full owner; draw, dispatch, barrier, attachment rebind, partial scissor/mask and unknown records cannot be skipped. The clear proof is limited to 64 records and the existing scope byte, handle and command bounds. Terminal closure remains at the first overwrite, and discarded backing can be reused by the next proven scope. No cross-submission preservation of valid lossy content is authorized. The isolated production clear-window function passed 12 host assertions, including a red failure on the old same-handle implementation; the complete replay fixture, Android build and device acceptance remain unverified.
