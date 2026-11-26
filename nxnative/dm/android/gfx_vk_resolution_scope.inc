@@ -133,7 +133,9 @@ static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look
 // storage destinations must be provably disjoint native images or explicit
 // bounded native SSBOs. No bindless handles, physical addressing, indirect
 // grid changes; indirect argument reads are bounded and disjoint.
-static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,unsigned *samples,unsigned *writes) {
+// Stable storage for descriptor-derived owners throughout one proof/rescan.
+static __thread tex_t g_rs_compute_targets[NX_RS_SCOPE_OWNER_MAX];
+static int rs_scope_compute_proof(rs_scope_group *g,const __typeof__(S) *look,const p_dispatch *d,unsigned *samples,unsigned *writes) {
     *samples=0;*writes=0;
     vkshader_t *s=look->sh[5];
     if (!s || s->stage!=5 || s->nbind<0 || s->nbind>96 || (s->nbind && !s->b) ||
@@ -144,6 +146,30 @@ static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *l
         (uint32_t)d->x>V.props.limits.maxComputeWorkGroupCount[0] ||
         (uint32_t)d->y>V.props.limits.maxComputeWorkGroupCount[1] ||
         (uint32_t)d->z>V.props.limits.maxComputeWorkGroupCount[2]) return 0;
+    tex_t pair[2];view_t views[2];
+    if (resolution_compute_transform_targets(s,d,look->tex[5],look->img[5],pair,views)) {
+        int src=rs_scope_match(g,&pair[0],&views[0]),dst=rs_scope_match(g,&pair[1],&views[1]);
+        uint32_t grid[3];
+        if (src || dst) {
+            if (src<=0 || dst<0 || src==dst ||
+                !resolution_compute_fill_grid(s,d,g->w,g->h,g->pw,g->ph,grid)) return 0;
+            if (!dst) {
+                // Restart the full proof with the output included, so earlier
+                // native reads/writes cannot be missed. Compute-only scopes
+                // with incomplete inherited slot mapping still reject growth.
+                uint64_t address=rs_scope_addr(&pair[1]);
+                unsigned available=NX_RS_SCOPE_OWNER_MASK & ~g->mask;
+                if (!address || !available) return 0;
+                unsigned index=(unsigned)__builtin_ctz(available);
+                g_rs_compute_targets[index]=pair[1];
+                g->target[index]=&g_rs_compute_targets[index];
+                g->addr[index]=address;g->mask|=1u<<index;
+                return 2;
+            }
+            *samples=1u<<(src-1);*writes=1u<<(dst-1);
+            return 1;
+        }
+    }
     const tex_t *fill=NULL;const view_t *fill_view=NULL;
     if (resolution_compute_fill_target(s,d,look->img[5],&fill,&fill_view)) {
         int match=rs_scope_match(g,fill,fill_view);
@@ -545,7 +571,11 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             break; }
         case OP_DISPATCH: {
             RS_NEED(p_dispatch);unsigned sampled=0,writes=0;
-            if (!rs_scope_compute_proof(g,&look,(const p_dispatch *)a,&sampled,&writes) ||
+            int proof=rs_scope_compute_proof(g,&look,(const p_dispatch *)a,&sampled,&writes);
+            if (proof==2) {
+                *expanded=1;*reason="compute output group expansion";return NULL;
+            }
+            if (!proof ||
                 !nx_rs_scope_sample(&life,sampled) || (writes && !nx_rs_scope_compute_write(&life,writes))) {
                 *reason="compute access";
                 return NULL;
@@ -730,7 +760,14 @@ refuse:
 
 static int rs_scope_physical_dispatch(const p_dispatch *d,uint32_t grid[3]) {
     const tex_t *t=NULL;const view_t *v=NULL;nx_rs_draw_extent extent;
-    return resolution_compute_fill_target(S.sh[5],d,S.img[5],&t,&v) &&
-        vk_rs_preflight_view(t,v,1,&extent)==1 &&
+    if (resolution_compute_fill_target(S.sh[5],d,S.img[5],&t,&v))
+        return vk_rs_preflight_view(t,v,1,&extent)==1 &&
+            resolution_compute_fill_grid(S.sh[5],d,extent.lw,extent.lh,extent.pw,extent.ph,grid);
+    tex_t pair[2];view_t views[2];nx_rs_draw_extent source;
+    if (!resolution_compute_transform_targets(S.sh[5],d,S.tex[5],S.img[5],pair,views) ||
+        vk_rs_preflight_view(&pair[0],&views[0],1,&source)!=1 ||
+        vk_rs_preflight_view(&pair[1],&views[1],1,&extent)!=1) return 0;
+    return source.lw==extent.lw && source.lh==extent.lh &&
+        source.pw==extent.pw && source.ph==extent.ph &&
         resolution_compute_fill_grid(S.sh[5],d,extent.lw,extent.lh,extent.pw,extent.ph,grid);
 }

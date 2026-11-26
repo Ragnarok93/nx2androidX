@@ -14,6 +14,7 @@
 #include "gfx_vk_resolution_frame.h"
 #include "gfx_vk_resolution_live.h"
 #include "gfx_vk_resolution_compute_proof.h"
+#include "gfx_vk_resolution_pointwise.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "nvn_hmap.h"
 #include "game_profile.h"
@@ -2345,15 +2346,15 @@ static void resolution_note_binding(int st, const dmsv_bind *b, vkimg_t *im, int
 // metadata; never guess from a texture ID or a requested global percentage.
 typedef struct { nx_rs_draw_samples samples; int failed; } rs_stage_collect;
 static rs_stage_collect *g_rs_collect;
-// Scoped to one fully certified direct constant-fill dispatch.
+// Scoped to one fully certified direct physical fill or pointwise dispatch.
 static int g_rs_compute_fill_active;
 static void resolution_collect_sample(int st,const dmsv_bind *b,vkimg_t *im,int storage) {
     if (!im || !im->rs_backing) return;
     const vk_rs_variant *v=im->rs_backing;
     if (v->physical_w==im->w && v->physical_h==im->h) return;
-    // The certified storage write uses physical invocation coordinates;
-    // unlike sampled inputs it must not receive a SupportBuffer scale.
-    if (storage && st==5 && g_rs_compute_fill_active && im->fmt==VK_FORMAT_R32G32B32A32_SFLOAT &&
+    // A certified pointwise dispatch uses physical coordinates for both
+    // storage writes and same-grid texelFetch; neither binding is remapped.
+    if (st==5 && g_rs_compute_fill_active && im->fmt==VK_FORMAT_R32G32B32A32_SFLOAT &&
         v->image==im->img) return;
     nx_rs_raster r; unsigned slot,flags;
     int ok=((st>=0 && st<3) || st==5) && !storage && b->count==1 && b->dim==1 && !(b->flags&3) &&
@@ -3919,6 +3920,37 @@ static int resolution_compute_fill_target(const vkshader_t *cs,const p_dispatch 
         t->set_swz || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
     *out=t;*view=v;
     return 1;
+}
+// Copy descriptor wrappers immediately: vk_tex_by_id returns thread-local
+// scratch, which the next lookup overwrites.
+static int resolution_compute_transform_targets(const vkshader_t *cs,const p_dispatch *d,
+        const uint64_t *textures,const uint64_t *images,tex_t out[2],view_t views[2]) {
+    if (!cs || !d || d->ind || d->x<=0 || d->y<=0 || d->z!=1 ||
+        cs->stage!=5 || cs->nbind!=2 || !cs->b) return 0;
+    const dmsv_bind *bind[2]={0};
+    for (unsigned i=0;i<2;i++) {
+        const dmsv_bind *b=&cs->b[i];
+        unsigned storage=b->kind==RK_IMG;
+        if ((!storage && b->kind!=RK_TEX) || bind[storage] ||
+            b->desc!=(storage?RD_STORAGE:RD_SAMPLED) || b->count!=1 ||
+            b->dim!=1 || (b->flags&3) || b->samp==RS_UBO ||
+            b->reg<0 || b->reg>=(storage?32:256) || (storage && b->fmt!=1)) return 0;
+        bind[storage]=b;
+    }
+    if (!bind[0] || !bind[1] ||
+        !nx_rs_compute_pointwise(cs->spv,cs->nspv,bind[0]->binding,bind[1]->binding,cs->local)) return 0;
+    for (unsigned i=0;i<2;i++) {
+        uint64_t handle=i?images[bind[i]->reg]:vk_tex_slot_handle(textures,images,(unsigned)bind[i]->reg);
+        int tid=(int)(handle&0xfffff);
+        const tex_t *t=NULL;const view_t *v=NULL;
+        if (!tid || !vk_tex_by_id(tid,&v,&t) || !t || !t->pool ||
+            !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+            (i && !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE)) || t->d.format!=NVN_FORMAT_RGBA32F ||
+            t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
+            t->set_swz || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
+        out[i]=*t;views[i]=v?*v:(view_t){0};
+    }
+    return out[0].mem!=out[1].mem && out[0].d.width==out[1].d.width && out[0].d.height==out[1].d.height;
 }
 static int resolution_compute_fill_grid(const vkshader_t *cs,const p_dispatch *d,
                                          uint32_t lw,uint32_t lh,uint32_t pw,uint32_t ph,uint32_t out[3]) {
