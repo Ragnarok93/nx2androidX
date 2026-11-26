@@ -14,6 +14,7 @@
 #include "gfx_vk_resolution_restore.h"
 #include "gfx_vk_resolution_draw.h"
 #include "gfx_vk_resolution_raster.h"
+#include "gfx_vk_resolution_storage_format.h"
 #include "rs_types.inc"
 #include "producer.vert.h"
 #include "producer.frag.h"
@@ -21,8 +22,21 @@
 #define CHECK(x) do {VkResult r=(x);if(r!=VK_SUCCESS){fprintf(stderr,"%s: %d\n",#x,r);exit(1);}}while(0)
 static struct {VkPhysicalDevice pd;VkDevice dev;VkPhysicalDeviceProperties props;VkPhysicalDeviceMemoryProperties mem;} V;
 static int vk_sub_open(void){return 1;}
-typedef struct {int compressed,is_int;} vkfmt_t;
-static const vkfmt_t *vk_fmt(int fmt){static const vkfmt_t f={0};(void)fmt;return &f;}
+// Match the production allocator's format contract, not just its flags.
+typedef struct {int compressed,is_int; VkFormat vk;} vkfmt_t;
+static const vkfmt_t *vk_fmt(int fmt) {
+    static const vkfmt_t rgba8={.vk=VK_FORMAT_R8G8B8A8_UNORM},
+        rgba16={.vk=VK_FORMAT_R16G16B16A16_SFLOAT},
+        rgba32={.vk=VK_FORMAT_R32G32B32A32_SFLOAT},
+        depth={.vk=VK_FORMAT_D32_SFLOAT};
+    switch(fmt) {
+    case NVN_FORMAT_RGBA8:return &rgba8;
+    case NVN_FORMAT_RGBA16F:return &rgba16;
+    case NVN_FORMAT_RGBA32F:return &rgba32;
+    case NVN_FORMAT_DEPTH32F:return &depth;
+    default:return NULL;
+    }
+}
 #include "rs_alloc.inc"
 static struct {vkimg_t *im;uint32_t w,h,layers;VkFormat fmt;} P_att[9];
 static VkRenderingInfo P_ri;
@@ -52,7 +66,9 @@ static vk_rs_variant *physical(vkimg_t *im,VkFormat fmt,VkImageAspectFlags aspec
                                uint32_t lw,uint32_t lh,uint32_t w,uint32_t h) {
     VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|
         (aspect==VK_IMAGE_ASPECT_COLOR_BIT?VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT:VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
-    *im=(vkimg_t){.usage=usage,.fmt=fmt,.aspect=aspect,.w=lw,.h=lh,.d=1,.layers=1,.levels=1,.samples=1,
+    const int nvn_format=aspect==VK_IMAGE_ASPECT_COLOR_BIT?NVN_FORMAT_RGBA8:NVN_FORMAT_DEPTH32F;
+    assert(vk_fmt(nvn_format)->vk==fmt);
+    *im=(vkimg_t){.usage=usage,.fmt=fmt,.nvn_format=nvn_format,.aspect=aspect,.w=lw,.h=lh,.d=1,.layers=1,.levels=1,.samples=1,
         .target=NVN_TEXTURE_TARGET_2D,.pool=1,.layout=VK_IMAGE_LAYOUT_UNDEFINED};
     VkImageCreateInfo ci={VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,NULL,0,VK_IMAGE_TYPE_2D,fmt,{lw,lh,1},1,1,VK_SAMPLE_COUNT_1_BIT,
         VK_IMAGE_TILING_OPTIMAL,usage,VK_SHARING_MODE_EXCLUSIVE,0,NULL,VK_IMAGE_LAYOUT_UNDEFINED};

@@ -134,6 +134,7 @@ int main(void) {
 #include "gfx_vk_resolution_draw.h"
 #include "gfx_vk_resolution_restore.h"
 #include "gfx_vk_resolution_preflight.h"
+#include "gfx_vk_resolution_storage_format.h"
 #define VK_IMAGE_LAYOUT_GENERAL 1
 #define VK_IMAGE_LAYOUT_UNDEFINED 0
 #define NX_RS_RESTORE_BUDGET_BYTES (64ull * 1024 * 1024)
@@ -204,10 +205,12 @@ int main(void) {
     nvn_hm_put(&g_by_key,&key,owner);
     assert(nx_rs_active_update(&g_rs_dormant,(uintptr_t)owner,1));
     const tex_t *targets[NX_RS_SCOPE_OWNER_MAX]={[8]=&a,[10]=&b};
-    b.d.flags=NVN_TEXTURE_FLAGS_IMAGE;
+    // IMAGE alone is no longer a rejection: canonical RGBA8 storage
+    // images are supported. Reject an unsupported storage format instead.
+    b.d.flags=NVN_TEXTURE_FLAGS_IMAGE;b.d.format=NVN_FORMAT_R32F;
     assert(!vk_rs_allocate_fresh_group(targets,NX_RS_SCOPE_OWNER_MAX,32,32));
     assert(created==1 && !published && !freed);
-    b.d.flags=0;
+    b.d.format=NVN_FORMAT_RGBA8; // Keep IMAGE for rollback and success.
     fail_at=3;
     assert(!vk_rs_allocate_fresh_group(targets,NX_RS_SCOPE_OWNER_MAX,32,32));
     assert(freed==1 && !published && !g_rs_live && !retired && g_by_key.n==1);
