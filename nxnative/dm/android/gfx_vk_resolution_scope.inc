@@ -2,6 +2,7 @@
 // narrow production seam: only disjoint bounded raw and indirect accesses, no unknown
 // descriptors, feedback, conditional rendering or open-ended lifetimes.
 #include "gfx_vk_resolution_scope.h"
+#include "gfx_vk_resolution_extent.h"
 static unsigned g_rs_scope_nested,g_rs_scope_program_count;
 static int g_rs_scope_overwrite;
 static const uint64_t *g_rs_scope_rest;
@@ -29,7 +30,7 @@ static int rs_scope_match(const rs_scope_group *g,const tex_t *t,const view_t *v
         const tex_t *o=g->target[i];
         if (hit || !nx_rs_view_equivalent(t,v) || t->has_layout || t->has_pkg_data || t->set_swz ||
             a!=g->addr[i] || t->pool!=o->pool || t->off!=o->off ||
-            t->L.size!=o->L.size || memcmp(&t->d,&o->d,sizeof t->d)) return -1;
+            !nx_rs_owner_description_equal(t,o)) return -1;
         hit=(int)i+1;
     }
     return hit;
@@ -167,7 +168,7 @@ static int rs_scope_compute_proof(const rs_scope_group *g,const __typeof__(S) *l
             if (!vk_tex_by_id(tid,&v,&t) || !t || t->d.target==NVN_TEXTURE_TARGET_BUFFER) return 0;
             int match=rs_scope_match(g,t,v);
             if (match<0 || (match && storage)) return 0;
-            if (storage && (v || t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 ||
+            if (storage && (!nx_rs_view_equivalent(t,v) || t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 ||
                 t->d.depth!=1 || t->d.samples>1 || b->dim!=1 || (b->flags&3) ||
                 !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE))) return 0;
             if (match) {
@@ -600,11 +601,14 @@ static void rs_scope_try_begin(const uint8_t *next) {
     // Check the same scalar SupportBuffer round trip used by pass setup
     // before replacing any native attachment. Even an exact aspect ratio
     // can fail this check (for example, 1920x1080 at 60%).
-    if (!nx_rs_plan(&dims,(int)g_rs_frame.target,V.props.limits.maxFramebufferWidth,V.props.limits.maxFramebufferHeight,&ext) ||
-        !nx_rs_raster_init(&raster,group.w,group.h,ext.w,ext.h)) {
+    if (!dims.n || dims.blockers ||
+        ((!nx_rs_plan(&dims,(int)g_rs_frame.target,V.props.limits.maxFramebufferWidth,V.props.limits.maxFramebufferHeight,&ext) ||
+          !nx_rs_raster_init(&raster,group.w,group.h,ext.w,ext.h)) &&
+         !nx_rs_choose_extent(&raster,group.w,group.h,g_rs_frame.target,V.props.limits.maxFramebufferWidth,V.props.limits.maxFramebufferHeight))) {
         rs_scope_reject("incompatible raster geometry");
         return;
     }
+    ext=(nx_rs_extent){raster.pw,raster.ph};
     if (!vk_rs_scope_freeze_begin()) {
         rs_scope_reject("descriptor snapshot unavailable");
         return;

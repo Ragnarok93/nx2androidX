@@ -4262,7 +4262,8 @@ static int resolution_copy_to_display(const p_copy_t2t *c) {
     vk_tex_mark_written(d);vk_img_barrier_all(cb);
     // Scope admission proves this transfer ends the source's write phase.
     // Keep the guest blit for any later consumer of the display texture.
-    if (g_rs_scope_end && s->w == d->w && s->h == d->h && !d->novl)
+    if (g_rs_scope_end && (uint64_t)s->w*d->h==(uint64_t)d->w*s->h &&
+        s->w<=d->w && s->h<=d->h && !d->novl)
         vk_present_offer_physical(s, d);
     return 1;
 }

@@ -15,7 +15,11 @@ int main(void) {
     assert(nx_rs_display_copy_shape(&c));
     d.d.flags=0;assert(!nx_rs_display_copy_shape(&c));d.d.flags=NVN_TEXTURE_FLAGS_DISPLAY;
     c.sr.width=1279;assert(!nx_rs_display_copy_shape(&c));c.sr.width=1280;
-    c.has_sv=1;assert(!nx_rs_display_copy_shape(&c));c.has_sv=0;
+    c.has_sv=1;assert(nx_rs_display_copy_shape(&c));
+    c.sv.set_levels=1;c.sv.nlevels=1;assert(nx_rs_display_copy_shape(&c));
+    c.sv.base_level=1;assert(!nx_rs_display_copy_shape(&c));c.sv.base_level=0;c.has_sv=0;
+    c.has_dv=1;c.dv.set_layers=1;c.dv.nlayers=1;assert(nx_rs_display_copy_shape(&c));
+    c.dv.min_layer=1;assert(!nx_rs_display_copy_shape(&c));c.has_dv=0;
     c.flags=DM_COPY_RESOLVE;assert(!nx_rs_display_copy_shape(&c));c.flags=1;
     d.d.format=NVN_FORMAT_BGRA8;assert(!nx_rs_display_copy_shape(&c));d.d.format=s.d.format;
     d.d.samples=4;assert(!nx_rs_display_copy_shape(&c));d.d.samples=1;

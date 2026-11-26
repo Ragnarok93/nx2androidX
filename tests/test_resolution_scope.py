@@ -218,6 +218,13 @@ static void consumer(void) {rt(&t[1]);bind(7,0);draw();}
 int main(void) {
     reset();clear(15);rt(&t[0]);draw();consumer();rt(&t[2]);draw();rt(&t[0]);uint8_t *end=discard();assert(scan()==end);
     reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    reset();
+    rs_scope_group owner_group={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};
+    tex_t wrapper=t[0];wrapper.d.flags|=NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+    assert(rs_scope_match(&owner_group,&wrapper,NULL)==1);
+    wrapper.L.tileH++;assert(rs_scope_match(&owner_group,&wrapper,NULL)<0);
+    wrapper=t[0];wrapper.d.flags|=NVN_TEXTURE_FLAGS_IMAGE;
+    assert(rs_scope_match(&owner_group,&wrapper,NULL)<0);
     // An explicit selection of the sole mip/layer and identical format
     // must resolve to the same owner on a subsequent attachment bind.
     reset();producer();consumer();

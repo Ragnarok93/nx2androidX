@@ -1,12 +1,14 @@
 #ifndef NX_RS_TRANSFER_H
 #define NX_RS_TRANSFER_H
-#include "nvn_obj.h"
+#include "gfx_vk_resolution_view.h"
 // Only a full, single-level, same-format color copy into a display
 // texture can be a reconstruction consumer. Raw copies to arbitrary
 // guest storage retain native semantics. Format features are checked
 // separately against the actual Vulkan physical device.
 static inline int nx_rs_display_copy_shape(const p_copy_t2t *c) {
-    if (!c || !c->src || !c->dst || c->has_sv || c->has_dv || (c->flags&~3u)) return 0;
+    if (!c || !c->src || !c->dst || (c->flags&~3u)) return 0;
+    if (!nx_rs_view_equivalent(c->src,c->has_sv?&c->sv:NULL) ||
+        !nx_rs_view_equivalent(c->dst,c->has_dv?&c->dv:NULL)) return 0;
     const tex_t *s=c->src,*d=c->dst;
     if (s==d || !(d->d.flags&NVN_TEXTURE_FLAGS_DISPLAY) ||
         s->set_swz || d->set_swz || s->stencil || d->stencil ||
