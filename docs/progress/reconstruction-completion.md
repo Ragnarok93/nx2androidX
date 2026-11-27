@@ -397,3 +397,38 @@ dependency order. Milestones 0 and 1 still await device validation.
   the producer crop, sample coordinates and destination coverage before
   applying reconstruction inside the guest pass. Preserve the currently
   composed image for presentation until that boundary is proven.
+
+## 2026-11-27 — Milestone 2 archived-pixel correlation
+
+- Compared the actual RGBA8 center-tile readbacks at presents 16745,
+  16775 and 16805. For pass 75, the four half-texel neighborhood taps
+  and two edge-directed taps on a top-left 1383×778 crop reproduced the
+  archived RGB with mean absolute error 0.249–0.264 code values per
+  channel, over 240 pixels per capture whose taps fit inside the tile.
+  Assuming the full 1384×780 allocation produced mean absolute error
+  18.195–22.120. The observed 1383×778 predecessor viewport is the
+  supported crop hypothesis for these center pixels.
+- For pass 76, the 1728×972 pixel-center mapping, cubic smoothstep
+  of each texel fraction and linear sampling reproduced all 256 RGB
+  pixels per capture with mean absolute error 0.240–0.255 and maximum
+  absolute error 0.62 code values. Plain bilinear on the same mapping
+  produced mean absolute error 1.307–1.362. Both filter comparisons
+  used the supplied shader instructions and archived source pixels.
+- The final 1920×1080 presentation readback matched all 256 pass-76
+  center pixels in each capture. It contained 197,855 pixels with
+  nonzero alpha in each capture, whereas the pass-76 shader writes
+  zero alpha where it draws. Keep the later composition on the
+  original attachment. These center-tile fits establish the filter
+  behavior locally and leave full-image coverage, edge clamping and
+  preservation of the LOAD contents open.
+- Verified implementation checkpoint `566b31b287cd14bf27b046fe4677d7328300ef29`
+  on the remote development branch. At this SHA, reconstruction validation
+  [45973787312](https://github.com/Ragnarok93/nx2androidX/actions/runs/45973787312)
+  passed both software Vulkan and the FFR Android NDK link. Signed Android
+  run [45973787386](https://github.com/Ragnarok93/nx2androidX/actions/runs/45973787386)
+  passed its 851-test discovery with nine skips, native host smoke, APK
+  assembly and repository signing verification. Its
+  [builder artifact 15187430279](https://github.com/Ragnarok93/nx2androidX/actions/runs/45973787386/artifacts/15187430279)
+  was available and unexpired at inspection. This verifies the build of
+  the capture and fixture checkpoint. FFR replay substitution, device
+  acceptance and the dependent production milestones remain open.
