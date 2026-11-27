@@ -383,10 +383,16 @@ static void surface_alias_flush(void) {
 static void surface_dispatch(void) {
     for (unsigned i = 0; i < g_sc.storage_count; i++) {
         surface_binding_t b = g_sc.storage[i].binding;
-        // A storage image uses a single mip in the shader; preserve the
-        // bound view in the binding row even if it contains other mips.
-        b.mips = 1;
-        surface_read("compute-image", g_sc.storage[i].im, b, NULL, NULL);
+        const vkimg_t *im = g_sc.storage[i].im;
+        // Retain the pre-dispatch ordinal shared by its input bindings,
+        // while reporting the image version after replay marked the write.
+        // A storage descriptor by itself does not prove full coverage.
+        if (im) b.write_sequence = im->wseq;
+        if (g_sc.metadata_only || b.mips != 1) {
+            surface_usage("compute-image", &b, -1, -1, NULL, "potential-write");
+        } else {
+            surface_read("compute-image", im, b, NULL, NULL);
+        }
     }
 }
 static void surface_pass(void) {

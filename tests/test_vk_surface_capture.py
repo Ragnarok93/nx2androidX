@@ -162,6 +162,15 @@ int main(int argc, char **argv) {
     surface_uniform_queue(0x1234, 8, 2, (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)2, 256, 8192});
     surface_compute_uniforms(vk_cmd());
     assert(copies == 3 && uniform_copies == 1 && !g_sc.buffer && !g_sc.count && !g_sc.uniform_count);
+    im.wseq = 41;
+    g_sc.storage[0].im = &im;
+    g_sc.storage[0].binding = surface_binding(&im, NULL, bc.vk, range, 2, 5, 0x1234);
+    g_sc.storage[0].binding.mips = 2;
+    g_sc.storage_count = 1;
+    im.wseq = 42;
+    surface_dispatch();
+    assert(g_sc.rows == 2 && !g_sc.buffer && !g_sc.count);
+
     surface_capture_abort();
     assert(unsetenv("DM_VK_SURFACE_METADATA_ONLY") == 0);
 

@@ -4142,10 +4142,11 @@ static void dispatch(const p_dispatch *d) {
         vkCmdDispatchIndirect(cb, b, o);   // the same snapshot supplies both the dispatch and the shader's group counts
     }
     else vkCmdDispatch(cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
-    if (d->ind || (d->x && d->y && d->z)) compute_images_written();
+    const int may_write = d->ind || (d->x && d->y && d->z);
+    if (may_write) compute_images_written();
     vk_pass_ts(1, (uint32_t)d->x, (uint32_t)d->y, PT_DISPATCH, (uint32_t)d->z);
     if (g_pd_state == 1 && g_pd_full) {
-        surface_dispatch();
+        if (may_write) surface_dispatch();
         if (g_sc.metadata_only) surface_alias_flush();
         else pass_dump_aliases();
     }
@@ -4455,7 +4456,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     // Exact full-image color transfers may contribute a dependency edge.
     // Partial, aliased, mirrored, multisampled and converted copies still
     // publish writes, but cannot propagate a known full color input.
-    const char *status = "recorded";
+    const char *status = c->flags & DM_COPY_RESOLVE ? "recorded-resolve" : "recorded";
     if (observe && !(c->flags & DM_COPY_RESOLVE) && !mir && s != d &&
         s->fmt == d->fmt && s->fmt == sf->vk && d->fmt == df->vk &&
         s->samples == 1 && d->samples == 1 && s->d == 1 && d->d == 1 &&

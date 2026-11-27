@@ -217,3 +217,21 @@ The previous remote checkpoint was `d1178deabb1d29ba0c02da0287e05feb0fa9cad1`.
 - Next action is to add resolved compute reads and writes and resolve
   provenance without attributing a partial write to a whole attachment.
   Then validate the discovery graph and eligibility against FFR on device.
+
+## 2026-11-27 — Milestone 1, compute and resolve observation checkpoint
+
+Milestone 1 remains **In progress**. Milestone 0 remains **Awaiting device
+validation**. The preceding remote checkpoint was
+`dce0a937c4b6f798e9c1ce568613f2145056ef3f` and triggered Android run 45969237774.
+
+- Compute observation retains the dispatch ordinal shared with its descriptor
+  inputs and reports the resource version after replay's potential write.
+  Metadata-only observations preserve the bound subresource range. Empty
+  direct dispatches no longer emit output rows. A recorded resolve is marked
+  separately from a copy and remains excluded from full-color traversal
+  until its source and destination sample coverage can be proved.
+- The surface capture and indirect compute host tests passed (8 total).
+  `git diff --check` passed. Device validation remains outstanding.
+- Next action is to implement bounded selection on live replay events and
+  verify that viewport/scissor coverage and shader semantics establish an
+  eligible scene input across docked and handheld paths.
