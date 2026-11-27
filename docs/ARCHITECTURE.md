@@ -311,6 +311,13 @@ validation and software Vulkan readbacks. Those fixtures cover the replay
 geometry and reconstruction recorders. Gameplay coverage and output on
 Xclipse and Adreno require device traces.
 
+A 1:1 picture uses the original image at zero sharpness. Sharpening at
+native size uses RCAS on the existing pixel grid. A direct replay
+submission carrying a sharpened draw suppresses a second native-grid
+sharpening pass for that source frame. Explicit output targets below the
+guest extent use a Bilinear downsample. The drawable and swapchain keep
+their own sizes.
+
 When LSFG is configured and the reconstruction target exceeds the
 drawable, reconstruction produces a display-sized resolve in the same
 submission. LSFG and the real presenter read that resolved image in queue
@@ -335,8 +342,8 @@ A HUD already blended into a game image is reconstructed with that image.
 For pixel-accurate temporal accumulation, replay-certified game inputs are
 still preferable.
 
-Gaps in real-frame tickets and changes in the stream or geometry invalidate
-history. Presentation also invalidates history on a surface rebuild.
+Gaps in real-frame tickets and changes in the stream, geometry, operation
+mode or surface generation invalidate history.
 The backend budgets images and uniforms against Vulkan allocation requirements
 and a fraction of the local heap. The replay and presentation paths time their own reconstruction work with
 GPU queries and apply a cadence-based budget. Queue backlog, display misses

@@ -79,6 +79,8 @@ void vk_pools_sync(VkCommandBuffer cb);
 
 // ---- submissions (gfx_vk_core.c) ----
 void vk_guest_flow_feedback(uint64_t source_ticket, uint32_t cadence_us, int stressed);
+int vk_guest_sharpened_this_frame(void);
+void vk_guest_flow_surface_reset(void);
 typedef struct vksub vksub_t;
 VkCommandBuffer vk_cmd(void);          // the current submission's main command buffer (recording)
 int vk_readback_ranges(void);

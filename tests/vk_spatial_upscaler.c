@@ -170,12 +170,16 @@ static spatial_image source_image(int size) {
     return src;
 }
 
-static void readback(VkImage image, uint32_t w, uint32_t h) {
+static void readback_pixels(VkImage image, uint32_t w, uint32_t h) {
     begin();
     VkBufferImageCopy region = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {w, h, 1}};
     vkCmdCopyImageToBuffer(test_cb, image, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &region);
     vk_img_barrier_all(test_cb);
     complete();
+}
+
+static void readback(VkImage image, uint32_t w, uint32_t h) {
+    readback_pixels(image, w, h);
     assert(mapped[0] >= 180 && mapped[4 * ((h - 1) * w)] < 95);
     for (uint32_t i = 0; i < w * h; i++)
         assert(abs((int)mapped[i * 4 + 3] - 173) <= 1);
@@ -242,8 +246,9 @@ static void run_spatial(void) {
             check_vivid(out);
         }
     }
-    // Selecting an upscaler with an already native-sized picture must not
-    // submit a reconstruction pass, even when a previous frame used one.
+    // Zero sharpness bypasses a native-size picture, even when a previous
+    // frame submitted reconstruction.
+    sharpness = 0;
     unsigned slot = g_spatial.slot;
     const int filters[] = {SP_BILINEAR, SP_FSR1, SP_SGSR1, SP_SGSR2};
     for (unsigned i = 0; i < sizeof filters / sizeof filters[0]; i++) {
@@ -335,6 +340,31 @@ static void check_spatial_slider(void) {
         }
         assert(quarter > 0 && previous > quarter);
     }
+    uint8_t native[16 * 16 * 4];
+    readback_pixels(src.texture.img, SRC, SRC);
+    for (unsigned y = 0; y < 16; y++)
+        memcpy(native + y * 16 * 4, mapped + ((17 - y) * SRC + 2) * 4, 16 * 4);
+    const int modes[] = {SP_BILINEAR, SP_FSR1, SP_SGSR1, SP_SGSR2};
+    for (unsigned i = 0; i < sizeof modes / sizeof modes[0]; ++i) {
+        selected_mode = modes[i];
+        sharpness = 0;
+        assert(!spatial_reconstruct(&src.texture, crop, 1, 16, 16, ++ticket, NULL));
+        uint64_t last = 0;
+        for (sharpness = 25; sharpness <= 100; sharpness += 25) {
+            spatial_image *out = spatial_reconstruct(&src.texture, crop, 1, 16, 16, ++ticket, NULL);
+            assert(out && out->texture.w == 16 && out->texture.h == 16 &&
+                   g_spatial.report_sharpness_applied == sharpness);
+            readback(out->texture.img, 16, 16);
+            uint64_t distance = slider_distance(native, mapped, sizeof native);
+            assert(distance && distance >= last);
+            last = distance;
+        }
+    }
+    g_spatial.replay_sharpened = 1;
+    sharpness = 25;
+    assert(!spatial_reconstruct(&src.texture, crop, 1, 16, 16, ++ticket, NULL));
+    g_spatial.replay_sharpened = 0;
+    puts("native-size sharpening, exact bypass and replay sharpening guard PASS");
     CHECK(vkQueueWaitIdle(V.q));
     spatial_drop_images();
     spatial_image_drop(&src);
@@ -438,10 +468,11 @@ static void check_large_outputs(void) {
     CHECK(vkQueueWaitIdle(V.q));
     spatial_drop_images();
     g_sfmt = VK_FORMAT_R8G8B8A8_UNORM;
-    static const uint32_t sizes[][4] = {{1920,1080,2560,1440},{2560,1440,3840,2160},
-        {1920,1080,3840,2160},{2560,1440,5120,2880}};
+    static const uint32_t sizes[][4] = {{960,540,1280,720},{1280,720,1920,1080},
+        {1920,1080,2560,1440},{2560,1440,3840,2160},
+        {1920,1080,3840,2160},{1920,1080,1280,720},{2560,1440,5120,2880}};
     uint64_t ticket = 10000;
-    for (unsigned k = 0; k < (getenv("DM_TEST_ULTRA_RECONSTRUCTION") ? 4u : 3u); ++k) {
+    for (unsigned k = 0; k < (getenv("DM_TEST_ULTRA_RECONSTRUCTION") ? 7u : 6u); ++k) {
         uint32_t iw=sizes[k][0], ih=sizes[k][1], ow=sizes[k][2], oh=sizes[k][3];
         if (!spatial_extent_ok(ow, oh, 1) ||
             dm_recon_budget(spatial_local_heap()) < (uint64_t)ow*oh*8 + (uint64_t)iw*ih*8) {
@@ -477,8 +508,10 @@ static void check_large_outputs(void) {
             sharpness=50;
             const int supersampling = iw==1920 && ih==1080 && ow==3840 && oh==2160;
             g_spatial.resolve_extent = supersampling ? (VkExtent2D){iw, ih} : (VkExtent2D){0};
+            g_spatial.explicit_target = 1;
             spatial_image *out=spatial_reconstruct(&src.texture,crop,0,ow,oh,++ticket,NULL);
-            assert(out && spatial_active==selected_mode && out->texture.w==ow && out->texture.h==oh);
+            int expected = ow < iw ? SP_BILINEAR : selected_mode;
+            assert(out && spatial_active==expected && out->texture.w==ow && out->texture.h==oh);
             begin();
             VkBufferImageCopy region={0,0,0,{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},
                 {(int)(ow/2),(int)(oh/2),0},{1,1,1}};
@@ -486,7 +519,8 @@ static void check_large_outputs(void) {
             complete();
             assert(abs((int)mapped[0]-64)<=3 && abs((int)mapped[1]-128)<=3 &&
                    abs((int)mapped[2]-191)<=3 && abs((int)mapped[3]-159)<=3);
-            fprintf(stderr,"large %s %ux%u readback PASS\n",spatial_mode_name(selected_mode),ow,oh);
+            fprintf(stderr,"%s %s %ux%u readback PASS\n",ow < iw ? "downsample" : "large",
+                    spatial_mode_name(selected_mode),ow,oh);
             if (supersampling) {
                 spatial_image *display = spatial_display_resolved(ticket);
                 assert(display && display->texture.w == iw && display->texture.h == ih);

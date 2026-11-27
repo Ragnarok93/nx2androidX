@@ -45,7 +45,7 @@ static struct {
     unsigned slot, encoding;
     float flow_budget_ms;
     uint32_t flow_cadence_us;
-    int flow_pressure;
+    int flow_pressure, explicit_target, replay_sharpened;
     uint64_t ticket, attempted_ticket, retry_after, rcas_retry_after, measured_ticket;
     uint64_t report_alloc_wait_ns, report_slot_wait_ns;
     unsigned report_alloc_attempts, report_allocations, report_alloc_waits;
@@ -704,14 +704,21 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         spatial_report(requested, SP_NATIVE, "invalid source crop or output extent", ticket);
         return NULL;
     }
+    const int native_grid = w == (uint32_t)crop[2] && h == (uint32_t)crop[3];
     if (w <= (uint32_t)crop[2] && h <= (uint32_t)crop[3]) {
 #if SP_TEMPORAL
         dm_flow_budget_invalidate(&g_flow.policy);
         g_flow.ticket = 0;
 #endif
-        spatial_report(requested, SP_NATIVE, w == (uint32_t)crop[2] && h == (uint32_t)crop[3] ?
-            "native 1:1 presentation input" : "presentation input does not require enlargement", ticket);
-        return NULL;
+        wants_flow = 0;
+        mode = SP_BILINEAR;
+        if (g_spatial.replay_sharpened) sharpness = 0;
+        if ((native_grid && sharpness == 0) || (!native_grid && !g_spatial.explicit_target)) {
+            spatial_report(requested, SP_NATIVE, native_grid ?
+                "native 1:1 presentation input" : "presentation input does not require enlargement", ticket);
+            return NULL;
+        }
+        reason = native_grid ? "native-size sharpening" : "explicit output downsampling";
     }
     if (ticket < g_spatial.retry_after || !spatial_commands_ready()) {
         spatial_report(requested, SP_NATIVE, "reconstruction resources unavailable", ticket);
@@ -915,6 +922,10 @@ select_backend:;
         VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, *source_set,
             0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &info};
         vkUpdateDescriptorSets(V.dev, 1, &write, 0, NULL);
+    }
+    if (native_grid && !post) {
+        spatial_report(requested, SP_NATIVE, "native-size sharpening unavailable", ticket);
+        return NULL;
     }
     spatial_image *resolve = (dst_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ?
         spatial_prepare_resolve(w, h, ticket) : NULL;

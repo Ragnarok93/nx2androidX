@@ -85,7 +85,8 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         self.assertLess(window.index("if (redraw)"), window.index("spatial_reconstruct("))
         self.assertLess(window.index("spatial_reconstruct("), window.index("dm_fg_frame("))
         self.assertLess(window.index("if (redraw || period < 0)"), window.index("dm_fg_frame("))
-        self.assertIn("dm_fg_frame(source, rect, flip_y", window)
+        self.assertIn("dm_fg_frame(fg_source, rect, flip_y", window)
+        self.assertIn("reconstructed && !resolved ? NULL : source", window)
         self.assertNotIn("spatial_reconstruct(", present)
         self.assertLess(present.index("vivid_record("), present.index("ov_render("))
 

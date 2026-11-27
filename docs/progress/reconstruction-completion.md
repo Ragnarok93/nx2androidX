@@ -660,3 +660,30 @@ reconstruct the target draw's vertices or covered region from a capture.
   [source ownership](https://github.com/Ragnarok93/nx2androidX/actions/runs/46021326675/artifacts/15208658477),
   [pre-composition replay](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022215963/artifacts/15211630129)
   and [source swizzle and phase guards](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022704538/artifacts/15211895617).
+
+## 2026-11-27 — Native sharpness and explicit output targets
+
+- Milestones 3 and 6 are Host validated for the exercised output
+  contracts. With zero sharpness, a 1:1 input bypasses reconstruction
+  commands. A positive slider strength at the same extent runs RCAS
+  over the original pixel grid. The runtime conservatively skips that
+  native-size pass when a direct replay draw submitted sharpening
+  during the same guest frame. This hint is not a claim that the
+  modified attachment reached presentation.
+- An explicit target below guest resolution now gets its own output
+  image. The downsample uses the Bilinear path, then ordinary
+  presentation fits that image to the drawable. Auto can still use the
+  native presentation fit when the drawable is smaller than the guest.
+- The Vulkan fixture verified the sharpness steps for all four selected
+  backends at native size, in UNORM and sRGB with a flipped crop.
+  Synchronization-validated readbacks covered 1280×720 and 1920×1080
+  enlargement, 1920×1080 to 1280×720 downsampling, 1440p, 2160p,
+  2160p-to-1080p resolve and 5120×2880. The 54-check reconstruction host
+  runner passed. The standalone processing-order fixture now checks
+  optional LSFG resolve failure as part of the updated handoff.
+- Replay GSR 2 resets history across handheld and docked mode changes
+  and swapchain recreation, including when scene dimensions match.
+  It retains the command and image ownership rules from the earlier
+  replay checkpoint.
+- Display-oriented resolve commit `2d399516bde0d0e367fefd600d3de87efb3c5f8d`
+  passed [software Vulkan and Android NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46024103333).

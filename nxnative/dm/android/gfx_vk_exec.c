@@ -705,7 +705,8 @@ static int pass_dump_limit(void) {
 static int g_input_collect_descriptors;
 // Replay-local and scoped to descriptor collection for one draw.
 static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_ok, g_guest_uniform_ok;
-static int g_guest_filter_bound;
+static int g_guest_filter_bound, g_guest_sharpness_bound;
+static uint64_t g_guest_sharpen_pending, g_guest_sharpen_submitted;
 static struct {
     VkImage image;
     VkExtent2D extent;
@@ -3255,12 +3256,18 @@ static struct {
         uint64_t fence, ticket, generation;
         float budget_ms;
     } slots[VK_GSR2_SLOTS];
-    uint32_t feedback_ticket;
+    uint32_t feedback_ticket, surface_epoch;
+    int docked;
     unsigned slot, failures, missing_timestamps;
     int pending, drawn, active;
 } guest_flow;
 
 static _Atomic uint64_t guest_flow_feedback;
+static _Atomic uint32_t guest_flow_surface_epoch;
+
+void vk_guest_flow_surface_reset(void) {
+    atomic_fetch_add_explicit(&guest_flow_surface_epoch, 1, memory_order_relaxed);
+}
 
 void vk_guest_flow_feedback(uint64_t source_ticket, uint32_t cadence_us, int stressed) {
     uint64_t sample = ((uint64_t)(uint32_t)source_ticket << 32) | ((uint64_t)cadence_us << 1) |
@@ -3278,7 +3285,15 @@ static void guest_flow_drop(void) {
     dm_flow_budget_invalidate(&guest_flow.policy);
 }
 
+// The presentation thread receives this as a conservative hint. A submitted
+// replay draw may have applied the slider before later composition.
+int vk_guest_sharpened_this_frame(void) {
+    return g_guest_sharpen_submitted == g_tex_frame + 1;
+}
+
 void vk_guest_flow_submitted(int accepted, uint64_t fence) {
+    if (accepted && g_guest_sharpen_pending) g_guest_sharpen_submitted = g_guest_sharpen_pending;
+    g_guest_sharpen_pending = 0;
     if (guest_flow.pending) {
         int commit = accepted && guest_flow.drawn;
         vk_gsr2_commit(guest_flow.ctx, commit);
@@ -3360,6 +3375,15 @@ static VkDescriptorSet guest_flow_record(VkCommandBuffer cb, uint64_t stream) {
             return VK_NULL_HANDLE;
         }
     }
+    extern int dm_opmode(void);
+    const int docked = dm_opmode() != 0;
+    const uint32_t surface = atomic_load_explicit(&guest_flow_surface_epoch, memory_order_relaxed);
+    if (docked != guest_flow.docked || surface != guest_flow.surface_epoch) {
+        guest_flow.surface_epoch = surface;
+        guest_flow.docked = docked;
+        ++guest_flow.epoch;
+        dm_flow_budget_invalidate(&guest_flow.policy);
+    }
     const uint64_t feedback = atomic_load_explicit(&guest_flow_feedback, memory_order_relaxed);
     const uint32_t period_us = (uint32_t)feedback >> 1;
     const uint32_t source_ticket = (uint32_t)(feedback >> 32);
@@ -3392,7 +3416,7 @@ static VkDescriptorSet guest_flow_record(VkCommandBuffer cb, uint64_t stream) {
 }
 
 static int prepare_draw(int prim, int indexed, int temporal_draw) {
-    g_guest_filter_bound = 0;
+    g_guest_filter_bound = g_guest_sharpness_bound = 0;
     // DM_VK_CB_DRAWS (read every submission, default 128, 0 = never): the replay is cut every that many draws and what is recorded goes to the GPU at once
     // (vk_cmd_split), so the GPU works on the frame while the rest is replayed instead of after all of it: NEO's Scramble Crossing 36.7 → 15.7 ms a frame
     g_cb_draws++;   // the cut itself happens between passes (begin_pass); inside one only with DM_VK_PASS_SPLIT (below): a pass cut in two stores and reloads its attachments
@@ -3677,7 +3701,9 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
         if (!(dbg_draw() & 2) && b < 17) { int fresh = bc_fresh(); if (fresh || g_bc.vb[b] != buf || g_bc.vo[b] != off) { vkCmdBindVertexBuffers(cb, b, 1, &buf, &off); g_bc.vb[b] = buf; g_bc.vo[b] = off; } }
     }
     if (k.guest_filter > SP_BILINEAR) {
-        float constants[] = {(float)P_att[0].w, (float)P_att[0].h, dm_fsr_sharpness() / 100.0f};
+        float sharpness = dm_recon_sharpness(dm_fsr_sharpness());
+        g_guest_sharpness_bound = sharpness > 0;
+        float constants[] = {(float)P_att[0].w, (float)P_att[0].h, sharpness};
         vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, constants);
     }
     if (g_input_capture && g_pd_state == 1 && indexed &&
@@ -3962,7 +3988,9 @@ static void draw(const p_draw *d) {
             { static int n; if (n++ < 6) VKLOG("transform feedback: DrawTransformFeedback by the counter of control buffer %#llx, stride %u%s", (unsigned long long)g_tf_ctl[g_bc_slot].ctl, st, xf == 2 ? ", captured again" : ""); } }
         return;
     }
-    if (!(dbg_draw() & 1) && g_ok) { int xf = xfb_begin(cb); vkCmdDraw(cb, (uint32_t)d->count, inst, (uint32_t)d->first, (uint32_t)d->base_instance); if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf); }
+    if (!(dbg_draw() & 1) && g_ok) { int xf = xfb_begin(cb); vkCmdDraw(cb, (uint32_t)d->count, inst, (uint32_t)d->first, (uint32_t)d->base_instance); if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf);
+        if (g_guest_sharpness_bound && d->count > 0) g_guest_sharpen_pending = g_tex_frame + 1;
+    }
 }
 // DM_VK_INDIRECT_LOG_AT=<present>: bounded, read-only diagnostics for GPU
 // culling/indirect scene draws. A submitted draw with a valid pipeline may
@@ -4138,6 +4166,7 @@ static void draw_idx(const p_draw_idx *d) {
         int xf = xfb_begin(cb);
         vkCmdDrawIndexed(cb, (uint32_t)d->count, inst, 0, d->base_vertex, (uint32_t)d->base_instance);
         if (g_guest_filter_bound == SP_SGSR2) guest_flow.drawn = 1;
+        if (g_guest_sharpness_bound && d->count > 0) g_guest_sharpen_pending = g_tex_frame + 1;
         if (g_guest_filter_bound && d->count > 0) {
             static unsigned logged;
             unsigned mode_bit = 1u << g_guest_filter_bound;

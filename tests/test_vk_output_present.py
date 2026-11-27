@@ -28,7 +28,7 @@ static dm_recon_continuity g_recon_source;
 static struct {uint64_t ticket,last_real_ticket;dm_flow_budget policy;} g_flow;
 #define SP_OUTPUT 0
 static struct {
-    int flow_pressure, live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
+    int flow_pressure, explicit_target, replay_sharpened, live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
     VkExtent2D report_input, report_allocated, measured_input, measured_output, resolve_extent;
     VkImage report_image;
     int report_crop[4], report_recorded;
@@ -67,8 +67,10 @@ static spatial_image *spatial_reconstruct(vkimg_t *im,const int *raw,int flip,ui
     (void)flip;(void)physical;rec_calls++;rec_target=(VkExtent2D){w,h};
     spatial_requested=mode;g_spatial.report_input=(VkExtent2D){(unsigned)raw[2],(unsigned)raw[3]};
     g_spatial.ticket=0;resolved_ticket=0;spatial_active=SP_NATIVE;
-    if(mode==SP_NATIVE||force_fail||!w||!h||(w<=(unsigned)raw[2]&&h<=(unsigned)raw[3]))return NULL;
-    spatial_active=mode;g_spatial.ticket=ticket;g_spatial.image[0].texture=(vkimg_t){w,h,im->fmt,22};
+    if(mode==SP_NATIVE||force_fail||!w||!h||(w==(unsigned)raw[2]&&h==(unsigned)raw[3]))return NULL;
+    int downscale=w<=(unsigned)raw[2]&&h<=(unsigned)raw[3];
+    if(downscale&&!g_spatial.explicit_target)return NULL;
+    spatial_active=downscale?SP_BILINEAR:mode;g_spatial.ticket=ticket;g_spatial.image[0].texture=(vkimg_t){w,h,im->fmt,22};
     if(g_spatial.resolve_extent.width&&!fail_resolve){
         resolved_ticket=ticket;resolve.texture=(vkimg_t){g_spatial.resolve_extent.width,g_spatial.resolve_extent.height,im->fmt,55};}
     return &g_spatial.image[0];
@@ -89,7 +91,7 @@ static int present_one(vkimg_t *im,VkImage src,const int *crop,VkExtent2D pictur
 }
 '''+code[start:end]+r'''
 static vkimg_t src={1920,1080,37,11};
-static void real(uint64_t ticket,int docked){present_calls=0;present_window(&src,NULL,1.0/30,ticket,0,ticket*33333333,docked,1,NULL);}
+static void real(uint64_t ticket,int docked){present_calls=0;present_window(&src,NULL,1.0/30,ticket,0,ticket*33333333,docked,1,0,NULL);}
 int main(void){
     real(1,1);
     assert(rec_target.width==3840&&rec_target.height==2160); // must not inherit drawable limit
@@ -103,7 +105,7 @@ int main(void){
     assert(cap.present_accepted==1&&cap.generated_accepted==1);
     // A paused setting change must not generate or reconstruct the old ticket.
     configured=1440;present_calls=0;
-    present_window(&src,NULL,-1,1,1,33333333,1,1,NULL);
+    present_window(&src,NULL,-1,1,1,33333333,1,1,0,NULL);
     assert(rec_calls==1&&fg_calls==1&&capture_calls==1&&present_calls==1&&observed[0].w==1920&&observed[0].image==55);
     g_spatial.retry_after=121;g_spatial.rcas_retry_after=121;
     real(2,1);assert(!g_spatial.retry_after&&!g_spatial.rcas_retry_after);assert(rec_target.width==2560&&rec_target.height==1440&&reset_flags==DM_RECON_SOURCE_GEOMETRY);
@@ -140,6 +142,9 @@ int main(void){
     assert(cap.actual_w==3840&&cap.final_source_w==3840&&!cap.generated_accepted);
     fail_resolve=0;real(19,1);
     assert(present_calls==2&&fg_image==55&&cap.generated_accepted==1);
+    configured=720;real(20,1);
+    assert(cap.actual_w==1280&&cap.actual_h==720&&cap.active==SP_BILINEAR);
+    assert(fg_input.width==1280&&fg_input.height==720&&observed[1].image==fg_image);
     return 0;
 }
 '''

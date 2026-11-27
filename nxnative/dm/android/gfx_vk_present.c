@@ -124,6 +124,7 @@ static void swap_destroy(void) {
     g_flow.ticket = 0;
     dm_flow_budget_invalidate(&g_flow.policy);
     dm_recon_source_invalidate(&g_recon_source);
+    vk_guest_flow_surface_reset();
     g_spatial.ticket = 0; // a redraw must not reuse pre-rebuild output geometry
     present_time_reset();
     if (g_swap) { present_wait_idle(); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
@@ -1437,7 +1438,7 @@ void vk_window_lost(void) {
 #define PQ_N 4
 static struct {
     vkimg_t *im;
-    int crop[4], has_crop, docked, flip_y;
+    int crop[4], has_crop, docked, flip_y, replay_sharpened;
     uint64_t n, source_ns;
     double period;
     vk_reconstruction_input physical;
@@ -1461,7 +1462,7 @@ static int reconstruction_pressure(dm_flow_cadence cadence) {
 }
 
 static void present_window(vkimg_t *im, const int *crop, double period, uint64_t ticket, int redraw,
-                           uint64_t source_ns, int docked, int flip_y,
+                           uint64_t source_ns, int docked, int flip_y, int replay_sharpened,
                            const vk_reconstruction_input *physical) {
     if (g_spatial.live_sources) spatial_collect_sources();
     if (g_present_failed) return;
@@ -1522,6 +1523,8 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             (target.width > picture.width || target.height > picture.height);
         g_spatial.resolve_extent = needs_fg_resolve && cadence.period_us && dm_fg_wants_input() ?
             picture : (VkExtent2D){0};
+        g_spatial.explicit_target = output_height > 0;
+        g_spatial.replay_sharpened = replay_sharpened;
         reconstructed = spatial_reconstruct(im, raw, flip_y, target.width, target.height, ticket,
                                            full ? physical : NULL);
     }
@@ -1620,7 +1623,7 @@ static void *present_thread(void *arg) {
             if (last.im) {
                 pthread_mutex_lock(&g_present_mu);
                 present_window(last.im, last.has_crop ? last.crop : NULL, -1, last.n, 1,
-                               last.source_ns, last.docked, last.flip_y, NULL);
+                               last.source_ns, last.docked, last.flip_y, last.replay_sharpened, NULL);
                 pthread_mutex_unlock(&g_present_mu);
             }
             continue;
@@ -1632,7 +1635,7 @@ static void *present_thread(void *arg) {
             last.physical.backing = NULL;
             pthread_mutex_lock(&g_present_mu);
             present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0,
-                           e.source_ns, e.docked, e.flip_y, e.physical.backing ? &e.physical : NULL);
+                           e.source_ns, e.docked, e.flip_y, e.replay_sharpened, e.physical.backing ? &e.physical : NULL);
             pthread_mutex_unlock(&g_present_mu);
         }
         vk_rs_variant_destroy(e.physical.backing);
@@ -1642,7 +1645,7 @@ static void *present_thread(void *arg) {
 }
 static void present_thread_start(void) { pthread_t t; pthread_create(&t, NULL, present_thread, NULL); pthread_detach(t); }
 static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, double period,
-                                const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
+                                int replay_sharpened, const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
     // Snapshot before queue backpressure, on the source submission thread.
     // Operation mode is a notification snapshot, not shader/scene certification.
     extern int dm_opmode(void);
@@ -1651,7 +1654,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     static int sync = -1; static pthread_once_t once = PTHREAD_ONCE_INIT;
     if (sync < 0) sync = getenv("DM_VK_SYNC_PRESENT") != NULL;
     if (sync || !dm_front_window()) {   // headless: nothing to show; or presenting on this thread
-        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, physical); pthread_mutex_unlock(&g_present_mu); }
+        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_sharpened, physical); pthread_mutex_unlock(&g_present_mu); }
         if (physical) vk_rs_variant_destroy(physical->backing);
         pthread_mutex_lock(&g_pq_mu); if (g_pq_tail == g_pq_head) g_pq_done = n; pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
         return n;
@@ -1661,6 +1664,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     while (g_pq_head - g_pq_tail >= PQ_N) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // never more than PQ_N frames behind
     typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = im; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
     e->source_ns = source_ns; e->docked = docked; e->flip_y = flip_y;
+    e->replay_sharpened = replay_sharpened;
     if (physical) e->physical = *physical;
     else e->physical.backing = NULL;
     g_pq_head++; pthread_cond_broadcast(&g_pq_cv);
@@ -1765,16 +1769,17 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         physical = take_physical_offer(im && im->layout == VK_IMAGE_LAYOUT_GENERAL ? im : NULL, n);
         if (physical.backing) input = &physical;
     }
-    if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period, NULL); }
-    if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period, NULL); }   // never drawn into: nothing to show yet
+    if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period, 0, NULL); }
+    if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period, 0, NULL); }   // never drawn into: nothing to show yet
     shown++;
     if (shot_wanted(n)) shot(im, n);
+    int replay_sharpened = vk_guest_sharpened_this_frame();
     { void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
     if (n % 1800 == 0) {   // every ~30 s: the pipeline cache to disk on a thread of its own (an Android app can be killed without any exit path)
         void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
         pthread_create(&th, &a, (void *(*)(void *))(void *)vk_pipeline_cache_save, NULL); pthread_attr_destroy(&a);
     }
-    uint64_t ticket=present_enqueue(im, crop, n, period, input);
+    uint64_t ticket=present_enqueue(im, crop, n, period, replay_sharpened, input);
     vk_rs_publish_source_frame(n);
     return ticket;
 }
@@ -1805,7 +1810,7 @@ uint64_t vk_present_vkimg(vkimg_t *im, double period) {
     { int disp = V.has_dtiming && dm_front_window() && (n <= 240 || g_pres_recorded); struct timespec ts; if (!disp) clock_gettime(CLOCK_MONOTONIC, &ts);
       present_time_begin(n, disp ? 0 : (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
     if (shot_wanted(n) && im->layout == VK_IMAGE_LAYOUT_GENERAL) shot(im, n);
-    return present_enqueue(im, NULL, n, period, NULL);
+    return present_enqueue(im, NULL, n, period, 0, NULL);
 }
 void mtl_present_wait(uint64_t tk) {   // NVN acquire: the window texture's last present has been blitted (the game may draw into it again)
     if (!tk) return;
