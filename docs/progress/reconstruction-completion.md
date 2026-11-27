@@ -547,3 +547,15 @@ reconstruct the target draw's vertices or covered region from a capture.
 - GSR 2 still needs a synchronized pre-composition source and history.
   Presentation telemetry also does not yet attribute an accepted frame to
   a replay-stage reconstruction variant.
+- The same readback checks passed at 180→200 pixels per side, matching
+  the audited 90% source-to-output ratio. The 54-test reconstruction
+  host runner and 1440p, 2160p and supersampling regressions passed.
+- At `91924a618e7a989ba9cf4d6723b48702da1bf23a`, the
+  [reconstruction workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46018792955)
+  passed software Vulkan and the FFR NDK link. The
+  [signed Android workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46018793186)
+  ran 851 tests with nine skips and passed native smoke and signing
+  verification. The
+  [signed builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46018793186/artifacts/15207033236)
+  was available at inspection. The device cost of inline RCAS and
+  physical FFR activation remain unmeasured.
