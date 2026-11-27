@@ -41,4 +41,31 @@ int verify_notes(void) {
             self.assertEqual(out.value.decode(),expected)
             self.assertEqual(lib.verify_notes(),1)
 
+    def test_android_guest_elf_types_do_not_collide(self):
+        # Exercise the Android declaration/implementation split with a host ELF
+        # compiler, including the guest typedefs that conflict with system ELF.
+        source = r'''
+#include <stdint.h>
+typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_Dyn;
+typedef struct { uint64_t r_offset, r_info; int64_t r_addend; } Elf64_Rela;
+typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
+#include "gfx_vk_runtime_identity.h"
+void runtime_id(char *out) { dm_runtime_build_id(out); }
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            (p/'caller.c').write_text(source)
+            inc = Path(__file__).resolve().parents[1]/'nxnative/dm/android'
+            so = p/'libidentity.so'
+            subprocess.run(['cc','-std=c11','-D_GNU_SOURCE','-D__ANDROID__','-Wall','-Wextra','-Werror',
+                            '-fPIC','-shared','-Wl,--build-id=sha1','-I',str(inc),str(p/'caller.c'),
+                            str(inc/'gfx_vk_runtime_identity.c'),'-ldl','-o',str(so)],check=True)
+            expected = re.search(r'Build ID: ([0-9a-f]+)',subprocess.check_output(['readelf','-n',str(so)],text=True)).group(1)
+            lib = ctypes.CDLL(str(so))
+            lib.runtime_id.argtypes = [ctypes.c_char_p]
+            lib.runtime_id.restype = None
+            out = ctypes.create_string_buffer(129)
+            lib.runtime_id(out)
+            self.assertEqual(out.value.decode(),expected)
+
 if __name__=='__main__':unittest.main()

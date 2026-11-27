@@ -10,7 +10,10 @@
 enum { DM_RUNTIME_ID_CAP = 129 };
 /* Android build.py defines _GNU_SOURCE. On non-ELF hosts or strict POSIX
  * host-test translation units the GNU loader enumeration API is unavailable. */
-#if defined(__ELF__) && (defined(__ANDROID__) || defined(_GNU_SOURCE))
+#if defined(__ANDROID__) && !defined(DM_RUNTIME_ID_IMPLEMENTATION)
+/* Keep system ELF declarations out of the guest loader's translation units. */
+void dm_runtime_build_id(char out[DM_RUNTIME_ID_CAP]);
+#elif defined(__ELF__) && (defined(__ANDROID__) || defined(_GNU_SOURCE))
 #include <elf.h>
 #include <link.h>
 static inline int dm_runtime_note_id(const void *notes, size_t bytes,
@@ -67,7 +70,12 @@ static int dm_runtime_identity_visit(struct dl_phdr_info *info, size_t size, voi
     }
     return 1; // Found the owning module, but no readable build-id note.
 }
-static inline void dm_runtime_build_id(char out[DM_RUNTIME_ID_CAP]) {
+#ifdef DM_RUNTIME_ID_IMPLEMENTATION
+__attribute__((visibility("hidden")))
+#else
+static inline
+#endif
+void dm_runtime_build_id(char out[DM_RUNTIME_ID_CAP]) {
     static unsigned char module_anchor;
     memcpy(out, "unavailable", sizeof "unavailable");
     dm_runtime_identity_lookup lookup = {(uintptr_t)&module_anchor, out};
