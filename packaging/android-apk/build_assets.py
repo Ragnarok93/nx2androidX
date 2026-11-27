@@ -38,6 +38,25 @@ MODULES = ['lz4', 'capstone', 'pillow', 'fonttools', 'pyyaml', 'pycryptodome', '
 NUGET = [('LibHac', '0.19.0')]
 
 
+def stamp_runtime_source(tool: Path):
+    stamp = tool / 'nxnative' / 'dm' / 'android' / 'runtime-source-commit.txt'
+    if not stamp.parent.is_dir():
+        return
+    sha = 'unavailable'
+    try:
+        candidate = subprocess.check_output(
+            ['git', '-C', str(REPO), 'rev-parse', 'HEAD'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        dirty = subprocess.check_output(
+            ['git', '-C', str(REPO), 'status', '--porcelain', '--', *KEEP],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        if not dirty and re.fullmatch(r'[0-9a-f]{40}', candidate):
+            sha = candidate
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    stamp.write_text(sha + '\n', encoding='ascii')
+
+
 def copy_tree(src: Path, dst: Path, skip=SKIP_DIRS):
     """Copies a tree, leaving out what the phone does not need"""
     for p in sorted(src.rglob('*')):
@@ -300,6 +319,7 @@ def main():
         src = REPO / name
         if not src.exists(): continue
         copy_tree(src, tool / name, skip=TOOL_SKIP)
+    stamp_runtime_source(tool)
     compile_game_activity_dex(tool)
     # the tool's own patch script (the interpreter paths of the programs the porter starts) and the SDK's
     # globalization fix (the phone's .NET has no ICU): both are run by the app, so they travel with it

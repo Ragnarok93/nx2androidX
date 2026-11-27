@@ -2,6 +2,14 @@
 #include "gfx_vk_capture_scale.h"
 #include "spatial_upscaler.h"
 
+#ifndef DM_RUNTIME_SOURCE_COMMIT
+#define DM_RUNTIME_SOURCE_COMMIT "unavailable"
+#endif
+#ifndef VK_CAPTURE_DRIVER_ID
+#define VK_CAPTURE_DRIVER_ID (-1)
+#define VK_CAPTURE_DRIVER_VERSION 0u
+#endif
+
 // The replay thread owns the Vulkan readbacks. The archive worker freezes
 // publication while it reads the files. A stopped capture stays available
 // for export retry without continuing to collect samples.
@@ -60,6 +68,23 @@ static int capture_scale_write(const char *root) {
     if (!out) return 0;
     char runtime_id[DM_RUNTIME_ID_CAP];
     dm_runtime_build_id(runtime_id);
+    fprintf(out, "# runtime_git_commit=%s\n"
+                 "# runtime_build_configuration=%s\n"
+                 "# runtime_lsfg_compiled=%d\n"
+                 "# vulkan_driver_id=%d\n"
+                 "# vulkan_driver_version=%#x\n",
+            DM_RUNTIME_SOURCE_COMMIT,
+#ifdef DM_RELEASE
+            "release",
+#else
+            "development",
+#endif
+#ifdef NX_LSFG
+            1,
+#else
+            0,
+#endif
+            VK_CAPTURE_DRIVER_ID, VK_CAPTURE_DRIVER_VERSION);
     fprintf(out, "# overwritten_rows=%llu\n"
                  "# runtime_elf_build_id=%s\n"
                  "ticket\tmode\tmin_pct\tmax_pct\tlatched_pct\tscaled_passes\tpasses_total\t"

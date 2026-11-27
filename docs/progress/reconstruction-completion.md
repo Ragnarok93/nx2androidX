@@ -44,3 +44,37 @@ Milestone 0 is **In progress**. Milestones 1–9 are **Pending**.
   The legacy archive analyzer reproduced all 332 native 1:1 bypasses.
   `git diff --check` passed. Full discovery was started separately. APK and
   SPIR-V validation remain outstanding. This checkpoint changes no shaders.
+
+## 2026-11-27 — Milestone 0, runtime provenance checkpoint
+
+Milestone 0 is **In progress**. The previous remote checkpoint was
+`515a96306c9da1a36e33a0a12d906669dbb03e77`. The latest checkpoint is the commit
+adding this section, resolved with
+`git log -1 --format=%H -- docs/progress/reconstruction-completion.md`.
+
+- The Android payload now stages a source commit stamp when its source trees
+  match the checkout. Direct Android builds resolve the commit in Git, and
+  on-device builds consume the staged stamp. An unavailable or modified source
+  identity is reported explicitly. The stamp participates in the native
+  object cache key for the capture writer.
+- Capture metadata now carries the Git identity, release/development setting,
+  LSFG build flag, mapped ELF build ID and actual physical-device Vulkan
+  driver ID and version. The trace analyzer exports these fields and remains
+  compatible with legacy archives.
+- Changed `packaging/android-apk/build_assets.py`, the Android native builder
+  and Vulkan capture/device initialization, and the trace analyzer. Added
+  clean/dirty stamp and capture-header checks to existing fixtures.
+- Ran `PYTHONPATH=. python tests/run_reconstruction_host.py` (51 passed),
+  `python -m unittest discover -s tests -p test_payload_stamp.py` (2 passed),
+  Python bytecode compilation of the changed scripts and `git diff --check`.
+  No shaders changed. The local environment lacks the Android SDK/NDK,
+  glslc and spirv-val. The first checkpoint triggered Android Actions run
+  [45964955086](https://github.com/Ragnarok93/nx2androidX/actions/runs/45964955086).
+- No hardware validation was performed. Exact runtime identity in an exported
+  game requires a new game APK or runtime upgrade built using the stamped
+  builder, followed by a capture from the installed runtime.
+- Next action is to record command completion from existing reconstruction
+  slot retirement, VK present acceptance, and accepted generated-frame count
+  by source ticket. Record source image/crop and allocated output separately
+  from fallback consumption. Re-run host and Android build checks before
+  starting observation-only source discovery.

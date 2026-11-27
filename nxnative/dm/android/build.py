@@ -29,6 +29,26 @@ if not (a.exe or a.lib or a.play): a.exe = a.lib = True
 
 import platform as _pf, shutil as _sh, stat as _st0
 
+def runtime_source_commit():
+    # Build assets omit .git. Their stamp is generated from the packaged
+    # checkout and travels with the on-device compiler inputs.
+    root = DM.parent.parent
+    try:
+        if (root / '.git').exists():
+            sha = subprocess.check_output(
+                ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            dirty = subprocess.check_output(
+                ['git', '-C', str(root), 'status', '--porcelain', '--', 'nxnative'],
+                text=True).strip()
+            if dirty:
+                return 'modified'
+        else:
+            sha = (DM / 'android' / 'runtime-source-commit.txt').read_text().strip()
+    except (OSError, subprocess.CalledProcessError):
+        return 'unavailable'
+    return sha if re.fullmatch(r'[0-9a-f]{40}', sha) else 'unavailable'
+
+
 def host_dir(base, tool):
     """The NDK's host folder for a tool under base. On arm64 Linux the NDK ships x86-64 host tools only, so a folder named linux-aarch64 with an arm64 build of the tool beside the NDK's sysroot
     (see docs/DEVELOPMENT_GUIDE.md) is used when it holds the tool; otherwise linux-x86_64, as before (an x86_64 machine, or arm64 with qemu-user / box64), so a missing folder fails as it did"""
@@ -99,6 +119,7 @@ INC = ['-include', str(DM / 'android/compat/include/darwin_compat.h'), f'-I{DM /
 CFLAGS = [TARGET, f'-O{a.O}'] + DBG + ['-fPIC', '-fno-omit-frame-pointer', '-ffixed-x18', '-Wall', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-unused-but-set-variable',
           '-Wno-format', '-Wno-deprecated-declarations', '-Wno-gnu-folding-constant', '-Werror=implicit-function-declaration', '-Werror=return-type',
           '-Werror=incompatible-pointer-types', '-Werror=int-conversion', '-D_GNU_SOURCE', '-DDM_ANDROID=1', '-fno-strict-aliasing', '-fvisibility=hidden'] + (['-DDM_RELEASE=1'] if a.release else []) + ([] if a.no_lsfg else ['-DNX_LSFG=1'])
+RUNTIME_ID_FLAG = f'-DDM_RUNTIME_SOURCE_COMMIT="{runtime_source_commit()}"'
 VPX_FLAGS = [TARGET, '-O2'] + DBG + ['-fPIC', f'-I{DM / "third_party/libvpx"}', f'-I{DM / "third_party/libvpx/config"}', '-w']
 ZSTD_FLAGS = [TARGET, '-O2'] + DBG + ['-fPIC', '-fvisibility=hidden', '-DZSTDLIB_VISIBLE=', '-DZSTDERRORLIB_VISIBLE=', '-w']   # its API stays inside libdmhost.so
 
@@ -147,6 +168,8 @@ def compile_one(s):
         src = gen / (s.stem + '.elf.S')
         refresh_generated(src, [sys.executable, str(DM / 'android/tools/darwin2elf.py'), str(s)])
     flags = VPX_FLAGS if 'third_party/libvpx' in str(rel).replace(os.sep, '/') else ZSTD_FLAGS if 'third_party/zstd' in str(rel).replace(os.sep, '/') else [TARGET] + DBG if s.suffix == '.S' else CFLAGS + INC
+    if s == DM / 'android' / 'gfx_vk_exec.c':
+        flags = flags + [RUNTIME_ID_FLAG]
     identity = (CC, compiler_key, CC_EXTRA, flags)
     try:
         if o.is_file() and o.stat().st_size and receipt.read_text() == dependency_key(d, src, identity):

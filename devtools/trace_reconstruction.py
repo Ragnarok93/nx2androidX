@@ -341,7 +341,11 @@ def summarize_presentation(rows, metadata):
             'history_initialization_samples':sum(r[4]=='1' for r in rs) if backend=='GSR 2' else None,
             'stages_ms':{name:stats([r[3][i] for r in rs if r[3][i] is not None]) for i,name in enumerate(('input','motion','accumulation','output'))} if backend=='GSR 2' else None})
     build_ids=[line.split('=',1)[1] for line in metadata if line.startswith('# runtime_elf_build_id=')]
-    return {'runtime_elf_build_ids':build_ids,'residency':residency,'timings':timings,
+    identity_keys = ('runtime_git_commit', 'runtime_build_configuration',
+                     'runtime_lsfg_compiled', 'vulkan_driver_id', 'vulkan_driver_version')
+    identity = {key: [line.split('=', 1)[1] for line in metadata if line.startswith(f'# {key}=')]
+                for key in identity_keys}
+    return {'runtime_elf_build_ids':build_ids, 'runtime_identity':identity,'residency':residency,'timings':timings,
         'conflicting_real_tickets':len(duplicates),'conflicting_timing_tickets':len(conflicts),
         'timing_rows_missing_backend':no_backend,
         'bypasses': [{'operation_mode': op, 'requested': backend, 'reason': reason, 'frames': count}

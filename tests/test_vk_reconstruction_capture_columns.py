@@ -11,6 +11,11 @@ class ReconstructionCaptureColumns(unittest.TestCase):
     def test_export_has_exact_column_alignment(self):
         source = r'''
 #define _POSIX_C_SOURCE 200809L
+#define DM_RUNTIME_SOURCE_COMMIT "0123456789abcdef0123456789abcdef01234567"
+#define DM_RELEASE 1
+#define NX_LSFG 1
+#define VK_CAPTURE_DRIVER_ID 3
+#define VK_CAPTURE_DRIVER_VERSION 0x1234u
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -58,9 +63,14 @@ int main(int argc, char **argv) {
                             '-I',str(ROOT/'nxnative/dm/android'),str(path/'case.c'),'-o',str(path/'case')],check=True)
             subprocess.run([str(path/'case'),d],check=True)
             lines=(path/'scaling_frames.tsv').read_text().splitlines()
-            self.assertEqual(lines[0],'# overwritten_rows=0')
-            self.assertTrue(lines[1].startswith('# runtime_elf_build_id='))
-            rows=list(csv.DictReader(lines[2:],delimiter='\t'))
+            self.assertIn('# overwritten_rows=0', lines)
+            self.assertTrue(any(line.startswith('# runtime_elf_build_id=') for line in lines))
+            self.assertIn('# runtime_git_commit=0123456789abcdef0123456789abcdef01234567', lines)
+            self.assertIn('# runtime_build_configuration=release', lines)
+            self.assertIn('# runtime_lsfg_compiled=1', lines)
+            self.assertIn('# vulkan_driver_id=3', lines)
+            self.assertIn('# vulkan_driver_version=0x1234', lines)
+            rows=list(csv.DictReader((line for line in lines if not line.startswith('#')),delimiter='\t'))
             self.assertEqual(len(rows),2)
             for row in rows:
                 self.assertNotIn(None,row)

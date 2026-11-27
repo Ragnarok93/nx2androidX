@@ -656,7 +656,11 @@ static uint32_t g_capture_scope_w, g_capture_scope_h;
 static uint64_t g_capture_peak_rs_bytes;
 static unsigned g_pd_scene_waited;
 enum { PD_SCENE_WAIT_LIMIT = 120 };
+#define VK_CAPTURE_DRIVER_ID V.driver_id
+#define VK_CAPTURE_DRIVER_VERSION V.props.driverVersion
 #include "gfx_vk_capture_session.inc"
+#undef VK_CAPTURE_DRIVER_ID
+#undef VK_CAPTURE_DRIVER_VERSION
 void vk_rs_capture_replay(uint64_t ticket, uint64_t cpu_replay_ns, double recent_gpu_ms) {
     unsigned dm_rs_live_config(void);
     nx_rs_live_config cfg = nx_rs_live_unpack(dm_rs_live_config());
