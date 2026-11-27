@@ -29,7 +29,7 @@ static struct {uint64_t ticket,last_real_ticket;dm_flow_budget policy;} g_flow;
 #define SP_OUTPUT 0
 static struct {
     int flow_pressure, live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
-    VkExtent2D report_input, report_allocated, measured_input, measured_output;
+    VkExtent2D report_input, report_allocated, measured_input, measured_output, resolve_extent;
     VkImage report_image;
     int report_crop[4], report_recorded;
     uint64_t report_completed_ticket;
@@ -42,7 +42,9 @@ static int g_present_failed,g_want=37,spatial_requested,spatial_active;
 static const char *spatial_reason;
 static _Atomic uint64_t g_fg_out_ns;
 static _Atomic int g_fg_images;
-static int configured=2160,mode=SP_SGSR2,force_fail,fg_on=1;
+static int configured=2160,mode=SP_SGSR2,force_fail,fail_resolve,fg_on=1;
+static spatial_image resolve;
+static uint64_t resolved_ticket;
 static unsigned rec_calls,fg_calls,present_calls,capture_calls,reset_flags;
 static VkExtent2D rec_target,fg_input,display={1920,1080};
 static VkImage fg_image;
@@ -52,6 +54,8 @@ static vk_capture_scale_present_sample cap;
 int dm_recon_output_height(void){return configured;}
 int dm_spatial_mode(void){return mode;}
 int dm_perf_rate_fps(void){return 30;}
+static int dm_fg_wants_input(void){return fg_on;}
+static spatial_image *spatial_display_resolved(uint64_t ticket){return resolved_ticket==ticket?&resolve:NULL;}
 static int reconstruction_pressure(dm_flow_cadence cadence){assert(cadence.period_us);return 0;}
 void vk_guest_flow_feedback(uint64_t ticket,uint32_t cadence,int stressed){assert(ticket&&cadence&&!stressed);}
 static void spatial_collect_sources(void){}
@@ -62,15 +66,18 @@ static VkExtent2D picture_extent(int w,int h){VkExtent2D p;dm_recon_picture_exte
 static spatial_image *spatial_reconstruct(vkimg_t *im,const int *raw,int flip,uint32_t w,uint32_t h,uint64_t ticket,const vk_reconstruction_input *physical){
     (void)flip;(void)physical;rec_calls++;rec_target=(VkExtent2D){w,h};
     spatial_requested=mode;g_spatial.report_input=(VkExtent2D){(unsigned)raw[2],(unsigned)raw[3]};
-    g_spatial.ticket=0;spatial_active=SP_NATIVE;
+    g_spatial.ticket=0;resolved_ticket=0;spatial_active=SP_NATIVE;
     if(mode==SP_NATIVE||force_fail||!w||!h||(w<=(unsigned)raw[2]&&h<=(unsigned)raw[3]))return NULL;
-    spatial_active=mode;g_spatial.ticket=ticket;g_spatial.image[0].texture=(vkimg_t){w,h,im->fmt,22};return &g_spatial.image[0];
+    spatial_active=mode;g_spatial.ticket=ticket;g_spatial.image[0].texture=(vkimg_t){w,h,im->fmt,22};
+    if(g_spatial.resolve_extent.width&&!fail_resolve){
+        resolved_ticket=ticket;resolve.texture=(vkimg_t){g_spatial.resolve_extent.width,g_spatial.resolve_extent.height,im->fmt,55};}
+    return &g_spatial.image[0];
 }
 static int dm_fg_frame(vkimg_t *im,const int *rect,int flip,unsigned encoding,unsigned reset,double period,VkImage gen[3],double *hold,double *out_period,VkFence *consumer){
     (void)flip;(void)encoding;(void)period;
-    fg_image=im->img;
+    fg_image=im?im->img:0;
     fg_calls++;fg_input=(VkExtent2D){(unsigned)rect[2],(unsigned)rect[3]};reset_flags=reset;
-    if(!fg_on)return 0;
+    if(!fg_on||!im)return 0;
     gen[0]=33;*hold=.01;*out_period=.01;*consumer=44;return 1;
 }
 int vk_pass_dump_user_active(void){return 1;}
@@ -86,17 +93,18 @@ static void real(uint64_t ticket,int docked){present_calls=0;present_window(&src
 int main(void){
     real(1,1);
     assert(rec_target.width==3840&&rec_target.height==2160); // must not inherit drawable limit
-    assert(rec_calls==1&&fg_calls==1&&fg_input.width==3840&&fg_input.height==2160);
-    assert(present_calls==2&&observed[0].image==33&&observed[1].image==22);
-    for(unsigned i=0;i<2;i++)assert(observed[i].w==3840&&observed[i].h==2160&&observed[i].display.width==1920&&observed[i].display.height==1080&&!observed[i].flip);
+    assert(rec_calls==1&&fg_calls==1&&fg_input.width==1920&&fg_input.height==1080);
+    assert(present_calls==2&&observed[0].image==33&&observed[1].image==55);
+    for(unsigned i=0;i<2;i++)assert(observed[i].w==1920&&observed[i].h==1080&&observed[i].display.width==1920&&observed[i].display.height==1080&&!observed[i].flip);
     assert(observed[0].ticket==0&&observed[1].ticket==1);
-    assert(fg_image==22&&g_spatial.image[0].last_use==44);
+    assert(fg_image==55&&resolve.last_use==44&&!g_spatial.image[0].last_use);
     assert(cap.reconstruction_submitted&&cap.actual_w==3840&&cap.actual_h==2160);
+    assert(cap.final_source_w==1920&&cap.final_source_h==1080);
     assert(cap.present_accepted==1&&cap.generated_accepted==1);
     // A paused setting change must not generate or reconstruct the old ticket.
     configured=1440;present_calls=0;
     present_window(&src,NULL,-1,1,1,33333333,1,1,NULL);
-    assert(rec_calls==1&&fg_calls==1&&capture_calls==1&&present_calls==1&&observed[0].w==3840);
+    assert(rec_calls==1&&fg_calls==1&&capture_calls==1&&present_calls==1&&observed[0].w==1920&&observed[0].image==55);
     g_spatial.retry_after=121;g_spatial.rcas_retry_after=121;
     real(2,1);assert(!g_spatial.retry_after&&!g_spatial.rcas_retry_after);assert(rec_target.width==2560&&rec_target.height==1440&&reset_flags==DM_RECON_SOURCE_GEOMETRY);
     g_spatial.retry_after=122;g_spatial.rcas_retry_after=122;
@@ -120,11 +128,18 @@ int main(void){
     const int modes[]={SP_BILINEAR,SP_FSR1,SP_SGSR1,SP_SGSR2};
     for(unsigned i=0;i<sizeof modes/sizeof modes[0];++i){
         mode=modes[i];configured=2160;real(10+2*i,1);
-        assert(cap.active==mode&&cap.reconstruction_submitted&&fg_image==22);
+        assert(cap.active==mode&&cap.reconstruction_submitted&&fg_image==55);
         assert(cap.present_accepted==1&&cap.generated_accepted==1);
         configured=1080;real(11+2*i,1);
         assert(cap.active==SP_NATIVE&&!cap.reconstruction_submitted&&fg_image==11);
     }
+    // The unresolvable frame remains renderable at its explicit output
+    // target. LSFG sees a skipped source and can restart on recovery.
+    configured=2160;fail_resolve=1;real(18,1);
+    assert(present_calls==1&&fg_image==0&&observed[0].image==22);
+    assert(cap.actual_w==3840&&cap.final_source_w==3840&&!cap.generated_accepted);
+    fail_resolve=0;real(19,1);
+    assert(present_calls==2&&fg_image==55&&cap.generated_accepted==1);
     return 0;
 }
 '''

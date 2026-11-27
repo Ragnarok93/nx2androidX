@@ -475,6 +475,8 @@ static void check_large_outputs(void) {
             }
             selected_mode=modes[m];
             sharpness=50;
+            const int supersampling = iw==1920 && ih==1080 && ow==3840 && oh==2160;
+            g_spatial.resolve_extent = supersampling ? (VkExtent2D){iw, ih} : (VkExtent2D){0};
             spatial_image *out=spatial_reconstruct(&src.texture,crop,0,ow,oh,++ticket,NULL);
             assert(out && spatial_active==selected_mode && out->texture.w==ow && out->texture.h==oh);
             begin();
@@ -485,18 +487,11 @@ static void check_large_outputs(void) {
             assert(abs((int)mapped[0]-64)<=3 && abs((int)mapped[1]-128)<=3 &&
                    abs((int)mapped[2]-191)<=3 && abs((int)mapped[3]-159)<=3);
             fprintf(stderr,"large %s %ux%u readback PASS\n",spatial_mode_name(selected_mode),ow,oh);
-            if (iw==1920 && ih==1080 && ow==3840 && oh==2160) {
-                // Resolve the reconstructed offscreen image to the drawable
-                // with the same full-rect linear blit used by present_one.
-                // Keep the source image untouched for the following filter.
-                assert(spatial_image_ready(SP_DISPLAY, iw, ih,
-                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, g_sfmt));
-                spatial_image *display=&g_spatial.image[SP_DISPLAY];
-                int full[4]={0,0,(int)ow,(int)oh};
+            if (supersampling) {
+                spatial_image *display = spatial_display_resolved(ticket);
+                assert(display && display->texture.w == iw && display->texture.h == ih);
+                assert(!spatial_display_resolved(ticket - 1));
                 begin();
-                barrier(test_cb,display->texture.img,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                spatial_blit(test_cb,out->texture.img,display->texture.img,full,iw,ih,0,VK_FILTER_LINEAR);
-                barrier(test_cb,display->texture.img,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
                 region.imageOffset=(VkOffset3D){(int)(iw/2),(int)(ih/2),0};
                 vkCmdCopyImageToBuffer(test_cb,display->texture.img,VK_IMAGE_LAYOUT_GENERAL,pixels,1,&region);
                 complete();

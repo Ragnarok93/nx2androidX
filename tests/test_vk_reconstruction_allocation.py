@@ -41,6 +41,7 @@ static unsigned first_mandatory, first_optional, attempts;
 static void spatial_image_drop(spatial_image *s) { if(s==&g_spatial.image[SP_INTERMEDIATE] && s->texture.img) ++evictions; *s=(spatial_image){0}; }
 static int spatial_wait(uint64_t fence,uint64_t *elapsed) { assert(fence); ++*elapsed; return 0; }
 static int spatial_pipeline_ready(int pass) { (void)pass; return 1; }
+static int spatial_drop_retired_resolve(void) { return 0; }
 static void spatial_flow_defer(uint64_t ticket) { assert(ticket); ++deferred; }
 static void spatial_report(int requested,int active,const char *reason,uint64_t ticket) { (void)requested;(void)reason;(void)ticket;last_mode=active; }
 static int spatial_image_ready(int index,unsigned w,unsigned h,VkImageUsageFlags usage,VkFormat fmt) {

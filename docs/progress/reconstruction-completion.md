@@ -634,3 +634,29 @@ reconstruct the target draw's vertices or covered region from a capture.
 - Source swizzle and coordinate phase guards at
   `b6e3dce2f92070a719fae42aaefca896b81cc99e` passed
   [software Vulkan and NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022704532).
+
+## 2026-11-27 — Display-oriented LSFG handoff
+
+- Milestone 7 is Host validated for this handoff. A reconstruction target
+  above the drawable stays at its configured offscreen extent. When LSFG
+  is configured, reconstruction also resolves the real image to the
+  display picture extent in the same submission. LSFG and the real
+  presenter read that same resolved image. The resolved image tracks its
+  last reader independently of the larger reconstruction.
+- If the optional resolve cannot allocate or retire safely, the real
+  frame stays on the offscreen presentation path. LSFG receives a
+  missing source and restarts its warmup when the resolve returns.
+  Tests distinguish the actual reconstruction, final source, drawable,
+  and swapchain sizes. Paused redraw reuses the most recent real image.
+- Software Vulkan read back the production 2160p-to-1080p resolve for
+  Bilinear, FSR 1, GSR 1 and GSR 2 with synchronization validation.
+  The host presentation harness checked matching real and LSFG input
+  images, disabled FG, allocation fallback, and recovery. The harness
+  substitutes the LSFG engine. Physical generated image production and
+  sustained device pacing remain Awaiting device validation.
+- Pacing commit `f8f69b44be53ead8528be45db5d360ee453a71f1` passed
+  [software Vulkan and Android NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46023387308).
+  Signed builder artifacts were verified for
+  [source ownership](https://github.com/Ragnarok93/nx2androidX/actions/runs/46021326675/artifacts/15208658477),
+  [pre-composition replay](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022215963/artifacts/15211630129)
+  and [source swizzle and phase guards](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022704538/artifacts/15211895617).

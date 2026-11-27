@@ -12,7 +12,7 @@ int vk_pass_dump_user_active(void);
 #endif
 
 enum { SP_EASU, SP_RCAS, SP_GSR1, SP_VIVID, SP_PASS_COUNT };
-enum { SP_SOURCE, SP_INTERMEDIATE, SP_DISPLAY, SP_OUTPUT, SP_FLOW0, SP_FLOW1, SP_IMAGE_COUNT };
+enum { SP_SOURCE, SP_INTERMEDIATE, SP_DISPLAY, SP_OUTPUT, SP_FLOW0, SP_FLOW1, SP_RESOLVE, SP_IMAGE_COUNT };
 enum { SP_SLOTS = 8, SP_QUERY_STRIDE = 10 };
 
 typedef struct {
@@ -55,7 +55,9 @@ static struct {
     float query_budget[SP_SLOTS], measured_budget;
     uint32_t query_cadence[SP_SLOTS], measured_cadence;
     uint64_t query_epoch[SP_SLOTS], measured_epoch;
-    dm_recon_shared_retry shared_output_retry;
+    dm_recon_shared_retry shared_output_retry, resolve_retry;
+    VkExtent2D resolve_extent;
+    uint64_t resolve_ticket;
     double gpu_ms, measured_stage_ms[4];
     uint64_t query_history_epoch[SP_SLOTS], measured_history_epoch;
     int query_history_reset[SP_SLOTS], measured_history_reset;
@@ -125,6 +127,9 @@ static void spatial_drop_images(void) {
     memset(g_spatial.completion_ticket, 0, sizeof g_spatial.completion_ticket);
     g_spatial.measured_ticket = 0;
     dm_recon_shared_succeeded(&g_spatial.shared_output_retry);
+    dm_recon_shared_succeeded(&g_spatial.resolve_retry);
+    g_spatial.resolve_extent = (VkExtent2D){0};
+    g_spatial.resolve_ticket = 0;
 }
 
 static VkFormat spatial_unorm_format(VkFormat fmt) {
@@ -582,6 +587,41 @@ static int spatial_flow_record(VkCommandBuffer cb, unsigned slot, VkImage image,
 }
 #endif
 
+// Optional display-oriented image for LSFG. Let a larger reconstruction
+// complete independently if the display-size allocation cannot be made.
+static int spatial_drop_retired_resolve(void) {
+    spatial_image *resolve = &g_spatial.image[SP_RESOLVE];
+    if (!resolve->texture.img || (resolve->last_use &&
+        vkWaitForFences(V.dev, 1, &resolve->last_use, VK_TRUE, 0) != VK_SUCCESS)) return 0;
+    spatial_image_drop(resolve);
+    g_spatial.resolve_ticket = 0;
+    return 1;
+}
+
+static spatial_image *spatial_prepare_resolve(uint32_t w, uint32_t h, uint64_t ticket) {
+    VkExtent2D extent = g_spatial.resolve_extent;
+    if (!extent.width || !extent.height || extent.width > w || extent.height > h ||
+        (extent.width == w && extent.height == h)) return NULL;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    spatial_image *resolve = &g_spatial.image[SP_RESOLVE];
+    if (spatial_image_matches(resolve, extent.width, extent.height, usage, g_sfmt)) return resolve;
+    if (resolve->last_use && vkWaitForFences(V.dev, 1, &resolve->last_use, VK_TRUE, 0) != VK_SUCCESS)
+        return NULL;
+    if (!dm_recon_shared_allowed(&g_spatial.resolve_retry, g_sfmt, extent.width, extent.height, ticket))
+        return NULL;
+    if (!spatial_image_ready(SP_RESOLVE, extent.width, extent.height, usage, g_sfmt)) {
+        dm_recon_shared_failed(&g_spatial.resolve_retry, g_sfmt, extent.width, extent.height, ticket);
+        return NULL;
+    }
+    dm_recon_shared_succeeded(&g_spatial.resolve_retry);
+    return resolve;
+}
+
+static spatial_image *spatial_display_resolved(uint64_t ticket) {
+    return ticket && ticket == g_spatial.ticket && ticket == g_spatial.resolve_ticket ?
+        &g_spatial.image[SP_RESOLVE] : NULL;
+}
+
 // A nonzero ticket identifies a unique rendered game frame. Generated frames
 // and overlay-only presents never enter this function. Cached output remains
 // readable by LSFG and the presenter until the next reconstruction.
@@ -595,6 +635,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     // Intra-call fallback still retries through the existing backend labels.
     if (ticket <= g_spatial.attempted_ticket) return NULL;
     g_spatial.attempted_ticket = ticket;
+    if (!g_spatial.resolve_extent.width) (void)spatial_drop_retired_resolve();
     g_spatial.report_alloc_attempts = g_spatial.report_allocations = g_spatial.report_alloc_waits = 0;
     g_spatial.report_alloc_wait_ns = g_spatial.report_slot_wait_ns = 0;
     g_spatial.ticket = 0;
@@ -818,6 +859,7 @@ select_backend:;
         spatial_image_ready(SP_SOURCE, iw, ih, stage_usage, raster ? sample_fmt : g_sfmt));
     // A cached optional image may have consumed the budget for mandatory
     // output/source storage. Retire it once before degrading the base filter.
+    if (!base_ready && spatial_drop_retired_resolve()) goto select_spatial_bilinear;
     if (!base_ready && !reclaimed_optional && intermediate->texture.img) {
         reclaimed_optional = 1;
         if (!intermediate->last_use || !spatial_wait(intermediate->last_use, &g_spatial.report_alloc_wait_ns)) {
@@ -874,6 +916,8 @@ select_backend:;
             0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &info};
         vkUpdateDescriptorSets(V.dev, 1, &write, 0, NULL);
     }
+    spatial_image *resolve = (dst_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ?
+        spatial_prepare_resolve(w, h, ticket) : NULL;
     VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     if (vkBeginCommandBuffer(cb, &begin)) goto submit_error;
     vk_img_barrier_all(cb);
@@ -937,6 +981,13 @@ select_backend:;
         if (flow) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 9);
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 1);
     }
+    if (resolve) {
+        const int full[4] = {0, 0, (int)w, (int)h};
+        barrier(cb, resolve->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        spatial_blit(cb, output->texture.img, resolve->texture.img, full,
+                     resolve->texture.w, resolve->texture.h, 0, VK_FILTER_LINEAR);
+        barrier(cb, resolve->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    }
     if (vkEndCommandBuffer(cb)) goto submit_error;
     g_spatial.report_recorded = 1;
     if (vkResetFences(V.dev, 1, &fence)) goto submit_error;
@@ -976,6 +1027,8 @@ select_backend:;
     if (stage_needed) stage->last_use = fence;
     if (rcas || post) intermediate->last_use = fence;
     output->last_use = fence;
+    g_spatial.resolve_ticket = resolve ? ticket : 0;
+    if (resolve) resolve->last_use = fence;
     // Effective processing is part of LSFG's source contract, including GSR1's
     // built-in sharpening. A changed slider resets LSFG once on the next real frame.
     g_spatial.report_sharpness_applied = (rcas || post || mode == SP_SGSR1) ?

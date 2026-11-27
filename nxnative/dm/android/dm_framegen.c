@@ -45,6 +45,16 @@ void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct) {
     VLOG("frame generation: %s, x%d, target %d fps, flow %d%%", on ? "on" : "off", atomic_load(&g_mult), atomic_load(&g_target), atomic_load(&g_flow));
 }
 
+int dm_fg_wants_input(void) {
+#ifdef NX_LSFG
+    settings_init();
+    return atomic_load(&g_on) > 0 &&
+           (atomic_load(&g_state) >= 0 || atomic_load(&g_reprobe));
+#else
+    return 0;
+#endif
+}
+
 int dm_fg_status(char *buf, int n) {
     settings_init();
     int st = atomic_load(&g_state);
@@ -180,7 +190,10 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         reason("%s", "uncapped source rate; select a fixed FPS mode for frame generation");
         return 0;
     }
-    if (!im || !im->img || im->layout != VK_IMAGE_LAYOUT_GENERAL) return 0;
+    if (!im || !im->img || im->layout != VK_IMAGE_LAYOUT_GENERAL) {
+        F.count = F.warm_streak = 0;
+        return 0;
+    }
     if (atomic_exchange(&g_reprobe, 0) && F.state < 0) {
         F.state = 0;
         atomic_store(&g_state, 0);

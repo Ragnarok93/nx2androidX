@@ -311,7 +311,11 @@ validation and software Vulkan readbacks. Those fixtures cover the replay
 geometry and reconstruction recorders. Gameplay coverage and output on
 Xclipse and Adreno require device traces.
 
-LSFG outputs and pause-menu redraws use the reconstructed images already available. Vivid applies display-referred SDR contrast and saturation after LSFG, followed by the runtime overlay. sRGB images use compatible UNORM views for the spatial shaders so they filter display-encoded values, then present and composite with their sRGB encoding intact.
+When LSFG is configured and the reconstruction target exceeds the
+drawable, reconstruction produces a display-sized resolve in the same
+submission. LSFG and the real presenter read that resolved image in queue
+order. A missing resolve preserves the offscreen real frame and resets LSFG
+warmup. Pause-menu redraw uses the last completed real image. Vivid applies display-referred SDR contrast and saturation after LSFG, followed by the runtime overlay. sRGB images use compatible UNORM views for the spatial shaders so they filter display-encoded values, then present and composite with their sRGB encoding intact.
 
 Standalone exports from new porter installations derive a reproducible private signing key and certificate from the base Switch title ID and a private porter seed. The versioned derivation is independent of runtime code, game updates and output paths. The seed survives porter updates and tool resets. A missing derived key can be regenerated from its seed and verified against the recorded certificate fingerprint. Game updates, build options and export formats share that key. The version-code floor is stored per Android package, and a recompile uses the same application ID when built for the same package. Installations with a legacy signing key keep using it for titles without a dedicated key because older exports may have no local title record. Signing files live in the porter's private state, outside the build workspace and exported APK. Moving upgrade work to another installation requires the original key or the original seed. Keep the package version records when moving full recompiles.
 

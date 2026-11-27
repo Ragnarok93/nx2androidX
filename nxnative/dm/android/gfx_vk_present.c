@@ -1273,8 +1273,8 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     int vivid = dm_vivid_enabled() && vivid_record(cb, src, crop, flip_y, tgt, tview, dx, dy, dw, dh);
     if (vivid) lay = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     else if (!flip_y && cw == (int)dw && ch == (int)dh &&
-             src == g_spatial.image[SP_OUTPUT].texture.img &&
-             g_spatial.image[SP_OUTPUT].texture.fmt == g_sfmt) {
+             (src == g_spatial.image[SP_OUTPUT].texture.img ||
+              src == g_spatial.image[SP_RESOLVE].texture.img) && im && im->fmt == g_sfmt) {
         VkImageCopy copy = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {cx, cy, 0},
             {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {dx, dy, 0}, {dw, dh, 1}};
         vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, tgt, lay, 1, &copy);
@@ -1330,6 +1330,8 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     if (vivid) g_spatial.image[SP_DISPLAY].last_use = g_pfence[k];
     if (src == g_spatial.image[SP_OUTPUT].texture.img)
         g_spatial.image[SP_OUTPUT].last_use = g_pfence[k];
+    if (src == g_spatial.image[SP_RESOLVE].texture.img)
+        g_spatial.image[SP_RESOLVE].last_use = g_pfence[k];
     VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &g_done_sem[k], 1, &g_swap, &idx, NULL};
     VkPresentTimeGOOGLE ptm = {++g_pace_id, period >= 0 ? pace_desired(period) : 0};
     VkPresentTimesInfoGOOGLE pti = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, NULL, 1, &ptm};
@@ -1485,6 +1487,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
 
     unsigned source_reset = 0;
     spatial_image *reconstructed = NULL;
+    int needs_fg_resolve = 0;
     if (redraw) {
         if (ticket && g_spatial.ticket == ticket) reconstructed = &g_spatial.image[SP_OUTPUT];
     } else if (period >= 0) {
@@ -1515,11 +1518,17 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         g_spatial.flow_budget_ms = cadence.budget_ms;
         g_spatial.flow_pressure = reconstruction_pressure(cadence);
         vk_guest_flow_feedback(ticket, cadence.period_us, g_spatial.flow_pressure);
+        needs_fg_resolve = target.width >= picture.width && target.height >= picture.height &&
+            (target.width > picture.width || target.height > picture.height);
+        g_spatial.resolve_extent = needs_fg_resolve && cadence.period_us && dm_fg_wants_input() ?
+            picture : (VkExtent2D){0};
         reconstructed = spatial_reconstruct(im, raw, flip_y, target.width, target.height, ticket,
                                            full ? physical : NULL);
     }
 
-    vkimg_t *source = reconstructed ? &reconstructed->texture : im;
+    spatial_image *resolved = reconstructed ? spatial_display_resolved(ticket) : NULL;
+    spatial_image *real_image = resolved ? resolved : reconstructed;
+    vkimg_t *source = real_image ? &real_image->texture : im;
     int full[4] = {0, 0, (int)source->w, (int)source->h};
     const int *rect = reconstructed ? full : raw;
     if (reconstructed) flip_y = 0;
@@ -1533,8 +1542,11 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     VkFence fg_fence = VK_NULL_HANDLE;
     unsigned encoding = (unsigned)source->fmt * 1024u;
     if (reconstructed) encoding += g_spatial.encoding;
-    int ng = dm_fg_frame(source, rect, flip_y, encoding, source_reset, period, gen, &hold, &out_period, &fg_fence);
-    if (reconstructed && fg_fence) reconstructed->last_use = fg_fence;
+    // Both consumers use the display-oriented resolve when it exists.
+    // A failed resolve preserves the offscreen real result and skips FG.
+    vkimg_t *fg_source = needs_fg_resolve && reconstructed && !resolved ? NULL : source;
+    int ng = dm_fg_frame(fg_source, rect, flip_y, encoding, source_reset, period, gen, &hold, &out_period, &fg_fence);
+    if (real_image && fg_fence) real_image->last_use = fg_fence;
     atomic_store(&g_fg_out_ns, out_period > 0 ? (uint64_t)(out_period * 1e9) : 0);
     atomic_store(&g_fg_images, ng > 0 ? ng + 1 : 1);
     const int capture = vk_pass_dump_user_active();
@@ -1546,8 +1558,8 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             .source_w = g_spatial.report_input.width, .source_h = g_spatial.report_input.height,
             .output_w = target.width, .output_h = target.height,
             .display_w = picture.width, .display_h = picture.height,
-            .actual_w = reconstructed ? source->w : 0,
-            .actual_h = reconstructed ? source->h : 0,
+            .actual_w = reconstructed ? reconstructed->texture.w : 0,
+            .actual_h = reconstructed ? reconstructed->texture.h : 0,
             .guest_w = im->w, .guest_h = im->h,
             .crop = {raw[0], raw[1], raw[2], raw[3]},
             .final_source_w = (unsigned)rect[2], .final_source_h = (unsigned)rect[3],
