@@ -27,9 +27,12 @@ class DrawInputCapture(unittest.TestCase):
             subprocess.run([exe], check=True, env={**os.environ, "DM_ROOT": folder})
             with (tmp / "gpu_draw_inputs.tsv").open() as report:
                 rows = list(csv.DictReader(report, delimiter="\t"))
-            self.assertEqual(len(rows), 2)
-            self.assertEqual([row["kind"] for row in rows], ["indexed-indirect", "index-binding-prefix"])
-            for row, offset, value in zip(rows, [32, 68], [0xAB, 0xCD]):
+            self.assertEqual([row["kind"] for row in rows],
+                             ["indexed-indirect", "index-binding-prefix", "indexed-direct"])
+            self.assertEqual([rows[2][key] for key in
+                              ("count", "stride", "binding_extent", "vertex_offset", "first_instance", "instances")],
+                             ["3", "2", "6", "-2", "7", "1"])
+            for row, offset, value in zip(rows, [32, 68, 60], [0xAB, 0xCD, 0xEF]):
                 self.assertEqual(int(row["vk_buffer_offset"]), offset)
                 self.assertEqual(row["draw"], "19")
                 raw = bytes.fromhex(row["raw_hex"])

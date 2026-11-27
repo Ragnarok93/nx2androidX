@@ -9,6 +9,8 @@ typedef struct {
     uint64_t address, pool, pool_offset, pool_serial, binding_extent;
     uint64_t present, submission, draw, dispatches, vs, fs, gs;
     unsigned size, stride, count, divisor, attr_count;
+    uint32_t first_instance, instances;
+    int32_t vertex_offset;
     struct { uint32_t location, format, offset; } attr[16];
     int pass, index_type, stream;
     const char *kind;
@@ -97,6 +99,17 @@ static int input_capture_add(input_sample_t sample, const char *kind, uint64_t a
     return 1;
 }
 
+static int input_capture_direct(input_sample_t sample, uint64_t address, VkBuffer buffer,
+                               VkDeviceSize offset, unsigned index_bytes, unsigned count) {
+    if (!index_bytes || !count || count > INPUT_BYTES / index_bytes || offset % 4) return 0;
+    sample.count = count;
+    sample.stride = index_bytes;
+    sample.binding_extent = count * index_bytes;
+    // Preserve the logical index count while aligning the diagnostic copy.
+    unsigned copy_bytes = ((unsigned)sample.binding_extent + 3) & ~3u;
+    return input_capture_add(sample, "indexed-direct", address, buffer, offset, copy_bytes, 0);
+}
+
 static void input_capture_end_pass(void) {
     if (!g_input_pending) return;
     if (g_pass_wmem || g_tf_in_pass) {
@@ -137,7 +150,7 @@ static void input_capture_write(void) {
             input_capture_path(tmp, ".tmp");
             FILE *f = fopen(tmp, "w");
             if (f) {
-                fputs("present\tsubmission\tpass\tdraw\tprior_dispatches\tvs\tfs\tgs\tkind\tindex_type\tstream\tstride\tcount\tguest_address\tpool\tpool_offset\tpool_serial\tvk_buffer_offset\tbinding_extent\tdivisor\tattributes\tbytes\tfnv1a64\traw_hex\n", f);
+                fputs("present\tsubmission\tpass\tdraw\tprior_dispatches\tvs\tfs\tgs\tkind\tindex_type\tstream\tstride\tcount\tguest_address\tpool\tpool_offset\tpool_serial\tvk_buffer_offset\tbinding_extent\tdivisor\tattributes\tbytes\tfnv1a64\traw_hex\tvertex_offset\tfirst_instance\tinstances\n", f);
                 for (unsigned i = 0; i < g_input_count; i++) {
                     const input_sample_t *s = &g_inputs[i];
                     const uint8_t *bytes = (const uint8_t *)g_input_map + i * INPUT_BYTES;
@@ -154,7 +167,7 @@ static void input_capture_write(void) {
                                 s->attr[a].format, s->attr[a].offset);
                     fprintf(f, "\t%u\t%016llx\t", s->size, (unsigned long long)vk_pd_hash(bytes, s->size));
                     for (unsigned j = 0; j < s->size; j++) fprintf(f, "%02x", bytes[j]);
-                    fputc('\n', f);
+                    fprintf(f, "\t%d\t%u\t%u\n", s->vertex_offset, s->first_instance, s->instances);
                 }
                 int ok = !ferror(f);
                 if (fclose(f) != 0) ok = 0;

@@ -262,9 +262,23 @@ allocation once it is the sole owner.
 When the game draws into its final display texture, presentation receives
 the native output of that draw. At equal input and output sizes the upscaler
 is idle, even if earlier passes used smaller physical attachments. The FFR
-RADV reference capture shows a 1384×780 scene passing through a 1728×972 draw
-and then a 1920×1080 display draw. Its final draw needs a separate proof
-before a physical input can replace that display output.
+docked reference capture shows a 1384×780 scene passing through an
+edge-directed 1728×972 enlargement and a smoothstep-filtered 1920×1080
+enlargement. Both draws write zero alpha. The second pass loads its
+attachment before drawing, so substitution also needs to prove which pixels
+the guest would overwrite. The existing frame path keeps the guest draws and
+later blending intact. Capture metadata and center tiles establish the
+dependency chain while leaving the valid source crop and exact geometry
+unresolved.
+
+The optional software Vulkan guest probe runs the local SPIR-V modules with
+synthetic vertices, uniforms and samplers. It tests a private reconstruction
+image committed to the guest extent, including the original alpha contract,
+an alpha-sensitive consumer and allocation fallback. In a full GPU capture,
+`DM_VK_PASSDUMP_INPUT_VS` selects a vertex shader for direct-indexed draw
+samples in addition to the existing indirect path. The report carries the
+logical index count and base offsets. Sampled vertex prefixes still need to
+cover every referenced vertex before they can establish raster coverage.
 
 The signed Android workflow requires the resolution host tests, SPIR-V
 validation and software Vulkan readbacks. Those fixtures cover the replay

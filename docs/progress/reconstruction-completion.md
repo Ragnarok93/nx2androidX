@@ -338,3 +338,62 @@ and device acceptance remains open. Milestones 3–9 are **Pending**.
 - Next action is a patterned software Vulkan fixture with explicit
   synthetic uniforms and coverage. Compare RGB and alpha contracts
   before admitting any production insertion.
+
+## 2026-11-27 — Milestone 2 software Vulkan checkpoint
+
+Milestone 2 is **In progress**. The synthetic image and composition checks
+passed. FFR docked insertion is **Blocked** on exact draw and source
+coverage evidence. Milestones 3–9 are **Pending** under the plan's
+dependency order. Milestones 0 and 1 still await device validation.
+
+- Android run [45972298484](https://github.com/Ragnarok93/nx2androidX/actions/runs/45972298484)
+  passed at `c435967a2a3f63cc7369d4bb12d4012ca96fcf49`, including the
+  repository signing verification and native smoke link. GitHub listed
+  [artifact 15185518305](https://github.com/Ragnarok93/nx2androidX/actions/runs/45972298484/artifacts/15185518305)
+  unexpired. This is the builder APK for the CI-repair checkpoint.
+- Lavapipe ran both supplied fragment modules with the supplied vertex
+  module, synthetic vertices and uniforms, linear clamp sampling, and
+  patterned color and alpha. Both original and fixture-adapted modules
+  passed SPIR-V validation. The edge-directed and smoothstep filters
+  differed from bilinear RGB by over two code values at 258 and 208 of
+  1,024 pixels, respectively. Both returned zero alpha everywhere under
+  full raster coverage.
+- The synthetic insertion prepares a private output and commits it to the
+  guest-sized attachment. Preserving the draw's zero-alpha write preserved
+  the later alpha-sensitive blend. The alpha-preserving blit alone changed
+  that blend. Partial coverage preserved the loaded target outside the
+  scissor. Aliased input, partial coverage and injected allocation failure
+  refused insertion and the subsequent guest draw reproduced its reference
+  bytes. The probe exercises synthetic insertion, not NVN replay insertion.
+  Run it with `python3 tests/run_vk_spatial_upscaler.py --guest-shaders <local-extracted-directory>`.
+- Each archived center tile had alpha 255 at FFR pass 74 and alpha zero
+  at passes 75 and 76. Pass 74's viewport was 1383×778 for a 1384×780
+  image, with LOAD. Pass 75's clear establishes a candidate with a defined
+  target background. Pass 76 is the narrower insertion candidate because
+  it retains the first enlargement and leaves later guest composition in
+  order. Its LOAD requires exact written pixels and preservation of the
+  prior attachment outside the draw. The archive lacks its index/vertex
+  data, effective sampler and graphics uniform values, and cannot
+  establish full coverage or reconstruct the live draw's UV transform.
+- Added opt-in direct indexed draw sampling to the existing Vulkan
+  diagnostic capture. The existing `DM_VK_PASSDUMP_INPUT_VS` setting now
+  survives arming from the menu. A matching direct draw reports its
+  complete small index range, base vertex and instance counts, and
+  bounded vertex prefixes. The input capture test verifies alignment,
+  range limits, deferred reads and report fields. Scope excludes
+  converted quads and ranges outside the bounded readback.
+- Local verification passed the 54-check reconstruction host runner, the
+  draw input capture test, the archived trace rerun, the guest Vulkan
+  probe with synchronization validation, and the GSR 2/large-output
+  Vulkan probe. The latter exercised every backend at 1440p and 2160p and
+  resolved 2160p to 1080p. These runs do not exercise FFR docked
+  presentation or on-device LSFG. Local full discovery lacked some
+  Python 3.14 and Android CI dependencies, so the signed workflow is the
+  full-suite gate.
+- The remaining FFR evidence is a capture of the actual draw inputs and
+  effective sampler/uniform state for pass 76. A targeted full GPU
+  capture can use vertex key `6e9683d5d012ebac`. The existing targeted
+  Vulkan sampler and uniform logs can corroborate the capture. Prove
+  the producer crop, sample coordinates and destination coverage before
+  applying reconstruction inside the guest pass. Preserve the currently
+  composed image for presentation until that boundary is proven.

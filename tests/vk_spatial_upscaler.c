@@ -109,7 +109,11 @@ static uint8_t *mapped;
 
 static void setup_buffers(void) {
     VkBufferCreateInfo buf = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, OUT * OUT * 8,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+#ifdef GUEST_ENLARGEMENT_PROBE
+        | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+#endif
+    };
     CHECK(vkCreateBuffer(V.dev, &buf, NULL, &pixels));
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(V.dev, pixels, &req);
@@ -511,6 +515,10 @@ static void check_large_outputs(void) {
 #include "vk_gsr2_probe.inc"
 #endif
 
+#ifdef GUEST_ENLARGEMENT_PROBE
+#include "vk_guest_enlargement_probe.inc"
+#endif
+
 int main(void) {
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "nx2androidX spatial test",
         1, NULL, 0, VK_API_VERSION_1_3};
@@ -527,7 +535,19 @@ int main(void) {
     VkPhysicalDeviceDynamicRenderingFeatures dynamic = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES};
     VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &dynamic};
+#ifdef GUEST_ENLARGEMENT_PROBE
+    VkPhysicalDeviceVulkan11Features v11 = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    dynamic.pNext = &v11;
+#endif
     vkGetPhysicalDeviceFeatures2(V.pd, &features);
+#ifdef GUEST_ENLARGEMENT_PROBE
+    if (!v11.shaderDrawParameters) return 77;
+    v11 = (VkPhysicalDeviceVulkan11Features){
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .shaderDrawParameters = VK_TRUE,
+    };
+#endif
     if (!dynamic.dynamicRendering) return 77;
     vkGetPhysicalDeviceQueueFamilyProperties(V.pd, &count, NULL);
     VkQueueFamilyProperties families[count];
@@ -543,6 +563,9 @@ int main(void) {
     vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     V.has_dynrender = 1;
     setup_buffers();
+#ifdef GUEST_ENLARGEMENT_PROBE
+    check_guest_enlargement();
+#endif
 
 #ifdef SGSR2_HOST_PROBE
     check_temporal();

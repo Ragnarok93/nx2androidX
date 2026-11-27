@@ -908,7 +908,7 @@ static int diag_capture_arm(int delay, int full) {
     static const char *const settings[][2] = {
         {"DM_VK_PASSDUMP_FULL", "1"}, {"DM_VK_PASSDUMP_EFFECTS", "0"},
         {"DM_VK_PASSDUMP_DEPTH_STATE", "1"}, {"DM_VK_PASSDUMP_INPUTS", "1"},
-        {"DM_VK_PASSDUMP_INPUT_VS", ""}, {"DM_VK_PASSDUMP_LIMIT", "96"},
+        {"DM_VK_PASSDUMP_LIMIT", "96"},
         // Allow the MRT and the later float effects to fit in the same sample.
         {"DM_VK_PASSDUMP_MAX_MB", "80"}, {"DM_VK_PASSDUMP_RAW", "1"},
         {"DM_VK_PASSDUMP_FRAMES", "1"}, {"DM_VK_PASSDUMP_SKIP", "0"},
@@ -942,6 +942,8 @@ static int diag_capture_arm(int delay, int full) {
                   "isolated_depth_transfer_control=0.625\n", f);
             for (unsigned i = 0; i < sizeof settings / sizeof settings[0]; i++)
                 fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
+            const char *input_vs = getenv("DM_VK_PASSDUMP_INPUT_VS");
+            fprintf(f, "DM_VK_PASSDUMP_INPUT_VS=%016llx\n", input_vs ? strtoull(input_vs, NULL, 16) : 0);
         }
         fclose(f);
     }

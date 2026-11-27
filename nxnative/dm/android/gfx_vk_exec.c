@@ -3672,32 +3672,44 @@ static void capture_indexed_inputs(const p_draw_idx *d, VkBuffer arguments, VkDe
                                    VkBuffer count_buffer, VkDeviceSize count_offset,
                                    VkBuffer indices, VkDeviceSize index_offset, VkIndexType type) {
     if (g_input_draws >= INPUT_PER_PASS || (g_input_vs && g_input_vs != S.sh[0]->key)) return;
-    unsigned stride = count_buffer ? (unsigned)d->mdi_stride : 20;
-    unsigned max = count_buffer ? (unsigned)d->mdi_max : 1;
-    unsigned records = 1 + (INPUT_BYTES - 20) / stride;
-    if (records > max) records = max;
     input_sample_t sample = {
         .present = g_tex_frame, .submission = g_set_epoch, .pass = g_sub_pass - 1,
         .draw = g_vkst.draws, .dispatches = g_vkst.dispatches, .vs = S.sh[0]->key,
         .fs = S.sh[1] ? S.sh[1]->key : 0, .gs = S.sh[2] ? S.sh[2]->key : 0,
-        .index_type = type, .stream = -1, .stride = stride, .count = max,
-        .binding_extent = (uint64_t)(max - 1) * stride + 20,
+        .index_type = type, .stream = -1,
     };
-    if (!input_capture_add(sample, "indexed-indirect", d->ind, arguments, argument_offset,
-                           (uint64_t)(records - 1) * stride + 20, 0)) return;
-    ++g_input_draws;
-    if (count_buffer) {
-        input_sample_t count = sample;
-        count.stride = 4;
-        count.binding_extent = 4;
-        input_capture_add(count, "draw-count", d->mdi_cnt, count_buffer, count_offset, 4, 0);
+    unsigned index_bytes = d->itype == 0 ? 1 : d->itype == 1 ? 2 : 4;
+    if (d->ind) {
+        unsigned stride = count_buffer ? (unsigned)d->mdi_stride : 20;
+        unsigned max = count_buffer ? (unsigned)d->mdi_max : 1;
+        unsigned records = 1 + (INPUT_BYTES - 20) / stride;
+        if (records > max) records = max;
+        sample.stride = stride;
+        sample.count = max;
+        sample.binding_extent = (uint64_t)(max - 1) * stride + 20;
+        if (!input_capture_add(sample, "indexed-indirect", d->ind, arguments, argument_offset,
+                               (uint64_t)(records - 1) * stride + 20, 0)) return;
+        if (count_buffer) {
+            input_sample_t count = sample;
+            count.stride = 4;
+            count.binding_extent = 4;
+            input_capture_add(count, "draw-count", d->mdi_cnt, count_buffer, count_offset, 4, 0);
+        }
+        sample.stride = index_bytes;
+        sample.count = 0;
+        sample.binding_extent = 0; // Vulkan's vkCmdBindIndexBuffer has no explicit size.
+        input_capture_add(sample, "index-binding-prefix", d->ibuf, indices, index_offset, INPUT_BYTES, 1);
+    } else {
+        sample.vertex_offset = d->base_vertex;
+        sample.first_instance = (uint32_t)d->base_instance;
+        sample.instances = d->instances ? (uint32_t)d->instances : 1;
+        if (!input_capture_direct(sample, d->ibuf, indices, index_offset, index_bytes,
+                                  (unsigned)d->count)) return;
     }
-    sample.stride = d->itype == 0 ? 1 : d->itype == 1 ? 2 : 4;
+    ++g_input_draws;
     sample.count = 0;
-    sample.binding_extent = 0; // Vulkan's vkCmdBindIndexBuffer has no explicit size.
-    input_capture_add(sample, "index-binding-prefix", d->ibuf, indices, index_offset, INPUT_BYTES, 1);
-    // A prefix is only a sample of the binding. firstIndex, vertexOffset and
-    // firstInstance are in the GPU argument records and may point outside it.
+    // A prefix is only a sample of the binding. Draw offsets can point
+    // beyond it even when the complete index range fits.
     for (unsigned i = 0; i < g_input_key.nbind; i++) {
         unsigned binding = g_input_key.bind[i].binding;
         if (binding >= 16) continue; // default attributes have no guest pool
@@ -3707,6 +3719,7 @@ static void capture_indexed_inputs(const p_draw_idx *d, VkBuffer arguments, VkDe
         sample.attr_count = 0;
         for (unsigned a = 0; a < g_input_key.nattr; a++) {
             if (g_input_key.attr[a].binding != binding) continue;
+            if (sample.attr_count == sizeof sample.attr / sizeof sample.attr[0]) break;
             unsigned n = sample.attr_count++;
             sample.attr[n].location = g_input_key.attr[a].loc;
             sample.attr[n].format = g_input_key.attr[a].fmt;
@@ -3777,7 +3790,15 @@ static void draw_idx(const p_draw_idx *d) {
         bc_index(cb, b, o, VK_INDEX_TYPE_UINT32); if (!(dbg_draw() & 1) && g_ok) vkCmdDrawIndexed(cb, (uint32_t)n, inst, 0, d->base_vertex, (uint32_t)d->base_instance); return; }
     if (io % isz) { VKRED_ONCE(57, "index buffer offset not aligned to its index size"); return; }
     bc_index(cb, ib, io, it);
-    if (!(dbg_draw() & 1) && g_ok) { int xf = xfb_begin(cb); vkCmdDrawIndexed(cb, (uint32_t)d->count, inst, 0, d->base_vertex, (uint32_t)d->base_instance); if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf); }
+    if (!(dbg_draw() & 1) && g_ok) {
+        // Direct draws are opt-in and shader-filtered so they cannot consume
+        // the generic capture's budget before the indirect samples arrive.
+        if (g_input_capture && g_input_vs && g_pd_state == 1 && !(dbg_draw() & 2))
+            capture_indexed_inputs(d, VK_NULL_HANDLE, 0, VK_NULL_HANDLE, 0, ib, io, it);
+        int xf = xfb_begin(cb);
+        vkCmdDrawIndexed(cb, (uint32_t)d->count, inst, 0, d->base_vertex, (uint32_t)d->base_instance);
+        if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf);
+    }
 }
 static nvn_hmap g_cpipes = {.klen = 32};   // {shader, integer texel masks, R32 storage texel mask}
 static pthread_mutex_t g_cpipe_mu = PTHREAD_MUTEX_INITIALIZER;   // the replay thread and compute_warm

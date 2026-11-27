@@ -121,13 +121,21 @@ int main(void) {
     input_capture_arm();
     assert(input_capture_add(draw, "indexed-indirect", 0x1010, pool.buf, 32, 20, 0));
     assert(input_capture_add(draw, "index-binding-prefix", 0x1034, pool.buf, 68, 256, 1));
+    input_sample_t direct = draw;
+    direct.vertex_offset = -2;
+    direct.first_instance = 7;
+    direct.instances = 1;
+    assert(!input_capture_direct(direct, 0x102a, pool.buf, 58, 2, 3));
+    assert(!input_capture_direct(direct, 0x102c, pool.buf, 60, 2, 129));
+    assert(input_capture_direct(direct, 0x102c, pool.buf, 60, 2, 3));
     input_capture_end_pass();
-    assert(ncopy == 2 && nbarrier == 2 && mapped && recorded[1].size == 44);
+    assert(ncopy == 3 && nbarrier == 2 && mapped && recorded[1].size == 44 && recorded[2].size == 8);
     assert(g_pd_bytes == sizeof dst + 4096);
 
     // Simulate the producer's device writes occurring after CPU recording.
     memset(src + 32, 0xab, 20);
     memset(src + 68, 0xcd, 44);
+    memset(src + 60, 0xef, 8);
     for (unsigned i = 0; i < ncopy; i++)
         memcpy(dst + recorded[i].dstOffset, src + recorded[i].srcOffset, recorded[i].size);
     complete = 1;
