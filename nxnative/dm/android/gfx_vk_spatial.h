@@ -1074,6 +1074,30 @@ submit_error:
     return NULL;
 }
 
+static void spatial_prepare_present_target(VkCommandBuffer cb, VkImage image,
+                                           VkExtent2D picture, VkExtent2D surface) {
+    barrier(cb, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if (picture.width == surface.width && picture.height == surface.height) return;
+
+    const VkImageSubresourceRange color = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    const VkClearColorValue black = {{0, 0, 0, 1}};
+    vkCmdClearColorImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &color);
+    // The picture transfer overwrites part of the letterbox clear.
+    VkImageMemoryBarrier cleared = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = color,
+    };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &cleared);
+}
+
 static int vivid_record(VkCommandBuffer cb, VkImage src, const int crop[4], int flip_y,
                         VkImage tgt, VkImageView view, int dx, int dy, uint32_t dw, uint32_t dh) {
     if (!spatial_pipeline_ready(SP_VIVID) ||

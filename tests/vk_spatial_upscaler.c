@@ -428,6 +428,31 @@ static void run_physical(VkFormat source_format) {
 }
 
 // Verify the actual Vulkan linear resolve averages 2x2 samples at 2:1.
+static void check_letterbox_copy(void) {
+    spatial_image source = source_image(16);
+    assert(spatial_image_ready(SP_DISPLAY, OUT, OUT,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, g_sfmt));
+    spatial_image *display = &g_spatial.image[SP_DISPLAY];
+    begin();
+    spatial_prepare_present_target(test_cb, display->texture.img,
+        (VkExtent2D){16, 16}, (VkExtent2D){OUT, OUT});
+    const VkImageSubresourceLayers color = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    const VkImageCopy copy = {color, {0}, color, {8, 8, 0}, {16, 16, 1}};
+    vkCmdCopyImage(test_cb, source.texture.img, VK_IMAGE_LAYOUT_GENERAL,
+                   display->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    barrier(test_cb, display->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    complete();
+
+    readback_pixels(display->texture.img, OUT, OUT);
+    const uint8_t black[] = {0, 0, 0, 255};
+    assert(!memcmp(mapped, black, sizeof black));
+    assert(!memcmp(mapped + 4 * (OUT * OUT - 1), black, sizeof black));
+    const uint8_t *picture = mapped + 4 * (11 * OUT + 12);
+    assert(picture[0] && picture[2] && picture[3] == 173);
+    spatial_image_drop(&source);
+    puts("letterbox clear and reconstructed picture copy PASS");
+}
+
 static void check_supersample_resolve(void) {
     CHECK(vkQueueWaitIdle(V.q));
     spatial_drop_images();
@@ -609,6 +634,7 @@ int main(void) {
     // Surfaces may select an sRGB swapchain even for an UNORM window image.
     run_physical(VK_FORMAT_R8G8B8A8_UNORM);
 #endif
+    check_letterbox_copy();
     check_supersample_resolve();
     check_large_outputs();
     CHECK(vkDeviceWaitIdle(V.dev));

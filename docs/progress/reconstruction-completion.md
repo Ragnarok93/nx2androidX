@@ -733,3 +733,39 @@ archives and translated game shaders stay outside Git.
   was available at inspection. The interim resolve-only Android run
   reached a stale source-order assertion. The following implementation
   commit updates that assertion and the focused suite passed locally.
+
+## 2026-11-27 — Presentation synchronization and regression audit
+
+- The software Vulkan synchronization layer reproduced a transfer
+  write-after-write hazard when the presentation copy followed the
+  black-bar clear. The presenter now orders the clear before the picture
+  transfer and skips clearing fully covered targets. The Vulkan fixture
+  read back opaque black borders and the original picture alpha.
+- The 55-check reconstruction host suite, 26 focused regressions and
+  native and temporal Lavapipe suites passed. The Vulkan runs included
+  synchronization validation, SPIR-V validation and the 5120×2880 targets.
+- Continuity commit `b79a84cf8a6a3c7e3b1d5b362b228b2b31243ab3` passed
+  [software Vulkan and FFR Android NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46025944260).
+  The [signed builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46025944258/artifacts/15213000815)
+  was available. The Android workflow passed its native smoke test and
+  APK signing-identity verification.
+
+A synthetic Lavapipe comparison at the continuity commit used a constant
+512×288 RGBA8 input, 768×432 output, 50% sharpness, 10 warmup frames and
+80 measured frames per backend. CPU time covers recording and submission.
+The fixture retired the queue after each output.
+
+| Backend | CPU median (ms) | GPU median (ms) | Queue-retired p50 / p95 / p99 (ms) | Allocation (MiB) | Residency |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bilinear | 0.033 | 1.793 | 1.923 / 2.292 / 13.016 | 2.53 | 80/80 |
+| FSR 1 | 0.041 | 4.765 | 4.883 / 5.134 / 5.933 | 3.09 | 80/80 |
+| GSR 1 | 0.032 | 1.056 | 1.168 / 2.360 / 3.569 | 1.83 | 80/80 |
+| GSR 2 | 0.056 | 5.523 | 5.665 / 6.304 / 16.418 | 8.74 | 80/80 |
+
+The same fixture at the resume checkpoint `b04976c5` measured GPU
+medians of 1.821, 4.970, 0.873 and 4.712 ms in backend order.
+Image allocation and residency matched. Actual title replay cost,
+display misses, history resets, and sustained memory remain device
+validation items on Samsung Vulkan, RADV Xclipse, Adreno 650 and newer
+Adreno. Engine-input GSR 2 still depends on proven guest semantic
+bindings. Docked FFR acceptance remains Awaiting device validation.
