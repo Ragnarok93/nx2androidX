@@ -141,3 +141,33 @@ Resolve this checkpoint with `git log -1 --format=%H -- docs/progress/reconstruc
   bounded per-frame observation buffer. Begin with the exact
   presentation-source marker and backward traversal of color writes and
   sampled reads. Export the candidate path without substituting resources.
+
+## 2026-11-27 — Milestone 1, offline observation checkpoint
+
+Milestone 0 remains **Awaiting device validation**. Milestone 1 is
+**In progress**. Milestones 2–9 remain **Pending**. The previous checkpoint
+was `0fc006f3cbcd2b9756d0017d737941ca0a95854b`. Resolve the commit adding
+this entry with `git log -1 --format=%H -- docs/progress/reconstruction-completion.md`.
+
+- Extended the existing capture analyzer to shortlist plausible enlargement
+  boundaries using an exact presentation dependency, stored color producer,
+  matching view formats, near-matching aspect and single-draw raster evidence.
+  It reports each candidate's rejection reasons and exports the producer,
+  sampled binding and path to the final presentation marker.
+- At present 16745 the shortlist includes 1384×780 → 1728×972 and
+  1728×972 → 1920×1080. The capture shows single full-size raster draws
+  without blending at these two boundaries. It does not establish the
+  fragment shader's semantics, source valid region or replacement eligibility.
+  The subsequent compositing write remains part of the dependency path.
+- The production renderer is unchanged by this checkpoint. The shortlist
+  uses the existing bounded capture data. Runtime observation without GPU
+  readbacks, replay CPU/memory overhead and device behavior remain outstanding.
+- Ran `python3 devtools/trace_reconstruction.py <capture.zip> -o <report.json>`,
+  the 52-test reconstruction host suite and `git diff --check`. No shaders or
+  Android runtime code changed in this checkpoint.
+- Next action is to separate metadata-only dependency acquisition from
+  the diagnostic readback session. Reuse the existing surface descriptors,
+  exact present markers, and subresource and write-sequence identity.
+  Correlate exact transfer/resolve and compute producer events before
+  enabling any candidate substitution. Preserve ambiguous or overflowed
+  observations without authorizing replacement.

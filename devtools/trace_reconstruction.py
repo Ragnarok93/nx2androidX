@@ -175,8 +175,56 @@ def presentation_links(rows, groups, writes):
         report['reason']='pass-level resource dependency only; draw semantics not certified'
     return links,reports
 
+def enlargement_evidence(src, dst, producer, areas, states, entries, path):
+    """Screen observed draws for review while leaving guest semantics unresolved."""
+    a, b = extent(src), extent(dst)
+    failures = []
+    if not path:
+        failures.append('no exact destination path to presentation')
+    # Allow a two-pixel rounding difference in the source raster's aspect
+    # ratio. Geometry is necessary for this shortlist alongside draw evidence.
+    if abs(a[0] * b[1] - a[1] * b[0]) > 2 * max(b):
+        failures.append('source and destination aspect differ')
+    if (producer['role'] != 'color' or number(producer, 'store') != 0 or
+            extent(producer) != a):
+        failures.append('source producer is not a stored color write at the sampled extent')
+    if len({r[field] for r in (src, dst, producer)
+            for field in ('storage_format', 'view_format')}) != 1 or number(src, 'view_format') in (0, None):
+        failures.append('color format transformation or undefined format')
+    sampled = {(resource(r), r['stage'], r['slot'], r['element'])
+               for _, r in entries if r['role'] == 'sampled-binding'}
+    if len(sampled) != 1 or any(r['role'] in ('depth', 'stencil', 'storage-binding')
+                               for _, r in entries):
+        failures.append('other sampled, depth, stencil or storage inputs')
+    if len(areas) != 1 or tuple(number(areas[0], k) for k in
+                                ('render_x', 'render_y', 'width', 'height')) != (0, 0, *b):
+        failures.append('full destination render area is unverified')
+    draw = number(src, 'draws')
+    if len(states) != 1 or draw is None or number(dst, 'draws') != draw + 1:
+        failures.append('single consuming draw is unverified')
+        return failures
+    state = dict(part.split('=', 1) for part in states[0]['status'].split(';') if '=' in part)
+    if any(state.get(key) != '0' for key in ('blend', 'depth_test', 'depth_write',
+                                            'stencil', 'discard', 'pass_draws_before')):
+        failures.append('draw may blend, discard or depend on earlier attachment contents')
+    if state.get('write_mask') != '15':
+        failures.append('draw does not write every color channel')
+    for key in ('guest_viewport', 'guest_scissor'):
+        try:
+            rectangle = tuple(float(v) for v in state.get(key, '').split(','))
+        except ValueError:
+            rectangle = ()
+        full = rectangle == (0, 0, *b)
+        if key == 'guest_viewport':
+            full |= rectangle == (0, b[1], b[0], -b[1])
+        if not full:
+            failures.append(f'{key} does not cover the destination')
+    return failures
+
+
 def analyze(rows, max_candidates=200, shader_index=None):
     groups=defaultdict(list); writes=defaultdict(list); linked_results=[]; other_results=[]; stats=Counter()
+    shortlist=[]
     for i,r in enumerate(rows):
         if None in context(r): raise ValueError('invalid present/submission/pass')
         groups[context(r)].append((i,r))
@@ -239,14 +287,28 @@ def analyze(rows, max_candidates=200, shader_index=None):
                                 'no exact dependency path established to presentation source' if ctx[0] in presentation_reports else
                                 'no presentation source in this captured frame')}
                 if k in links: stats['presentation_linked_candidates']+=1
+                screening = enlargement_evidence(src, dst, producer, areas, states, entries, links.get(k))
+                if 'potential intervening source write' in reasons:
+                    screening.append('potential intervening source write')
+                if presentation_reports.get(ctx[0], {}).get('truncated'):
+                    screening.append('presentation dependency traversal truncated')
+                if sum(r['role'] == 'color' for _, r in entries) != 1:
+                    screening.append('multiple color attachments')
+                if not screening:
+                    stats['plausible_enlargement_boundaries'] += 1
+                    if len(shortlist) < max_candidates:
+                        shortlist.append({'present':ctx[0], 'submission':ctx[1], 'pass':ctx[2],
+                                          'source_extent':a, 'destination_extent':b,
+                                          'path_rows':[i+1,j+1,*links[k]]})
                 selected=linked_results if k in links else other_results
                 if len(selected)<max_candidates:
                     selected.append(dict(certified=False, capture_present=ctx[0], submission=ctx[1], pass_index=ctx[2],
                         source_extent=a, destination_extent=b, producer_row=i+1, sampled_row=j+1, destination_row=k+1,
                         producer=producer, sampled=src, destination=dst, render_areas=areas,
-                        draw_state=states, static_shader_evidence=(shader_index or {}).get(src['shader'].lower()), downstream=downstream, presentation_link=link, reasons=reasons))
+                        draw_state=states, static_shader_evidence=(shader_index or {}).get(src['shader'].lower()), downstream=downstream, presentation_link=link, reasons=reasons, enlargement_screening_rejections=screening))
     results=(linked_results+other_results)[:max_candidates]
     return dict(rows=len(rows), counts=dict(stats), candidates=results, presentation_sources=presentation_reports,
+                plausible_enlargement_boundaries=shortlist,
                 truncated=stats['candidates']>len(results))
 
 def summarize_presentation(rows, metadata):

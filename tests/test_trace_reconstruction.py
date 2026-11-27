@@ -15,6 +15,27 @@ class TraceTests(unittest.TestCase):
         r=chain(); r.insert(2,row('draw-state',1)); index={'ac':{'stage':1,'key':'ac','bindings':[]}}
         c=analyze(r,shader_index=index)['candidates'][0]
         self.assertEqual(len(c['draw_state']),1);self.assertEqual(c['static_shader_evidence'],index['ac']);self.assertFalse(c['certified'])
+    def test_enlargement_screening_requires_exact_raster_evidence(self):
+        r = chain()
+        r[2].update(render_x='0', render_y='0')
+        r[-1]['draws'] = '31'
+        for entry in (r[0], r[1], r[-1]):
+            entry.update(storage_format='37', view_format='37')
+        state = row('draw-state', 1, status=(
+            'blend=0;depth_test=0;depth_write=0;stencil=0;discard=0;'
+            'pass_draws_before=0;write_mask=15;'
+            'guest_viewport=0,972,1728,-972;guest_scissor=0,0,1728,972'))
+        r.insert(2, state)
+        r.append(row('presentation-source', -202, im='b', seq='8', w='1728', h='972'))
+        report = analyze(r)
+        self.assertEqual(report['plausible_enlargement_boundaries'][0]['path_rows'], [1, 2, 5, 6])
+        self.assertFalse(report['candidates'][0]['certified'])
+        state['status'] = state['status'].replace('blend=0', 'blend=1')
+        report = analyze(r)
+        self.assertFalse(report['plausible_enlargement_boundaries'])
+        self.assertIn('draw may blend, discard or depend on earlier attachment contents',
+                      report['candidates'][0]['enlargement_screening_rejections'])
+
     def test_downstream(self):
         r=chain();r.append(row('sampled-binding',2,im='b',seq='8',w='1728',h='972'))
         self.assertEqual(len(analyze(r)['candidates'][0]['downstream']),1)
