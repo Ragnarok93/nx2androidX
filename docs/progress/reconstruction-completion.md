@@ -799,3 +799,12 @@ bindings. Docked FFR acceptance remains Awaiting device validation.
   The regressions exercise submission rejection, same-frame recovery,
   storage view cache hits, compute write-list overflow, and descriptor
   memo invalidation. Vulkan readbacks also passed through 5120×2880.
+
+- Commit `dd35bcb97e9042fd3b2a915bdf0e71460b242de2` passed
+  [reconstruction validation](https://github.com/Ragnarok93/nx2androidX/actions/runs/46082625222),
+  including the FFR Android NDK link. The
+  [first Android run](https://github.com/Ragnarok93/nx2androidX/actions/runs/46082625214)
+  failed while compiling the descriptor-capacity fixture, which extracts
+  the image descriptor switch independently. Revision tracking now runs
+  in the surrounding memo collection loop. The descriptor-capacity
+  fixture and the reconstruction host suite passed locally.
