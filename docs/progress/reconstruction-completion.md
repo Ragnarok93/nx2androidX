@@ -469,3 +469,14 @@ checkpoint fills the missing draw inputs in one scoped GPU capture.
   cube-view and indirect-compute harnesses. Both harnesses now match the
   production interfaces and pass locally. The runtime code is identical
   to the NDK-validated checkpoint.
+- Verified signed Android run
+  [45976292053](https://github.com/Ragnarok93/nx2androidX/actions/runs/45976292053)
+  at `4bf3943c5fca4f45a526a082cbbf3e7bc030037e`. The full suite completed
+  with 851 tests and nine skips. Native linking and repository signing
+  verification passed. The
+  [builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/45976292053/artifacts/15186839267)
+  was available and unexpired. Re-ran the local guest SPIR-V and
+  synchronization-validated Vulkan fixture and the archived replay trace
+  on the same runtime code. All passed. The remaining Milestone 2 input
+  is a new docked FFR GPU-snapshot ZIP with the target shader filters.
+  Use internal scaling Off for this capture.
