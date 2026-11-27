@@ -1,8 +1,11 @@
 // Present-thread-owned spatial reconstruction. All work uses the graphics queue.
 int vk_pass_dump_user_active(void);
+#include <time.h>
+#include "gfx_vk_reconstruction_limits.h"
 
 #if !defined(SPATIAL_HOST_PROBE) || defined(SGSR2_HOST_PROBE)
 #include "gfx_vk_gsr2.h"
+#include "gfx_vk_flow_budget.h"
 #define SP_TEMPORAL 1
 #else
 #define SP_TEMPORAL 0
@@ -10,7 +13,7 @@ int vk_pass_dump_user_active(void);
 
 enum { SP_EASU, SP_RCAS, SP_GSR1, SP_VIVID, SP_PASS_COUNT };
 enum { SP_SOURCE, SP_INTERMEDIATE, SP_DISPLAY, SP_OUTPUT, SP_FLOW0, SP_FLOW1, SP_IMAGE_COUNT };
-enum { SP_SLOTS = 8, SP_MAX_PIXELS = 3840 * 1080 };
+enum { SP_SLOTS = 8, SP_QUERY_STRIDE = 10 };
 
 typedef struct {
     vkimg_t texture;
@@ -18,6 +21,7 @@ typedef struct {
     VkImageUsageFlags usage;
     VkFormat view_fmt;
     VkFence last_use;
+    VkDeviceSize bytes;
 } spatial_image;
 
 static struct {
@@ -40,10 +44,21 @@ static struct {
     uint32_t timestamp_bits;
     unsigned slot, encoding;
     float flow_budget_ms;
-    uint64_t ticket, retry_after, rcas_retry_after, measured_ticket;
+    uint32_t flow_cadence_us;
+    uint64_t ticket, attempted_ticket, retry_after, rcas_retry_after, measured_ticket;
+    uint64_t report_alloc_wait_ns, report_slot_wait_ns;
+    unsigned report_alloc_attempts, report_allocations, report_alloc_waits;
     uint64_t query_ticket[SP_SLOTS];
-    double gpu_ms;
-    int submit_failed, report_physical;
+    int query_mode[SP_SLOTS], measured_mode;
+    VkExtent2D query_input[SP_SLOTS], query_output[SP_SLOTS], measured_input, measured_output;
+    float query_budget[SP_SLOTS], measured_budget;
+    uint32_t query_cadence[SP_SLOTS], measured_cadence;
+    uint64_t query_epoch[SP_SLOTS], measured_epoch;
+    dm_recon_shared_retry shared_output_retry;
+    double gpu_ms, measured_stage_ms[4];
+    uint64_t query_history_epoch[SP_SLOTS], measured_history_epoch;
+    int query_history_reset[SP_SLOTS], measured_history_reset;
+    int submit_failed, report_physical, report_sharpness_requested, report_sharpness_applied;
     VkExtent2D report_input;
 } g_spatial;
 
@@ -56,8 +71,10 @@ static struct {
     VkExtent2D render, output, candidate_render, candidate_output;
     unsigned stable_frames;
     int crop[4], flip_y, physical;
-    unsigned next, slow_frames;
-    uint64_t ticket, retry_after, last_source_ns;
+    unsigned next, resource_failures, resource_streak;
+    dm_flow_budget policy;
+    uint64_t query_generation[SP_SLOTS];
+    uint64_t ticket, retry_after, history_epoch, pending_epoch, last_real_ticket;
     float budget_ms[SP_SLOTS];
 } g_flow;
 #endif
@@ -99,7 +116,10 @@ static void spatial_drop_images(void) {
 #endif
     for (unsigned i = 0; i < SP_SLOTS; i++) spatial_release_source(i);
     for (int i = 0; i < SP_IMAGE_COUNT; i++) spatial_image_drop(&g_spatial.image[i]);
-    g_spatial.ticket = g_spatial.retry_after = g_spatial.rcas_retry_after = 0;
+    g_spatial.ticket = g_spatial.attempted_ticket = g_spatial.retry_after = g_spatial.rcas_retry_after = 0;
+    memset(g_spatial.query_ticket, 0, sizeof g_spatial.query_ticket);
+    g_spatial.measured_ticket = 0;
+    dm_recon_shared_succeeded(&g_spatial.shared_output_retry);
 }
 
 static VkFormat spatial_unorm_format(VkFormat fmt) {
@@ -193,19 +213,64 @@ static VkFormatFeatureFlags spatial_features(VkFormat fmt) {
     return props.optimalTilingFeatures;
 }
 
+// Capacity limits are separate from resolution: actual memory requirements
+// are checked below. A heap-size fraction is NOT a free-memory measurement.
+static uint64_t spatial_local_heap(void) {
+    uint64_t heap = 0;
+    for (uint32_t i = 0; i < V.mem.memoryHeapCount; ++i)
+        if ((V.mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
+            V.mem.memoryHeaps[i].size > heap) heap = V.mem.memoryHeaps[i].size;
+    return heap;
+}
+static int spatial_extent_ok(uint32_t w, uint32_t h, int raster) {
+    uint32_t limit = V.props.limits.maxImageDimension2D;
+    if (!dm_recon_extent_ok(w, h, limit, limit)) return 0;
+    return !raster || dm_recon_extent_ok(w, h, V.props.limits.maxFramebufferWidth,
+                                          V.props.limits.maxFramebufferHeight);
+}
+static uint64_t spatial_clock_ns(void) {
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t)) return 0;
+    return (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
+}
+static VkResult spatial_wait(VkFence fence, uint64_t *elapsed) {
+    int measure = vk_pass_dump_user_active();
+    uint64_t before = measure ? spatial_clock_ns() : 0;
+    VkResult result = vkWaitForFences(V.dev, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (before) {
+        uint64_t after = spatial_clock_ns();
+        if (after >= before) *elapsed += after - before;
+    }
+    return result;
+}
+static int spatial_image_matches(const spatial_image *s, uint32_t w, uint32_t h,
+                                 VkImageUsageFlags usage, VkFormat view_fmt) {
+    return s->texture.img && s->texture.w == w && s->texture.h == h &&
+        s->texture.fmt == g_sfmt && s->view_fmt == view_fmt && (s->usage & usage) == usage;
+}
 static int spatial_image_ready(int index, uint32_t w, uint32_t h, VkImageUsageFlags usage, VkFormat view_fmt) {
     spatial_image *s = &g_spatial.image[index];
-    if (s->texture.img && s->texture.w == w && s->texture.h == h &&
-        s->texture.fmt == g_sfmt && s->view_fmt == view_fmt && (s->usage & usage) == usage) return 1;
-    if (!w || !h || (uint64_t)w * h > SP_MAX_PIXELS) return 0;
+    if (spatial_image_matches(s, w, h, usage, view_fmt)) return 1;
+    if (!spatial_extent_ok(w, h, (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0)) return 0;
+    VkImageCreateFlags flags = view_fmt != g_sfmt ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0;
+    VkImageFormatProperties props;
+    if (vkGetPhysicalDeviceImageFormatProperties(V.pd, g_sfmt, VK_IMAGE_TYPE_2D,
+            VK_IMAGE_TILING_OPTIMAL, usage, flags, &props) ||
+        !dm_recon_extent_ok(w, h, props.maxExtent.width, props.maxExtent.height)) return 0;
+    uint64_t used = 0;
+    for (unsigned i = 0; i < SP_IMAGE_COUNT; ++i)
+        if (i != (unsigned)index) used += g_spatial.image[i].bytes;
 
     // Descriptor writes and image retirement wait only for the last user of this
     // particular allocation, on resize or a backend change. In steady state GPU
     // barriers order all reads and writes, with immutable descriptors.
-    if (s->last_use && vkWaitForFences(V.dev, 1, &s->last_use, VK_TRUE, UINT64_MAX)) return 0;
+    if (s->last_use) {
+        g_spatial.report_alloc_waits++;
+        if (spatial_wait(s->last_use, &g_spatial.report_alloc_wait_ns)) return 0;
+    }
+    g_spatial.report_alloc_attempts++;
     spatial_image_drop(s);
     vkimg_t *t = &s->texture;
-    VkImageCreateFlags flags = view_fmt != g_sfmt ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0;
     VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, flags, VK_IMAGE_TYPE_2D, g_sfmt,
         {w, h, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, usage,
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
@@ -214,8 +279,11 @@ static int spatial_image_ready(int index, uint32_t w, uint32_t h, VkImageUsageFl
         VkMemoryRequirements req;
         vkGetImageMemoryRequirements(V.dev, t->img, &req);
         uint32_t type = vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
-        if (type == UINT32_MAX) r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        if (type == UINT32_MAX || req.size > props.maxResourceSize ||
+            !dm_recon_fits(dm_recon_budget(spatial_local_heap()), used, req.size))
+            r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
         else {
+            s->bytes = req.size;
             VkMemoryAllocateInfo ma = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, type};
             r = vkAllocateMemory(V.dev, &ma, NULL, &t->mem);
         }
@@ -237,6 +305,7 @@ static int spatial_image_ready(int index, uint32_t w, uint32_t h, VkImageUsageFl
     t->layout = VK_IMAGE_LAYOUT_GENERAL;
     s->usage = usage;
     s->view_fmt = view_fmt;
+    g_spatial.report_allocations++;
     if (index < SP_OUTPUT && (usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
         VkDescriptorImageInfo info = {g_spatial.sampler, s->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_spatial.set[index],
@@ -308,31 +377,71 @@ static int spatial_commands_ready(void) {
         }
     }
     VkQueryPoolCreateInfo queries = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0,
-        VK_QUERY_TYPE_TIMESTAMP, 2 * SP_SLOTS};
+        VK_QUERY_TYPE_TIMESTAMP, SP_QUERY_STRIDE * SP_SLOTS};
     if (g_spatial.timestamp_bits &&
         vkCreateQueryPool(V.dev, &queries, NULL, &g_spatial.queries)) g_spatial.queries = VK_NULL_HANDLE;
     return 1;
 }
 
-static void spatial_read_timing(unsigned slot) {
-    uint64_t stamp[2];
+static void spatial_read_timing(unsigned slot, uint64_t decision_ticket) {
+    (void)decision_ticket;
+    uint64_t stamp[SP_QUERY_STRIDE];
     if (!g_spatial.queries || !g_spatial.query_ticket[slot]) return;
-    if (vkGetQueryPoolResults(V.dev, g_spatial.queries, 2 * slot, 2, sizeof stamp, stamp,
-                              sizeof stamp[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+    uint64_t measured_ticket = g_spatial.query_ticket[slot];
+    g_spatial.query_ticket[slot] = 0; // This retired slot is consumed once.
+    g_spatial.measured_ticket = 0; // Missing result is not a fresh measurement.
+    g_spatial.gpu_ms = 0;
+    unsigned count = g_spatial.query_mode[slot] == SP_SGSR2 ? SP_QUERY_STRIDE : 2;
+    memset(g_spatial.measured_stage_ms, 0, sizeof g_spatial.measured_stage_ms);
+    g_spatial.measured_history_epoch = 0;
+    g_spatial.measured_history_reset = 0;
+    if (vkGetQueryPoolResults(V.dev, g_spatial.queries, SP_QUERY_STRIDE * slot, count,
+                              count * sizeof stamp[0], stamp, sizeof stamp[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
         uint32_t bits = g_spatial.timestamp_bits;
         uint64_t mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
         g_spatial.gpu_ms = ((stamp[1] - stamp[0]) & mask) * (double)V.props.limits.timestampPeriod / 1e6;
-        g_spatial.measured_ticket = g_spatial.query_ticket[slot];
-#if SP_TEMPORAL
-        if (g_flow.budget_ms[slot] > 0) {
-            if (g_spatial.gpu_ms <= g_flow.budget_ms[slot]) g_flow.slow_frames = 0;
-            else if (++g_flow.slow_frames == 3) {
-                g_flow.retry_after = g_spatial.measured_ticket + 120;
-                g_flow.slow_frames = 0;
-            }
+        g_spatial.measured_ticket = measured_ticket;
+        g_spatial.measured_mode = g_spatial.query_mode[slot];
+        g_spatial.measured_input = g_spatial.query_input[slot];
+        g_spatial.measured_output = g_spatial.query_output[slot];
+        g_spatial.measured_budget = g_spatial.query_budget[slot];
+        g_spatial.measured_cadence = g_spatial.query_cadence[slot];
+        g_spatial.measured_epoch = g_spatial.query_epoch[slot];
+        if (count == SP_QUERY_STRIDE) {
+            for (unsigned i = 0; i < 4; ++i)
+                g_spatial.measured_stage_ms[i] = ((stamp[3 + 2*i] - stamp[2 + 2*i]) & mask) *
+                    (double)V.props.limits.timestampPeriod / 1e6;
+            g_spatial.measured_history_epoch = g_spatial.query_history_epoch[slot];
+            g_spatial.measured_history_reset = g_spatial.query_history_reset[slot];
         }
+#if SP_TEMPORAL
+        if (g_spatial.measured_mode == SP_SGSR2)
+            dm_flow_budget_observe(&g_flow.policy, g_flow.query_generation[slot],
+                measured_ticket, decision_ticket, g_flow.budget_ms[slot], g_spatial.gpu_ms);
 #endif
     }
+}
+
+// The next recording slot has already been fence-waited. If it holds a
+// pending measurement, retire it before reuse. Otherwise look for the
+// oldest outstanding query on this single graphics queue. Poll at most one
+// fence, never block on a different slot and never publish two samples in
+// one capture row. Retiring a query does not retire its command resources.
+static void spatial_retire_timing(unsigned reuse_slot, uint64_t decision_ticket) {
+    if (!g_spatial.queries) return;
+    if (g_spatial.query_ticket[reuse_slot]) {
+        spatial_read_timing(reuse_slot, decision_ticket);
+        return;
+    }
+    unsigned oldest = SP_SLOTS;
+    for (unsigned i = 0; i < SP_SLOTS; ++i) {
+        uint64_t ticket = g_spatial.query_ticket[i];
+        if (!ticket || ticket >= decision_ticket) continue;
+        if (oldest == SP_SLOTS || ticket < g_spatial.query_ticket[oldest]) oldest = i;
+    }
+    if (oldest != SP_SLOTS &&
+        vkWaitForFences(V.dev, 1, &g_spatial.fence[oldest], VK_TRUE, 0) == VK_SUCCESS)
+        spatial_read_timing(oldest, decision_ticket);
 }
 
 static int spatial_active, spatial_requested = -1;
@@ -345,9 +454,10 @@ static void spatial_report(int requested, int active, const char *reason, uint64
     spatial_reason = reason;
     if (changed || (ticket % 120 == 0 && vk_pass_dump_user_active())) {
         if (g_spatial.measured_ticket)
-            VKLOG("[upscale] real frame %llu, requested %s, active %s, %s, GPU %.3f ms (frame %llu)",
+            VKLOG("[upscale] real frame %llu, requested %s, active %s, %s, GPU %.3f ms (%s frame %llu)",
                   (unsigned long long)ticket, spatial_mode_name(requested), spatial_mode_name(active),
-                  reason ? reason : "ready", g_spatial.gpu_ms, (unsigned long long)g_spatial.measured_ticket);
+                  reason ? reason : "ready", g_spatial.gpu_ms, spatial_mode_name(g_spatial.measured_mode),
+                  (unsigned long long)g_spatial.measured_ticket);
         else
             VKLOG("[upscale] real frame %llu, requested %s, active %s, %s",
                   (unsigned long long)ticket, spatial_mode_name(requested), spatial_mode_name(active),
@@ -366,11 +476,18 @@ static void spatial_flow_release(void) {
     for (unsigned i = SP_FLOW0; i <= SP_FLOW1; ++i) spatial_image_drop(&g_spatial.image[i]);
 }
 
+static void spatial_flow_defer(uint64_t ticket) {
+    g_flow.ticket = 0;
+    g_flow.resource_streak = 0;
+    g_flow.retry_after = dm_flow_resource_defer(&g_flow.resource_failures, ticket);
+    dm_flow_budget_retire_samples(&g_flow.policy);
+}
+
 static int spatial_flow_ready(uint32_t iw, uint32_t ih, uint32_t w, uint32_t h,
                               VkFormat format, const int crop[4], int flip_y,
                               int physical, uint64_t ticket) {
     if (ticket < g_flow.retry_after || iw > w || ih > h || iw < 16 || ih < 16 ||
-        (uint64_t)iw * ih > 1920u * 1080u || (uint64_t)w * h > SP_MAX_PIXELS) return 0;
+        !spatial_extent_ok(iw, ih, 0) || !spatial_extent_ok(w, h, 1)) return 0;
     if (g_flow.candidate_render.width != iw || g_flow.candidate_render.height != ih ||
         g_flow.candidate_output.width != w || g_flow.candidate_output.height != h) {
         g_flow.candidate_render = (VkExtent2D){iw, ih};
@@ -397,7 +514,8 @@ static int spatial_flow_ready(uint32_t iw, uint32_t ih, uint32_t w, uint32_t h,
         g_flow.render = (VkExtent2D){iw, ih};
         g_flow.output = (VkExtent2D){w, h};
         g_flow.format = g_sfmt;
-        g_flow.ctx = vk_gsr2_create_image(g_flow.render, g_flow.output, 48u * 1024u * 1024u);
+        g_flow.ctx = vk_gsr2_create_image(g_flow.render, g_flow.output,
+            dm_recon_budget(spatial_local_heap()));
         if (!g_flow.ctx) goto unavailable;
     }
     VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -414,7 +532,7 @@ static int spatial_flow_ready(uint32_t iw, uint32_t ih, uint32_t w, uint32_t h,
 
 unavailable:
     spatial_flow_release();
-    g_flow.retry_after = ticket + 120;
+    spatial_flow_defer(ticket);
     return 0;
 }
 
@@ -423,20 +541,33 @@ static int spatial_flow_record(VkCommandBuffer cb, unsigned slot, VkImage image,
                                spatial_image *output) {
     spatial_image *current = &g_spatial.image[SP_FLOW0 + g_flow.next];
     const int cut = !g_flow.ticket || ticket - g_flow.ticket != 1;
+    const unsigned first_query = SP_QUERY_STRIDE * slot;
+    if (g_spatial.queries)
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_spatial.queries, first_query + 2);
     spatial_image *previous = cut ? current : &g_spatial.image[SP_FLOW0 + (g_flow.next ^ 1)];
     barrier(cb, current->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     spatial_blit(cb, image, current->texture.img, crop, g_flow.render.width, g_flow.render.height,
                  flip_y, VK_FILTER_NEAREST);
     barrier(cb, current->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-    dm_temporal_frame frame = {.ticket = ticket, .stream = 1, .epoch = 1,
+    if (g_spatial.queries)
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, first_query + 3);
+    // Advance only the tentative epoch on a discontinuity; publication follows submit.
+    g_flow.pending_epoch = g_flow.history_epoch + (cut ? 1 : 0);
+    dm_temporal_frame frame = {.ticket = ticket, .stream = 1, .epoch = g_flow.pending_epoch,
         .iw = g_flow.render.width, .ih = g_flow.render.height,
         .ow = g_flow.output.width, .oh = g_flow.output.height,
         .inputs = DM_TEMPORAL_IMAGE_PAIR, .variants = DM_TEMPORAL_2FS,
         .real = 1, .memory_ok = 1, .cut = cut};
     vk_gsr2_output result;
-    if (!vk_gsr2_record_image(g_flow.ctx, cb, slot, &frame,
-            (vk_gsr2_input){current->view, VK_IMAGE_LAYOUT_GENERAL},
-            (vk_gsr2_input){previous->view, VK_IMAGE_LAYOUT_GENERAL}, &result)) return 0;
+    const vk_gsr2_inputs inputs = {
+        .color = {current->view, VK_IMAGE_LAYOUT_GENERAL},
+        .previous_color = {previous->view, VK_IMAGE_LAYOUT_GENERAL}, .pre_exposure = 1.0f,
+    };
+    const vk_gsr2_timing timing = {g_spatial.queries, first_query + 4};
+    if (!vk_gsr2_record(g_flow.ctx, cb, slot, &frame, &inputs,
+            g_spatial.queries ? &timing : NULL, &result)) return 0;
+    if (g_spatial.queries)
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_spatial.queries, first_query + 8);
     int full[4] = {0, 0, (int)result.extent.width, (int)result.extent.height};
     barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     spatial_blit(cb, result.image, output->texture.img, full, result.extent.width, result.extent.height,
@@ -455,16 +586,36 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (!ticket) return NULL;
     spatial_image *output = &g_spatial.image[SP_OUTPUT];
     if (g_spatial.ticket == ticket) return output;
+    // The same real ticket may not record again after bypass or failure.
+    // Intra-call fallback still retries through the existing backend labels.
+    if (ticket <= g_spatial.attempted_ticket) return NULL;
+    g_spatial.attempted_ticket = ticket;
+    g_spatial.report_alloc_attempts = g_spatial.report_allocations = g_spatial.report_alloc_waits = 0;
+    g_spatial.report_alloc_wait_ns = g_spatial.report_slot_wait_ns = 0;
     g_spatial.ticket = 0;
+    g_spatial.measured_ticket = 0; // no new completed sample until a slot retires
+    g_spatial.gpu_ms = 0;
+    memset(g_spatial.measured_stage_ms, 0, sizeof g_spatial.measured_stage_ms);
+    g_spatial.measured_history_epoch = 0;
+    g_spatial.measured_history_reset = 0;
     g_spatial.report_input = (VkExtent2D){crop[2] > 0 ? (uint32_t)crop[2] : 0,
                                          crop[3] > 0 ? (uint32_t)crop[3] : 0};
     g_spatial.report_physical = 0;
     int requested = dm_spatial_mode();
+    int sharpness_pct = dm_fsr_sharpness();
+    float sharpness = dm_recon_sharpness(sharpness_pct);
+    g_spatial.report_sharpness_requested = (int)(sharpness * 100.0f + 0.5f);
+    g_spatial.report_sharpness_applied = 0;
     int wants_flow = requested == SP_SGSR2;
     int mode = wants_flow ? SP_SGSR1 : requested;
     const char *reason = NULL;
 #if SP_TEMPORAL
-    if (!wants_flow && g_flow.ctx) spatial_flow_release();
+    if (!wants_flow) {
+        dm_flow_budget_invalidate(&g_flow.policy);
+        g_flow.last_real_ticket = 0;
+        g_flow.ticket = 0;
+        if (g_flow.ctx) spatial_flow_release();
+    }
 #endif
     if (mode == SP_NATIVE) {
         spatial_report(requested, SP_NATIVE, NULL, ticket);
@@ -492,8 +643,21 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     } else physical = NULL;
     if (crop[2] <= 0 || crop[3] <= 0 || crop[0] < 0 || crop[1] < 0 ||
         (uint64_t)crop[0] + crop[2] > sw || (uint64_t)crop[1] + crop[3] > sh ||
-        !w || !h || (w <= (uint32_t)crop[2] && h <= (uint32_t)crop[3])) {
-        spatial_report(requested, SP_NATIVE, "picture fits or exceeds output", ticket);
+        !w || !h) {
+#if SP_TEMPORAL
+        dm_flow_budget_invalidate(&g_flow.policy);
+        g_flow.ticket = 0;
+#endif
+        spatial_report(requested, SP_NATIVE, "invalid source crop or output extent", ticket);
+        return NULL;
+    }
+    if (w <= (uint32_t)crop[2] && h <= (uint32_t)crop[3]) {
+#if SP_TEMPORAL
+        dm_flow_budget_invalidate(&g_flow.policy);
+        g_flow.ticket = 0;
+#endif
+        spatial_report(requested, SP_NATIVE, w == (uint32_t)crop[2] && h == (uint32_t)crop[3] ?
+            "native 1:1 presentation input" : "presentation input does not require enlargement", ticket);
         return NULL;
     }
     if (ticket < g_spatial.retry_after || !spatial_commands_ready()) {
@@ -507,18 +671,58 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     VkFormatFeatureFlags raster_features = spatial_features(sample_fmt);
     VkFormatFeatureFlags sampling = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     uint32_t iw = (uint32_t)crop[2], ih = (uint32_t)crop[3];
-    int flow = 0;
+    int flow = 0, disable_post = 0, reclaimed_optional = 0;
+    unsigned slot = g_spatial.slot % SP_SLOTS;
+    VkFence fence = g_spatial.fence[slot];
+    VkCommandBuffer cb = g_spatial.cb[slot];
 #if SP_TEMPORAL
-    flow = wants_flow && (g_spatial.queries || g_spatial.flow_budget_ms == 0.0f) &&
+    if (wants_flow) {
+        // Actual source tickets, not successful temporal tickets, define a gap.
+        // Failed or spatial fallback frames must not restart the overload policy.
+        if (g_flow.last_real_ticket && ticket - g_flow.last_real_ticket != 1) {
+            dm_flow_budget_invalidate(&g_flow.policy);
+            g_flow.ticket = 0;
+        }
+        g_flow.last_real_ticket = ticket;
+        dm_flow_workload key = {.iw=iw, .ih=ih, .ow=w, .oh=h,
+            .cadence_us=g_spatial.flow_cadence_us, .source_format=(uint32_t)format,
+            .output_format=(uint32_t)g_sfmt, .crop_x=crop[0], .crop_y=crop[1],
+            .flip_y=flip_y, .physical=physical != NULL,
+            .sharpen=sharpness > 0};
+        uint64_t generation = g_flow.policy.generation;
+        dm_flow_budget_set_workload(&g_flow.policy, &key);
+        if (generation != g_flow.policy.generation) {
+            g_flow.retry_after = 0;
+            g_flow.resource_failures = g_flow.resource_streak = 0;
+        }
+    }
+#endif
+    // Retire and consume timing before deciding which backend records this frame.
+    if (spatial_wait(fence, &g_spatial.report_slot_wait_ns)) goto submit_error;
+    spatial_forget_fence(fence);
+    spatial_release_source(slot);
+    spatial_retire_timing(slot, ticket);
+#if SP_TEMPORAL
+    int budget_allows = wants_flow && dm_flow_budget_allow(&g_flow.policy, ticket);
+    flow = budget_allows && (g_spatial.queries || g_spatial.flow_budget_ms == 0.0f) &&
         (src_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
         (dst_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
         spatial_flow_ready(iw, ih, w, h, format, crop, flip_y, physical != NULL, ticket);
     if (flow) {
         mode = SP_SGSR2;
         reason = "image-driven motion";
-    } else if (wants_flow) reason = "temporal reconstruction unavailable or over budget";
+    } else if (wants_flow) {
+        if (!budget_allows) reason = g_flow.policy.retry_after == UINT64_MAX ?
+            "temporal sustained overload; waiting for workload change" : "temporal sustained overload cooldown";
+        else if (!g_spatial.queries && g_spatial.flow_budget_ms > 0.0f)
+            reason = "temporal timing capability unavailable";
+        else reason = "temporal resources or geometry unavailable";
+    }
 #endif
-    float sharpness = dm_fsr_sharpness() / 100.0f;
+select_spatial_bilinear:;
+#if SP_TEMPORAL
+select_backend:;
+#endif
     int rcas = mode == SP_FSR1 && sharpness > 0.001f;
     int first_pass = mode == SP_FSR1 ? SP_EASU : SP_GSR1;
     if (!flow && mode != SP_BILINEAR &&
@@ -546,7 +750,6 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     spatial_image *intermediate = &g_spatial.image[SP_INTERMEDIATE];
     int raster = !flow && mode != SP_BILINEAR;
     int isolated = crop[0] || crop[1] || iw != sw || ih != sh;
-    unsigned slot = g_spatial.slot % SP_SLOTS;
     // A matching encoded view can feed the raster filters directly. Cropped,
     // flipped and incompatible encodings still use a physical-size staging
     // image to preserve clamp, orientation and color behavior.
@@ -565,13 +768,81 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     VkImageUsageFlags stage_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         (raster ? VK_IMAGE_USAGE_SAMPLED_BIT : VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     rcas = raster && rcas;
+    // Bilinear and temporal reconstruction share the same optional RCAS output
+    // pass. Never sharpen the temporal history or feed RCAS back into motion.
+    int wants_post = (mode == SP_BILINEAR || flow) && sharpness > 0.001f;
+    int post = wants_post && !disable_post && ticket >= g_spatial.rcas_retry_after &&
+        (raster_features & sampling) == sampling &&
+        (raster_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) &&
+        spatial_pipeline_ready(SP_RCAS);
+    if (wants_post && !post && !reason) reason = "output sharpening unavailable";
+    int raster_output = raster || post;
     VkImageUsageFlags out_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-        (raster ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    if (!spatial_image_ready(SP_OUTPUT, w, h, out_usage, raster ? sample_fmt : g_sfmt) ||
-        (stage_needed && !spatial_image_ready(SP_SOURCE, iw, ih, stage_usage, raster ? sample_fmt : g_sfmt))) {
+        (raster_output ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    // Prefer one output with transfer and raster usage and an encoded UNORM view.
+    // Some drivers reject this combination; retain the old narrower allocation.
+    VkImageUsageFlags shared_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // Do not destroy a working narrower allocation solely to retry a wider
+    // usage combination. Retry the combination only on a real replacement.
+    VkFormat out_view = raster_output ? sample_fmt : g_sfmt;
+    int output_ready = spatial_image_matches(output, w, h, out_usage, out_view) ||
+        spatial_image_matches(output, w, h, shared_usage, sample_fmt);
+    if (!output_ready && dm_recon_shared_allowed(&g_spatial.shared_output_retry,
+            (uint32_t)g_sfmt, w, h, ticket) &&
+        (raster_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+        output_ready = spatial_image_ready(SP_OUTPUT, w, h, shared_usage, sample_fmt);
+        if (output_ready) dm_recon_shared_succeeded(&g_spatial.shared_output_retry);
+        else dm_recon_shared_failed(&g_spatial.shared_output_retry, (uint32_t)g_sfmt, w, h, ticket);
+    }
+    if (!output_ready)
+        output_ready = spatial_image_ready(SP_OUTPUT, w, h, out_usage, out_view);
+    int base_ready = output_ready && (!stage_needed ||
+        spatial_image_ready(SP_SOURCE, iw, ih, stage_usage, raster ? sample_fmt : g_sfmt));
+    // A cached optional image may have consumed the budget for mandatory
+    // output/source storage. Retire it once before degrading the base filter.
+    if (!base_ready && !reclaimed_optional && intermediate->texture.img) {
+        reclaimed_optional = 1;
+        if (!intermediate->last_use || !spatial_wait(intermediate->last_use, &g_spatial.report_alloc_wait_ns)) {
+            if (intermediate->last_use) g_spatial.report_alloc_waits++;
+            spatial_image_drop(intermediate);
+            goto select_spatial_bilinear;
+        }
+    }
+    if (!base_ready && post) {
+        disable_post = 1;
+        g_spatial.rcas_retry_after = ticket + 120;
+        if (!reason) reason = "output sharpening unavailable";
+        goto select_spatial_bilinear; // same backend, without optional sharpening
+    }
+    if (!base_ready) {
+#if SP_TEMPORAL
+        if (flow) {
+            spatial_flow_defer(ticket);
+            flow = 0;
+            mode = SP_SGSR1;
+            reason = "temporal output allocation unavailable";
+            goto select_backend;
+        }
+#endif
+        if (mode != SP_BILINEAR) {
+            mode = SP_BILINEAR;
+            reason = "spatial image allocation unavailable";
+            goto select_spatial_bilinear;
+        }
         g_spatial.retry_after = ticket + 120;
         spatial_report(requested, SP_NATIVE, "image allocation unavailable", ticket);
         return NULL;
+    }
+    // Base images have priority. A failed optional post pass must not
+    // discard the selected reconstruction algorithm or temporal history.
+    if (post && !spatial_image_ready(SP_INTERMEDIATE, w, h,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, sample_fmt)) {
+        disable_post = 1;
+        g_spatial.rcas_retry_after = ticket + 120;
+        if (flow) reason = "image-driven motion; output sharpening unavailable";
+        else if (!reason) reason = "output sharpening unavailable";
+        goto select_spatial_bilinear;
     }
     if (rcas && !spatial_image_ready(SP_INTERMEDIATE, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                     VK_IMAGE_USAGE_SAMPLED_BIT, sample_fmt)) {
@@ -580,13 +851,6 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         reason = "FSR 1 sharpening unavailable";
     }
 
-    g_spatial.slot++;
-    VkFence fence = g_spatial.fence[slot];
-    VkCommandBuffer cb = g_spatial.cb[slot];
-    if (vkWaitForFences(V.dev, 1, &fence, VK_TRUE, UINT64_MAX)) goto submit_error;
-    spatial_forget_fence(fence);
-    spatial_release_source(slot);
-    spatial_read_timing(slot);
     if (direct) {
         VkDescriptorImageInfo info = {g_spatial.sampler, physical->sampled, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, *source_set,
@@ -597,8 +861,8 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (vkBeginCommandBuffer(cb, &begin)) goto submit_error;
     vk_img_barrier_all(cb);
     if (g_spatial.queries) {
-        vkCmdResetQueryPool(cb, g_spatial.queries, 2 * slot, 2);
-        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_spatial.queries, 2 * slot);
+        vkCmdResetQueryPool(cb, g_spatial.queries, SP_QUERY_STRIDE * slot, SP_QUERY_STRIDE);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot);
     }
     if (layout == VK_IMAGE_LAYOUT_UNDEFINED)
         barrier(cb, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -611,11 +875,16 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     }
 #if SP_TEMPORAL
     if (flow) {
-        if (!spatial_flow_record(cb, slot, image, crop, flip_y, ticket, output)) {
-            vkEndCommandBuffer(cb);
-            g_flow.ticket = 0;
-            spatial_report(requested, SP_NATIVE, "temporal recording rejected", ticket);
-            return NULL;
+        if (!spatial_flow_record(cb, slot, image, crop, flip_y, ticket, post ? intermediate : output)) {
+            // Nothing has been submitted; abandon the command buffer and the
+            // pending temporal transaction before trying the same real frame.
+            vk_gsr2_commit(g_flow.ctx, 0);
+            spatial_flow_defer(ticket);
+            if (vkEndCommandBuffer(cb) || vkResetCommandBuffer(cb, 0)) goto submit_error;
+            flow = 0;
+            mode = SP_SGSR1;
+            reason = "temporal recording rejected; spatial fallback";
+            goto select_backend;
         }
     } else
 #endif
@@ -631,16 +900,26 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         }
         barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     } else {
-        barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        spatial_image *first = post ? intermediate : output;
+        barrier(cb, first->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         // Vulkan may filter outside a blit's crop offsets. When cropped, scale
         // the isolated source so taps clamp to the picture and avoid guard pixels.
         int full[4] = {0, 0, (int)iw, (int)ih};
-        spatial_blit(cb, isolated ? stage->texture.img : image, output->texture.img,
+        spatial_blit(cb, isolated ? stage->texture.img : image, first->texture.img,
                      isolated ? full : crop, w, h, isolated ? 0 : flip_y, VK_FILTER_LINEAR);
-        barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+        barrier(cb, first->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     }
-    if (g_spatial.queries)
-        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, 2 * slot + 1);
+    if (post) {
+        spatial_constants params = {{(float)w, (float)h, (float)w, (float)h}, {0, 0}, sharpness, 0};
+        barrier(cb, intermediate->texture.img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        spatial_draw(cb, SP_RCAS, g_spatial.set[SP_INTERMEDIATE], output->view, 0, 0, w, h, params);
+        barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    if (g_spatial.queries) {
+        if (flow) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 9);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 1);
+    }
     if (vkEndCommandBuffer(cb) || vkResetFences(V.dev, 1, &fence)) goto submit_error;
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cb};
     extern pthread_mutex_t g_vk_queue_mu;
@@ -651,8 +930,15 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
 
 #if SP_TEMPORAL
     g_flow.budget_ms[slot] = flow ? g_spatial.flow_budget_ms : 0.0f;
+    g_flow.query_generation[slot] = flow ? g_flow.policy.generation : 0;
+    if (!flow) { g_flow.ticket = 0; g_flow.resource_streak = 0; }
     if (flow) {
+        g_spatial.query_history_epoch[slot] = g_flow.pending_epoch;
+        g_spatial.query_history_reset[slot] = g_flow.pending_epoch != g_flow.history_epoch;
         vk_gsr2_commit(g_flow.ctx, 1);
+        g_flow.history_epoch = g_flow.pending_epoch;
+        if (g_flow.resource_failures && ++g_flow.resource_streak >= 60)
+            g_flow.resource_failures = g_flow.resource_streak = 0;
         g_flow.next ^= 1;
         g_flow.ticket = ticket;
         g_flow.fence = fence;
@@ -669,11 +955,25 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
                   w, h, stage_needed ? " (physical-size staging)" : "");
     } else src->layout = VK_IMAGE_LAYOUT_GENERAL;
     if (stage_needed) stage->last_use = fence;
-    if (rcas) intermediate->last_use = fence;
+    if (rcas || post) intermediate->last_use = fence;
     output->last_use = fence;
-    g_spatial.encoding = (unsigned)mode * 128u + (rcas ? (unsigned)(sharpness * 100.0f + 0.5f) : 0u);
+    // Effective processing is part of LSFG's source contract, including GSR1's
+    // built-in sharpening. A changed slider resets LSFG once on the next real frame.
+    g_spatial.report_sharpness_applied = (rcas || post || mode == SP_SGSR1) ?
+        g_spatial.report_sharpness_requested : 0;
+    g_spatial.encoding = (unsigned)mode * 128u + (unsigned)g_spatial.report_sharpness_applied;
     g_spatial.ticket = ticket;
+    g_spatial.slot++;
     g_spatial.query_ticket[slot] = ticket;
+    g_spatial.query_mode[slot] = mode;
+    g_spatial.query_input[slot] = (VkExtent2D){iw, ih};
+    g_spatial.query_output[slot] = (VkExtent2D){w, h};
+    g_spatial.query_budget[slot] = flow ? g_spatial.flow_budget_ms : 0.0f;
+    g_spatial.query_cadence[slot] = g_spatial.flow_cadence_us;
+    g_spatial.query_epoch[slot] = 0;
+#if SP_TEMPORAL
+    if (flow) g_spatial.query_epoch[slot] = g_flow.policy.generation;
+#endif
     spatial_report(requested, mode, reason, ticket);
     return output;
 

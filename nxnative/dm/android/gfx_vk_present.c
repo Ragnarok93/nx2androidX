@@ -21,7 +21,10 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #include "gsr1_frag.spv.h"
 #include "vivid_frag.spv.h"
 #include "spatial_upscaler.h"
+#include "gfx_vk_output_target.h"
 #include "gfx_vk_capture_scale.h"
+#include "gfx_vk_source_continuity.h"
+static dm_recon_continuity g_recon_source;
 
 __attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
 __attribute__((weak)) int dm_external_active(void) { return 0; }
@@ -78,6 +81,7 @@ __attribute__((weak)) float dm_overlay_scale(void) { return 1; }
 __attribute__((weak)) void dm_overlay_knob(int stick, float *dx, float *dy) { (void)stick; *dx = *dy = 0; }
 __attribute__((weak)) int64_t dm_overlay_pressed(int ctl, uint64_t bit) { (void)ctl; (void)bit; return 0; }
 __attribute__((weak)) int dm_menu_state(void) { return -1; }
+__attribute__((weak)) int dm_menu_scroll_units(void) { return 0; }
 __attribute__((weak)) int dm_menu_audio_available(void) { return 0; }
 __attribute__((weak)) int dm_overlay_fps(void) { return 0; }   // front_android.c: the pause menu's Show FPS
 __attribute__((weak)) int dm_save_note(char *out, int cap) { if (cap > 0) out[0] = 0; return OVX_IDLE; }   // front_player.c: the save manager's rows
@@ -118,6 +122,9 @@ static void present_wait_idle(void) {
 static void swap_destroy(void) {
     pace_reset();
     g_flow.ticket = 0;
+    dm_flow_budget_invalidate(&g_flow.policy);
+    dm_recon_source_invalidate(&g_recon_source);
+    g_spatial.ticket = 0; // a redraw must not reuse pre-rebuild output geometry
     present_time_reset();
     if (g_swap) { present_wait_idle(); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
                   vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE; }
@@ -261,7 +268,7 @@ static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImage
 enum { SP_DISC = OV_N, SP_BLACK, SP_WHITE, SP_ACCENT, SP_N };   // (black, white, accent: solid blocks, the dimming and the layout editor's frames)
 #define OV_FPS_CHARS "0123456789 FPS-CBATO"   // (the temperature rows: "SOC 52C", "BAT 38C")
 static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler samp; VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; VkDescriptorSet set;
-                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs; VkBuffer up; VkDeviceMemory upm; uint8_t *px; int uploaded, panel, lay, cver; float sp[SP_N][4];
+                VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs; VkBuffer up; VkDeviceMemory upm; uint8_t *px; int uploaded, panel, panel_scroll, lay, cver; float sp[SP_N][4];
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
 // Without dynamic rendering (a Vulkan 1.1 / 1.2 device, V.has_dynrender) the overlay draws in a render pass object over the swapchain image: one pass for the swapchain's
@@ -486,9 +493,13 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_EXPORT]="Export save", [OVM_IMPORT]="Import save", [OVM_PAD]="Face buttons",
     [OVM_AUDIO]="Audio output", [OVM_FG]="Lossless FG", [OVM_FG_MULT]="FG multiplier",
     [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver",
+    [OVM_OUTPUT_HEIGHT]="Output Resolution", [OVM_OUTPUT_CUSTOM]="Custom resolution",
+    [OVM_OUTPUT_AUTO]="Auto (display)", [OVM_OUTPUT_720]="720p", [OVM_OUTPUT_1080]="1080p",
+    [OVM_OUTPUT_1440]="1440p", [OVM_OUTPUT_1800]="1800p", [OVM_OUTPUT_2160]="2160p (4K)",
+    [OVM_OUTPUT_2880]="2880p (5K)", [OVM_OUTPUT_4320]="4320p (8K)", [OVM_OUTPUT_BACK]="Back",
     [OVM_VIVID]="HDR", [OVM_FSR]="Upscaler", [OVM_FSR_SHARP]="Sharpness", [OVM_RATE]="Frame rate",
-    [OVM_DRS]="Dynamic resolution", [OVM_DRS_MIN]="Minimum scale",
-    [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling", [OVM_RS_MAX]="Maximum / fixed scale",
+    [OVM_DRS]="Dynamic resolution", [OVM_DRS_MIN]="Minimum Scale",
+    [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling", [OVM_RS_MAX]="Maximum Scale",
     [OVM_DIAG_OPEN]="Diagnostics", [OVM_DIAG_CAPTURE]="Capture graphics",
     [OVM_DIAG_EXPORT]="Export diagnostics", [OVM_DIAG_STATUS]="Capture status",
     [OVM_DIAG_STOP]="Stop capture",
@@ -523,6 +534,7 @@ __attribute__((weak)) unsigned dm_menu_rs_recorded(void) {return 0;}
 __attribute__((weak)) int dm_vivid_enabled(void) { return 0; }
 __attribute__((weak)) int dm_spatial_mode(void) { return SP_NATIVE; }
 __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
+__attribute__((weak)) int dm_recon_output_height(void) { return 0; }
 int dm_menu_fg_has_dll(void);
 const char *dm_vk_driver_status(void);   // a controller's face buttons (front_android.c pad_labels)
 __attribute__((weak)) void dm_menu_diag_note(char *out, int cap) { if (cap > 0) snprintf(out, (size_t)cap, "Logs only"); }
@@ -531,31 +543,27 @@ __attribute__((weak)) void dm_menu_radv_note(int index, char *out, int cap) {
     snprintf(out, (size_t)cap, "RADV only");
 }
 static int ov_flag_item(int item) { return item >= OVM_FLAG_DLC && item <= OVM_FLAG_HIZ; }
-static void ov_menu_panel(const ov_canvas *cv, int st) {
-    float p[4] = {0, 0, (float)cv->w, (float)cv->h}, r[4]; ov_menu_rowrect(p, 0, r);
+static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
+    const ov_canvas *cv=root;
+    float p[4] = {0, 0, (float)cv->w, (float)cv->h}, r[4], v[4];
+    ov_settings_view(p,v);ov_settings_row(p,0,0,0,r);
     float rh = r[3], rw = r[2], gap = rh * 0.28f, sh = rh * 0.52f, sw = sh * 1.65f;
     int tab = ((unsigned)st >> 29) & 3, sel = (st >> 4 & 15) - 1, op = st >> 9 & 127;
-    int page = (st & OVM_FLAGS_STATE) ? OVM_FLAGS_PAGE : (st & OVM_DIAG_STATE) ? OVM_DIAG_TAB : tab;
+    int page = (st & OVM_OUTPUT_STATE) ? OVM_OUTPUT_PAGE : (st & OVM_FLAGS_STATE) ? OVM_FLAGS_PAGE : (st & OVM_DIAG_STATE) ? OVM_DIAG_TAB : tab;
+    scroll=ov_settings_clamp(page,scroll);
+    // Draw partially visible rows in a bounded subcanvas. Text, controls and
+    // antialiasing share its clip; header, tab bar and Resume cannot be overdrawn.
+    uint32_t top=(uint32_t)ceilf(v[1]),bottom=(uint32_t)floorf(v[1]+v[3]);
+    ov_canvas body=*root;body.y0+=top;body.h=bottom>top?bottom-top:0;
     int is = (int)fmaxf(1, roundf(rh * 0.30f / PF_CAP));
-    for (; is > 1; is--) {   // the widest row: its label, a gap and its control
-        float need = 0;
-        for (int i = 0; i < OVM_RESUME; i++) {
-            if (!OVM_LABELS[i]) continue;
-            float lw = m3_text_w(OVM_LABELS[i], is),
-                cw = i == OVM_MODE ? 2 * (m3_text_w(OVM_MODES[0], is) + sh) :
-                     i == OVM_PAD ? 2 * (m3_text_w(OVM_PADS[0], is) + sh) :
-                     ov_flag_item(i) ? m3_text_w("Default on restart", is) :
-                     (i == OVM_FSR || i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_RATE || i == OVM_DRS_NOW || i == OVM_DRS_HOOK || i == OVM_DIAG_STATUS) ? m3_text_w("System (fallback)", is) :
-                     OVM_BUTTONS[i] ? m3_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + m3_text_w("OFF", is);
-            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP || i == OVM_DRS_MIN || i==OVM_RS_MAX) ? fmaxf(lw / 0.38f, m3_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
-        }
-        int names_fit = 1;
-        for (int tabname = 0; tabname < OVM_TABS; tabname++)
-            if (m3_text_w(OVM_TAB_NAMES[tabname], is) >= rw / OVM_TABS - sh) names_fit = 0;
-        if (need <= rw && names_fit) break;
+    int row_scale=is;
+    for (; is>1; is--) {
+        int names_fit=1;
+        for(int t=0;t<OVM_TABS;t++)if(m3_text_w(OVM_TAB_NAMES[t],is)>=rw/OVM_TABS-sh)names_fit=0;
+        if(names_fit)break;
     }
     cv_rrect(cv, 0, 0, p[2], p[3], rh * 0.48f, C_BG);
-    const char *title = page == OVM_FLAGS_PAGE ? "RADV test flags" : page == OVM_DIAG_TAB ? "Diagnostics" : "Game settings";
+    const char *title = page == OVM_OUTPUT_PAGE ? "Output Resolution" : page == OVM_FLAGS_PAGE ? "RADV test flags" : page == OVM_DIAG_TAB ? "Diagnostics" : "Game settings";
     const char *subtitle = "PAUSED";
     float title_y = r[1] * 0.53f;
     int title_size = (int)fmaxf(1, roundf(rh * 0.43f / PF_CAP));
@@ -563,8 +571,28 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
     m3_text(cv, r[0]+rh*0.18f, title_y, title, title_size, M3_ON_SURFACE);
     m3_text(cv, r[0]+rw-rh*0.18f-m3_text_w(subtitle,is), title_y, subtitle, is, M3_PRIMARY);
     for (int row = 0; row < OVM_ROWS; row++) {
-        int it = ov_menu_item(page, row); ov_menu_rowrect(p, row, r); float cy = r[1] + rh / 2, x1 = r[0] + rw - rh * 0.15f;
-        if (it < 0) continue;
+        cv=root;
+        int it=ov_menu_item(page,row);
+        if(it<0||!ov_settings_row(p,page,row,scroll,r))continue;
+        int fixed=row==0||row==OVM_ROWS-1;
+        if(!fixed){
+            if(!body.h||r[1]+r[3]<=v[1]||r[1]>=v[1]+v[3])continue;
+            cv=&body;r[1]-=top;
+        }
+        int i=it, is=row_scale;
+        if(row==0){is=row_scale;while(is>1){int fit=1;for(int t=0;t<OVM_TABS;t++)if(m3_text_w(OVM_TAB_NAMES[t],is)>=rw/OVM_TABS-sh)fit=0;if(fit)break;is--;}}
+        else if(!fixed)for(;is>1;is--){
+            float need=0;
+            float lw = m3_text_w(OVM_LABELS[i], is),
+                cw = i == OVM_MODE ? 2 * (m3_text_w(OVM_MODES[0], is) + sh) :
+                     i == OVM_PAD ? 2 * (m3_text_w(OVM_PADS[0], is) + sh) :
+                     ov_flag_item(i) ? m3_text_w("Default on restart", is) :
+                     (i == OVM_OUTPUT_HEIGHT || i == OVM_OUTPUT_CUSTOM || i == OVM_FSR || i == OVM_FG_MULT || i == OVM_FG_FLOW || i == OVM_DRIVER || i == OVM_RATE || i == OVM_DRS_NOW || i == OVM_DRS_HOOK || i == OVM_DIAG_STATUS) ? m3_text_w("System (fallback)", is) :
+                     OVM_BUTTONS[i] ? m3_text_w(OVM_BUTTONS[i], is) + 2 * sh : sw + gap + m3_text_w("OFF", is);
+            need = fmaxf(need, (i == OVM_OPACITY || i == OVM_FSR_SHARP || i == OVM_DRS_MIN || i==OVM_RS_MAX) ? fmaxf(lw / 0.38f, m3_text_w("100%", is) / 0.14f) : lw + gap + cw + rh * 0.3f);
+            if(need<=rw)break;
+        }
+        float cy=r[1]+rh/2,x1=r[0]+rw-rh*0.15f;
         if (row == sel) cv_rrect(cv, r[0], r[1] + rh * 0.08f, r[0] + rw, r[1] + rh * 0.92f, rh * 0.14f, C_HI);
         if (it == OVM_TAB) {
             // Primary tabs, a tonal active container and a separate indicator.
@@ -588,13 +616,13 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
         float x0 = r[0]+rh*0.18f;
         if (row != sel) cv_rrect(cv,r[0],r[1]+rh*0.055f,r[0]+rw,r[1]+rh*0.945f,rh*0.18f,M3_HIGH);
         const char *label = OVM_LABELS[it];
-        if (it == OVM_DRS) label = "Internal resolution";
+        if (it == OVM_DRS) label = "Internal Resolution";
         if (it == OVM_DRS_NOW && dm_menu_rs_live()) label = "Recorded scale";
-        if (it == OVM_RS_MAX && dm_menu_rs_mode() == 1) label = "Fixed scale";
+        /* Maximum Scale remains the same label in Fixed and Adaptive modes. */
         m3_text(cv,x0,cy,label,is,M3_ON_SURFACE);
         if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN || it==OVM_RS_MAX) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
             int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : it==OVM_RS_MAX?dm_menu_rs_max():dm_fsr_sharpness();
-            float t[3]; ov_menu_track(p, row, t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : (it == OVM_DRS_MIN || it==OVM_RS_MAX) ? (float)(value - 50) / (dm_menu_rs_live()?50.0f:45.0f) : (float)value / 100.0f, th = fmaxf(2, rh * 0.14f), kr = rh * 0.18f;
+            float t[3] = {r[0]+rw*0.40f,cy,rw*0.44f}; float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : (it == OVM_DRS_MIN || it==OVM_RS_MAX) ? (float)(value - 50) / (dm_menu_rs_live()?50.0f:45.0f) : (float)value / 100.0f, th = fmaxf(2, rh * 0.14f), kr = rh * 0.18f;
             f = f < 0 ? 0 : f > 1 ? 1 : f;
             cv_rrect(cv, t[0], t[1] - th / 2, t[0] + t[2], t[1] + th / 2, th / 2, M3_SECONDARY);
             if (f * t[2] >= th) cv_rrect(cv, t[0], t[1] - th / 2, t[0] + f * t[2], t[1] + th / 2, th / 2, M3_PRIMARY);
@@ -607,11 +635,23 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             while (vs > 1 && m3_text_w(v, vs) > room) vs--;
             while (v[0] && m3_text_w(v,vs) > room) pf_chop(v,strlen(v));
             m3_text(cv, x1 - m3_text_w(v, vs), cy, v, vs, x == OVX_FAILED ? M3_ERROR : M3_ON_SURFACE);
-        } else if ((it==OVM_DRS && dm_menu_rs_live()) || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
+        } else if (page == OVM_OUTPUT_PAGE && ov_output_preset(it)>=0) {
+            const char *status=dm_recon_output_height()==ov_output_preset(it)?"Selected":">";
+            m3_text(cv,x1-m3_text_w(status,is),cy,status,is,M3_PRIMARY);
+        } else if (it==OVM_OUTPUT_BACK) {
+            m3_text(cv,x1-m3_text_w(">",is),cy,">",is,M3_PRIMARY);
+        } else if ((it==OVM_DRS && dm_menu_rs_live()) || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
             char value[128];
             if (it==OVM_DRS) {
                 int mode=dm_menu_rs_mode();
                 snprintf(value,sizeof value,"%s",mode==1?"Fixed":mode==2?"Adaptive":"Off");
+            } else if (it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM) {
+                int height = dm_recon_output_height();
+                if (it == OVM_OUTPUT_CUSTOM) {
+                    if (!height) snprintf(value, sizeof value, "< Set 1080p >");
+                    else snprintf(value, sizeof value, "< %dp >", height);
+                } else if (!height) snprintf(value, sizeof value, "Auto (display)");
+                else snprintf(value, sizeof value, "%dp", height);
             } else if (it == OVM_FSR) {
                 snprintf(value, sizeof value, "%s", spatial_mode_name(dm_spatial_mode()));
             } else if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
@@ -637,7 +677,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             int vs = is;
-            const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
+            const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
             float trailing = action ? rh*0.30f : 0, room = rw - m3_text_w(label,is)-gap-rh*0.36f-trailing;
             while (vs > 1 && m3_text_w(value, vs) > room) vs--;
             while (value[0] && m3_text_w(value,vs) > room) pf_chop(value,strlen(value));
@@ -662,6 +702,13 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
                                it == OVM_DRS && !dm_menu_drs_supported() ? "Unavailable" : on ? "ON" : "OFF";
             m3_text(cv, sx0 - gap - m3_text_w(word, is), cy, word, is, on ? M3_PRIMARY : C_DIM);
         }
+    }
+    int count=ov_settings_count(page);
+    if(count>OV_SETTINGS_VIEW_ROWS){
+        float height=v[3]*OV_SETTINGS_VIEW_ROWS/count;
+        float y=v[1]+(v[3]-height)*scroll/ov_settings_max(page);
+        float x=v[0]+v[2]+rh*0.06f, w=fmaxf(1,rh*0.045f);
+        cv_rrect(root,x,y,x+w,y+height,w/2,M3_OUTLINE);
     }
 }
 // The layout editor's toolbar and prompt (overlay_layout.h ov_ed_*), at half the window's scale in the raster's panel rectangle: the toolbar at its top, the
@@ -719,13 +766,13 @@ static void ov_save_panel(const ov_canvas *cv, int st) {
         if (q->style == OVS_TITLE) cv_rrect(cv, r[0], r[1] + rh - 1, r[0] + rw, r[1] + rh, 0.5f, C_LINE);
     }
 }
-static void ov_panel(int st) {   // the pause menu, the text entry or the layout editor, for menu state st (dm_menu_state), into the panel's rows of the upload buffer
+static void ov_panel(int st, int scroll) {   // the pause menu, the text entry or the layout editor, for menu state st (dm_menu_state), into the panel's rows of the upload buffer
     ov_canvas cv = {g_ov.px, g_ov.w, 0, g_ov.h + g_ov.sh, g_ov.pw, g_ov.ph};
     for (uint32_t y = 0; y < g_ov.ph; y++) memset(g_ov.px + 4 * ((size_t)(cv.y0 + y) * g_ov.w), 0, (size_t)g_ov.pw * 4);
     if (st >> 16 & 1) ov_text_panel(&cv);   // a text entry is open (dm_menu_state)
     else if (st & OVE_ST) ov_edit_panel(&cv, st, (float)g_sext.width, (float)g_sext.height);
     else if (st & OVS_ST) ov_save_panel(&cv, st);
-    else ov_menu_panel(&cv, st);
+    else ov_menu_panel(&cv, st, scroll);
 }
 // The phone window uses the same menu raster as Vulkan, independently of the external swapchain.
 JNIEXPORT jint JNICALL Java_org_nx2a_ExternalActivity_externalMenuState(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_menu_state(); }
@@ -736,7 +783,8 @@ JNIEXPORT jfloatArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuGeometr
     if (out) (*env)->SetFloatArrayRegion(env,out,0,5,geometry);
     return out;
 }
-JNIEXPORT jintArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuPixels(JNIEnv *env, jclass cls, jint W, jint H, jint st) {
+JNIEXPORT jint JNICALL Java_org_nx2a_ExternalActivity_externalMenuScroll(JNIEnv *env,jclass cls) { (void)env;(void)cls;return dm_menu_scroll_units(); }
+static jintArray external_menu_pixels(JNIEnv *env, jclass cls, jint W, jint H, jint st, jint scroll) {
     (void)cls;
     if (W <= 0 || H <= 0 || W > 8192 || H > 8192 || st < 0) return NULL;
     float r[4]; ov_menu_rect((float)W, (float)H, r);
@@ -748,7 +796,7 @@ JNIEXPORT jintArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuPixels(JN
     if (st & 0x10000) ov_text_panel(&cv);
     else if (st & OVE_ST) ov_edit_panel(&cv, st, (float)W, (float)H);
     else if (st & OVS_ST) ov_save_panel(&cv, st);
-    else ov_menu_panel(&cv, st);
+    else ov_menu_panel(&cv, st, scroll);
     size_t count = (size_t)w * h; jint *argb = malloc((count + 2) * sizeof *argb);
     if (!argb) { free(pixels); return NULL; }
     argb[0] = (jint)w; argb[1] = (jint)h;
@@ -756,6 +804,13 @@ JNIEXPORT jintArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuPixels(JN
     jintArray out = (*env)->NewIntArray(env, (jsize)(count + 2));
     if (out) (*env)->SetIntArrayRegion(env, out, 0, (jsize)(count + 2), argb);
     free(argb); free(pixels); return out;
+}
+// Retain the legacy JNI entrypoint for already-exported game shells.
+JNIEXPORT jintArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuPixels(JNIEnv *env,jclass cls,jint W,jint H,jint st) {
+    return external_menu_pixels(env,cls,W,H,st,dm_menu_scroll_units());
+}
+JNIEXPORT jintArray JNICALL Java_org_nx2a_ExternalActivity_externalMenuPixelsScrolled(JNIEnv *env,jclass cls,jint W,jint H,jint st,jint scroll) {
+    return external_menu_pixels(env,cls,W,H,st,scroll);
 }
 static void ov_raster(uint8_t *px, uint32_t w, uint32_t h, uint32_t sh) {
     memset(px, 0, (size_t)w * (h + sh) * 4);
@@ -1035,13 +1090,15 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
         g_ov.uploaded = 0; g_ov.panel = -1;
     }
+    int scroll=dm_menu_scroll_units();
+    int panel_changed=menu!=g_ov.panel||scroll!=g_ov.panel_scroll;
     uint32_t y0 = 0, rows = g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh;   // the rows to upload
-    if (g_ov.uploaded && menu >= 0 && menu != g_ov.panel) {   // only the panel, after the last copy out of the buffer has run
+    if (g_ov.uploaded && menu >= 0 && panel_changed) {   // only the panel, after the last copy out of the buffer has run
         VkFence f[8]; uint32_t n = 0; for (uint32_t i = 0; i < 8; i++) if (i != k) f[n++] = g_pfence[i];
         vkWaitForFences(V.dev, n, f, 1, 1000000000ull);
         y0 = g_ov.h + g_ov.sh; rows = g_ov.ph; g_ov.uploaded = 0;
     }
-    if (menu >= 0 && menu != g_ov.panel) { ov_panel(menu); g_ov.panel = menu; }
+    if (menu >= 0 && panel_changed) { ov_panel(menu,scroll); g_ov.panel = menu; g_ov.panel_scroll=scroll; }
     if (!g_ov.uploaded) {
         VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, y0 ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, g_ov.img, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -1173,8 +1230,10 @@ static VkFormat present_window_format(VkFormat src) {
 }
 static VkExtent2D picture_extent(int width, int height) {
     if (width <= 0 || height <= 0) return (VkExtent2D){0};
-    double scale = fmin((double)g_sext.width / width, (double)g_sext.height / height);
-    return (VkExtent2D){(uint32_t)(width * scale), (uint32_t)(height * scale)};
+    uint32_t w, h;
+    dm_recon_picture_extent((uint32_t)width, (uint32_t)height,
+                            g_sext.width, g_sext.height, &w, &h);
+    return (VkExtent2D){w, h};
 }
 
 static void present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D picture,
@@ -1375,8 +1434,8 @@ void vk_window_lost(void) {
 #define PQ_N 4
 static struct {
     vkimg_t *im;
-    int crop[4], has_crop;
-    uint64_t n;
+    int crop[4], has_crop, docked, flip_y;
+    uint64_t n, source_ns;
     double period;
     vk_reconstruction_input physical;
 } g_pq[PQ_N];
@@ -1386,6 +1445,7 @@ static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_
 static _Atomic int g_redraw;
 void dm_overlay_redraw(void) { atomic_store(&g_redraw, 1); pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }
 static void present_window(vkimg_t *im, const int *crop, double period, uint64_t ticket, int redraw,
+                           uint64_t source_ns, int docked, int flip_y,
                            const vk_reconstruction_input *physical) {
     if (g_spatial.live_sources) spatial_collect_sources();
     if (g_present_failed) return;
@@ -1401,8 +1461,15 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         crop && crop[2] ? crop[2] : (int)im->w, crop && crop[3] ? crop[3] : (int)im->h};
     VkExtent2D picture = picture_extent(raw[2], raw[3]);
     if (!picture.width || !picture.height) return;
+    // The drawable remains the only presentation/overlay rectangle. A target
+    // above it is offscreen supersampling, not a swapchain resize request.
+    int output_height = dm_recon_output_height();
+    VkExtent2D target = picture;
+    if (!redraw && dm_spatial_mode() != SP_NATIVE)
+        dm_recon_target_extent((uint32_t)raw[2], (uint32_t)raw[3],
+            picture.width, picture.height, output_height, &target.width, &target.height);
 
-    int flip_y = vk_window_bottom_up();
+    unsigned source_reset = 0;
     spatial_image *reconstructed = NULL;
     if (redraw) {
         if (ticket && g_spatial.ticket == ticket) reconstructed = &g_spatial.image[SP_OUTPUT];
@@ -1410,14 +1477,29 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         // A guest crop can carry engine dynamic-resolution information.
         // Keep the existing native image path for anything but the full copy.
         int full = !raw[0] && !raw[1] && raw[2] == (int)im->w && raw[3] == (int)im->h;
-        int mode = dm_spatial_mode();
-        if (mode == SP_SGSR2) {
-            uint64_t now = mono_ns();
-            if (g_flow.last_source_ns && now - g_flow.last_source_ns > 250000000) g_flow.ticket = 0;
-            g_flow.last_source_ns = now;
+        dm_recon_source frame = {.ticket=ticket, .source_ns=source_ns,
+            .width=im->w, .height=im->h, .output_w=target.width, .output_h=target.height,
+            .format=(uint32_t)im->fmt, .crop={raw[0],raw[1],raw[2],raw[3]},
+            .flip_y=flip_y, .docked=docked};
+        if (!dm_recon_source_accept(&g_recon_source, &frame, &source_reset)) return;
+        if (source_reset) {
+            // A failed oversized target must not suppress a new smaller one.
+            if (source_reset & (DM_RECON_SOURCE_GEOMETRY | DM_RECON_SOURCE_MODE |
+                                DM_RECON_SOURCE_SURFACE | DM_RECON_SOURCE_ENCODING)) {
+                g_spatial.retry_after = 0;
+                g_spatial.rcas_retry_after = 0;
+            }
+            g_flow.ticket = 0;
+            g_flow.last_real_ticket = 0;
+            dm_flow_budget_invalidate(&g_flow.policy);
         }
-        g_spatial.flow_budget_ms = period > 0 ? (float)fmin(2.5, period * 100.0) : 2.0f;
-        reconstructed = spatial_reconstruct(im, raw, flip_y, picture.width, picture.height, ticket,
+        // Match LSFG's source-rate cap. This is not measured GPU headroom.
+        extern int dm_perf_rate_fps(void);
+        dm_flow_cadence cadence = dm_flow_cadence_estimate(period, dm_perf_rate_fps());
+        // Quantize the workload key, not the budget, to avoid tiny period jitter.
+        g_spatial.flow_cadence_us = ((cadence.period_us + 500u) / 1000u) * 1000u;
+        g_spatial.flow_budget_ms = cadence.budget_ms;
+        reconstructed = spatial_reconstruct(im, raw, flip_y, target.width, target.height, ticket,
                                            full ? physical : NULL);
     }
 
@@ -1435,7 +1517,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     VkFence fg_fence = VK_NULL_HANDLE;
     unsigned encoding = (unsigned)source->fmt * 1024u;
     if (reconstructed) encoding += g_spatial.encoding;
-    int ng = dm_fg_frame(source, rect, flip_y, encoding, period, gen, &hold, &out_period, &fg_fence);
+    int ng = dm_fg_frame(source, rect, flip_y, encoding, source_reset, period, gen, &hold, &out_period, &fg_fence);
     if (reconstructed && fg_fence) reconstructed->last_use = fg_fence;
     atomic_store(&g_fg_out_ns, out_period > 0 ? (uint64_t)(out_period * 1e9) : 0);
     atomic_store(&g_fg_images, ng > 0 ? ng + 1 : 1);
@@ -1444,8 +1526,28 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             .requested = spatial_requested, .active = spatial_active,
             .physical = g_spatial.report_physical, .generated = ng,
             .source_w = g_spatial.report_input.width, .source_h = g_spatial.report_input.height,
-            .output_w = picture.width, .output_h = picture.height,
+            .output_w = target.width, .output_h = target.height,
+            .display_w = picture.width, .display_h = picture.height,
+            .actual_w = (unsigned)rect[2], .actual_h = (unsigned)rect[3],
+            .output_height = output_height,
+            .supersampling = reconstructed && target.width >= picture.width && target.height >= picture.height &&
+                (target.width > picture.width || target.height > picture.height),
             .timing_ticket = g_spatial.measured_ticket, .gpu_ms = g_spatial.gpu_ms, .reason = spatial_reason,
+            .timing_mode = g_spatial.measured_mode,
+            .timing_iw = g_spatial.measured_input.width, .timing_ih = g_spatial.measured_input.height,
+            .timing_ow = g_spatial.measured_output.width, .timing_oh = g_spatial.measured_output.height,
+            .timing_budget_ms = g_spatial.measured_budget, .timing_cadence_us = g_spatial.measured_cadence,
+            .timing_generation = g_spatial.measured_epoch,
+            .sharpness_requested = g_spatial.report_sharpness_requested,
+            .sharpness_applied = g_spatial.report_sharpness_applied,
+            .source_ns = source_ns, .source_reset = source_reset, .docked = docked,
+            .alloc_attempts = g_spatial.report_alloc_attempts, .allocations = g_spatial.report_allocations,
+            .alloc_waits = g_spatial.report_alloc_waits, .alloc_wait_ns = g_spatial.report_alloc_wait_ns,
+            .slot_wait_ns = g_spatial.report_slot_wait_ns,
+            .timing_history_epoch = g_spatial.measured_history_epoch,
+            .timing_history_reset = g_spatial.measured_history_reset,
+            .stage_ms = {g_spatial.measured_stage_ms[0], g_spatial.measured_stage_ms[1],
+                         g_spatial.measured_stage_ms[2], g_spatial.measured_stage_ms[3]},
         });
     }
     int generated_rect[4] = {0, 0, rect[2], rect[3]};
@@ -1465,7 +1567,8 @@ static void *present_thread(void *arg) {
             pthread_mutex_unlock(&g_pq_mu);
             if (last.im) {
                 pthread_mutex_lock(&g_present_mu);
-                present_window(last.im, last.has_crop ? last.crop : NULL, -1, last.n, 1, NULL);
+                present_window(last.im, last.has_crop ? last.crop : NULL, -1, last.n, 1,
+                               last.source_ns, last.docked, last.flip_y, NULL);
                 pthread_mutex_unlock(&g_present_mu);
             }
             continue;
@@ -1477,7 +1580,7 @@ static void *present_thread(void *arg) {
             last.physical.backing = NULL;
             pthread_mutex_lock(&g_present_mu);
             present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0,
-                           e.physical.backing ? &e.physical : NULL);
+                           e.source_ns, e.docked, e.flip_y, e.physical.backing ? &e.physical : NULL);
             pthread_mutex_unlock(&g_present_mu);
         }
         vk_rs_variant_destroy(e.physical.backing);
@@ -1488,10 +1591,15 @@ static void *present_thread(void *arg) {
 static void present_thread_start(void) { pthread_t t; pthread_create(&t, NULL, present_thread, NULL); pthread_detach(t); }
 static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, double period,
                                 const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
+    // Snapshot before queue backpressure, on the source submission thread.
+    // Operation mode is a notification snapshot, not shader/scene certification.
+    extern int dm_opmode(void);
+    uint64_t source_ns = mono_ns();
+    int docked = dm_opmode() != 0, flip_y = vk_window_bottom_up();
     static int sync = -1; static pthread_once_t once = PTHREAD_ONCE_INIT;
     if (sync < 0) sync = getenv("DM_VK_SYNC_PRESENT") != NULL;
     if (sync || !dm_front_window()) {   // headless: nothing to show; or presenting on this thread
-        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, physical); pthread_mutex_unlock(&g_present_mu); }
+        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, physical); pthread_mutex_unlock(&g_present_mu); }
         if (physical) vk_rs_variant_destroy(physical->backing);
         pthread_mutex_lock(&g_pq_mu); if (g_pq_tail == g_pq_head) g_pq_done = n; pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
         return n;
@@ -1500,6 +1608,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_head - g_pq_tail >= PQ_N) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // never more than PQ_N frames behind
     typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = im; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
+    e->source_ns = source_ns; e->docked = docked; e->flip_y = flip_y;
     if (physical) e->physical = *physical;
     else e->physical.backing = NULL;
     g_pq_head++; pthread_cond_broadcast(&g_pq_cv);
@@ -1592,8 +1701,8 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         if (vcrop[2] > 0 && vcrop[3] > 0 && vcrop[0] + vcrop[2] <= (int)im->w && vcrop[1] + vcrop[3] <= (int)im->h) crop = vcrop;
     }
     if (vk_pass_dump_user_active()) vk_rs_capture_replay(n, replay_ns, gpu_ms);
-    { void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4]);
-      uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done(), im, crop); }
+    { void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4], uint64_t ticket);
+      uint64_t vk_fence_done(void); vk_pass_dump_poll(vk_fence_done(), im, crop, n); }
     vk_reconstruction_input physical;
     const vk_reconstruction_input *input = NULL;
     if (g_physical_offer.input.backing) {

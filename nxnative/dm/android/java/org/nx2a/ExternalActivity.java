@@ -49,7 +49,8 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
     private static native boolean externalControllerMotion(MotionEvent event);
     private static native float[] externalOverlay(int width, int height);
     private static native int externalMenuState();
-    private static native int[] externalMenuPixels(int width, int height, int state);
+    private static native int externalMenuScroll();
+    private static native int[] externalMenuPixelsScrolled(int width, int height, int state, int scroll);
     private static native float[] externalMenuGeometry(int width, int height);
     private String diagnosticsRoot;
     public void exportDiagnostics(String root) {
@@ -186,7 +187,7 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
         private final OverlayTheme[] themes = new OverlayTheme[2];
         private final Bitmap[] atlases = new Bitmap[2];
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private int menuState = -1, rasterState = -2, rasterWidth, rasterHeight;
+        private int menuState = -1, rasterState = -2, rasterWidth, rasterHeight, rasterScroll;
         private Bitmap menuRaster;
 
         OriginalPad() throws IOException {
@@ -242,13 +243,14 @@ public class ExternalActivity extends NativeActivity implements ExternalDisplay.
         }
         private Bitmap menuRaster(int state) {
             int W = getWidth(), H = getHeight();
-            if (menuRaster != null && rasterState == state && rasterWidth == W && rasterHeight == H) return menuRaster;
-            int[] pixels = externalMenuPixels(W, H, state);
+            int scroll=externalMenuScroll();
+            if (menuRaster != null && rasterState == state && rasterWidth == W && rasterHeight == H && rasterScroll == scroll) return menuRaster;
+            int[] pixels = externalMenuPixelsScrolled(W, H, state, scroll);
             if (pixels == null || pixels.length < 3 || pixels[0] <= 0 || pixels[1] <= 0 || pixels.length != 2 + pixels[0] * pixels[1]) return null;
             if (menuRaster == null || menuRaster.getWidth() != pixels[0] || menuRaster.getHeight() != pixels[1])
                 menuRaster = Bitmap.createBitmap(pixels[0], pixels[1], Bitmap.Config.ARGB_8888);
             menuRaster.setPixels(pixels, 2, pixels[0], 0, 0, pixels[0], pixels[1]);
-            rasterState = state; rasterWidth = W; rasterHeight = H; return menuRaster;
+            rasterState = state; rasterWidth = W; rasterHeight = H; rasterScroll = scroll; return menuRaster;
         }
         private void drawMenu(Canvas c, float[] data) {
             Bitmap bitmap = menuRaster(menuState); if (bitmap == null) return;

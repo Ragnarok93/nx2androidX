@@ -53,9 +53,9 @@ int dm_fg_status(char *buf, int n) {
 }
 
 #ifndef NX_LSFG
-int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding,
+int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, unsigned source_reset,
                 double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
-    (void)im; (void)crop; (void)period; (void)gen; (void)flip_y; (void)encoding;
+    (void)im; (void)crop; (void)period; (void)gen; (void)flip_y; (void)encoding; (void)source_reset;
     *consumer = VK_NULL_HANDLE;
     settings_init(); *hold = 0; *out_period = 0;
     if (atomic_load(&g_on) > 0) { atomic_store(&g_state, -1); reason("%s", "not in this build (built without NX_LSFG)"); }
@@ -67,6 +67,7 @@ static struct {
     int state;                         // 0 not tried, 1 ready (modules loaded), -1 unavailable
     lsfg_modules mods;
     lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
+    VkExtent2D failed_extent; int failed_flow; double rebuild_retry_at;
     VkImage out[LSFG_MAX_GENERATIONS]; VkImageView out_view[LSFG_MAX_GENERATIONS]; VkDeviceMemory out_mem[LSFG_MAX_GENERATIONS];
     VkCommandPool pool; struct { VkCommandBuffer cb; VkFence fence; } fr[NFG]; unsigned fi;
     lsfg_pacer pacer; uint64_t count; uint32_t warm_streak;
@@ -126,14 +127,20 @@ static int out_new(VkExtent2D e, int i, VkImageView *view) {
         .extent = {e.width, e.height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
     VkResult r = vk.vkCreateImage(V.dev, &ci, NULL, &F.out[i]);
+    if (r) F.out[i] = VK_NULL_HANDLE;
     VkMemoryRequirements mr = {0}; if (!r) vk.vkGetImageMemoryRequirements(V.dev, F.out[i], &mr);
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
     if (!r && ai.memoryTypeIndex == UINT32_MAX) r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    if (!r) r = vk.vkAllocateMemory(V.dev, &ai, NULL, &F.out_mem[i]);
+    if (!r) {
+        r = vk.vkAllocateMemory(V.dev, &ai, NULL, &F.out_mem[i]);
+        if (r) F.out_mem[i] = VK_NULL_HANDLE;
+    }
     if (!r) r = vk.vkBindImageMemory(V.dev, F.out[i], F.out_mem[i], 0);
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = F.out[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     if (!r) r = vk.vkCreateImageView(V.dev, &vi, NULL, view);
-    if (r) { VRED("frame generation: output image %ux%u: %d", e.width, e.height, r); F.out[i] = VK_NULL_HANDLE; return 0; }
+    // Rebuild's teardown must still see every successfully created image
+    // and allocation, even when a later bind or view creation fails.
+    if (r) { *view = VK_NULL_HANDLE; VRED("frame generation: output image %ux%u: %d", e.width, e.height, r); return 0; }
     return 1;
 }
 
@@ -154,12 +161,13 @@ static void full_barrier(VkCommandBuffer cb) {   // the game's writes to the win
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
 
-int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding,
+int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, unsigned source_reset,
                 double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
     settings_init();
     *hold = 0; *out_period = 0; *consumer = VK_NULL_HANDLE;
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     if (!on) {
+        F.rebuild_retry_at = 0;
         if (F.chain) { teardown(); VLOG("frame generation off"); }
         if (F.state >= 0) { atomic_store(&g_state, 0); reason("%s", "off"); }
         return 0;
@@ -198,11 +206,24 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding,
     }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
-        if (!rebuild(e, flow)) { unavailable("%s", "the frame generation chain could not be made (see the [RED] lines)"); return 0; }
+        // A larger source can exhaust allocations without making the loaded
+        // LSFG shaders unavailable. Retry a different geometry immediately;
+        // bound same-geometry retries to avoid an allocation storm.
+        if (tnow < F.rebuild_retry_at && e.width == F.failed_extent.width &&
+            e.height == F.failed_extent.height && flow == F.failed_flow) return 0;
+        if (!rebuild(e, flow)) {
+            F.failed_extent = e; F.failed_flow = flow;
+            F.rebuild_retry_at = tnow + 2.0;
+            atomic_store(&g_state, 2);
+            reason("%s", "frame generation chain allocation unavailable; retrying");
+            return 0;
+        }
+        F.rebuild_retry_at = 0;
     }
-    if (encoding != F.encoding) {
+    if (source_reset || encoding != F.encoding) {
         F.encoding = encoding;
         F.count = F.warm_streak = 0;
+        if (source_reset) VLOG("frame generation: real-source discontinuity %#x", source_reset);
     }
     // The floor for the game's own rate (DM_LSFG_MIN_FPS, default 30): the generation's work must not push the game under it
     F.pacer.min_base = 30.0f;

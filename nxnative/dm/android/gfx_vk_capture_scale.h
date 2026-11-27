@@ -16,8 +16,19 @@ typedef struct {
 typedef struct {
     int requested, active, physical, generated;
     unsigned source_w, source_h, output_w, output_h;
+    unsigned display_w, display_h, actual_w, actual_h;
+    int output_height, supersampling;
     uint64_t timing_ticket;
     double gpu_ms;
+    int timing_mode;
+    unsigned timing_iw, timing_ih, timing_ow, timing_oh, timing_cadence_us;
+    float timing_budget_ms;
+    uint64_t timing_generation, timing_history_epoch;
+    int timing_history_reset, sharpness_requested, sharpness_applied;
+    double stage_ms[4];
+    uint64_t source_ns, alloc_wait_ns, slot_wait_ns;
+    unsigned source_reset, alloc_attempts, allocations, alloc_waits;
+    int docked;
     const char *reason; // immutable reconstruction status string
 } vk_capture_scale_present_sample;
 

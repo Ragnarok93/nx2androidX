@@ -12,6 +12,7 @@
 #include "dm_input.h"
 #include "overlay_layout.h"
 #include "spatial_upscaler.h"
+#include "gfx_vk_output_target.h"
 #include "gfx_vk_capture_scale.h"
 #include "gfx_vk_resolution_live.h"
 #include "saves_android.h"
@@ -84,6 +85,7 @@ unsigned dm_menu_rs_recorded(void) {return vk_rs_live_recorded();}
 static _Atomic int g_set_dyn, g_set_dyn_min = 70;             // requested true 3D dynamic-resolution mode and minimum percent
 static _Atomic int g_set_rate;                                // selected actual source-frame target (30/40/60), -1 unlocked, 0 follows profile
 static _Atomic int g_set_vivid;
+static _Atomic int g_set_output_height; // 0 matches the drawable
 static _Atomic int g_set_upscaler = SP_NATIVE, g_set_fsr_sharp = 50;            // spatial backend and sharpness 0..100
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
@@ -124,6 +126,10 @@ static void settings_load(void) {
         int mode = spatial_mode_restore(atoi(fg_env));
         if (spatial_mode_valid(mode)) atomic_store(&g_set_upscaler, mode);
     }
+    if ((fg_env = getenv("DM_UPSCALE_OUTPUT_HEIGHT"))) {
+        int height = dm_recon_parse_height(fg_env);
+        if (height >= 0) atomic_store(&g_set_output_height, height);
+    }
     if ((fg_env = getenv("DM_FSR_SHARPNESS"))) {
         int v = atoi(fg_env); atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
     }
@@ -148,6 +154,10 @@ static void settings_load(void) {
         else if (sscanf(line, "upscaler=%d", &v) == 1) {
             v = spatial_mode_restore(v);
             if (spatial_mode_valid(v)) saved_upscaler = v;
+        }
+        else if (!strncmp(line, "upscale_output_height=", sizeof("upscale_output_height=")-1)) {
+            int height = dm_recon_parse_height(line + sizeof("upscale_output_height=")-1);
+            if (height >= 0) atomic_store(&g_set_output_height, height);
         }
         else if (sscanf(line, "fsr_sharp=%d", &v) == 1) atomic_store(&g_set_fsr_sharp, v < 0 ? 0 : v > 100 ? 100 : v);
         else if (sscanf(line, "fps_mode=%d", &v) == 1 && (v == -1 || v == 30 || v == 40 || v == 60)) atomic_store(&g_set_rate, v);
@@ -175,6 +185,7 @@ static void settings_save(void) {
     snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
     int upscaler = dm_spatial_mode();
+    fprintf(f, "upscale_output_height=%d\n", dm_recon_output_height());
     fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\nfg=%d\nfg_mult=%d\nfg_flow=%d\nfsr=%d\nupscaler=%d\nfsr_sharp=%d\nfps_mode=%d\ndyn_scale=%d\ndyn_min=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
             atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow),
             upscaler == SP_FSR1, upscaler, atomic_load(&g_set_fsr_sharp), atomic_load(&g_set_rate),
@@ -647,6 +658,14 @@ static void *pad_watch(void *a) {
 // ---- the pause menu: the game is held while it is open; touches and a controller's keys go to it. Two tabs (overlay_layout.h OVM_TAB_ITEMS): the gamepad's
 // settings (shown, opacity, the layout editor, rumble) and the game's (the frame rate counter, the mode, exporting and importing the save); Resume under them ----
 static _Atomic int g_menu_cfg_ver;
+static _Atomic int g_menu_scroll;
+int dm_menu_scroll_units(void) { return atomic_load(&g_menu_scroll); }
+static float g_menu_down_x, g_menu_down_y, g_menu_down_w, g_menu_down_h;
+static int g_menu_down_scroll, g_menu_gesture, g_menu_down_page;
+static void menu_scroll_set(int page, int scroll) {
+    scroll=ov_settings_clamp(page,scroll);
+    if(atomic_exchange(&g_menu_scroll,scroll)!=scroll) { atomic_fetch_add(&g_menu_cfg_ver,1); dm_overlay_redraw(); }
+}
 static _Atomic int g_menu_hi = -1, g_menu_tab;   // the highlighted row (a controller's selection, or the row a finger is on), -1 none; the open tab
 static int g_menu_ptr = -1, g_menu_row = -2;   // the pointer pressing in the menu, and the row it went down on (-3 the menu button)
 static _Atomic int g_tx_ver;   // the text entry's edit count: the panel is drawn again when it changes
@@ -662,7 +681,7 @@ enum { DIAG_IDLE, DIAG_ARMED, DIAG_EXPORTING, DIAG_EXPORTED, DIAG_FAILED, DIAG_S
 static void diag_changed(void) { atomic_fetch_add_explicit(&g_diag_ver, 1, memory_order_relaxed); dm_overlay_redraw(); }
 static int menu_active_tab(void) {
     int sub = atomic_load(&g_diag_flags_page);
-    return sub == 2 ? OVM_FLAGS_PAGE : sub == 1 ? OVM_DIAG_TAB : atomic_load(&g_menu_tab);
+    return sub == 3 ? OVM_OUTPUT_PAGE : sub == 2 ? OVM_FLAGS_PAGE : sub == 1 ? OVM_DIAG_TAB : atomic_load(&g_menu_tab);
 }
 static void radv_test_report(FILE *file) {
     fprintf(file, "radv_test_mask_applied=%u\nradv_test_mask_staged=%u\n",
@@ -720,16 +739,27 @@ int dm_menu_state(void) {
            atomic_load(&g_set_opacity) << 9 |
            atomic_load(&g_set_fg) << 19 | atomic_load(&g_sv_st) << 20 |
            ((atomic_load(&g_sv_n) + atomic_load(&g_menu_cfg_ver) + atomic_load(&g_diag_ver)) & 3) << 24 |
-           (sub ? OVM_DIAG_STATE : 0) | (sub == 2 ? OVM_FLAGS_STATE : 0) |
+           (sub == 1 || sub == 2 ? OVM_DIAG_STATE : 0) | (sub == 2 ? OVM_FLAGS_STATE : 0) |
+           (sub == 3 ? OVM_OUTPUT_STATE : 0) |
            atomic_load(&g_menu_tab) << 29;
 }
 int dm_vivid_enabled(void) { return atomic_load(&g_set_vivid); }
 int dm_spatial_mode(void) { return atomic_load(&g_set_upscaler); }
 int dm_fsr_sharpness(void) { return atomic_load(&g_set_fsr_sharp); }
+int dm_recon_output_height(void) { return atomic_load(&g_set_output_height); }
+static void menu_output_step(int direction, int custom) {
+    int current = dm_recon_output_height();
+    atomic_store(&g_set_output_height, custom ? dm_recon_custom_step(current, direction) :
+                                                dm_recon_output_step(current, direction));
+    atomic_fetch_add(&g_menu_cfg_ver, 1);
+    settings_save();
+    dm_overlay_redraw();
+}
 int dm_overlay_fps(void) { return atomic_load(&g_set_fps) && !atomic_load(&g_menu); }   // gfx_vk_present.c draws the counter (not while the menu holds the game)
 static void menu_open(int hi) {
     if (!atomic_load(&g_running) || atomic_exchange(&g_menu, 1)) return;
     atomic_store(&g_menu_hi, hi); g_menu_ptr = -1;
+    menu_scroll_set(menu_active_tab(), ov_settings_reveal(menu_active_tab(),0,hi));
     dm_app_notice(DM_NOTICE_PANEL);   // the app: its drawer steps aside (the panel is drawn under it otherwise)
     if (atomic_load(&g_sv_st) != OVX_BUSY) atomic_store(&g_sv_st, OVX_IDLE);   // the last export's note goes (one still copying stays)
     dm_input_set(0, 0, 0, 0, 0); dm_touch_set(NULL, 0); g_touch_btn = 0;   // nothing stays pressed in the game
@@ -804,7 +834,11 @@ static void menu_opacity(int v) {   // the slider: a new value is drawn at once 
 static void menu_tab(int t) {
     t = (t % OVM_TABS + OVM_TABS) % OVM_TABS;
     int previous = atomic_exchange(&g_diag_flags_page, 0);
-    if (atomic_exchange(&g_menu_tab, t) != t || previous) dm_haptics_android_tap();
+    if (atomic_exchange(&g_menu_tab, t) != t || previous) {
+        menu_scroll_set(t,0);
+        atomic_store(&g_menu_hi,0);
+        dm_haptics_android_tap();
+    }
     dm_overlay_redraw();
 }
 static void ed_open(void); static void sp_open(void); static void save_export(void);
@@ -960,6 +994,7 @@ Java_org_nx2a_GameActivity_diagnosticsExported(JNIEnv *E, jclass cls, jint resul
     diag_changed();
 }
 static void menu_do(int item) {
+    int prior_page=menu_active_tab();
     if (item == OVM_OVERLAY) { atomic_store(&g_set_overlay, !atomic_load(&g_set_overlay)); atomic_store(&g_overlay, 1); settings_save(); }
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
@@ -968,6 +1003,18 @@ static void menu_do(int item) {
         atomic_fetch_add(&g_menu_cfg_ver, 1);
         settings_save();
     }
+    else if (item == OVM_OUTPUT_HEIGHT) {
+        atomic_store(&g_diag_flags_page, 3); atomic_store(&g_menu_hi, -1);
+    }
+    else if (item == OVM_OUTPUT_BACK || ov_output_preset(item) >= 0) {
+        int preset=ov_output_preset(item);
+        if (preset>=0) {
+            atomic_store(&g_set_output_height,preset);
+            atomic_fetch_add(&g_menu_cfg_ver,1);settings_save();
+        }
+        atomic_store(&g_diag_flags_page,0);atomic_store(&g_menu_hi,4);
+    }
+    else if (item == OVM_OUTPUT_CUSTOM) menu_output_step(1,1);
     else if (item == OVM_VIVID) { atomic_store(&g_set_vivid, !atomic_load(&g_set_vivid)); atomic_fetch_add(&g_menu_cfg_ver, 1); settings_save(); }
     else if (item == OVM_FSR_SHARP || item == OVM_DRS_MIN || item == OVM_RS_MAX) return;
     else if (item == OVM_RATE) { menu_rate_step(1); return; }
@@ -1014,41 +1061,73 @@ static void menu_do(int item) {
     else if (item == OVM_OPACITY) return;   // (the slider is dragged, or stepped with left and right)
     else if (item == OVM_EXPORT) { if (atomic_load(&g_sv_st) == OVX_BUSY) return; jni_save_document_picker("chooseSaveExport"); }
     else if (item == OVM_IMPORT) { jni_save_document_picker("chooseSaveImport"); return; }
+    if (prior_page!=menu_active_tab()) menu_scroll_set(menu_active_tab(),0);
     if (item >= 0 && item < OVM_N) dm_haptics_android_tap();
     if (item == OVM_RESUME) menu_close(); else dm_overlay_redraw();
 }
-static void menu_touch(const dm_java_event *e, float W, float H) {   // a press on a row does it when it lifts there; a tap outside the panel or on the menu button closes
-    int act = e->action & AMOTION_EVENT_ACTION_MASK, ai = e->action >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
-    int i = act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_UP ? 0 : ai, id = i < e->pointers ? e->ptr[i].id & 31 : 0;
-    float x = i < e->pointers ? e->ptr[i].x : 0, y = i < e->pointers ? e->ptr[i].y : 0, p[4]; ov_menu_rect(W, H, p);
-    int c = ctl_at(x, y, W, H), row = c >= 0 && OV_CTLS[c].kind == OV_MENU ? -3 : ov_menu_row_at(x, y, W, H), tab = menu_active_tab();
-    int item = row >= 0 ? ov_menu_item(tab, row) : -1;
-    if (act == AMOTION_EVENT_ACTION_DOWN || act == AMOTION_EVENT_ACTION_POINTER_DOWN) {
-        if (g_menu_ptr >= 0) return;
-        g_menu_ptr = id; g_menu_row = row;
-        if (item == OVM_TAB) menu_tab(ov_menu_tab_at(x, p));   // a tab opens as the finger touches it
-        else if (item == OVM_OPACITY) menu_opacity(ov_menu_track_value(x, p, row));
-        else if (item == OVM_FSR_SHARP) menu_fsr_sharp(ov_menu_sharp_value(x, p, row));
-        else if (item == OVM_DRS_MIN) menu_drs_min(dm_menu_rs_live()?ov_menu_rs_value(x,p,row):ov_menu_dyn_min_value(x, p, row));
-        else if (item == OVM_RS_MAX) menu_rs_max(ov_menu_rs_value(x,p,row));
-        if (row >= 0) { atomic_store(&g_menu_hi, item >= 0 ? row : -1); dm_overlay_redraw(); }
-    } else if (act == AMOTION_EVENT_ACTION_MOVE && g_menu_ptr >= 0 && g_menu_row >= 0) {   // the slider follows the finger; another row's highlight follows it off the row and back
-        for (int k = 0; k < e->pointers; k++) if ((e->ptr[k].id & 31) == g_menu_ptr) {
-            float kx = e->ptr[k].x, ky = e->ptr[k].y;
-            if (ov_menu_item(tab, g_menu_row) == OVM_OPACITY) { menu_opacity(ov_menu_track_value(kx, p, g_menu_row)); continue; }
-            if (ov_menu_item(tab, g_menu_row) == OVM_FSR_SHARP) { menu_fsr_sharp(ov_menu_sharp_value(kx, p, g_menu_row)); continue; }
-            if (ov_menu_item(tab, g_menu_row) == OVM_DRS_MIN) { menu_drs_min(dm_menu_rs_live()?ov_menu_rs_value(kx,p,g_menu_row):ov_menu_dyn_min_value(kx, p, g_menu_row)); continue; }
-            if (ov_menu_item(tab,g_menu_row)==OVM_RS_MAX) {menu_rs_max(ov_menu_rs_value(kx,p,g_menu_row));continue;}
-            int r = ov_menu_row_at(kx, ky, W, H), hi = r == g_menu_row && ov_menu_item(tab, r) >= 0 ? r : -1;
-            if (atomic_exchange(&g_menu_hi, hi) != hi) dm_overlay_redraw();
+static void menu_slider_set(int item,float x,const float p[4]) {
+    float f=ov_settings_fraction(x,p);
+    if(item==OVM_OPACITY) menu_opacity(OV_OPACITY_MIN+5*(int)lroundf(f*(OV_OPACITY_MAX-OV_OPACITY_MIN)/5));
+    else if(item==OVM_FSR_SHARP) menu_fsr_sharp(5*(int)lroundf(f*20));
+    else if(item==OVM_DRS_MIN) menu_drs_min(50+5*(int)lroundf(f*(dm_menu_rs_live()?10:9)));
+    else if(item==OVM_RS_MAX) menu_rs_max(50+5*(int)lroundf(f*10));
+}
+static void menu_touch(const dm_java_event *e,float W,float H) {
+    int act=e->action&AMOTION_EVENT_ACTION_MASK, ai=e->action>>AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
+    int i=act==AMOTION_EVENT_ACTION_DOWN||act==AMOTION_EVENT_ACTION_UP?0:ai;
+    int id=i<e->pointers?e->ptr[i].id&31:0;
+    float x=i<e->pointers?e->ptr[i].x:0,y=i<e->pointers?e->ptr[i].y:0,p[4],v[4];
+    ov_menu_rect(W,H,p);ov_settings_view(p,v);
+    int page=menu_active_tab(),scroll=ov_settings_clamp(page,dm_menu_scroll_units());
+    int c=ctl_at(x,y,W,H),row=c>=0&&OV_CTLS[c].kind==OV_MENU?-3:ov_settings_hit(p,page,scroll,x,y);
+    int item=row>=0?ov_menu_item(page,row):-1;
+    if(g_menu_ptr>=0&&(W!=g_menu_down_w||H!=g_menu_down_h)){
+        if(g_menu_gesture==OV_SETTINGS_SLIDER)settings_save();
+        g_menu_ptr=-1;atomic_store(&g_menu_hi,-1);dm_overlay_redraw();
+        return;
+    }
+    if(act==AMOTION_EVENT_ACTION_DOWN||act==AMOTION_EVENT_ACTION_POINTER_DOWN) {
+        if(g_menu_ptr>=0)return;
+        g_menu_ptr=id;g_menu_row=row;g_menu_down_x=x;g_menu_down_y=y;
+        g_menu_down_scroll=scroll;g_menu_down_page=page;g_menu_gesture=OV_SETTINGS_PENDING;
+        g_menu_down_w=W;g_menu_down_h=H;
+        if(item==OVM_TAB){int t=(int)((x-v[0])*OVM_TABS/v[2]);menu_tab(t<0?0:t>=OVM_TABS?OVM_TABS-1:t);}
+        atomic_store(&g_menu_hi,item>=0?row:-1);dm_overlay_redraw();
+    } else if(act==AMOTION_EVENT_ACTION_MOVE&&g_menu_ptr>=0&&page==g_menu_down_page) {
+        for(int k=0;k<e->pointers;k++)if((e->ptr[k].id&31)==g_menu_ptr){
+            float kx=e->ptr[k].x,ky=e->ptr[k].y,dy=ky-g_menu_down_y,dx=kx-g_menu_down_x;
+            int down=g_menu_row,down_item=down>=0?ov_menu_item(page,down):-1;
+            int in_body=g_menu_down_y>=v[1]&&g_menu_down_y<v[1]+v[3]&&g_menu_down_x>=v[0]&&g_menu_down_x<v[0]+v[2];
+            int slider=ov_settings_slider(down_item)&&g_menu_down_x>=v[0]+v[2]*0.38f;
+            if(in_body)g_menu_gesture=ov_settings_gesture(slider,g_menu_gesture,dx,dy,v[3]/OV_SETTINGS_VIEW_ROWS);
+            if(g_menu_gesture==OV_SETTINGS_SCROLL){
+                if(atomic_exchange(&g_menu_hi,-1)!=-1)dm_overlay_redraw();
+                menu_scroll_set(page,g_menu_down_scroll-(int)lroundf(dy*OV_SETTINGS_UNIT*OV_SETTINGS_VIEW_ROWS/v[3]));
+            }else if(g_menu_gesture==OV_SETTINGS_SLIDER)menu_slider_set(down_item,kx,p);
+            else {
+                int hit=ov_settings_hit(p,page,scroll,kx,ky),hi=hit==down&&down_item>=0?down:-1;
+                if(atomic_exchange(&g_menu_hi,hi)!=hi)dm_overlay_redraw();
+            }
         }
-    } else if ((act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_POINTER_UP) && id == g_menu_ptr) {
-        int down = g_menu_row; g_menu_ptr = -1; atomic_store(&g_menu_hi, -1);
-        if (down >= 0 && (ov_menu_item(tab, down) == OVM_OPACITY || ov_menu_item(tab, down) == OVM_FSR_SHARP || ov_menu_item(tab, down) == OVM_DRS_MIN || ov_menu_item(tab,down)==OVM_RS_MAX)) { settings_save(); dm_overlay_redraw(); }
-        else if (row == down && item >= 0 && item != OVM_TAB) menu_do(item);
-        else if (row == down && (row == -2 || row == -3)) { dm_haptics_android_tap(); menu_close(); }
-        else dm_overlay_redraw();
-    } else if (act == AMOTION_EVENT_ACTION_CANCEL) { g_menu_ptr = -1; atomic_store(&g_menu_hi, -1); dm_overlay_redraw(); }
+    } else if((act==AMOTION_EVENT_ACTION_UP||act==AMOTION_EVENT_ACTION_POINTER_UP)&&id==g_menu_ptr){
+        int down=g_menu_row,gesture=g_menu_gesture;g_menu_ptr=-1;atomic_store(&g_menu_hi,-1);
+        if(page==g_menu_down_page){
+            if(gesture==OV_SETTINGS_SLIDER){menu_slider_set(ov_menu_item(page,down),x,p);settings_save();}
+            else if(gesture==OV_SETTINGS_PENDING&&row==down){
+                // Large horizontal motions are not taps; vertical drags may end on the same row.
+                if(fmaxf(fabsf(x-g_menu_down_x),fabsf(y-g_menu_down_y))<v[3]/OV_SETTINGS_VIEW_ROWS*0.14f){
+                    if(ov_settings_slider(item)){if(x>=v[0]+v[2]*0.38f){menu_slider_set(item,x,p);settings_save();}}
+                    else if(item==OVM_OUTPUT_CUSTOM){menu_output_step(x<p[0]+p[2]*0.5f?-1:1,1);dm_haptics_android_tap();}
+                    else if(item>=0&&item!=OVM_TAB)menu_do(item);
+                    else if(row==-2||row==-3){dm_haptics_android_tap();menu_close();}
+                }
+            }
+        }
+        dm_overlay_redraw();
+    } else if(act==AMOTION_EVENT_ACTION_CANCEL){
+        if(g_menu_gesture==OV_SETTINGS_SLIDER)settings_save();
+        g_menu_ptr=-1;atomic_store(&g_menu_hi,-1);dm_overlay_redraw();
+    }
 }
 static void ed_key(uint64_t bit); static void sp_key(uint64_t bit);
 static void menu_key(uint64_t bit) {   // a controller key pressed while the menu is open: up and down go through the rows, left and right change the tab or the
@@ -1057,8 +1136,12 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
     int hi = atomic_load(&g_menu_hi), tab = menu_active_tab(), item = hi >= 0 ? ov_menu_item(tab, hi) : -1;
     if (bit == DM_BTN_UP || bit == DM_BTN_DOWN) {
         for (int k = 0; k < OVM_ROWS; k++) { hi = hi < 0 ? (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1) : (hi + (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1)) % OVM_ROWS; if (ov_menu_item(tab, hi) >= 0) break; }
+        menu_scroll_set(tab,ov_settings_reveal(tab,dm_menu_scroll_units(),hi));
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
     } else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_OPACITY) { menu_opacity(atomic_load(&g_set_opacity) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) &&
+             (item == OVM_OUTPUT_HEIGHT || item == OVM_OUTPUT_CUSTOM))
+        menu_output_step(bit == DM_BTN_LEFT ? -1 : 1, item == OVM_OUTPUT_CUSTOM);
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FSR_SHARP) { menu_fsr_sharp(atomic_load(&g_set_fsr_sharp) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_DRS_MIN) { menu_drs_min(dm_menu_drs_min() + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
     else if ((bit==DM_BTN_LEFT || bit==DM_BTN_RIGHT) && item==OVM_RS_MAX) {menu_rs_max(dm_menu_rs_max()+(bit==DM_BTN_LEFT?-5:5));settings_save();}
@@ -1069,9 +1152,10 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(atomic_load(&g_menu_tab) + (bit == DM_BTN_LEFT ? -1 : 1));
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {
         menu_tab(atomic_load(&g_menu_tab) + (bit == DM_BTN_L || bit == DM_BTN_ZL ? -1 : 1));
-        if (hi > 0 && ov_menu_item(menu_active_tab(), hi) < 0) atomic_store(&g_menu_hi, OVM_ROWS - 1);   // (the other tab has fewer rows)
+        /* menu_tab owns the new page selection and scroll position. */
     }
     else if (bit == DM_BTN_A) menu_do(hi < 0 ? OVM_RESUME : item);
+    else if (bit == DM_BTN_B && tab == OVM_OUTPUT_PAGE) menu_do(OVM_OUTPUT_BACK);
     else if (bit == DM_BTN_B || bit == DM_BTN_PLUS) menu_close();
 }
 

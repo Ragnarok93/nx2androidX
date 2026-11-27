@@ -202,6 +202,9 @@ static void check_vivid(spatial_image *input) {
 }
 
 static void run_spatial(void) {
+    // The separate fixtures use independent synthetic ticket ranges.
+    CHECK(vkQueueWaitIdle(V.q));
+    spatial_drop_images();
     const char *names[] = {"None", "Bilinear", "FSR 1", "GSR 1", "GSR 2"};
     int mode = SP_NATIVE;
     for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++) {
@@ -244,6 +247,9 @@ static void run_spatial(void) {
         assert(!spatial_reconstruct(&src.texture, crop, 1, 16, 16, ++ticket, NULL));
         assert(spatial_requested == selected_mode && spatial_active == SP_NATIVE);
         assert(g_spatial.slot == slot);
+        // A bypassed ticket cannot be reconstructed by a later re-entry.
+        assert(!spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ticket, NULL));
+        assert(g_spatial.slot == slot);
     }
     selected_mode = SP_FSR1;
     sharpness = 0;
@@ -285,6 +291,49 @@ static void run_spatial(void) {
     readback(fallback->texture.img, OUT, OUT);
     V.has_dynrender = 1;
     spatial_image_drop(&src);
+}
+
+static uint64_t slider_distance(const uint8_t *base, const uint8_t *current, unsigned bytes) {
+    uint64_t distance = 0;
+    for (unsigned i = 0; i < bytes; ++i) {
+        if (i % 4 == 3) assert(base[i] == current[i]);
+        else distance += (unsigned)abs((int)base[i] - current[i]);
+    }
+    return distance;
+}
+
+static void check_spatial_slider(void) {
+    CHECK(vkQueueWaitIdle(V.q));
+    spatial_drop_images();
+    spatial_image src = source_image(SRC);
+    int crop[] = {2, 2, 16, 16};
+    uint8_t unsharpened[OUT * OUT * 4];
+    uint64_t ticket = 1000;
+    for (int mode = SP_BILINEAR; mode <= SP_SGSR1; ++mode) {
+        selected_mode = mode;
+        sharpness = 0;
+        spatial_image *out = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket, NULL);
+        assert(out && spatial_active == mode);
+        readback(out->texture.img, OUT, OUT);
+        memcpy(unsharpened, mapped, sizeof unsharpened);
+        uint64_t previous = 0, quarter = 0;
+        for (sharpness = 25; sharpness <= 100; sharpness += 25) {
+            out = spatial_reconstruct(&src.texture, crop, 1, OUT, OUT, ++ticket, NULL);
+            assert(out && spatial_active == mode);
+            readback(out->texture.img, OUT, OUT);
+            uint64_t distance = slider_distance(unsharpened, mapped, sizeof unsharpened);
+            // Saturation and quantization can flatten individual steps.
+            assert(distance >= previous);
+            if (sharpness == 25) quarter = distance;
+            previous = distance;
+            assert(g_spatial.encoding == (unsigned)mode * 128u + (unsigned)sharpness);
+        }
+        assert(quarter > 0 && previous > quarter);
+    }
+    CHECK(vkQueueWaitIdle(V.q));
+    spatial_drop_images();
+    spatial_image_drop(&src);
+    sharpness = 50;
 }
 
 static void run_physical(VkFormat source_format) {
@@ -343,6 +392,120 @@ static void run_physical(VkFormat source_format) {
     assert(!spatial_reconstruct(&(vkimg_t){.w = OUT, .h = OUT}, raw, 0, OUT, OUT, ++ticket, NULL));
 }
 
+// Verify the actual Vulkan linear resolve averages 2x2 samples at 2:1.
+static void check_supersample_resolve(void) {
+    CHECK(vkQueueWaitIdle(V.q));
+    spatial_drop_images();
+    g_sfmt=VK_FORMAT_R8G8B8A8_UNORM;
+    spatial_image src=source_image(4);
+    for(unsigned y=0;y<4;y++) for(unsigned x=0;x<4;x++) {
+        uint8_t *p=mapped+4*(4*y+x);
+        p[0]=p[1]=p[2]=(x+y)%2?255:0; p[3]=173;
+    }
+    begin();
+    barrier(test_cb,src.texture.img,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy upload={0,0,0,{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{0},{4,4,1}};
+    vkCmdCopyBufferToImage(test_cb,pixels,src.texture.img,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&upload);
+    barrier(test_cb,src.texture.img,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+    complete();
+    assert(spatial_image_ready(SP_OUTPUT,2,2,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,g_sfmt));
+    spatial_image *out=&g_spatial.image[SP_OUTPUT];
+    int crop[4]={0,0,4,4};
+    begin();
+    barrier(test_cb,out->texture.img,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    spatial_blit(test_cb,src.texture.img,out->texture.img,crop,2,2,0,VK_FILTER_LINEAR);
+    barrier(test_cb,out->texture.img,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+    VkBufferImageCopy read={0,0,0,{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{0},{2,2,1}};
+    vkCmdCopyImageToBuffer(test_cb,out->texture.img,VK_IMAGE_LAYOUT_GENERAL,pixels,1,&read);
+    complete();
+    for(unsigned i=0;i<4;i++) {
+        for(unsigned j=0;j<3;j++) assert(abs((int)mapped[i*4+j]-128)<=1);
+        assert(mapped[i*4+3]==173);
+    }
+    spatial_image_drop(&src);spatial_drop_images();
+    puts("supersampling 2x checkerboard resolve PASS");
+}
+
+// Explicit opt-in because 4K temporal readback on a software ICD is expensive.
+// This uses a real source-sized image, not a fabricated extent or shader-only test.
+static void check_large_outputs(void) {
+    if (!getenv("DM_TEST_LARGE_RECONSTRUCTION")) return;
+    CHECK(vkQueueWaitIdle(V.q));
+    spatial_drop_images();
+    g_sfmt = VK_FORMAT_R8G8B8A8_UNORM;
+    static const uint32_t sizes[][4] = {{1920,1080,2560,1440},{2560,1440,3840,2160},
+        {1920,1080,3840,2160},{2560,1440,5120,2880}};
+    uint64_t ticket = 10000;
+    for (unsigned k = 0; k < (getenv("DM_TEST_ULTRA_RECONSTRUCTION") ? 4u : 3u); ++k) {
+        uint32_t iw=sizes[k][0], ih=sizes[k][1], ow=sizes[k][2], oh=sizes[k][3];
+        if (!spatial_extent_ok(ow, oh, 1) ||
+            dm_recon_budget(spatial_local_heap()) < (uint64_t)ow*oh*8 + (uint64_t)iw*ih*8) {
+            fprintf(stderr,"large reconstruction SKIP %ux%u: device limits or spatial budget\n",ow,oh);
+            continue;
+        }
+        assert(spatial_image_ready(SP_OUTPUT, iw, ih,
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, g_sfmt));
+        spatial_image src = g_spatial.image[SP_OUTPUT];
+        g_spatial.image[SP_OUTPUT] = (spatial_image){0};
+        begin();
+        barrier(test_cb,src.texture.img,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearColorValue c = {{0.25f,0.5f,0.75f,0.625f}};
+        VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        vkCmdClearColorImage(test_cb,src.texture.img,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&c,1,&all);
+        barrier(test_cb,src.texture.img,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+        complete();
+        int crop[] = {0,0,(int)iw,(int)ih};
+        const int modes[] = {SP_BILINEAR,SP_FSR1,SP_SGSR1,SP_SGSR2};
+        for (unsigned m=0; m<sizeof modes/sizeof modes[0]; ++m) {
+            if (modes[m]==SP_SGSR2) {
+#if SP_TEMPORAL
+                if (!(vk_gsr2_variants() & DM_TEMPORAL_2FS) ||
+                    dm_recon_budget(spatial_local_heap()) < (uint64_t)ow*oh*16 + 2*DM_RECON_MIB) {
+                    fprintf(stderr,"large GSR2 SKIP %ux%u: variant/history budget\n",ow,oh);
+                    continue;
+                }
+#else
+                continue;
+#endif
+            }
+            selected_mode=modes[m];
+            sharpness=50;
+            spatial_image *out=spatial_reconstruct(&src.texture,crop,0,ow,oh,++ticket,NULL);
+            assert(out && spatial_active==selected_mode && out->texture.w==ow && out->texture.h==oh);
+            begin();
+            VkBufferImageCopy region={0,0,0,{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},
+                {(int)(ow/2),(int)(oh/2),0},{1,1,1}};
+            vkCmdCopyImageToBuffer(test_cb,out->texture.img,VK_IMAGE_LAYOUT_GENERAL,pixels,1,&region);
+            complete();
+            assert(abs((int)mapped[0]-64)<=3 && abs((int)mapped[1]-128)<=3 &&
+                   abs((int)mapped[2]-191)<=3 && abs((int)mapped[3]-159)<=3);
+            fprintf(stderr,"large %s %ux%u readback PASS\n",spatial_mode_name(selected_mode),ow,oh);
+            if (iw==1920 && ih==1080 && ow==3840 && oh==2160) {
+                // Resolve the reconstructed offscreen image to the drawable
+                // with the same full-rect linear blit used by present_one.
+                // Keep the source image untouched for the following filter.
+                assert(spatial_image_ready(SP_DISPLAY, iw, ih,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, g_sfmt));
+                spatial_image *display=&g_spatial.image[SP_DISPLAY];
+                int full[4]={0,0,(int)ow,(int)oh};
+                begin();
+                barrier(test_cb,display->texture.img,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                spatial_blit(test_cb,out->texture.img,display->texture.img,full,iw,ih,0,VK_FILTER_LINEAR);
+                barrier(test_cb,display->texture.img,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+                region.imageOffset=(VkOffset3D){(int)(iw/2),(int)(ih/2),0};
+                vkCmdCopyImageToBuffer(test_cb,display->texture.img,VK_IMAGE_LAYOUT_GENERAL,pixels,1,&region);
+                complete();
+                assert(abs((int)mapped[0]-64)<=3 && abs((int)mapped[1]-128)<=3 &&
+                    abs((int)mapped[2]-191)<=3 && abs((int)mapped[3]-159)<=3);
+                fprintf(stderr,"supersampling %s 3840x2160 -> 1920x1080 readback PASS\n",spatial_mode_name(selected_mode));
+            }
+        }
+        CHECK(vkQueueWaitIdle(V.q));
+        spatial_drop_images();
+        spatial_image_drop(&src);
+    }
+}
+
 #ifdef SGSR2_HOST_PROBE
 #include "vk_gsr2_probe.inc"
 #endif
@@ -384,13 +547,17 @@ int main(void) {
     check_temporal();
 #else
     run_spatial();
+    check_spatial_slider();
     run_physical(g_sfmt);
     g_sfmt = VK_FORMAT_R8G8B8A8_SRGB;
     run_spatial();
+    check_spatial_slider();
     run_physical(g_sfmt);
     // Surfaces may select an sRGB swapchain even for an UNORM window image.
     run_physical(VK_FORMAT_R8G8B8A8_UNORM);
 #endif
+    check_supersample_resolve();
+    check_large_outputs();
     CHECK(vkDeviceWaitIdle(V.dev));
     spatial_drop_images();
     if (g_spatial.queries) vkDestroyQueryPool(V.dev, g_spatial.queries, NULL);

@@ -40,7 +40,7 @@ class SurfaceCapture(unittest.TestCase):
 ''' + types + r'''
 static struct { VkDevice dev; } V;
 static struct { uint64_t draws, dispatches; } g_vkst;
-static struct { int pass_open, rp_pass, rt_has_col[8], rt_has_dep, samples, ncol, pass_w, pass_h;
+static struct { int pass_open, rp_pass, rt_has_col[8], rt_has_dep, samples, ncol, pass_w, pass_h, daspect;
     view_t rt_cview[8], rt_dview; uint8_t rt_has_cview[8], rt_has_dview; struct { uint64_t key; } *sh[6]; } S;
 static struct { vkimg_t *im; VkFormat fmt; VkImageSubresourceRange range; } P_att[9];
 static VkRenderingInfo P_ri;
@@ -145,6 +145,15 @@ int main(int argc, char **argv) {
     surface_uniform_queue(0x1234, 9, 3, (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)2, 1, 4096});
     surface_compute_uniforms(vk_cmd());
     assert(uniform_copies == 1 && g_sc.uniform_count == 0);
+    surface_binding_t shown = surface_binding(&im, NULL, im.fmt,
+        (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}, -1, -1, 0);
+    const int shown_crop[4] = {2, 4, 90, 40};
+    surface_present_identity(&shown, shown_crop, UINT64_C(1001));
+    surface_usage("presentation-source", &shown, -1, -1, NULL, "full-image");
+    assert(shown.pass == -202 && shown.present == g_tex_frame && shown.real_ticket == 1001);
+    surface_present_identity(&shown, NULL, UINT64_C(1002));
+    assert(shown.present_crop[0] == 0 && shown.present_crop[1] == 0 &&
+           shown.present_crop[2] == im.w && shown.present_crop[3] == im.h);
     surface_capture_write();
     assert(invalidates == 1);
 
@@ -214,6 +223,14 @@ int main(int argc, char **argv) {
                             str(src), "-o", str(out)], check=True)
             subprocess.run([str(out), tmp], check=True, timeout=10)
             usage = (root / "surface_usage.tsv").read_text()
+            import csv
+            rows = list(csv.DictReader((line for line in usage.splitlines() if not line.startswith("#")), delimiter="\t"))
+            self.assertTrue(all(None not in row and None not in row.values() for row in rows))
+            marker, = [row for row in rows if row["role"] == "presentation-source"]
+            self.assertEqual(marker["present"], "42")
+            self.assertEqual(marker["real_ticket"], "1001")
+            self.assertEqual([marker["present_crop_" + k] for k in ("x", "y", "w", "h")], ["2", "4", "90", "40"])
+            self.assertTrue(all(row["real_ticket"] == "0" for row in rows if row is not marker))
             self.assertIn("tile:0:1024:16:4:16:16", usage)
             self.assertIn("multisampled", usage)
             self.assertIn("completed_samples=4", usage)

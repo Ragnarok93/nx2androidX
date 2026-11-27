@@ -383,6 +383,7 @@ static void check_image_temporal(void) {
     spatial_image src = source_image(24);
     int crop[4] = {0, 0, 24, 24};
     selected_mode = SP_SGSR2;
+    sharpness = 0;
     flow_frame(&src, 0, 0);
     spatial_image *output = spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 100, NULL);
     assert(output && spatial_active == SP_SGSR2 && g_flow.ctx->pending_plan.reset);
@@ -425,6 +426,37 @@ static void check_image_temporal(void) {
     assert(spatial_active == SP_SGSR1 && g_flow.ctx->history.ticket == 102);
     assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 104, NULL) == output);
     assert(spatial_active == SP_SGSR2 && g_flow.ctx->pending_plan.reset);
+    CHECK(vkQueueWaitIdle(V.q));
+    flow_frame(&src, 0, 0);
+    // Compare reset frames so temporal accumulation cannot explain the difference.
+    sharpness = 0;
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 110, NULL) == output);
+    CHECK(vkQueueWaitIdle(V.q));
+    begin();
+    vkCmdCopyImageToBuffer(test_cb, output->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &copy);
+    complete();
+    uint8_t base[OUT * OUT * 4];
+    memcpy(base, mapped, sizeof base);
+    uint64_t previous = 0, quarter = 0, ticket = 110;
+    for (sharpness = 25; sharpness <= 100; sharpness += 25) {
+        ticket += 10;
+        assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, ticket, NULL) == output);
+        assert(spatial_active == SP_SGSR2 && g_flow.ctx->pending_plan.reset);
+        begin();
+        vkCmdCopyImageToBuffer(test_cb, output->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &copy);
+        complete();
+        uint64_t distance = slider_distance(base, mapped, sizeof base);
+        assert(distance >= previous);
+        if (sharpness == 25) quarter = distance;
+        previous = distance;
+        assert(g_spatial.encoding == SP_SGSR2 * 128u + (unsigned)sharpness);
+    }
+    assert(quarter > 0 && previous > quarter);
+    sharpness = 0;
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, ++ticket, NULL) == output);
+    assert(spatial_active == SP_SGSR2 && !g_flow.ctx->pending_plan.reset);
+    assert(g_flow.ctx->history.ticket == ticket);
+    sharpness = 50;
     CHECK(vkQueueWaitIdle(V.q));
     spatial_image_drop(&src);
     puts("SGSR 2 image-driven presentation passed motion, scene change, history and fallback checks");

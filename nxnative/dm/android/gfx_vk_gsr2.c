@@ -182,7 +182,8 @@ static int gsr2_image(vk_gsr2 *ctx, unsigned index, VkExtent2D extent, VkFormat 
     if (vkCreateImage(V.dev, &create, NULL, &image->image)) return 0;
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(V.dev, image->image, &req);
-    if (req.size > ctx->budget - ctx->bytes) return 0;
+    if (req.size > properties.maxResourceSize || ctx->bytes > ctx->budget ||
+        req.size > ctx->budget - ctx->bytes) return 0;
     uint32_t type = vk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
     if (type == UINT32_MAX) return 0;
     VkMemoryAllocateInfo alloc = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, type};
@@ -221,7 +222,8 @@ static int gsr2_uniform(vk_gsr2 *ctx) {
     vkGetBufferMemoryRequirements(V.dev, ctx->ubo, &req);
     uint32_t type = vk_mem_type(req.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
-    if (type == UINT32_MAX || req.size > ctx->budget - ctx->bytes) return 0;
+    if (type == UINT32_MAX || ctx->bytes > ctx->budget ||
+        req.size > ctx->budget - ctx->bytes) return 0;
     VkMemoryAllocateInfo alloc = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, type};
     if (vkAllocateMemory(V.dev, &alloc, NULL, &ctx->ubo_memory) ||
         vkBindBufferMemory(V.dev, ctx->ubo, ctx->ubo_memory, 0)) return 0;
@@ -319,8 +321,9 @@ static vk_gsr2 *gsr2_create(uint32_t variant, VkExtent2D render, VkExtent2D outp
     ctx->variant = variant;
     ctx->render = render;
     ctx->output = output;
-    const VkDeviceSize limit = 96u * 1024 * 1024;
-    ctx->budget = budget < limit ? budget : limit;
+    // The caller supplies the context's memory budget. No fixed image-size
+    // or MiB ceiling here: account actual Vulkan requirements below.
+    ctx->budget = budget;
     ctx->fragment = variant == DM_TEMPORAL_2FS;
     ctx->image_driven = image_driven;
     ctx->pass_count = variant == DM_TEMPORAL_3CS ? 3 : 2;

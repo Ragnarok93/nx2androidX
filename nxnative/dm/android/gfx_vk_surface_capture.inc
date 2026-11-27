@@ -7,6 +7,10 @@ typedef struct {
     uint64_t pool, write_sequence;
     int64_t offset, size;
     int pass, slot, stage, storage_format, view_format;
+    int32_t render_x, render_y;
+    // Set only on the presentation-source row, never inferred from g_tex_frame.
+    uint64_t real_ticket;
+    int64_t present_crop[4];
     unsigned element;
     uint32_t aspect, mip, mips, layer, layers, w, h, d, samples, usage;
     uint32_t nvn_format;
@@ -43,7 +47,7 @@ static int surface_capture_arm(void) {
         VKLOG("[diagnostics] could not open full-frame surface catalog");
         return 0;
     }
-    fputs("role\tpresent\tsubmission\tpass\tdraws\tdispatches\tslot\telement\tstage\tshader\timage\tview\tpool\twrite_sequence\tguest_offset\tguest_bytes\tnvn_format\tstorage_format\tview_format\taspect\tmip\tmips\tlayer\tlayers\twidth\theight\tdepth\tsamples\tusage\tload\tstore\tclear_bits\tstatus\n", g_sc.usage);
+    fputs("role\tpresent\tsubmission\tpass\tdraws\tdispatches\tslot\telement\tstage\tshader\timage\tview\tpool\twrite_sequence\tguest_offset\tguest_bytes\tnvn_format\tstorage_format\tview_format\taspect\tmip\tmips\tlayer\tlayers\twidth\theight\tdepth\tsamples\tusage\tload\tstore\tclear_bits\tstatus\trender_x\trender_y\treal_ticket\tpresent_crop_x\tpresent_crop_y\tpresent_crop_w\tpresent_crop_h\n", g_sc.usage);
     return 1;
 }
 
@@ -63,19 +67,32 @@ static surface_binding_t surface_binding(const vkimg_t *im, VkImageView view, Vk
     };
 }
 
+// Snapshot the same raw rectangle present_window uses; do not claim it is
+// the engine scene rectangle or even that presentation succeeded yet.
+static void surface_present_identity(surface_binding_t *b, const int crop[4], uint64_t ticket) {
+    b->pass = -202;
+    b->real_ticket = ticket;
+    b->present_crop[0] = crop ? crop[0] : 0;
+    b->present_crop[1] = crop ? crop[1] : 0;
+    b->present_crop[2] = crop && crop[2] ? (int64_t)crop[2] : (int64_t)b->w;
+    b->present_crop[3] = crop && crop[3] ? (int64_t)crop[3] : (int64_t)b->h;
+}
+
 static void surface_usage(const char *role, const surface_binding_t *b, int load, int store,
     const VkClearValue *clear, const char *status) {
     if (!g_sc.usage) return;
     if (g_sc.rows >= SC_ROWS) { g_sc.dropped++; return; }
     uint32_t bits[4] = {0};
     if (clear) memcpy(bits, clear, sizeof bits);
-    if (fprintf(g_sc.usage, "%s\t%llu\t%llu\t%d\t%llu\t%llu\t%d\t%u\t%d\t%016llx\t%llx\t%llx\t%llx\t%llu\t%lld\t%lld\t%x\t%d\t%d\t%x\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%x\t%d\t%d\t%08x,%08x,%08x,%08x\t%s\n",
+    if (fprintf(g_sc.usage, "%s\t%llu\t%llu\t%d\t%llu\t%llu\t%d\t%u\t%d\t%016llx\t%llx\t%llx\t%llx\t%llu\t%lld\t%lld\t%x\t%d\t%d\t%x\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%x\t%d\t%d\t%08x,%08x,%08x,%08x\t%s\t%d\t%d\t%llu\t%lld\t%lld\t%lld\t%lld\n",
         role, (unsigned long long)b->present, (unsigned long long)b->submission, b->pass,
         (unsigned long long)b->draws, (unsigned long long)b->dispatches, b->slot, b->element, b->stage,
         (unsigned long long)b->shader, (unsigned long long)b->image, (unsigned long long)b->view,
         (unsigned long long)b->pool, (unsigned long long)b->write_sequence, (long long)b->offset, (long long)b->size, b->nvn_format,
         b->storage_format, b->view_format, b->aspect, b->mip, b->mips, b->layer, b->layers,
-        b->w, b->h, b->d, b->samples, b->usage, load, store, bits[0], bits[1], bits[2], bits[3], status) >= 0)
+        b->w, b->h, b->d, b->samples, b->usage, load, store, bits[0], bits[1], bits[2], bits[3], status, b->render_x, b->render_y,
+        (unsigned long long)b->real_ticket, (long long)b->present_crop[0], (long long)b->present_crop[1],
+        (long long)b->present_crop[2], (long long)b->present_crop[3]) >= 0)
         g_sc.rows++;
 }
 
@@ -99,7 +116,8 @@ static void surface_descriptor(const vkimg_t *im, VkImageView view, int st, int 
     b.draws = (uint64_t)storage;
     unsigned hash = (unsigned)(b.view ^ b.shader ^ (uint64_t)b.pass * 31 ^ (uint64_t)binding * 257 ^ element * 13u ^ (unsigned)storage);
     surface_binding_t *previous = &g_sc.bindings[hash % (sizeof g_sc.bindings / sizeof g_sc.bindings[0])];
-    if (previous->present && !memcmp(previous, &b, sizeof b)) return;
+    int detailed = st == 1 && S.ncol == 1 && !S.daspect;
+    if (!detailed && previous->present && !memcmp(previous, &b, sizeof b)) return;
     // Normalize the role for comparison in the cache while keeping the draw
     // ordinal in the written row.
     *previous = b;
@@ -364,6 +382,8 @@ static void surface_dispatch(void) {
 static void surface_pass(void) {
     surface_binding_t pass = surface_binding(NULL, VK_NULL_HANDLE, VK_FORMAT_UNDEFINED,
         (VkImageSubresourceRange){0}, -1, -1, 0);
+    pass.render_x = P_ri.renderArea.offset.x;
+    pass.render_y = P_ri.renderArea.offset.y;
     pass.w = P_ri.renderArea.extent.width;
     pass.h = P_ri.renderArea.extent.height;
     pass.layers = P_ri.layerCount;

@@ -1126,7 +1126,7 @@ static void pass_dump_retire_stopped(uint64_t done_fence, uint64_t *capture_fenc
     g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;
 }
 
-static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const int crop[4]) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
+static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const int crop[4], uint64_t ticket) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
     static uint64_t capture_fence;
     int had_scene = g_pd_frame_has_scene;
     g_pd_frame_has_scene = 0;
@@ -1198,7 +1198,7 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             surface_binding_t binding = surface_binding(present, present ? present->full : VK_NULL_HANDLE,
                 present ? present->fmt : VK_FORMAT_UNDEFINED, range, -1, -1, 0);
-            binding.pass = -202;
+            surface_present_identity(&binding, crop, ticket);
             int captured = 0;
             if (present && present->layout == VK_IMAGE_LAYOUT_GENERAL) {
                 uint64_t mtl_sub_commit(void);
@@ -1338,9 +1338,9 @@ release_dump:
     g_pd_full = 0;
     g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;
 }
-void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4]) {
+void vk_pass_dump_poll(uint64_t done, vkimg_t *present, const int crop[4], uint64_t ticket) {
     pthread_mutex_lock(&g_capture_lock);
-    pass_dump_poll_locked(done, present, crop);
+    pass_dump_poll_locked(done, present, crop, ticket);
     pthread_mutex_unlock(&g_capture_lock);
 }
 // DM_VK_CRUMBS=1 (start-up), for a device lost (a GPU hang): every pass end and dispatch writes {submission, pass} into host-visible memory after a full barrier, and the host
@@ -3291,6 +3291,24 @@ static int prepare_draw(int prim, int indexed) {
         }
     }
     texbind(&k);
+    // Full diagnostics only: associate pipeline state with the observed draw
+    // ordinal. This is evidence, not admission to a replacement path.
+    if (g_sc.usage && g_sc.rows < SC_ROWS && S.ncol == 1 && !S.daspect) {
+        surface_binding_t b = surface_binding(NULL, VK_NULL_HANDLE, VK_FORMAT_UNDEFINED,
+            (VkImageSubresourceRange){0}, -1, 1, k.key[1]);
+        if (S.pass_open == 2) b.pass++;
+        b.w = S.pass_w; b.h = S.pass_h; b.samples = k.samples;
+        b.render_x = P_ri.renderArea.offset.x; b.render_y = P_ri.renderArea.offset.y;
+        char state[512];
+        snprintf(state, sizeof state,
+            "VS=%016llx;GS=%016llx;topology=%u;indexed=%d;blend=%u;write_mask=%u;depth_test=%u;depth_write=%u;stencil=%u;discard=%u;cull=%u;guest_viewport=%.9g,%.9g,%.9g,%.9g;guest_scissor=%d,%d,%u,%u;pass_draws_before=%llu",
+            (unsigned long long)k.key[0], (unsigned long long)k.key[2],
+            (unsigned)k.topo, !!indexed, (unsigned)k.blend_en, (unsigned)k.wmask[0],
+            (unsigned)k.dt, (unsigned)k.dw, (unsigned)k.st, (unsigned)k.raster_discard, (unsigned)k.cull,
+            S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3],
+            S.sc.x, S.sc.y, (unsigned)S.sc.w, (unsigned)S.sc.h, (unsigned long long)g_pass_draws);
+        surface_usage("draw-state", &b, -1, -1, NULL, state);
+    }
     if (g_ubolog_key && g_ubolog_n > 0 && S.sh[0] && S.sh[0]->key == g_ubolog_key) {   // DM_VK_UBO_LOG: the pipeline the draw got, and its key's hash
         uint64_t kh = fnv(1469598103934665603ull, &k, sizeof k); VKLOG("ubo: present %llu pipeline %p key %016llx um %llx/%llx im %llx/%llx", (unsigned long long)g_tex_frame, (void *)p, (unsigned long long)kh,
               (unsigned long long)k.um[0], (unsigned long long)k.um[1], (unsigned long long)k.im[0], (unsigned long long)k.im[1]); }

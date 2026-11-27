@@ -1,3 +1,4 @@
+#include "gfx_vk_runtime_identity.h"
 #include "gfx_vk_capture_scale.h"
 #include "spatial_upscaler.h"
 
@@ -57,15 +58,18 @@ static int capture_scale_write(const char *root) {
     if (n < 0 || (size_t)n >= sizeof path || m < 0 || (size_t)m >= sizeof tmp) return 0;
     FILE *out = fopen(tmp, "w");
     if (!out) return 0;
+    char runtime_id[DM_RUNTIME_ID_CAP];
+    dm_runtime_build_id(runtime_id);
     fprintf(out, "# overwritten_rows=%llu\n"
+                 "# runtime_elf_build_id=%s\n"
                  "ticket\tmode\tmin_pct\tmax_pct\tlatched_pct\tscaled_passes\tpasses_total\t"
                  "largest_scaled_logical_w\tlargest_scaled_logical_h\tlargest_scaled_physical_w\t"
                  "largest_scaled_physical_h\trenderer_available\tgpu_snapshot_in_flight\t"
                  "replay_cpu_us\tsource_monotonic_us\trecent_replay_gpu_ms\t"
                  "presentation_seen\trequested_upscaler\tactive_upscaler\tphysical_candidate\t"
                  "source_w\tsource_h\toutput_w\toutput_h\tgenerated_frames\t"
-                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\n",
-            (unsigned long long)g_scale_capture_overwritten);
+                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\ttiming_backend\ttiming_iw\ttiming_ih\ttiming_ow\ttiming_oh\ttiming_budget_ms\ttiming_cadence_us\ttiming_generation\ttiming_history_epoch\ttiming_history_reset\tsharpness_requested\tsharpness_applied\tstage_input_ms\tstage_motion_ms\tstage_accumulate_ms\tstage_output_ms\tsource_enqueue_ns\tsource_reset_flags\tdocked_at_enqueue\treconstruction_alloc_attempts\treconstruction_allocations\treconstruction_alloc_waits\treconstruction_alloc_wait_ns\treconstruction_slot_wait_ns\tdisplay_w\tdisplay_h\tactual_reconstruction_w\tactual_reconstruction_h\tconfigured_output_short_edge\tsupersampling\n",
+            (unsigned long long)g_scale_capture_overwritten, runtime_id);
     uint64_t end = g_scale_capture_ticket;
     uint64_t first = end >= SCALE_CAPTURE_FRAMES ? end - SCALE_CAPTURE_FRAMES + 1 : 1;
     static const char *const modes[] = {"Off", "Fixed", "Adaptive"};
@@ -75,7 +79,7 @@ static int capture_scale_write(const char *root) {
         const vk_capture_scale_replay_sample *r = &row->replay;
         const vk_capture_scale_present_sample *p = &row->present;
         fprintf(out, "%llu\t%s\t%u\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llu\t%.3f\t%d\t"
-                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\n",
+                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\t%s\t%u\t%u\t%u\t%u\t%.3f\t%u\t%llu\t%llu\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%llu\t%u\t%d\t%u\t%u\t%u\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\n",
                 (unsigned long long)ticket, r->mode < 3 ? modes[r->mode] : "-", r->min, r->max,
                 r->target, r->passes, (unsigned long long)r->passes_total, r->logical_w, r->logical_h,
                 r->physical_w, r->physical_h, r->renderer_available, r->gpu_snapshot,
@@ -86,7 +90,18 @@ static int capture_scale_write(const char *root) {
                 p->output_w, p->output_h, p->generated, (unsigned long long)p->timing_ticket, p->gpu_ms,
                 row->seen_present ? (p->reason ? p->reason : "ready") : "no presentation sample",
                 r->scope_reason ? r->scope_reason : "-", r->rejected_w, r->rejected_h,
-                (unsigned long long)r->backing_bytes, (unsigned long long)r->peak_published_backing_bytes);
+                (unsigned long long)r->backing_bytes, (unsigned long long)r->peak_published_backing_bytes,
+                p->timing_ticket ? spatial_mode_name(p->timing_mode) : "-",
+                p->timing_iw, p->timing_ih, p->timing_ow, p->timing_oh,
+                p->timing_budget_ms, p->timing_cadence_us, (unsigned long long)p->timing_generation,
+                (unsigned long long)p->timing_history_epoch, p->timing_history_reset,
+                p->sharpness_requested, p->sharpness_applied,
+                p->stage_ms[0], p->stage_ms[1], p->stage_ms[2], p->stage_ms[3],
+                (unsigned long long)p->source_ns, p->source_reset, p->docked,
+                p->alloc_attempts, p->allocations, p->alloc_waits,
+                (unsigned long long)p->alloc_wait_ns, (unsigned long long)p->slot_wait_ns,
+                p->display_w, p->display_h, p->actual_w, p->actual_h,
+                p->output_height, p->supersampling);
     }
     int ok = !ferror(out);
     if (fclose(out) || !ok || rename(tmp, path)) {

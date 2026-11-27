@@ -21,7 +21,11 @@ void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 void main() {
     ivec2 px = ivec2(gl_FragCoord.xy - params.origin);
     AU4 c;
-    FsrRcasCon(c, 2.0 - 2.0 * clamp(params.sharpness, 0.0, 1.0));
+    // RCAS takes attenuation in stops and internally computes exp2(-stops).
+    // Map the slider to linear filter gain: 1% means 0.01, not about 0.25.
+    // At exactly zero the host bypasses this pass entirely.
+    float strength = clamp(params.sharpness, 0.0, 1.0);
+    FsrRcasCon(c, -log2(max(strength, 1e-6)));
     AF1 r, g, b;
     FsrRcasF(r, g, b, AU2(px), c);
     color = vec4(clamp(vec3(r, g, b), vec3(0.0), vec3(1.0)), texelFetch(tex, px, 0).a);

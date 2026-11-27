@@ -45,9 +45,11 @@ void main() {
     vec2 best = vec2(0);
     float cost = errorAt(PreviousColor, center, invSize, samples);
     // Coarse-to-fine search. Preserve stationary content on ties.
-    for (float stepSize = 4.0; stepSize >= 0.5; stepSize *= 0.5) {
+    // Errors are nonnegative and an improvement must exceed 0.001.
+    // Once this floor is reached no subsequent candidate can win.
+    for (float stepSize = 4.0; stepSize >= 0.5 && cost > 0.001; stepSize *= 0.5) {
         vec2 origin = best;
-        for (int j = 1; j < 9; ++j) {
+        for (int j = 1; j < 9 && cost > 0.001; ++j) {
             vec2 delta = origin + directions[j] * stepSize;
             vec2 p = center + delta;
             if (any(lessThan(p, vec2(2.5))) || any(greaterThan(p, size - 2.5))) continue;
@@ -63,11 +65,17 @@ void main() {
     // Reject a match if the reverse direction prefers a different
     // neighborhood. A second good forward match is also ambiguous.
     float reverseSamples[5];
-    for (int i = 0; i < 5; ++i)
-        reverseSamples[i] = luma(PreviousColor, center + best + taps[i], invSize);
+    // The reverse test cannot reject when its nonnegative error plus 0.005
+    // is already >= cost. Forward ambiguity must still be evaluated.
+    bool reverseNeeded = cost > 0.005;
+    if (reverseNeeded)
+        for (int i = 0; i < 5; ++i)
+            reverseSamples[i] = luma(PreviousColor, center + best + taps[i], invSize);
     for (int j = 1; j < 9; ++j) {
         vec2 p = center + directions[j] * 2.0;
-        if (errorAt(CurrentColor, p, invSize, reverseSamples) + 0.005 < cost) return;
+        if (reverseNeeded) {
+            if (errorAt(CurrentColor, p, invSize, reverseSamples) + 0.005 < cost) return;
+        }
         p += best;
         if (any(lessThan(p, vec2(2.5))) || any(greaterThan(p, size - 2.5))) continue;
         if (errorAt(PreviousColor, p, invSize, samples) <= cost + 0.006) return;

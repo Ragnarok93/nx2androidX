@@ -130,6 +130,7 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof path, "%s/scaling_frames.tsv", argv[1]);
     FILE *trace = fopen(path, "r");
     assert(trace && fgets(line, sizeof line, trace) && strstr(line, "overwritten_rows=1"));
+    assert(fgets(line, sizeof line, trace) && strstr(line, "runtime_elf_build_id="));
     assert(fgets(line, sizeof line, trace) && strstr(line, "requested_upscaler"));
     assert(fgets(line, sizeof line, trace) && !strncmp(line, "2\tFixed", 7));
     while (fgets(line, sizeof line, trace)) {
