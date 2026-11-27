@@ -4,6 +4,7 @@
 // The translator numbers every stage's bindings from 0 in set 0; at module creation each stage's bindings move to a set of its own (vertex 0, fragment 1,
 // geometry 2, tessellation 3 / 4; compute 0) by rewriting the DescriptorSet decorations, so a program's stages never collide.
 #include "gfx_vk.h"
+#include "gfx_vk_guest_filter.h"
 #include "gfx_vk_resolution_support.h"
 #include "nvn_hmap.h"
 #include "zstd.h"
@@ -13,6 +14,20 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static int guest_filter_certified(uint32_t stage, const uint32_t *spirv, uint32_t words) {
+    // Certificate for the audited smoothstep-only fragment program. It
+    // covers the executable and descriptor interface independently of its
+    // NVN key, and is checked before Vulkan driver-specific rewrites.
+    static const uint8_t smoothstep_digest[CC_SHA256_DIGEST_LENGTH] = {
+        0x0d, 0xef, 0x8f, 0x7a, 0x7a, 0x9a, 0x83, 0xb1, 0x2a, 0xce, 0x3e, 0xa2, 0x96, 0xb4, 0x8b, 0xeb,
+        0xfb, 0xba, 0x71, 0xac, 0x3f, 0xa1, 0xb7, 0xa9, 0xf8, 0x32, 0x13, 0xe2, 0x8d, 0xdd, 0x3c, 0xcd,
+    };
+    if (stage != 1 || words != 797) return 0;
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(spirv, words * sizeof *spirv, digest);
+    return memcmp(digest, smoothstep_digest, sizeof digest) == 0;
+}
 
 // spv_size: 0 = the SPIR-V is stored as it is (spv_len bytes; every version 1 entry), else a zstd frame of spv_len bytes that decompresses to spv_size (version 2)
 typedef struct __attribute__((packed)) { uint64_t key; uint32_t stage, spv_off, spv_len, refl_off, refl_len, spv_size; } bent;
@@ -311,6 +326,7 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     if (s->refl_extra_len && !nx_rs_ref_valid(s->c1+s->c1_len,s->refl_extra_len))
         s->refl_extra_len=0;
     // SPIR-V with the stage's set
+    s->guest_filter_certified = guest_filter_certified(stage, w, nw);
     int f64_used = 0; uint32_t xb = 4;
     for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n) break; if (op == 71 && n >= 4 && w[i + 2] == 34) w[i + 3] = (uint32_t)s->set;   // OpDecorate DescriptorSet
         if (op == 22 && n == 3 && w[i + 2] == 64) f64_used = 1;   // OpTypeFloat 64
@@ -384,6 +400,29 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
     pthread_mutex_unlock(&g_sh_mu);
     return s;
 }
+VkShaderModule vk_shader_guest_bilinear(vkshader_t *s) {
+    if (!s || !s->guest_filter_certified) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_sh_mu);
+    if (!s->guest_bilinear_attempted) {
+        s->guest_bilinear_attempted = 1;
+        size_t bytes = (size_t)s->nspv * sizeof *s->spv;
+        uint32_t *code = malloc(bytes);
+        if (code) {
+            memcpy(code, s->spv, bytes);
+            if (dm_guest_bilinear_patch(code, s->nspv)) {
+                VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, bytes, code};
+                VkShaderModule module = VK_NULL_HANDLE;
+                if (vkCreateShaderModule(V.dev, &ci, NULL, &module) == VK_SUCCESS)
+                    s->guest_bilinear = module;
+            }
+            free(code);
+        }
+    }
+    VkShaderModule result = s->guest_bilinear;
+    pthread_mutex_unlock(&g_sh_mu);
+    return result;
+}
+
 // Integer texels. Maxwell's texture instructions return the texel's 32-bit words as they are, and the shader decides what they mean; the translator declares
 // every sampled image as float, which matches only float views. A view of an integer format, or the stencil of a depth-stencil texture (DepthStencilMode
 // STENCIL), must be read through a uint / int image in Vulkan, and Adreno converts the value otherwise. Xenoblade Chronicles 3 tags each pixel's material

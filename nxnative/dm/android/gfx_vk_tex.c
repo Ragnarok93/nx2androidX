@@ -2074,7 +2074,7 @@ static const samp_par *samp_at(int sid, uint64_t seq) {   // under g_rmu: the ve
     for (int k = 0; k < SREG_OLD; k++) if (o[k].seq && o[k].seq <= seq) return &o[k].p;
     return &g_sreg[sid];   // older than what is kept: the newest
 }
-VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size) {   // the sampler a bind made after seq registrations sees (gfx_vk_exec.c samp_for)
+VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size, int *linear) {   // the sampler a bind made after seq registrations sees (gfx_vk_exec.c samp_for)
     pthread_mutex_lock(&g_rmu);
     VkSampler s = VK_NULL_HANDLE; const samp_par *q = samp_at(sid, seq);
     if (q) { samp_par p = *q;
@@ -2085,6 +2085,11 @@ VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size
             p.ws, p.wt, p.wr, p.minf, p.magf, p.lod_min, p.lod_max, p.lod_bias, p.aniso,
             p.cmp_mode, p.cmp_func, p.reduction, p.border[0], p.border[1], p.border[2], p.border[3]);
     }
+    if (linear) *linear = s && q && !nearest && q->magf == 1 &&
+        (q->minf == 1 || q->minf == 3 || q->minf == 5) &&
+        wrap(q->ws) == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+        wrap(q->wt) == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+        q->aniso < 2 && !q->cmp_mode && !q->reduction;
     if (!s && description) snprintf(description, size, "dummy");
     pthread_mutex_unlock(&g_rmu);
     return s;

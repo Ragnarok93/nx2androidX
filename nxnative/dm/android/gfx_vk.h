@@ -141,6 +141,7 @@ struct vkimg {
     struct vk_rs_variant *rs_backing; // only populated by explicit backing exchange; logical dimensions/key stay unchanged
     uint64_t rs_guest_addr; // captured direct guest address; zero means not proven
     uint8_t rs_presented; // asynchronous presentation may retain this owner
+    uint64_t guest_clear_frame, guest_clear_write; // last complete stored color clear
     uint64_t wseq, rseen;             // when it was last rendered to (gfx_vk_tex.c g_wseq); the newest overlapping write already reported
 };
 // Physical resolution variants are deliberately separate from guest storage keys.
@@ -248,6 +249,8 @@ typedef struct {
     uint32_t local[3];
     uint8_t dyn[96]; int ndyn;          // bindings of uniform buffers bound with a dynamic offset (gfx_vk_exec.c stage_set), and their count
     int xfb; uint32_t xfb_stride[4];    // a vertex shader that captures transform feedback (its SPIR-V has the Xfb execution mode), and each buffer's stride
+    VkShaderModule guest_bilinear;
+    int guest_filter_certified, guest_bilinear_attempted;
     uint32_t *spv, nspv;                // its SPIR-V as the module was made from it, for the variants below
     struct { uint64_t um, im, r32; uint32_t xo; int fd; VkShaderModule mod; } var[8]; int nvar;   // variants whose sampled bindings (bit = index in b) of an integer view read uint (um) / int (im) texels,
                                                                                     // that declare the vec4 outputs xo (bit = location) the next stage reads, and (fd) that write gl_FragDepth = gl_FragCoord.z
@@ -260,6 +263,7 @@ int vk_shader_stage(uint64_t key);
 vkshader_t *vk_shader(uint64_t key, int stage);   // NULL when the bundle has no such shader
 vkshader_t *vk_shader_gs_topo(vkshader_t *gs, VkPrimitiveTopology topo);   // the geometry shader translated for the draw's input primitive (shader_vk.py gs_variant_key); gs when there is none
 VkShaderModule vk_shader_module(vkshader_t *s, uint64_t um, uint64_t im, uint64_t r32, uint32_t xo, int fd);   // the module, or its variant (integer views; extra outputs; fragment depth written)
+VkShaderModule vk_shader_guest_bilinear(vkshader_t *s);
 void vk_shaders_open(const char *path);
 VkBuffer vk_support_buffer(void);
 // Optional trailer is absent in old bundles. Lookup is used only by scaled path.

@@ -1,5 +1,6 @@
 // Fixture inputs stand in for guest vertex buffers and uniforms absent from
 // the capture. The shader modules themselves are supplied at test time.
+#include "gfx_vk_guest_filter.h"
 #include "guest_vert.spv.h"
 #include "guest_edge_frag.spv.h"
 #include "guest_smooth_frag.spv.h"
@@ -281,6 +282,29 @@ static void check_guest_enlargement(void) {
         assert(memcmp(mapped + last, sentinel, sizeof sentinel) == 0);
     }
     puts("guest enlargement partial LOAD coverage readback PASS");
+    // Use the runtime patch on the supplied shader with the original
+    // coverage and a loaded guest attachment.
+    uint32_t patched[sizeof guest_smooth_frag_spv / sizeof(uint32_t)];
+    memcpy(patched, guest_smooth_frag_spv, sizeof patched);
+    assert(dm_guest_bilinear_patch(patched, sizeof patched / sizeof patched[0]));
+    VkPipeline guest_linear = guest_pipeline(layout, patched, sizeof patched, VK_FALSE, 0xf);
+    begin();
+    vkCmdClearColorImage(test_cb, target->texture.img, VK_IMAGE_LAYOUT_GENERAL, &magenta, 1, &full);
+    vk_img_barrier_all(test_cb);
+    guest_draw(guest_linear, layout, sets, target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+    guest_readback(target);
+    for (unsigned y = 0; y < OUT; ++y) {
+        for (unsigned x = 0; x < OUT - 1; ++x) {
+            size_t at = (y * OUT + x) * 4;
+            for (unsigned c = 0; c < 3; ++c)
+                assert(abs((int)mapped[at + c] - baseline[at + c]) <= 1);
+            assert(mapped[at + 3] == 0);
+        }
+        size_t last = (y * OUT + OUT - 1) * 4;
+        assert(memcmp(mapped + last, sentinel, sizeof sentinel) == 0);
+    }
+    puts("guest Bilinear shader variant preserves raster coverage and alpha PASS");
+    vkDestroyPipeline(V.dev, guest_linear, NULL);
     vkDestroyPipeline(V.dev, alpha_only, NULL);
     vkDestroyPipeline(V.dev, compose, NULL);
     vkDestroyPipeline(V.dev, smooth, NULL);

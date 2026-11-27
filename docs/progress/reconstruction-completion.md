@@ -480,3 +480,35 @@ checkpoint fills the missing draw inputs in one scoped GPU capture.
   on the same runtime code. All passed. The remaining Milestone 2 input
   is a new docked FFR GPU-snapshot ZIP with the target shader filters.
   Use internal scaling Off for this capture.
+
+## 2026-11-27 — Native replay Bilinear checkpoint
+
+Milestone 2 has a Bilinear insertion path that operates during regular
+replay. The runtime proves source coverage from a complete stored clear and
+runs the original guest vertex stage and raster state, so it has no need to
+reconstruct the target draw's vertices or covered region from a capture.
+
+- The initial admitted fragment interface is the audited cubic-warp program
+  from the supplied modules. Admission checks the SHA-256 of the full
+  translated SPIR-V before driver-specific rewrites. This is limited to
+  that exact binary contract. The NVN shader key is independent of
+  admission. There is no generalized shader semantic classifier yet.
+- Only the texel-fraction warp is changed. The original UV input, guest
+  uniforms, coordinate clamps, sampler, explicit LOD-zero read and output
+  alpha remain in the program. Replay also requires a defined,
+  current-frame source with unchanged write sequence and matching single
+  mip/layer RGBA8 view, a linear-clamp sampler, valid binding and a larger
+  compatible render target. Source and destination must have distinct
+  guest pools. No new image allocation or pass is needed.
+- Coverage follows the original draw, including its scissor and loaded
+  target. Unsupported draws or failed replacement pipeline creation use
+  the guest pipeline. Replay reports a recorded direct indexed Bilinear
+  draw independently of presentation activation.
+- Lavapipe with synchronization validation ran the production patch on the
+  supplied SPIR-V. Covered RGB matched the bilinear reference within one
+  8-bit code value and alpha remained zero. A scissored column retained
+  every loaded byte. The existing synthetic composition and fallback
+  tests also passed.
+- This does not yet wire FSR 1, GSR 1 or GSR 2 into replay or attribute
+  final presentation consumption to the guest-stage Bilinear draw.
+  Activation on the physical Galaxy device remains unverified.
