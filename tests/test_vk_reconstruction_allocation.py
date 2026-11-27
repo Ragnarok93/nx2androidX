@@ -24,6 +24,7 @@ class ReconstructionAllocation(unittest.TestCase):
 #include "gfx_vk_reconstruction_limits.h"
 #include "spatial_upscaler.h"
 typedef unsigned VkFormat, VkImageUsageFlags;
+typedef struct { unsigned width, height; } VkExtent2D;
 enum { SP_SOURCE, SP_INTERMEDIATE, SP_OUTPUT, SP_RCAS, SP_IMAGE_COUNT=3 };
 enum { VK_IMAGE_USAGE_TRANSFER_SRC_BIT=1, VK_IMAGE_USAGE_TRANSFER_DST_BIT=2,
        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT=4, VK_IMAGE_USAGE_SAMPLED_BIT=8,
@@ -32,7 +33,7 @@ enum { VK_IMAGE_USAGE_TRANSFER_SRC_BIT=1, VK_IMAGE_USAGE_TRANSFER_DST_BIT=2,
 typedef struct { struct { int img; unsigned w,h,fmt; } texture;
     VkFormat view_fmt; VkImageUsageFlags usage; uint64_t last_use; unsigned bytes; } spatial_image;
 static VkFormat g_sfmt=37;
-static struct { spatial_image image[SP_IMAGE_COUNT]; dm_recon_shared_retry shared_output_retry;
+static struct { spatial_image image[SP_IMAGE_COUNT]; dm_recon_shared_retry shared_output_retry; VkExtent2D report_allocated;
     uint64_t report_alloc_wait_ns, rcas_retry_after, retry_after; unsigned report_alloc_waits; } g_spatial;
 static unsigned cap, failure_shared, shared_attempts, evictions, deferred, last_mode, sharpened;
 static unsigned first_mandatory, first_optional, attempts;

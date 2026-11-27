@@ -30,6 +30,7 @@ class ReconstructionTiming(unittest.TestCase):
 #define SP_IMAGE_COUNT 6
 typedef int VkDescriptorSetLayout,VkPipelineLayout,VkDescriptorPool,VkDescriptorSet,VkSampler,VkPipeline,VkFormat,VkCommandPool,VkCommandBuffer,VkFence,VkQueryPool;
 typedef struct { uint32_t width,height; } VkExtent2D;
+typedef uint64_t VkImage;
 typedef int spatial_image, vk_gsr2, vk_rs_variant;
 static struct {int dev; struct {struct {double timestampPeriod;} limits;} props;} V={.props.limits.timestampPeriod=1000000.0};
 static unsigned query_calls, query_count, polls;

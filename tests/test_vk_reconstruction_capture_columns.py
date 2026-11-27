@@ -43,6 +43,8 @@ int main(int argc, char **argv) {
         .display_w=1920,.display_h=1080,.actual_w=2560,.actual_h=1440,
         .output_height=1440,.supersampling=1,.reconstruction_submitted=1,
         .guest_w=1280,.guest_h=720,.crop={8,4,1264,712},
+        .scene_image=0xab,.guest_image=0xcd,.scene_crop={1,2,1200,700},
+        .allocated_w=2560,.allocated_h=1440,.reconstruction_recorded=1,.completed_ticket=9,
         .final_source_w=2560,.final_source_h=1440,
         .drawable_w=1920,.drawable_h=1080,.swapchain_w=1080,.swapchain_h=1920,
         .timing_mode=SP_SGSR2,.timing_iw=1280,.timing_ih=720,
@@ -85,6 +87,12 @@ int main(int argc, char **argv) {
             self.assertEqual(a['supersampling'],'1')
             self.assertEqual(a['reconstruction_submitted'],'1')
             self.assertEqual(a['guest_w'],'1280')
+            self.assertEqual(a['scene_image'],'ab')
+            self.assertEqual(a['guest_image'],'cd')
+            self.assertEqual(a['scene_crop_h'],'700')
+            self.assertEqual(a['reconstruction_allocated_w'],'2560')
+            self.assertEqual(a['reconstruction_recorded'],'1')
+            self.assertEqual(a['reconstruction_completed_ticket'],'9')
             self.assertEqual(a['guest_crop_x'],'8')
             self.assertEqual(a['final_source_w'],'2560')
             self.assertEqual(a['drawable_w'],'1920')

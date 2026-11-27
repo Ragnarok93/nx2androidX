@@ -292,8 +292,12 @@ def summarize_presentation(rows, metadata):
             'allocations':sum(allocations) if allocations else None,
             'source_reset_frames':sum(v>0 for v in reset_flags) if reset_flags else None})
     bypasses = Counter()
+    completed = set()
     integrity = defaultdict(list)
     for ticket, row in frames.items():
+        retired = number(row, 'reconstruction_completed_ticket')
+        if retired and 0 < retired < ticket:
+            completed.add(retired)
         requested = row.get('requested_upscaler')
         active = row.get('active_upscaler')
         if requested not in (None, 'None', '-') and active == 'None':
@@ -315,6 +319,11 @@ def summarize_presentation(rows, metadata):
                 integrity['submitted_extent_mismatch'].append(ticket)
             if final != actual:
                 integrity['final_source_extent_mismatch'].append(ticket)
+            if 'reconstruction_recorded' in row and row['reconstruction_recorded'] != '1':
+                integrity['submission_without_recording'].append(ticket)
+            if 'reconstruction_allocated_w' in row and actual != (
+                    number(row, 'reconstruction_allocated_w'), number(row, 'reconstruction_allocated_h')):
+                integrity['submitted_allocation_extent_mismatch'].append(ticket)
         else:
             if active not in (None, 'None', '-'):
                 integrity['effective_backend_without_submission'].append(ticket)
@@ -335,6 +344,10 @@ def summarize_presentation(rows, metadata):
         if origin in samples and samples[origin]!=sample: conflicts.add(origin)
         else: samples[origin]=sample
     for t in conflicts: samples.pop(t,None)
+    completed.update(samples)
+    for t in sorted(completed & frames.keys()):
+        if frames[t].get('reconstruction_submitted') == '0':
+            integrity['completion_without_submission'].append(t)
     timing_groups=defaultdict(list)
     for t,sample in samples.items():
         backend,geometry,*_=sample
@@ -355,6 +368,7 @@ def summarize_presentation(rows, metadata):
         'timing_rows_missing_backend':no_backend,
         'bypasses': [{'operation_mode': op, 'requested': backend, 'reason': reason, 'frames': count}
                      for (op, backend, reason), count in sorted(bypasses.items())],
+        'observed_completed_tickets': len(completed),
         'submission_integrity': dict(sorted(integrity.items()))}
 
 def inspect(path, limit):

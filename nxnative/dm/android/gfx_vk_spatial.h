@@ -59,7 +59,10 @@ static struct {
     uint64_t query_history_epoch[SP_SLOTS], measured_history_epoch;
     int query_history_reset[SP_SLOTS], measured_history_reset;
     int submit_failed, report_physical, report_sharpness_requested, report_sharpness_applied;
-    VkExtent2D report_input;
+    VkExtent2D report_input, report_allocated;
+    VkImage report_image;
+    int report_crop[4], report_recorded;
+    uint64_t report_completed_ticket, completion_ticket[SP_SLOTS];
 } g_spatial;
 
 #if SP_TEMPORAL
@@ -118,6 +121,7 @@ static void spatial_drop_images(void) {
     for (int i = 0; i < SP_IMAGE_COUNT; i++) spatial_image_drop(&g_spatial.image[i]);
     g_spatial.ticket = g_spatial.attempted_ticket = g_spatial.retry_after = g_spatial.rcas_retry_after = 0;
     memset(g_spatial.query_ticket, 0, sizeof g_spatial.query_ticket);
+    memset(g_spatial.completion_ticket, 0, sizeof g_spatial.completion_ticket);
     g_spatial.measured_ticket = 0;
     dm_recon_shared_succeeded(&g_spatial.shared_output_retry);
 }
@@ -601,6 +605,11 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     g_spatial.report_input = (VkExtent2D){crop[2] > 0 ? (uint32_t)crop[2] : 0,
                                          crop[3] > 0 ? (uint32_t)crop[3] : 0};
     g_spatial.report_physical = 0;
+    g_spatial.report_image = src->img;
+    memcpy(g_spatial.report_crop, crop, sizeof g_spatial.report_crop);
+    g_spatial.report_allocated = (VkExtent2D){0};
+    g_spatial.report_recorded = 0;
+    g_spatial.report_completed_ticket = 0;
     int requested = dm_spatial_mode();
     int sharpness_pct = dm_fsr_sharpness();
     float sharpness = dm_recon_sharpness(sharpness_pct);
@@ -640,6 +649,8 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         flip_y = physical->flip_y;
         g_spatial.report_input = physical->valid.extent;
         g_spatial.report_physical = 1;
+        g_spatial.report_image = image;
+        memcpy(g_spatial.report_crop, crop, sizeof g_spatial.report_crop);
     } else physical = NULL;
     if (crop[2] <= 0 || crop[3] <= 0 || crop[0] < 0 || crop[1] < 0 ||
         (uint64_t)crop[0] + crop[2] > sw || (uint64_t)crop[1] + crop[3] > sh ||
@@ -701,6 +712,8 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     if (spatial_wait(fence, &g_spatial.report_slot_wait_ns)) goto submit_error;
     spatial_forget_fence(fence);
     spatial_release_source(slot);
+    g_spatial.report_completed_ticket = g_spatial.completion_ticket[slot];
+    g_spatial.completion_ticket[slot] = 0;
     spatial_retire_timing(slot, ticket);
 #if SP_TEMPORAL
     int budget_allows = wants_flow && dm_flow_budget_allow(&g_flow.policy, ticket);
@@ -797,6 +810,8 @@ select_backend:;
     }
     if (!output_ready)
         output_ready = spatial_image_ready(SP_OUTPUT, w, h, out_usage, out_view);
+    g_spatial.report_allocated = output_ready ?
+        (VkExtent2D){output->texture.w, output->texture.h} : (VkExtent2D){0};
     int base_ready = output_ready && (!stage_needed ||
         spatial_image_ready(SP_SOURCE, iw, ih, stage_usage, raster ? sample_fmt : g_sfmt));
     // A cached optional image may have consumed the budget for mandatory
@@ -920,7 +935,9 @@ select_backend:;
         if (flow) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 9);
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 1);
     }
-    if (vkEndCommandBuffer(cb) || vkResetFences(V.dev, 1, &fence)) goto submit_error;
+    if (vkEndCommandBuffer(cb)) goto submit_error;
+    g_spatial.report_recorded = 1;
+    if (vkResetFences(V.dev, 1, &fence)) goto submit_error;
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cb};
     extern pthread_mutex_t g_vk_queue_mu;
     pthread_mutex_lock(&g_vk_queue_mu);
@@ -965,6 +982,7 @@ select_backend:;
     g_spatial.ticket = ticket;
     g_spatial.slot++;
     g_spatial.query_ticket[slot] = ticket;
+    g_spatial.completion_ticket[slot] = ticket;
     g_spatial.query_mode[slot] = mode;
     g_spatial.query_input[slot] = (VkExtent2D){iw, ih};
     g_spatial.query_output[slot] = (VkExtent2D){w, h};

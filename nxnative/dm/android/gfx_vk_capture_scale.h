@@ -22,6 +22,9 @@ typedef struct {
     int crop[4];
     int output_height, supersampling, reconstruction_submitted;
     int present_accepted, generated_accepted;
+    uint64_t scene_image, guest_image, completed_ticket;
+    unsigned allocated_w, allocated_h;
+    int scene_crop[4], reconstruction_recorded;
     uint64_t timing_ticket;
     double gpu_ms;
     int timing_mode;

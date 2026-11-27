@@ -29,7 +29,10 @@ static struct {uint64_t ticket,last_real_ticket;dm_flow_budget policy;} g_flow;
 #define SP_OUTPUT 0
 static struct {
     int live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
-    VkExtent2D report_input, measured_input, measured_output;
+    VkExtent2D report_input, report_allocated, measured_input, measured_output;
+    VkImage report_image;
+    int report_crop[4], report_recorded;
+    uint64_t report_completed_ticket;
     uint64_t retry_after, rcas_retry_after, ticket, measured_ticket, measured_epoch, measured_history_epoch, report_alloc_wait_ns, report_slot_wait_ns;
     unsigned flow_cadence_us, measured_cadence, report_alloc_attempts, report_allocations, report_alloc_waits;
     double flow_budget_ms, gpu_ms, measured_budget, measured_stage_ms[4];

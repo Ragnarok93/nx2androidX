@@ -103,3 +103,41 @@ entry with `git log -1 --format=%H -- docs/progress/reconstruction-completion.md
   unavailable, using the existing reconstruction slot fence retirement.
   Record source image and valid crop, output allocation and recording state
   independently. Then review runtime validation before starting Milestone 1.
+
+## 2026-11-27 — Milestone 0, reconstruction lifecycle checkpoint
+
+Milestone 0 is **Awaiting device validation**. Milestone 1 is **Pending**.
+The previous checkpoint was `167fe3bfca4b423d54b44029bfe26a3e31bf0946`.
+Resolve this checkpoint with `git log -1 --format=%H -- docs/progress/reconstruction-completion.md`.
+
+- The runtime now records the selected source handle and crop, guest image,
+  available output allocation, command-buffer recording and successful
+  submission. Existing fence waits at reconstruction slot reuse supply
+  completion evidence even without timestamp support. The trace joins that
+  evidence to the original source ticket. Pending tail slots may leave some
+  submissions without observed completion in a stopped capture.
+- Source selection still uses the guest presentation image or the existing
+  physical-mode offer. The handle does not certify earlier scene color.
+  The downstream input extent represents the image supplied to the
+  presenter and offered to LSFG. Generated output currently uses that extent.
+  Actual compositor display and separate future composition/LSFG stages
+  require independent evidence when those paths are introduced.
+- Ran the reconstruction host suite (51 passed), the legacy archive trace
+  (332 native 1:1 bypasses), and `git diff --check`. No shader code changed.
+  The previous checkpoint triggered Android Actions run
+  [45965529404](https://github.com/Ragnarok93/nx2androidX/actions/runs/45965529404).
+- Device procedure after the signed builder artifact is available. Upgrade the
+  FFR 1.0.1 runtime in place with the existing signer. On Xclipse 940, use
+  internal scaling Off and select an explicit Vulkan driver. Arm full
+  graphics diagnostics. In one scene with 1080p target, capture at least
+  120 real frames each for handheld FSR 1, docked FSR 1, and docked GSR 2.
+  Repeat with fixed 2× LSFG and export the ZIP. Verify the runtime Git SHA,
+  ELF ID, driver ID/version, the submitted and completed 720p-to-1080p
+  handheld reconstruction, and the docked bypass with zero reconstruction
+  output. Verify a nonzero count of accepted generated frames when LSFG
+  successfully warms up. Repeat with Samsung Vulkan and RADV Xclipse.
+- Next implementation step for Milestone 1 is to index the existing replay
+  surface-usage writer by resource identity and write sequence inside a
+  bounded per-frame observation buffer. Begin with the exact
+  presentation-source marker and backward traversal of color writes and
+  sampled reads. Export the candidate path without substituting resources.
