@@ -687,3 +687,30 @@ reconstruct the target draw's vertices or covered region from a capture.
   replay checkpoint.
 - Display-oriented resolve commit `2d399516bde0d0e367fefd600d3de87efb3c5f8d`
   passed [software Vulkan and Android NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46024103333).
+
+## 2026-11-27 — Replay audit and host acceptance matrix
+
+The branch contains the image-driven replay, pacing, target and LSFG
+handoff implementation. The 55-check reconstruction host suite now
+compiles the production source proof and submit hook. It rejects a
+partial or discarded clear, stale and aliased writes, remapped or sRGB
+views, nonzero mips, missing transfer usage and a previous-frame
+producer. It confirms that rejected or unconsumed work cannot publish
+history and that a mode change releases the context only after the
+replay fence completes.
+
+| Milestone | Status | Evidence or dependency |
+| --- | --- | --- |
+| 0. Diagnostics | Awaiting device validation | Host runtime identity, lifecycle and present-accounting regressions passed. Device driver and WSI events need hardware. |
+| 1. Scene discovery | Host validated | The archived FFR 1728×972 source was identified. Live admission and cross-title cost need actual replay streams. |
+| 2. Composition and insertion | In progress | Original fragment behavior and replacement composition passed synthetic Vulkan replay. The initial shader certificate covers the audited translated program. General semantic classification, physical FFR admission and presentation attribution remain open. |
+| 3. Spatial and sharpening | Host validated | All four selections passed exact bypass, sharpening-only, slider, crop and orientation fixtures. Live cost and driver conformance remain open. |
+| 4. Temporal history | In progress | Image-driven pre-composition input, history rotation, submit rollback, mode changes and fence retirement are covered. The supplied shaders prove no engine motion, depth, jitter or exposure bindings. Native engine-input activation requires that evidence. |
+| 5. Pacing | Host validated | Cadence, stage measurement, pressure, cooldown and recovery passed. Physical frame deadlines and backend residency need devices. |
+| 6. Output and resources | Host validated | Production software Vulkan outputs passed from 720p through 2880p. Actual device limits, repeated target changes under load and sustained 8 GB use remain open. |
+| 7. LSFG | Awaiting device validation | The host ordering fixture and Vulkan resolve passed. Nonzero real generated images, fixed and adaptive device behavior need a working LSFG runtime and physical presentation. |
+| 8. Regression and performance | In progress | Software Vulkan and NDK linking passed. Native Samsung Vulkan, RADV Xclipse, Adreno 650 and newer Adreno comparisons remain open. CPU and GPU timing on Lavapipe cannot establish those frame percentiles or memory residency. |
+| 9. Integration and delivery | In progress | Verified runtime link and signed artifact identities are recorded per checkpoint. Final implementation artifact verification follows. |
+
+No new game capture was required for this host work. The original diagnostic
+archives and translated game shaders stay outside Git.
