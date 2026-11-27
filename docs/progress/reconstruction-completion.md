@@ -714,3 +714,22 @@ replay fence completes.
 
 No new game capture was required for this host work. The original diagnostic
 archives and translated game shaders stay outside Git.
+
+## 2026-11-27 — Replay and presentation continuity
+
+- When a real replay submission carried image-driven GSR 2, any further
+  output enlargement uses the spatial GSR 1 path. This keeps the
+  composited guest image out of a second temporal accumulation. The
+  already-applied sharpening hint suppresses repeated sharpening. Both
+  hints are scoped to one guest frame and published after submit.
+- The LSFG source encoding includes replay processing and selected
+  backend identity, so a change resets warmup even when the output
+  and drawable extents hold steady. The Vulkan fixture exercised
+  replay-to-spatial fallback with temporal history disabled. The
+  55-check reconstruction suite and 26 focused regression checks passed.
+- Native sharpness and target commit `647d461433ddb8677ff6799ac35a42d38fc1330c`
+  passed [software Vulkan and Android NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46024851447).
+  The [signed pacing artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46023387249/artifacts/15210193434)
+  was available at inspection. The interim resolve-only Android run
+  reached a stale source-order assertion. The following implementation
+  commit updates that assertion and the focused suite passed locally.

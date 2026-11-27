@@ -360,10 +360,10 @@ static void check_spatial_slider(void) {
             last = distance;
         }
     }
-    g_spatial.replay_sharpened = 1;
+    g_spatial.replay_flags = SP_REPLAY_SHARPENED;
     sharpness = 25;
     assert(!spatial_reconstruct(&src.texture, crop, 1, 16, 16, ++ticket, NULL));
-    g_spatial.replay_sharpened = 0;
+    g_spatial.replay_flags = 0;
     puts("native-size sharpening, exact bypass and replay sharpening guard PASS");
     CHECK(vkQueueWaitIdle(V.q));
     spatial_drop_images();

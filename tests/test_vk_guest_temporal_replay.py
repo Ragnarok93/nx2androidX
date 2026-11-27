@@ -44,7 +44,7 @@ static VkRenderingInfo P_ri;
 static VkRenderingAttachmentInfo P_ca[1];
 static struct { VkImage image; VkExtent2D extent; } g_guest_scene;
 static int g_guest_source_ok;
-static uint64_t g_tex_frame, g_guest_sharpen_pending, g_guest_sharpen_submitted;
+static uint64_t g_tex_frame, g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
 __thread VkFormat vk_view_fmt;
 __thread VkComponentMapping vk_view_swizzle;
 __thread VkImageSubresourceRange vk_view_range;
@@ -65,7 +65,7 @@ static void vkDestroyQueryPool(VkDevice dev, VkQueryPool pool, const VkAllocatio
             replay_function(code, "static void guest_store_clear("),
             replay_function(code, "static void guest_check_source("),
             replay_function(code, "static void guest_flow_drop("),
-            replay_function(code, "int vk_guest_sharpened_this_frame("),
+            replay_function(code, "unsigned vk_guest_reconstruction_flags("),
             replay_function(code, "void vk_guest_flow_submitted("),
         ))
         source += r'''
@@ -149,18 +149,19 @@ static void submission_ownership(void) {
     guest_flow.pending = guest_flow.drawn = 1;
     g_guest_sharpen_pending = g_tex_frame + 1;
     vk_guest_flow_submitted(0, 8);
-    assert(commits == 2 && !last_commit && !vk_guest_sharpened_this_frame());
+    assert(commits == 2 && !last_commit && !vk_guest_reconstruction_flags());
 
     guest_flow.pending = guest_flow.drawn = 1;
-    guest_flow.slots[2].ticket = 12;
+    guest_flow.ticket = guest_flow.slots[2].ticket = g_tex_frame + 1;
     g_guest_sharpen_pending = g_tex_frame + 1;
     vk_guest_flow_submitted(1, 9);
-    assert(commits == 3 && last_commit && vk_guest_sharpened_this_frame());
-    assert(guest_flow.slots[2].ticket == 12 && guest_flow.slots[2].fence == 9);
+    assert(commits == 3 && last_commit &&
+           vk_guest_reconstruction_flags() == (SP_REPLAY_SHARPENED | SP_REPLAY_TEMPORAL));
+    assert(guest_flow.slots[2].ticket == g_tex_frame + 1 && guest_flow.slots[2].fence == 9);
     vk_guest_flow_submitted(1, 10);
     assert(commits == 3 && guest_flow.retire == 9);
     ++g_tex_frame;
-    assert(!vk_guest_sharpened_this_frame());
+    assert(!vk_guest_reconstruction_flags());
 
     mode = SP_FSR1;
     completed = 8;

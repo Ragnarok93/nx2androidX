@@ -21,5 +21,8 @@ static inline const char *spatial_mode_name(int mode) {
     return spatial_mode_valid(mode) ? names[mode] : names[SP_NATIVE];
 }
 
+// Conservative indications of replay work submitted on this real frame.
+enum { SP_REPLAY_SHARPENED = 1, SP_REPLAY_TEMPORAL = 2 };
+
 int dm_spatial_mode(void);
 int dm_fsr_sharpness(void);

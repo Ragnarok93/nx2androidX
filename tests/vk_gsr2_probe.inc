@@ -458,6 +458,11 @@ static void check_image_temporal(void) {
     assert(g_flow.ctx->history.ticket == ticket);
     sharpness = 50;
     CHECK(vkQueueWaitIdle(V.q));
+    g_spatial.replay_flags = SP_REPLAY_TEMPORAL | SP_REPLAY_SHARPENED;
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, ++ticket, NULL) == output);
+    assert(spatial_active == SP_SGSR1 && !g_flow.ticket && !g_spatial.report_sharpness_applied);
+    CHECK(vkQueueWaitIdle(V.q));
+    g_spatial.replay_flags = 0;
     spatial_image_drop(&src);
     puts("SGSR 2 image-driven presentation passed motion, scene change, history and fallback checks");
 }

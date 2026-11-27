@@ -45,7 +45,8 @@ static struct {
     unsigned slot, encoding;
     float flow_budget_ms;
     uint32_t flow_cadence_us;
-    int flow_pressure, explicit_target, replay_sharpened;
+    int flow_pressure, explicit_target;
+    unsigned replay_flags;
     uint64_t ticket, attempted_ticket, retry_after, rcas_retry_after, measured_ticket;
     uint64_t report_alloc_wait_ns, report_slot_wait_ns;
     unsigned report_alloc_attempts, report_allocations, report_alloc_waits;
@@ -657,9 +658,13 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     float sharpness = dm_recon_sharpness(sharpness_pct);
     g_spatial.report_sharpness_requested = (int)(sharpness * 100.0f + 0.5f);
     g_spatial.report_sharpness_applied = 0;
-    int wants_flow = requested == SP_SGSR2;
-    int mode = wants_flow ? SP_SGSR1 : requested;
-    const char *reason = NULL;
+    // A frame that submitted replay GSR 2 already has pre-composition
+    // history. Any additional output resize stays spatial.
+    int replay_temporal = requested == SP_SGSR2 && (g_spatial.replay_flags & SP_REPLAY_TEMPORAL);
+    int wants_flow = requested == SP_SGSR2 && !replay_temporal;
+    int mode = requested == SP_SGSR2 ? SP_SGSR1 : requested;
+    const char *reason = replay_temporal ? "spatial output resize after replay GSR 2" : NULL;
+    if (g_spatial.replay_flags & SP_REPLAY_SHARPENED) sharpness = 0;
 #if SP_TEMPORAL
     if (!wants_flow) {
         dm_flow_budget_invalidate(&g_flow.policy);
@@ -712,7 +717,6 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
 #endif
         wants_flow = 0;
         mode = SP_BILINEAR;
-        if (g_spatial.replay_sharpened) sharpness = 0;
         if ((native_grid && sharpness == 0) || (!native_grid && !g_spatial.explicit_target)) {
             spatial_report(requested, SP_NATIVE, native_grid ?
                 "native 1:1 presentation input" : "presentation input does not require enlargement", ticket);
@@ -1043,7 +1047,7 @@ select_backend:;
     // Effective processing is part of LSFG's source contract, including GSR1's
     // built-in sharpening. A changed slider resets LSFG once on the next real frame.
     g_spatial.report_sharpness_applied = (rcas || post || mode == SP_SGSR1) ?
-        g_spatial.report_sharpness_requested : 0;
+        (int)(sharpness * 100.0f + 0.5f) : 0;
     g_spatial.encoding = (unsigned)mode * 128u + (unsigned)g_spatial.report_sharpness_applied;
     g_spatial.ticket = ticket;
     g_spatial.slot++;

@@ -706,7 +706,7 @@ static int g_input_collect_descriptors;
 // Replay-local and scoped to descriptor collection for one draw.
 static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_ok, g_guest_uniform_ok;
 static int g_guest_filter_bound, g_guest_sharpness_bound;
-static uint64_t g_guest_sharpen_pending, g_guest_sharpen_submitted;
+static uint64_t g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
 static struct {
     VkImage image;
     VkExtent2D extent;
@@ -3287,8 +3287,10 @@ static void guest_flow_drop(void) {
 
 // The presentation thread receives this as a conservative hint. A submitted
 // replay draw may have applied the slider before later composition.
-int vk_guest_sharpened_this_frame(void) {
-    return g_guest_sharpen_submitted == g_tex_frame + 1;
+unsigned vk_guest_reconstruction_flags(void) {
+    uint64_t ticket = g_tex_frame + 1;
+    return (g_guest_sharpen_submitted == ticket ? SP_REPLAY_SHARPENED : 0) |
+           (g_guest_temporal_submitted == ticket ? SP_REPLAY_TEMPORAL : 0);
 }
 
 void vk_guest_flow_submitted(int accepted, uint64_t fence) {
@@ -3297,6 +3299,7 @@ void vk_guest_flow_submitted(int accepted, uint64_t fence) {
     if (guest_flow.pending) {
         int commit = accepted && guest_flow.drawn;
         vk_gsr2_commit(guest_flow.ctx, commit);
+        if (commit) g_guest_temporal_submitted = guest_flow.ticket;
         guest_flow.retire = guest_flow.slots[guest_flow.slot].fence = fence;
         if (!commit) guest_flow.slots[guest_flow.slot].ticket = 0;
         guest_flow.pending = guest_flow.drawn = 0;

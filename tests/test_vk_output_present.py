@@ -28,7 +28,8 @@ static dm_recon_continuity g_recon_source;
 static struct {uint64_t ticket,last_real_ticket;dm_flow_budget policy;} g_flow;
 #define SP_OUTPUT 0
 static struct {
-    int flow_pressure, explicit_target, replay_sharpened, live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
+    unsigned replay_flags;
+    int flow_pressure, explicit_target, live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
     VkExtent2D report_input, report_allocated, measured_input, measured_output, resolve_extent;
     VkImage report_image;
     int report_crop[4], report_recorded;
@@ -48,11 +49,13 @@ static uint64_t resolved_ticket;
 static unsigned rec_calls,fg_calls,present_calls,capture_calls,reset_flags;
 static VkExtent2D rec_target,fg_input,display={1920,1080};
 static VkImage fg_image;
+static unsigned fg_encoding;
 static VkExtent2D g_sext={1920,1080},g_next={1920,1080};
 static struct {VkImage image;int w,h,meta,flip;VkExtent2D display;uint64_t ticket;} observed[4];
 static vk_capture_scale_present_sample cap;
 int dm_recon_output_height(void){return configured;}
 int dm_spatial_mode(void){return mode;}
+int dm_fsr_sharpness(void){return 50;}
 int dm_perf_rate_fps(void){return 30;}
 static int dm_fg_wants_input(void){return fg_on;}
 static spatial_image *spatial_display_resolved(uint64_t ticket){return resolved_ticket==ticket?&resolve:NULL;}
@@ -76,7 +79,8 @@ static spatial_image *spatial_reconstruct(vkimg_t *im,const int *raw,int flip,ui
     return &g_spatial.image[0];
 }
 static int dm_fg_frame(vkimg_t *im,const int *rect,int flip,unsigned encoding,unsigned reset,double period,VkImage gen[3],double *hold,double *out_period,VkFence *consumer){
-    (void)flip;(void)encoding;(void)period;
+    (void)flip;(void)period;
+    fg_encoding=encoding;
     fg_image=im?im->img:0;
     fg_calls++;fg_input=(VkExtent2D){(unsigned)rect[2],(unsigned)rect[3]};reset_flags=reset;
     if(!fg_on||!im)return 0;
@@ -145,6 +149,11 @@ int main(void){
     configured=720;real(20,1);
     assert(cap.actual_w==1280&&cap.actual_h==720&&cap.active==SP_BILINEAR);
     assert(fg_input.width==1280&&fg_input.height==720&&observed[1].image==fg_image);
+    unsigned prior_encoding=fg_encoding;
+    present_calls=0;
+    present_window(&src,NULL,1.0/30,21,0,21*33333333,1,1,
+        SP_REPLAY_TEMPORAL|SP_REPLAY_SHARPENED,NULL);
+    assert(fg_encoding!=prior_encoding);
     return 0;
 }
 '''

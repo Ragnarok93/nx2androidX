@@ -309,14 +309,16 @@ cover every referenced vertex before they can establish raster coverage.
 The signed Android workflow requires the resolution host tests, SPIR-V
 validation and software Vulkan readbacks. Those fixtures cover the replay
 geometry and reconstruction recorders. Gameplay coverage and output on
-Xclipse and Adreno require device traces.
+Xclipse and Adreno require device validation.
 
 A 1:1 picture uses the original image at zero sharpness. Sharpening at
 native size uses RCAS on the existing pixel grid. A direct replay
-submission carrying a sharpened draw suppresses a second native-grid
-sharpening pass for that source frame. Explicit output targets below the
-guest extent use a Bilinear downsample. The drawable and swapchain keep
-their own sizes.
+submission carrying a sharpened draw suppresses repeated sharpening for
+that source frame. After replay GSR 2, further enlargement stays spatial
+so that the composited image stays outside temporal history. Replay
+processing changes contribute to the LSFG source encoding. Explicit
+targets below the guest extent use a Bilinear downsample. The drawable
+and swapchain have independent sizes.
 
 When LSFG is configured and the reconstruction target exceeds the
 drawable, reconstruction produces a display-sized resolve in the same

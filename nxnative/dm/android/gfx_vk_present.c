@@ -1438,7 +1438,8 @@ void vk_window_lost(void) {
 #define PQ_N 4
 static struct {
     vkimg_t *im;
-    int crop[4], has_crop, docked, flip_y, replay_sharpened;
+    int crop[4], has_crop, docked, flip_y;
+    unsigned replay_flags;
     uint64_t n, source_ns;
     double period;
     vk_reconstruction_input physical;
@@ -1462,7 +1463,7 @@ static int reconstruction_pressure(dm_flow_cadence cadence) {
 }
 
 static void present_window(vkimg_t *im, const int *crop, double period, uint64_t ticket, int redraw,
-                           uint64_t source_ns, int docked, int flip_y, int replay_sharpened,
+                           uint64_t source_ns, int docked, int flip_y, unsigned replay_flags,
                            const vk_reconstruction_input *physical) {
     if (g_spatial.live_sources) spatial_collect_sources();
     if (g_present_failed) return;
@@ -1524,7 +1525,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         g_spatial.resolve_extent = needs_fg_resolve && cadence.period_us && dm_fg_wants_input() ?
             picture : (VkExtent2D){0};
         g_spatial.explicit_target = output_height > 0;
-        g_spatial.replay_sharpened = replay_sharpened;
+        g_spatial.replay_flags = replay_flags;
         reconstructed = spatial_reconstruct(im, raw, flip_y, target.width, target.height, ticket,
                                            full ? physical : NULL);
     }
@@ -1545,6 +1546,11 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     VkFence fg_fence = VK_NULL_HANDLE;
     unsigned encoding = (unsigned)source->fmt * 1024u;
     if (reconstructed) encoding += g_spatial.encoding;
+    // Include replay changes even when the final image needs no extra pass.
+    encoding = (encoding * 8u + (unsigned)dm_spatial_mode()) * 4u + replay_flags;
+    encoding *= 128u;
+    if (replay_flags & SP_REPLAY_SHARPENED)
+        encoding += (unsigned)(dm_recon_sharpness(dm_fsr_sharpness()) * 100.0f + 0.5f);
     // Both consumers use the display-oriented resolve when it exists.
     // A failed resolve preserves the offscreen real result and skips FG.
     vkimg_t *fg_source = needs_fg_resolve && reconstructed && !resolved ? NULL : source;
@@ -1623,7 +1629,7 @@ static void *present_thread(void *arg) {
             if (last.im) {
                 pthread_mutex_lock(&g_present_mu);
                 present_window(last.im, last.has_crop ? last.crop : NULL, -1, last.n, 1,
-                               last.source_ns, last.docked, last.flip_y, last.replay_sharpened, NULL);
+                               last.source_ns, last.docked, last.flip_y, last.replay_flags, NULL);
                 pthread_mutex_unlock(&g_present_mu);
             }
             continue;
@@ -1635,7 +1641,7 @@ static void *present_thread(void *arg) {
             last.physical.backing = NULL;
             pthread_mutex_lock(&g_present_mu);
             present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0,
-                           e.source_ns, e.docked, e.flip_y, e.replay_sharpened, e.physical.backing ? &e.physical : NULL);
+                           e.source_ns, e.docked, e.flip_y, e.replay_flags, e.physical.backing ? &e.physical : NULL);
             pthread_mutex_unlock(&g_present_mu);
         }
         vk_rs_variant_destroy(e.physical.backing);
@@ -1645,7 +1651,7 @@ static void *present_thread(void *arg) {
 }
 static void present_thread_start(void) { pthread_t t; pthread_create(&t, NULL, present_thread, NULL); pthread_detach(t); }
 static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, double period,
-                                int replay_sharpened, const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
+                                unsigned replay_flags, const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
     // Snapshot before queue backpressure, on the source submission thread.
     // Operation mode is a notification snapshot, not shader/scene certification.
     extern int dm_opmode(void);
@@ -1654,7 +1660,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     static int sync = -1; static pthread_once_t once = PTHREAD_ONCE_INIT;
     if (sync < 0) sync = getenv("DM_VK_SYNC_PRESENT") != NULL;
     if (sync || !dm_front_window()) {   // headless: nothing to show; or presenting on this thread
-        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_sharpened, physical); pthread_mutex_unlock(&g_present_mu); }
+        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_flags, physical); pthread_mutex_unlock(&g_present_mu); }
         if (physical) vk_rs_variant_destroy(physical->backing);
         pthread_mutex_lock(&g_pq_mu); if (g_pq_tail == g_pq_head) g_pq_done = n; pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
         return n;
@@ -1664,7 +1670,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     while (g_pq_head - g_pq_tail >= PQ_N) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // never more than PQ_N frames behind
     typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = im; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
     e->source_ns = source_ns; e->docked = docked; e->flip_y = flip_y;
-    e->replay_sharpened = replay_sharpened;
+    e->replay_flags = replay_flags;
     if (physical) e->physical = *physical;
     else e->physical.backing = NULL;
     g_pq_head++; pthread_cond_broadcast(&g_pq_cv);
@@ -1773,13 +1779,13 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period, 0, NULL); }   // never drawn into: nothing to show yet
     shown++;
     if (shot_wanted(n)) shot(im, n);
-    int replay_sharpened = vk_guest_sharpened_this_frame();
+    unsigned replay_flags = vk_guest_reconstruction_flags();
     { void vk_pass_frame(void); vk_pass_frame(); void vk_tex_sweep(void); vk_tex_sweep(); }
     if (n % 1800 == 0) {   // every ~30 s: the pipeline cache to disk on a thread of its own (an Android app can be killed without any exit path)
         void vk_pipeline_cache_save(void); pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
         pthread_create(&th, &a, (void *(*)(void *))(void *)vk_pipeline_cache_save, NULL); pthread_attr_destroy(&a);
     }
-    uint64_t ticket=present_enqueue(im, crop, n, period, replay_sharpened, input);
+    uint64_t ticket=present_enqueue(im, crop, n, period, replay_flags, input);
     vk_rs_publish_source_frame(n);
     return ticket;
 }
