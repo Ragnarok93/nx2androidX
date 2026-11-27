@@ -144,16 +144,19 @@ fun UpgradeScreen(selection: UpgradeSelection, runtime: RuntimeUpdateState, busy
             }
             if (target != null && !target.embedded) {
                 HorizontalDivider()
-                Text(companion?.absolutePath ?: stringResource(R.string.upgrade_companion_required),
+                Text(companion?.absolutePath ?: stringResource(if (target.compatibilityEmbedded)
+                    R.string.upgrade_companion_optional else R.string.upgrade_companion_required),
                     style = MaterialTheme.typography.bodyMedium)
                 OutlinedButton(enabled = !busy, onClick = {
                     onRequest(PickerRequest(PickerMode.DIR, emptySet(), companion ?: target.apk.parentFile,
                         pickData, onPicked = { selection.companion = it.absolutePath }))
                 }) { Text(pickData) }
+                if (selection.companion.isNotBlank()) TextButton(enabled = !busy,
+                    onClick = { selection.companion = "" }) { Text(stringResource(R.string.upgrade_clear_companion)) }
             }
         }
         if (target != null) {
-            val canStart = !busy && ready && (target.embedded || companion != null)
+            val canStart = !busy && ready && (target.embedded || target.compatibilityEmbedded || companion != null)
             Section(stringResource(R.string.upgrade_action)) {
                 Text(stringResource(R.string.upgrade_key_explanation), style = MaterialTheme.typography.bodySmall)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

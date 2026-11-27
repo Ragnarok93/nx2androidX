@@ -105,8 +105,8 @@ def rewrite_runtime(src, out, key, host, dex, assets=None):
     if src.resolve() == out.resolve(): raise ValueError('choose a separate output APK')
     replace = {ABI+'libdmhost.so': host, 'classes.dex': dex}
     for name, path in (assets or {}).items():
-        if not name.startswith('font/') and name not in ('licenses/sgsr1.txt', 'licenses/sgsr2.txt'):
-            raise ValueError('only runtime fonts and GSR licenses can be added')
+        if not name.startswith('font/') and name not in ('licenses/sgsr1.txt', 'licenses/sgsr2.txt', 'nx2a-upgrade-v1.json'):
+            raise ValueError('only runtime fonts, GSR licenses and upgrade compatibility metadata can be added')
         replace['assets/'+name] = path
     with zipfile.ZipFile(src) as archive:
         k, crt = checked_signer(src, archive.start_dir, key)

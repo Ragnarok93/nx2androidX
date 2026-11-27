@@ -109,7 +109,8 @@ class StreamingApkTests(unittest.TestCase):
                     return apk, signing.source_certificate(apk, z.start_dir)
 
             with patch.object(signing.paths, "signing_key", return_value=legacy):
-                key = signing.export_key(title)
+                # Explicitly construct an old private-seed port, not a new public signer.
+                key = signing.provision_title_key(legacy, signing.title_key(legacy, title))
                 first, identity = build("first", key, 42)
                 self.assertEqual(hashlib.sha256(identity[0]).hexdigest(),
                                  "1551c62c47add16a6ecd4017fbc9e91c3c92c938a1d4503ec32a78d0a5c93ae9")
@@ -118,7 +119,8 @@ class StreamingApkTests(unittest.TestCase):
                 self.assertEqual(identity, second_identity)
                 with zipfile.ZipFile(first) as before, zipfile.ZipFile(second) as after:
                     self.assertEqual(before.read("AndroidManifest.xml"), after.read("AndroidManifest.xml"))
-                other_apk, other_identity = build("another-title", signing.export_key(other.lower()), 42)
+                old_other = signing.provision_title_key(legacy, signing.title_key(legacy, other))
+                other_apk, other_identity = build("another-title", old_other, 42)
                 self.assertNotEqual(identity, other_identity)
                 self.assertEqual(signing.original_key(second), key)
                 upgraded = root / "runtime-upgrade.apk"
@@ -181,6 +183,116 @@ class StreamingApkTests(unittest.TestCase):
                 restored_key = signing.original_key(first, title=title)
                 _, restored_identity = build("restored", restored_key, 42)
                 self.assertEqual(identity, restored_identity)
+
+    def test_public_title_signer_survives_clean_builder_install(self):
+        from porter import signing, pipeline, upgrade_apk
+        from porter.upstream import BuildError
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            title = "0100606026F12000"
+            package = "org.nx2a.fixture"
+            lib = root / "host.so"
+            lib.write_bytes(b"\x7fELF\x02\x01\x01".ljust(16,b"\0")+struct.pack("<HH",3,183))
+            dex = root / "classes.dex"
+            dex.write_bytes(b"old dex")
+            first, runtime = root/"first.apk", root/"runtime.apk"
+            stage = root/"stage"
+            stage.mkdir()
+            updated = stage/"updated.apk"
+            pack = root/"payload.zip"
+            def game_pack(version):
+                with zipfile.ZipFile(pack, "w") as z:
+                    z.writestr("nx2a-data.json", json.dumps({"title_id": title, "package": package, "version": version}))
+                    z.writestr("mods/build_src.sha256", "record")
+            game_pack("v0")
+            old_home, new_home = root / "old", root / "new"
+            old_home.mkdir()
+            new_home.mkdir()
+            def build(apk, key, version):
+                subprocess.run([sys.executable, str(signing.paths.DM / "android/apk/mkapk.py"),
+                    str(lib), str(apk), str(key), "--lib", "dmhost", "--dex", str(dex),
+                    "--package", package, "--version-code", str(version), "--preserve-version-floor",
+                    "--asset", f"nx2a-data.zip={pack}"],
+                    check=True, capture_output=True)
+                _assert_v2_digest(self, apk.read_bytes())
+                with zipfile.ZipFile(apk) as z:
+                    return signing.source_certificate(apk, z.start_dir)
+            with patch.object(signing.paths, "signing_key", return_value=old_home/"signing-key.json"):
+                identity = build(first, signing.export_key(title.lower(), package=package), 1)
+                self.assertFalse((old_home/"signing-key.seed-v1").exists())
+                self.assertEqual(hashlib.sha256(identity[0]).hexdigest(),
+                                 "a6bd221cdf88b0ea651bdc9e540deefbd85669ec3e73f21f8514ad54fea65c40")
+            shutil.rmtree(old_home)
+            with patch.object(signing.paths, "signing_key", return_value=new_home/"signing-key.json"):
+                key = signing.original_key(first, title=title)
+                # Exercise the production game-upgrade entry point, replacing only
+                # the expensive guest recompilation with a signed fixture build.
+                base_dump, update_dump = root/"base.nsp", root/"update.nsp"
+                base_dump.write_bytes(b"base fixture")
+                update_dump.write_bytes(b"update fixture")
+                def compile_fixture(port):
+                    self.assertEqual(port.o.package, package)
+                    self.assertEqual(port.o.folder, base_dump)
+                    self.assertEqual(port.o.game_update.patch, update_dump)
+                    self.assertEqual(port.o.game_update.old_version, "v0")
+                    self.assertEqual(port.o.game_update.version_floor, 65537)
+                    self.assertEqual(port.o.game_update.key, key)
+                    game_pack("v65536")
+                    self.assertEqual(identity, build(updated, key, 65537))
+                    return {"apk": str(updated)}
+                with patch.object(pipeline.Port, "run", autospec=True, side_effect=compile_fixture):
+                    self.assertEqual(updated, upgrade_apk.upgrade_game(
+                        first, stage, package=package, version_floor=65537, patch=update_dump,
+                        base=base_dump, keys=None))
+                self.assertEqual(upgrade_apk.metadata(updated, None, runtime=False)[0]["version"], "v65536")
+                lib.write_bytes(b"new runtime")
+                dex.write_bytes(b"new UI")
+                subprocess.run([sys.executable, str(signing.paths.DM / "android/apk/apkdriver.py"),
+                    str(updated), str(runtime), str(key), "--host", str(lib), "--dex", str(dex)],
+                    check=True, capture_output=True)
+                _assert_v2_digest(self, runtime.read_bytes())
+                with zipfile.ZipFile(updated) as before, zipfile.ZipFile(runtime) as after:
+                    self.assertEqual(identity, signing.source_certificate(runtime, after.start_dir))
+                    self.assertEqual(before.read("AndroidManifest.xml"), after.read("AndroidManifest.xml"))
+                    self.assertEqual(before.read("assets/nx2a-data.zip"), after.read("assets/nx2a-data.zip"))
+                    self.assertEqual(after.read("classes.dex"), b"new UI")
+                    self.assertEqual(after.read("lib/arm64-v8a/libdmhost.so"), b"new runtime")
+                with self.assertRaisesRegex(BuildError, "signing key is unavailable"):
+                    signing.original_key(first, title="0100000000010000")
+
+    def test_companion_compatibility_without_full_data_folder(self):
+        from porter.upgrade_apk import companion_compatibility, metadata, COMPATIBILITY_ASSET
+        from porter.upstream import BuildError
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pack = root / "pack"
+            (pack/"mods").mkdir(parents=True)
+            manifest = {"title_id": "0100606026F12000", "version": "v65536", "package": "org.nx2a.fixture"}
+            raw = json.dumps(manifest).encode()
+            (pack/"nx2a-data.json").write_bytes(raw)
+            (pack/"mods/build_src.sha256").write_text("record")
+            (pack/"shaders.dmsv").write_bytes(b"DMSV"+struct.pack("<II", 2, 0))
+            capsule = root/"metadata.json"
+            self.assertTrue(companion_compatibility(pack, capsule))
+            apk = root/"game.apk"
+            def write(digest, include=True):
+                with zipfile.ZipFile(apk, "w") as z:
+                    z.writestr("lib/arm64-v8a/libdmhost.so", b"\x7fELF\x02\x01\x01".ljust(16,b"\0")+struct.pack("<HH",3,183))
+                    z.writestr("assets/nx2a-companion.json", json.dumps({"manifest_sha256":digest}))
+                    if include: z.write(capsule, COMPATIBILITY_ASSET)
+            # Compare the same production reader on both representations.
+            digest = hashlib.sha256(raw).hexdigest()
+            write(digest)
+            self.assertEqual(metadata(apk, pack), metadata(apk, None))
+            shutil.rmtree(pack)
+            self.assertEqual(metadata(apk, None, runtime=False)[0], manifest)
+            self.assertEqual(metadata(apk, None)[1], "record")
+            write("0"*64)
+            with self.assertRaisesRegex(BuildError, "does not match"):
+                metadata(apk, None)
+            write(digest, False)
+            with self.assertRaisesRegex(BuildError, "older companion APK"):
+                metadata(apk, None)
 
     def test_runtime_upgrade_replaces_code_only(self):
         with tempfile.TemporaryDirectory() as temp:

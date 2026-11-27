@@ -7,7 +7,9 @@
     <string name="upgrade_pick_installed">Choose installed game</string>
     <string name="upgrade_reading">Inspecting the selected APK…</string>
     <string name="upgrade_no_installed">No standalone nx2android games found.</string>
-    <string name="upgrade_companion_required">Choose the matching companion data folder for this port.</string>
+    <string name="upgrade_companion_required">Choose the matching companion data folder for this older port before upgrading.</string>
+    <string name="upgrade_companion_optional">Upgrade metadata is embedded. Existing imported game data can be reused; keep the companion folder for new installations.</string>
+    <string name="upgrade_clear_companion">Clear selected folder</string>
     <string name="upgrade_companion_location">Companion data: %1$s</string>
     <string name="upgrade_action">Upgrade options</string>
     <string name="upgrade_runtime">Update runtime</string>
@@ -20,7 +22,7 @@
     <string name="upgrade_game_running">Building and packaging the game update…</string>
     <string name="upgrade_install">Install update</string>
     <string name="upgrade_allow_installs">Allow app installation from nx2android, then tap Install update again.</string>
-    <string name="upgrade_key_explanation">The original signing key is selected automatically. You can restore a matching private key backup if needed.</string>
+    <string name="upgrade_key_explanation">New ports use a reproducible public title signer. Only install trusted APKs. Older ports need their original signing key or seed.</string>
     <string name="upgrade_restore_key">Restore original signing key</string>
     <string name="upgrade_clear_key">Clear key selection</string>
     <string name="upgrade_pick_apk">Choose game APK</string>

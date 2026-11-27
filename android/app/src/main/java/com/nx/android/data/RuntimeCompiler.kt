@@ -58,8 +58,9 @@ class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProces
         check(upgradeApks.archiveIdentity(target.apk) == target.identity) {
             "The selected APK changed. Choose it again."
         }
-        check(target.embedded || (data != null && upgradeApks.matchesCompanion(data, target.companionDigest))) {
-            "The selected companion folder does not match the game APK."
+        check(target.embedded || if (data != null) upgradeApks.matchesCompanion(data, target.companionDigest)
+            else target.compatibilityEmbedded) {
+            "Choose the matching companion folder for this older APK, or clear an incorrect folder selection."
         }
         val installed = if (game == null) {
             upgradeApks.requireInstallableVersion(target.identity)
@@ -125,9 +126,20 @@ class RuntimeCompiler @Inject constructor(private val guestLauncher: GuestProces
             val companion = if (game == null) data else {
                 apk.resolveSibling("${apk.nameWithoutExtension}-data").takeIf(File::isDirectory)
             }
-            check(verified.embedded ||
-                (companion != null && upgradeApks.matchesCompanion(companion, verified.companionDigest))) {
-                "The completed upgrade is missing its companion game data."
+            if (game == null) {
+                check(verified.embedded == target.embedded && verified.companionDigest == target.companionDigest) {
+                    "The runtime update changed the original game data identity."
+                }
+                check(verified.embedded || if (companion != null)
+                    upgradeApks.matchesCompanion(companion, verified.companionDigest)
+                    else verified.compatibilityEmbedded) {
+                    "The completed runtime update is missing its compatibility metadata."
+                }
+            } else {
+                check(verified.embedded ||
+                    (companion != null && upgradeApks.matchesCompanion(companion, verified.companionDigest))) {
+                    "The completed game upgrade is missing its new companion game data."
+                }
             }
             check(!cancellation.exists()) { "APK upgrade cancelled." }
             return ApkUpgradeResult(apk, companion)

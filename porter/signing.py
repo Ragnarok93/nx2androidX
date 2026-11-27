@@ -63,6 +63,33 @@ def provision_title_key(legacy, key, *, expected=None):
     return key
 
 
+# PUBLIC compatibility identity, not a secret or a publisher trust boundary.
+# Freeze this domain, derivation algorithm and certificate encoding across releases.
+SERIAL_SIGNER_DOMAIN_V1 = b'nx2androidX public title APK signer v1'
+
+def serial_key(legacy, title):
+    key = title_key(legacy, title)
+    return key.with_name(key.stem + '-serial-v1.json')
+
+
+def derive_serial_signer(title):
+    if not re.fullmatch(r'[0-9a-fA-F]{16}', title):
+        raise BuildError('A valid base title ID is required to select an APK signing key.')
+    return derive_signer_v1(hashlib.sha256(SERIAL_SIGNER_DOMAIN_V1).digest(), title.upper())
+
+
+def provision_serial_key(legacy, title, *, identity=None):
+    path = serial_key(legacy, title)
+    private, certificate = derive_serial_signer(title)
+    if identity is not None and identity != (certificate, spki(private)):
+        return None
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    saved, saved_cert = persistent_signer(path, derive=lambda: (private, certificate))
+    if (saved_cert, spki(saved)) != (certificate, spki(private)) or saved != private:
+        raise ValueError('The cached title signer is inconsistent with the public serial identity.')
+    return path
+
+
 def saved_version_floor(key, package):
     try:
         return int(package_receipt(key, package).read_text(encoding='ascii'))
@@ -109,7 +136,7 @@ def export_key(title, *, package=None, previous_apk=None):
     title_records = [(root, title_key(root, title)) for root in roots]
     if package:
         receipts = [(root, p) for root, k in title_records
-                    for p in (k, *imported_keys(k), root) if package_receipt(p, package).is_file()]
+                    for p in dict.fromkeys((k, *imported_keys(k), serial_key(root, title), root)) if package_receipt(p, package).is_file()]
         if len(receipts) > 1:
             raise BuildError('Multiple signing histories exist for this package. Select the original APK to upgrade.')
         if receipts:
@@ -119,6 +146,8 @@ def export_key(title, *, package=None, previous_apk=None):
                     return provision_title_key(root, p)
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     raise BuildError(f'Cannot prepare the standalone signing key: {exc}') from exc
+            if p == serial_key(root, title):
+                return provision_serial_key(root, title)
             if not p.is_file():
                 raise BuildError('Original APK signing key is missing. Restore it before recompiling this game.')
             return p
@@ -134,7 +163,10 @@ def export_key(title, *, package=None, previous_apk=None):
             raise BuildError('Multiple recovered keys exist for this title. Select the original APK to upgrade.')
         if recovered:
             return recovered[0]
-        root = primary
+        try:
+            return provision_serial_key(primary, title)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise BuildError(f'Cannot prepare the public title signer: {exc}') from exc
     try:
         return provision_title_key(root, key)
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -207,4 +239,13 @@ def original_key(apk, *, title=None, explicit=None):
                 return path
         except (OSError, ValueError, KeyError, TypeError):
             continue
+    # A clean builder installation has no private state for public title signers.
+    # Compare the complete certificate and public key before caching anything.
+    if explicit is None and title is not None:
+        try:
+            recovered = provision_serial_key(primary, title, identity=identity)
+            if recovered is not None:
+                return recovered
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     raise BuildError('Original APK signing key is unavailable or does not match. Restore the original key or private signing seed to upgrade in place. Certificate SHA-256: ' + fingerprint)

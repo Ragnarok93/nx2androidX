@@ -26,6 +26,7 @@ data class UpgradeTarget(
     val embedded: Boolean,
     val companion: File?,
     val companionDigest: String?,
+    val compatibilityEmbedded: Boolean = false,
 )
 
 data class GameUpdateInputs(val patch: File, val base: File)
@@ -71,7 +72,9 @@ class UpgradeApks @Inject constructor(@ApplicationContext private val context: C
 
     fun inspect(apk: File): UpgradeTarget {
         require(apk.isFile && apk.canRead()) { "The selected game APK could not be read." }
+        var compatibilityEmbedded = false
         val (embedded, companion, digest) = ZipFile(apk).use { zip ->
+            compatibilityEmbedded = (zip.getEntry("assets/nx2a-upgrade-v1.json")?.size ?: 0L) in 1L..(16L shl 20)
             check(zip.getEntry("classes.dex") != null &&
                 zip.getEntry("lib/arm64-v8a/libdmhost.so") != null &&
                 (StandaloneApkAssets.contains(zip, StandaloneApkAssets.EMBEDDED) ||
@@ -106,7 +109,7 @@ class UpgradeApks @Inject constructor(@ApplicationContext private val context: C
             app.publicSourceDir = apk.absolutePath
             pm.getApplicationLabel(app).toString()
         }.orEmpty().ifBlank { info.packageName }
-        return UpgradeTarget(apk, identity(info), info.versionName.orEmpty(), label, embedded, companion, digest)
+        return UpgradeTarget(apk, identity(info), info.versionName.orEmpty(), label, embedded, companion, digest, compatibilityEmbedded)
     }
 
     fun installedGames(): List<Pair<String, File>> =

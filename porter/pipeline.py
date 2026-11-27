@@ -1580,6 +1580,12 @@ class Port:
                 'title_id': str(info.get('title_id', '')),
             }, ensure_ascii=False) + '\n', encoding='utf-8')
             cmd += ['--data-root', str(pack), '--asset', f'nx2a-companion.json={descriptor}']
+            from porter.upgrade_apk import companion_compatibility
+            compatibility = self.aw / 'nx2a-upgrade-v1.json'
+            if companion_compatibility(pack, compatibility):
+                cmd += ['--asset', f'nx2a-upgrade-v1.json={compatibility}']
+            else:
+                say('Upgrade compatibility record unavailable; retain the original companion folder.')
         cmd += (['--landscape'] if self.ap.landscape else []) + icon + self.theme() + self.ui_font() + external + ([] if self.o.debug else ['--release'])
         cmd += (['--game-mode-performance'] if getattr(self, 'gl', None) is False else [])   # only NVN implements the mode's pacing policy; GL keeps OEM interventions
         cmd += [a for lib in vulkan_libs for a in ('--extra-so', str(lib))]

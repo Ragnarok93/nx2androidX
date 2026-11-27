@@ -70,6 +70,58 @@ class StoredAsset(io.RawIOBase):
         return result
 
 
+COMPATIBILITY_ASSET = 'assets/nx2a-upgrade-v1.json'
+MAX_COMPATIBILITY_BYTES = 16 << 20
+
+
+def companion_compatibility(pack, output):
+    """Serialize only compatibility inputs, never game payloads or private signing state."""
+    pack = Path(pack)
+    files = [pack/'nx2a-data.json', pack/'mods/build_src.sha256']
+    files += sorted((pack/'mods').glob('*.cuts.tsv'))
+    files += sorted((pack/'mods').glob('*.obs.tsv'))
+    if not all(p.is_file() for p in files):
+        return False
+    if sum(p.stat().st_size for p in files) > MAX_COMPATIBILITY_BYTES // 2:
+        return False
+    record = {p.relative_to(pack).as_posix(): p.read_text(encoding='utf-8') for p in files}
+    # Preserve the manifest's exact bytes (including CRLF) for its descriptor hash.
+    record['nx2a-data.json'] = (pack/'nx2a-data.json').read_bytes().decode('utf-8')
+    shader = pack/'shaders.dmsv'
+    shader_info = None
+    if shader.is_file():
+        with shader.open('rb') as stream:
+            shader_info = [stream.read(12).hex(), shader.stat().st_size]
+    raw = json.dumps({'schema': 1, 'files': record, 'shader': shader_info}, ensure_ascii=False).encode('utf-8')
+    if len(raw) > MAX_COMPATIBILITY_BYTES:
+        return False
+    Path(output).write_bytes(raw)
+    return True
+
+
+def read_compatibility(archive, descriptor, read_pack):
+    entry = archive.getinfo(COMPATIBILITY_ASSET)
+    if not 0 < entry.file_size <= MAX_COMPATIBILITY_BYTES:
+        raise BuildError('Invalid APK upgrade compatibility record size.')
+    info = json.loads(archive.read(entry))
+    if not isinstance(info, dict) or info.get('schema') != 1 or not isinstance(info.get('files'), dict):
+        raise BuildError('Invalid APK upgrade compatibility record.')
+    files = info['files']
+    if not all(isinstance(name, str) and isinstance(value, str) for name, value in files.items()):
+        raise BuildError('Invalid APK upgrade compatibility inputs.')
+    manifest = files['nx2a-data.json'].encode('utf-8')
+    if hashlib.sha256(manifest).hexdigest() != descriptor['manifest_sha256']:
+        raise BuildError('APK upgrade compatibility record does not match its companion manifest.')
+    names = set(files)
+    shader = info.get('shader')
+    if shader is not None:
+        if not isinstance(shader, list) or len(shader) != 2 or not isinstance(shader[0], str) or type(shader[1]) is not int:
+            raise BuildError('Invalid APK shader compatibility record.')
+        names.add('shaders.dmsv')
+    return read_pack(names, lambda name: files[name].encode('utf-8'),
+                     lambda: (bytes.fromhex(shader[0]), shader[1]))
+
+
 def metadata(apk, data, *, runtime=True):
     shader = 'shaders.dmsv'
 
@@ -104,10 +156,12 @@ def metadata(apk, data, *, runtime=True):
                 with z.open(entry) as stream:
                     return read_embedded(stream, read_pack, shader)
 
-            if data is None:
-                raise BuildError('For a companion-data APK, pass --data pointing to its existing data folder.')
-            data = Path(data)
             descriptor = json.loads(z.read('assets/nx2a-companion.json'))
+            if data is None:
+                if COMPATIBILITY_ASSET in z.namelist():
+                    return read_compatibility(z, descriptor, read_pack)
+                raise BuildError('This older companion APK needs its matching original data folder for compatibility checks.')
+            data = Path(data)
             if hashlib.sha256((data/'nx2a-data.json').read_bytes()).hexdigest() != descriptor['manifest_sha256']:
                 raise BuildError('Companion data does not match this APK.')
             names = {p.relative_to(data).as_posix() for p in (data/'mods').glob('*.tsv')}
@@ -162,7 +216,7 @@ def upgrade_game(apk, output, *, package, version_floor, patch, base, keys, data
             baked = 'assets/nx2a-data.txt'
             old_path = archive.read(baked).decode().strip() if baked in archive.namelist() else ''
             if not old_path or not Path(old_path).is_dir():
-                old_path = str(Path(data).resolve())
+                old_path = str(Path(data).resolve()) if data is not None else ''
             previous = (old_path, descriptor['manifest_sha256'])
     result = Port(Options(
         folder=base, out=output, keys=Path(keys) if keys else None, package=package,
@@ -251,6 +305,14 @@ def upgrade(apk, output, *, data=None, key=None, jobs=None, no_lsfg=False, debug
         from porter.pipeline import ui_font_assets, runtime_shader_license_assets
         runtime_assets = {name: path for name, path in ui_font_assets().items() if path.is_file()}
         runtime_assets.update(runtime_shader_license_assets())
+        # Legacy companion exports with an available verified folder acquire
+        # the compatibility record on their next successful runtime update.
+        if data is not None:
+            with zipfile.ZipFile(apk) as archive:
+                if 'assets/nx2a-data.zip' not in archive.namelist():
+                    compatibility = scratch/'nx2a-upgrade-v1.json'
+                    if companion_compatibility(data, compatibility):
+                        runtime_assets['nx2a-upgrade-v1.json'] = compatibility
         assets = [arg for name, path in runtime_assets.items() for arg in ('--asset', f'{name}={path}')]
         subprocess.run([sys.executable, str(DM/'android/apk/apkdriver.py'), str(apk), str(output),
                         str(key), '--host', str(library), '--dex', str(dex), *assets], check=True)
