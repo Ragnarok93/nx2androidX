@@ -465,10 +465,10 @@ static void surface_capture_write(void) {
     surface_capture_free();
 }
 
-static void surface_transfer(const vkimg_t *im, VkImageSubresourceLayers sub, const char *role) {
+static void surface_transfer(const vkimg_t *im, VkImageSubresourceLayers sub, const char *role, const char *status) {
     VkImageSubresourceRange range = {sub.aspectMask, sub.mipLevel, 1, sub.baseArrayLayer, sub.layerCount};
     surface_binding_t b = surface_binding(im, VK_NULL_HANDLE, im->fmt, range, -1, -1, 0);
-    surface_usage(role, &b, -1, -1, NULL, "requested");
+    surface_usage(role, &b, -1, -1, NULL, status);
 }
 
 static void surface_clear(const vkimg_t *im, VkImageSubresourceRange range, const VkClearValue *clear) {

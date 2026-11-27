@@ -136,6 +136,17 @@ def presentation_links(rows, groups, writes):
             visited.add(i)
             links[i]=[j+1 for j in path]
             out=rows[i]
+            if out['role'] == 'copy-destination' and out['status'] == 'recorded-full-color-transfer' and i:
+                src = rows[i - 1]
+                # Replay emits the recorded source and destination consecutively.
+                # Legacy requested rows and incomplete pairs cannot form an edge.
+                if (src['role'] == 'copy-source' and src['status'] == out['status'] and
+                        context(src) == context(out) and not overlaps(src, out)):
+                    producer = last_writer(i - 1)
+                    if producer is not None and producer not in discovered:
+                        discovered.add(producer)
+                        queue.append((producer, (producer, i - 1) + path))
+                continue
             # Only graphics color writes can be traced through sampled fragment
             # bindings with this catalog. Compute/transfer pairing is ambiguous.
             if out['role']!='color': continue

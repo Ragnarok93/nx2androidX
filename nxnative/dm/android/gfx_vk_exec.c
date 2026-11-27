@@ -4218,7 +4218,7 @@ static void copy_b2t(const p_copy_b2t *c, int to_texture) {
     VkBufferImageCopy r = {o, rowlen, imgh, sub_of(im, &c->view, c->has_view, c->r.zoffset), {c->r.xoffset, c->r.yoffset, layered ? 0 : c->r.zoffset},
                            {(uint32_t)c->r.width, (uint32_t)(c->r.height ? c->r.height : 1), layered ? 1 : (uint32_t)depth}};
     if (g_pd_state == 1 && g_pd_full)
-        surface_transfer(im, r.imageSubresource, to_texture ? "buffer-copy-destination" : "buffer-copy-source");
+        surface_transfer(im, r.imageSubresource, to_texture ? "buffer-copy-destination" : "buffer-copy-source", "requested");
     if (layered) r.imageSubresource.layerCount = (uint32_t)depth;
     if (f->dec) {
         uint8_t *blocks = malloc(packed);
@@ -4376,10 +4376,6 @@ static void copy_t2t(const p_copy_t2t *c) {
     vk_watch(s, "copy source"); vk_watch(d, "copy destination");
     VkCommandBuffer cb = vk_cmd(); vk_tex_prepare(cb, s); vk_tex_prepare(cb, d); vk_img_barrier_all(cb);
     VkImageSubresourceLayers ss = sub_of(s, &c->sv, c->has_sv, c->sr.zoffset), ds = sub_of(d, &c->dv, c->has_dv, c->dr.zoffset);
-    if (g_pd_state == 1 && g_pd_full) {
-        surface_transfer(s, ss, "copy-source");
-        surface_transfer(d, ds, "copy-destination");
-    }
     // Vulkan refuses (vkEndCommandBuffer fails for the whole submission) a region outside either image or a blit the format cannot do: regions are clipped
     // to both images' levels, a copy with nothing left is skipped
     int32_t sw = (int32_t)(s->w >> ss.mipLevel ? s->w >> ss.mipLevel : 1), sh = (int32_t)(s->h >> ss.mipLevel ? s->h >> ss.mipLevel : 1);
@@ -4455,7 +4451,22 @@ static void copy_t2t(const p_copy_t2t *c) {
         vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &r, (c->flags & 1) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
         if (di != d->img) { vk_img_barrier_all(cb); vkCmdCopyImage(cb, di, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &back); }
     }
+    const int observe = g_pd_state == 1 && g_pd_full;
+    // Exact full-image color transfers may contribute a dependency edge.
+    // Partial, aliased, mirrored, multisampled and converted copies still
+    // publish writes, but cannot propagate a known full color input.
+    const char *status = "recorded";
+    if (observe && !(c->flags & DM_COPY_RESOLVE) && !mir && s != d &&
+        s->fmt == d->fmt && s->fmt == sf->vk && d->fmt == df->vk &&
+        s->samples == 1 && d->samples == 1 && s->d == 1 && d->d == 1 &&
+        ss.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && ds.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+        ss.layerCount == 1 && ds.layerCount == 1 &&
+        !c->sr.xoffset && !c->sr.yoffset && !c->dr.xoffset && !c->dr.yoffset &&
+        c->sr.width == sw && c->sr.height == sh && c->dr.width == dw && c->dr.height == dh)
+        status = "recorded-full-color-transfer";
+    if (observe) surface_transfer(s, ss, "copy-source", status);
     vk_tex_mark_written(d);
+    if (observe) surface_transfer(d, ds, "copy-destination", status);
     vk_img_barrier_all(cb);
 }
 static void clear_tex(const p_clear_tex *c) {

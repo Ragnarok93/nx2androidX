@@ -36,6 +36,19 @@ class TraceTests(unittest.TestCase):
         self.assertIn('draw may blend, discard or depend on earlier attachment contents',
                       report['candidates'][0]['enlargement_screening_rejections'])
 
+    def test_recorded_full_color_transfer_links_graphics_to_present(self):
+        observed = 'recorded-full-color-transfer'
+        r = chain() + [
+            row('copy-source', 2, im='b', seq='8', w='1728', h='972', status=observed),
+            row('copy-destination', 2, im='c', seq='9', w='1728', h='972',
+                guest_offset='20000', status=observed),
+            row('presentation-source', -202, im='c', seq='9', w='1728', h='972',
+                guest_offset='20000'),
+        ]
+        self.assertEqual(analyze(r)['candidates'][0]['presentation_link']['path_rows'], [4, 5, 6, 7])
+        r[4]['status'] = 'requested'
+        self.assertFalse(analyze(r)['candidates'][0]['presentation_link']['linked'])
+
     def test_downstream(self):
         r=chain();r.append(row('sampled-binding',2,im='b',seq='8',w='1728',h='972'))
         self.assertEqual(len(analyze(r)['candidates'][0]['downstream']),1)

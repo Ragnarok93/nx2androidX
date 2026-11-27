@@ -33,7 +33,7 @@ int g_pool_slots = 1;   // gfx_vk_exec.c's (vk_pool_of reads it)
 static int g_x_tracepass = -1, g_sub_pass, g_prof_on, g_prereset = 1;
 static uint64_t g_prof_ns[8], g_fence, g_tex_frame;
 static int g_pd_state, g_pd_effects, g_pd_full, g_ch_enabled;
-static struct { FILE *usage; unsigned storage_count, uniform_count; } g_sc;
+static struct { FILE *usage; unsigned storage_count, uniform_count; int metadata_only; } g_sc;
 static unsigned g_compute_image_count;
 /* Native-only replay fixture: real scaling helpers compile, but any attempt
  * to enter the scaled Vulkan backend is an unexpected test failure. */
@@ -58,6 +58,7 @@ static int resolution_native_preflight(const tex_t *t,const view_t *v,int texel,
 static int resolution_raw_span(uint64_t addr,uint64_t bytes,int tail) { abort(); }
 static void compute_images_written(void) {}
 static void surface_dispatch(void) { abort(); }
+static void surface_alias_flush(void) { abort(); }
 static void surface_uniform_queue(uint64_t shader, int binding, int reg, VkDescriptorBufferInfo source) { abort(); }
 static void surface_compute_uniforms(VkCommandBuffer cb) { abort(); }
 static void pass_dump_aliases(void) { abort(); }

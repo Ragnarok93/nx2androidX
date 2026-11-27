@@ -200,3 +200,20 @@ validation**. The previous checkpoint was
 - Next action is to give transfer, resolve and compute observations exact
   operation-level producer/consumer identity, then bound the runtime graph
   and assess safe eligibility at the first observed enlargement boundary.
+
+## 2026-11-27 — Milestone 1, recorded transfer evidence checkpoint
+
+Milestone 1 is **In progress**. Milestone 0 remains **Awaiting device validation**.
+The previous remote checkpoint was `d1178deabb1d29ba0c02da0287e05feb0fa9cad1`.
+
+- Reproduced the Android APK CI failure from run 45966346348 in the indirect
+  compute harness. Updated its stubs for the metadata-only diagnostic branch.
+- Moved texture-to-texture transfer observations after successful command
+  recording and published the destination after its write sequence advances.
+  The analyzer follows consecutive full single-sample color transfer pairs
+  with exact subresources and rejects requested or overlapping pairs.
+- Indirect compute (7), trace analyzer (19) and surface capture (1) tests
+  passed. `git diff --check` passed. No shaders changed. Device tests remain open.
+- Next action is to add resolved compute reads and writes and resolve
+  provenance without attributing a partial write to a whole attachment.
+  Then validate the discovery graph and eligibility against FFR on device.
