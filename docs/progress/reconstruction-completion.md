@@ -287,3 +287,18 @@ and source-coverage evidence for safe replacement.
   point. Record sampler and producer coverage and establish the guest
   shader's behavior independently. A plausible observation cannot authorize
   a substitution, and the docked reconstruction regression remains open.
+
+## 2026-11-27 — Milestone 1 replay and CI validation
+
+- Ran the production C observer over the archived FFR 1.0.1 docked
+  present 16745 surface rows. It selected the 1728×972 image feeding the
+  final enlargement to 1920×1080. The existing offline analyzer also
+  observed its 1384×780 upstream input. These are provenance observations.
+- Reconstruction validation run 45970378481 passed its software Vulkan
+  and FFR Android NDK link jobs at `5704ea06db33e364d8c18fd48eaf58e641eaf976`.
+- Milestone 2 FFR eligibility remains unverified. Neither fragment shader
+  key (16405ad0ea722934 or 7d05eef41136554f) appears in the capture's shader
+  index. The archive contains no SPIR-V modules. Use the matching build's
+  DMSV bundle in a host harness to inspect the two fragment modules and
+  their shared vertex module (6e9683d5d012ebac), then check coverage and
+  color equivalence while preserving the subsequent composition.
