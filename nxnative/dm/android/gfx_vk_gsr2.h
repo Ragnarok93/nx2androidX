@@ -98,6 +98,7 @@ int vk_gsr2_record_image(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
 // a fully defined RGBA8 UNORM color image in GENERAL, with one mip, one layer,
 // one sample, transfer source usage and exactly the context's render extent.
 vk_gsr2 *vk_gsr2_create_replay(VkExtent2D render, VkExtent2D output, VkDeviceSize budget);
+// The optional replay timing range uses two queries for the whole operation.
 int vk_gsr2_record_replay(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
                           const dm_temporal_frame *frame, VkImage scene,
                           const vk_gsr2_timing *timing, vk_gsr2_output *output);

@@ -508,12 +508,21 @@ static void check_replay_snapshots(void) {
         .iw = 24, .ih = 24, .ow = 32, .oh = 32, .inputs = DM_TEMPORAL_IMAGE_PAIR,
         .variants = DM_TEMPORAL_2FS, .real = 1, .memory_ok = 1};
     vk_gsr2_output result;
+    VkQueryPool pool;
+    VkQueryPoolCreateInfo query = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0,
+        VK_QUERY_TYPE_TIMESTAMP, 2};
+    CHECK(vkCreateQueryPool(V.dev, &query, NULL, &pool));
+    vk_gsr2_timing timing = {pool, 0};
     flow_frame(&source, 0, 0);
     begin();
-    assert(vk_gsr2_record_replay(ctx, test_cb, 0, &frame, source.texture.img, NULL, &result));
+    assert(vk_gsr2_record_replay(ctx, test_cb, 0, &frame, source.texture.img, &timing, &result));
     assert(ctx->pending_plan.reset && !ctx->history.valid);
     assert(!vk_gsr2_record_replay(ctx, test_cb, 1, &frame, source.texture.img, NULL, &result));
     complete();
+    uint64_t stamps[2];
+    CHECK(vkGetQueryPoolResults(V.dev, pool, 0, 2, sizeof stamps, stamps, sizeof stamps[0],
+        VK_QUERY_RESULT_64_BIT));
+    vkDestroyQueryPool(V.dev, pool, NULL);
     vk_gsr2_commit(ctx, 1);
     assert(ctx->history.ticket == frame.ticket);
 

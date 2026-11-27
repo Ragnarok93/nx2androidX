@@ -849,6 +849,12 @@ int vk_gsr2_record_replay(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
         frame->iw != ctx->render.width || frame->ih != ctx->render.height ||
         frame->ow != ctx->output.width || frame->oh != ctx->output.height) return 0;
 
+    if (timing && timing->pool) {
+        vkCmdResetQueryPool(cb, timing->pool, timing->first, 2);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timing->pool, timing->first);
+        vk_img_barrier_all(cb);
+    }
+
     // Replay owns the guest image only for this copy. Keep the other snapshot
     // alive until the next accepted real frame, even if the guest recycles it.
     temporal_image *current = &ctx->snapshots[ctx->next];
@@ -877,7 +883,10 @@ int vk_gsr2_record_replay(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
         .color = {current->view, VK_IMAGE_LAYOUT_GENERAL},
         .previous_color = {previous->view, VK_IMAGE_LAYOUT_GENERAL}, .pre_exposure = 1.0f,
     };
-    return vk_gsr2_record(ctx, cb, slot, &replay, &inputs, timing, output);
+    int recorded = vk_gsr2_record(ctx, cb, slot, &replay, &inputs, NULL, output);
+    if (timing && timing->pool)
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timing->pool, timing->first + 1);
+    return recorded;
 }
 
 VkDescriptorSet vk_gsr2_replay_sample(vk_gsr2 *ctx, unsigned slot,

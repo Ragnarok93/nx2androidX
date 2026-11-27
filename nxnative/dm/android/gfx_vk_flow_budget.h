@@ -10,12 +10,20 @@ static inline dm_flow_cadence dm_flow_cadence_estimate(double guest_period, int 
     double period = guest_period;
     if (cap_fps > 0 && period < 1.0 / cap_fps) period = 1.0 / cap_fps;
     if (period == 0.0) return (dm_flow_cadence){0, 2.0f};
-    double budget = period * 100.0;
-    return (dm_flow_cadence){(uint32_t)(period * 1000000.0 + 0.5),
-        (float)(budget > 2.5 ? 2.5 : budget)};
+    // Limit the effect to one fifth of the source interval. Measured
+    // frame pressure can suspend it even when its stage time fits.
+    return (dm_flow_cadence){(uint32_t)(period * 1000000.0 + 0.5), (float)(period * 200.0)};
 }
 
-/* Present-thread policy. Only completed GSR2 samples from the current
+// CPU replay and GPU execution can overlap. Compare the longer one to the
+// source interval and let independent queue and display observations add pressure.
+static inline int dm_flow_frame_stressed(uint32_t period_us, uint32_t cpu_us,
+        uint32_t gpu_us, unsigned queued, int missed) {
+    uint32_t work = cpu_us > gpu_us ? cpu_us : gpu_us;
+    return queued >= 2 || missed || (period_us && (uint64_t)work * 10 >= (uint64_t)period_us * 9);
+}
+
+/* One controller per reconstruction owner. Only completed GSR2 samples from the current
  * workload generation may enter this controller. Spatial samples never do. */
 typedef struct {
     uint32_t iw, ih, ow, oh, cadence_us, source_format, output_format;
@@ -23,8 +31,8 @@ typedef struct {
 } dm_flow_workload;
 typedef struct {
     dm_flow_workload key;
-    uint64_t generation, retry_after, last_sample;
-    unsigned slow, affordable, backoff, overload_events;
+    uint64_t generation, retry_after, last_sample, last_pressure;
+    unsigned slow, affordable, backoff, overload_events, pressure;
     int valid;
 } dm_flow_budget;
 
@@ -55,6 +63,28 @@ static inline int dm_flow_budget_allow(dm_flow_budget *p, uint64_t ticket) {
     return 1;
 }
 
+static inline void dm_flow_budget_overload(dm_flow_budget *p, uint64_t decision_ticket) {
+    // After three failed recovery probes, wait for a workload change.
+    p->retry_after = ++p->overload_events >= 4 ? UINT64_MAX : decision_ticket + p->backoff;
+    p->backoff = p->backoff < 1920 ? p->backoff * 2 : 1920;
+    p->slow = p->pressure = p->affordable = 0;
+    p->generation++;
+    p->last_sample = 0;
+}
+
+// One pressure sample per source frame, irrespective of LSFG outputs.
+// Stage cost and aggregate pressure share one cooldown without adding times.
+static inline void dm_flow_budget_pressure(dm_flow_budget *p, uint64_t ticket, int stressed) {
+    if (!p->valid || p->retry_after || !ticket || ticket <= p->last_pressure) return;
+    p->last_pressure = ticket;
+    if (!stressed) {
+        if (p->pressure) --p->pressure;
+        return;
+    }
+    p->pressure += 2;
+    if (p->pressure >= 8) dm_flow_budget_overload(p, ticket);
+}
+
 static inline void dm_flow_budget_observe(dm_flow_budget *p, uint64_t generation,
         uint64_t sample_ticket, uint64_t decision_ticket, float budget_ms, double cost_ms) {
     if (!p->valid || p->retry_after || generation != p->generation ||
@@ -70,13 +100,7 @@ static inline void dm_flow_budget_observe(dm_flow_budget *p, uint64_t generation
         return;
     }
     p->affordable = 0;
-    if (++p->slow < 5) return;
-    // After three failed recovery probes, wait for a workload change.
-    p->retry_after = ++p->overload_events >= 4 ? UINT64_MAX : decision_ticket + p->backoff;
-    p->backoff = p->backoff < 1920 ? p->backoff * 2 : 1920;
-    p->slow = 0;
-    p->generation++;
-    p->last_sample = 0;
+    if (++p->slow >= 5) dm_flow_budget_overload(p, decision_ticket);
 }
 // Resource/recording failures have a separate retry clock from measured overload.
 static inline uint64_t dm_flow_resource_defer(unsigned *failures, uint64_t ticket) {

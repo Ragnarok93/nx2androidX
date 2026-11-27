@@ -3249,35 +3249,89 @@ static struct {
     vk_gsr2 *ctx;
     VkExtent2D input, output;
     uint64_t retire, ticket, epoch, retry_after;
-    uint64_t slots[VK_GSR2_SLOTS];
-    unsigned slot, failures;
+    VkQueryPool queries;
+    dm_flow_budget policy;
+    struct {
+        uint64_t fence, ticket, generation;
+        float budget_ms;
+    } slots[VK_GSR2_SLOTS];
+    uint32_t feedback_ticket;
+    unsigned slot, failures, missing_timestamps;
     int pending, drawn, active;
 } guest_flow;
+
+static _Atomic uint64_t guest_flow_feedback;
+
+void vk_guest_flow_feedback(uint64_t source_ticket, uint32_t cadence_us, int stressed) {
+    uint64_t sample = ((uint64_t)(uint32_t)source_ticket << 32) | ((uint64_t)cadence_us << 1) |
+                      (stressed != 0);
+    atomic_store_explicit(&guest_flow_feedback, sample, memory_order_relaxed);
+}
 
 static void guest_flow_drop(void) {
     vk_gsr2_destroy(guest_flow.ctx);
     guest_flow.ctx = NULL;
+    if (guest_flow.queries) vkDestroyQueryPool(V.dev, guest_flow.queries, NULL);
+    guest_flow.queries = VK_NULL_HANDLE;
+    guest_flow.missing_timestamps = 0;
     memset(guest_flow.slots, 0, sizeof guest_flow.slots);
+    dm_flow_budget_invalidate(&guest_flow.policy);
 }
 
 void vk_guest_flow_submitted(int accepted, uint64_t fence) {
     if (guest_flow.pending) {
         int commit = accepted && guest_flow.drawn;
         vk_gsr2_commit(guest_flow.ctx, commit);
-        guest_flow.retire = guest_flow.slots[guest_flow.slot] = fence;
+        guest_flow.retire = guest_flow.slots[guest_flow.slot].fence = fence;
+        if (!commit) guest_flow.slots[guest_flow.slot].ticket = 0;
         guest_flow.pending = guest_flow.drawn = 0;
     }
     if (guest_flow.ctx && dm_spatial_mode() != SP_SGSR2) {
         if (guest_flow.active) ++guest_flow.epoch;
         guest_flow.active = 0;
+        dm_flow_budget_invalidate(&guest_flow.policy);
         if (guest_flow.retire <= vk_fence_done()) guest_flow_drop();
     }
+}
+
+static unsigned guest_flow_slot(uint64_t done, uint64_t ticket, unsigned *backlog) {
+    unsigned reuse = VK_GSR2_SLOTS, oldest = VK_GSR2_SLOTS;
+    *backlog = 0;
+    for (unsigned i = 0; i < VK_GSR2_SLOTS; i++) {
+        if (guest_flow.slots[i].fence > done) {
+            ++*backlog;
+            continue;
+        }
+        if (!guest_flow.slots[i].ticket) reuse = i;
+        else if (oldest == VK_GSR2_SLOTS || guest_flow.slots[i].ticket < guest_flow.slots[oldest].ticket)
+            oldest = i;
+    }
+    if (oldest == VK_GSR2_SLOTS) return reuse;
+    typeof(guest_flow.slots[0]) *sample = &guest_flow.slots[oldest];
+    uint64_t stamps[2];
+    VkResult read = vkGetQueryPoolResults(V.dev, guest_flow.queries, 2 * oldest, 2,
+        sizeof stamps, stamps, sizeof stamps[0], VK_QUERY_RESULT_64_BIT);
+    if (read == VK_SUCCESS) {
+        guest_flow.missing_timestamps = 0;
+        uint64_t mask = V.timestamp_bits >= 64 ? UINT64_MAX :
+                        (UINT64_C(1) << V.timestamp_bits) - 1;
+        double ms = (double)((stamps[1] - stamps[0]) & mask) * V.props.limits.timestampPeriod / 1e6;
+        dm_flow_budget_observe(&guest_flow.policy, sample->generation, sample->ticket, ticket,
+                               sample->budget_ms, ms);
+    } else if (++guest_flow.missing_timestamps >= 3) {
+        guest_flow.retry_after = dm_flow_resource_defer(&guest_flow.failures, ticket);
+        dm_flow_budget_retire_samples(&guest_flow.policy);
+        guest_flow.missing_timestamps = 0;
+    }
+    sample->ticket = 0;
+    return oldest;
 }
 
 static VkDescriptorSet guest_flow_record(VkCommandBuffer cb, uint64_t stream) {
     const uint64_t ticket = g_tex_frame + 1;
     const VkExtent2D iw = g_guest_scene.extent, ow = {P_att[0].w, P_att[0].h};
-    if (guest_flow.pending || guest_flow.ticket == ticket || iw.width < 16 || iw.height < 16 ||
+    if (!V.timestamp_bits || guest_flow.pending || guest_flow.ticket == ticket ||
+        iw.width < 16 || iw.height < 16 ||
         !dm_recon_extent_ok(ow.width, ow.height, V.props.limits.maxFramebufferWidth,
                                                V.props.limits.maxFramebufferHeight)) return VK_NULL_HANDLE;
     const uint64_t done = vk_fence_done();
@@ -3297,23 +3351,40 @@ static VkDescriptorSet guest_flow_record(VkCommandBuffer cb, uint64_t stream) {
             if ((V.mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
                 V.mem.memoryHeaps[i].size > heap) heap = V.mem.memoryHeaps[i].size;
         guest_flow.ctx = vk_gsr2_create_replay(iw, ow, dm_recon_budget(heap));
-        if (!guest_flow.ctx || !vk_gsr2_replay_bindings(guest_flow.ctx, guest_flow_layout())) {
+        VkQueryPoolCreateInfo queries = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0,
+            VK_QUERY_TYPE_TIMESTAMP, 2 * VK_GSR2_SLOTS};
+        if (!guest_flow.ctx || !vk_gsr2_replay_bindings(guest_flow.ctx, guest_flow_layout()) ||
+            vkCreateQueryPool(V.dev, &queries, NULL, &guest_flow.queries) != VK_SUCCESS) {
             guest_flow_drop();
             guest_flow.retry_after = dm_flow_resource_defer(&guest_flow.failures, ticket);
             return VK_NULL_HANDLE;
         }
     }
-    unsigned slot = 0, pending = 0;
-    for (unsigned i = 0; i < VK_GSR2_SLOTS; ++i)
-        if (guest_flow.slots[i] > done) ++pending;
-        else slot = i;
-    if (pending >= 2) return VK_NULL_HANDLE;
+    const uint64_t feedback = atomic_load_explicit(&guest_flow_feedback, memory_order_relaxed);
+    const uint32_t period_us = (uint32_t)feedback >> 1;
+    const uint32_t source_ticket = (uint32_t)(feedback >> 32);
+    const float budget_ms = period_us ? period_us * 0.0002f : 2.0f;
+    dm_flow_workload workload = {.iw = iw.width, .ih = iw.height, .ow = ow.width, .oh = ow.height,
+        .cadence_us = ((period_us + 500u) / 1000u) * 1000u,
+        .source_format = VK_FORMAT_R8G8B8A8_UNORM, .output_format = VK_FORMAT_R16G16B16A16_SFLOAT};
+    dm_flow_budget_set_workload(&guest_flow.policy, &workload);
+    unsigned backlog;
+    unsigned slot = guest_flow_slot(done, ticket, &backlog);
+    const int new_feedback = source_ticket && source_ticket != guest_flow.feedback_ticket;
+    guest_flow.feedback_ticket = source_ticket;
+    dm_flow_budget_pressure(&guest_flow.policy, ticket, backlog >= 2 || (new_feedback && (feedback & 1)));
+    if (slot == VK_GSR2_SLOTS || backlog >= 2 || ticket < guest_flow.retry_after ||
+        !dm_flow_budget_allow(&guest_flow.policy, ticket)) return VK_NULL_HANDLE;
     dm_temporal_frame frame = {.ticket = ticket, .stream = stream, .epoch = guest_flow.epoch,
         .iw = iw.width, .ih = iw.height, .ow = ow.width, .oh = ow.height,
         .inputs = DM_TEMPORAL_IMAGE_PAIR, .variants = DM_TEMPORAL_2FS, .real = 1, .memory_ok = 1};
     vk_gsr2_output result;
+    vk_gsr2_timing timing = {guest_flow.queries, 2 * slot};
     if (!vk_gsr2_record_replay(guest_flow.ctx, cb, slot, &frame, g_guest_scene.image,
-                               NULL, &result)) return VK_NULL_HANDLE;
+                               &timing, &result)) return VK_NULL_HANDLE;
+    guest_flow.slots[slot].ticket = ticket;
+    guest_flow.slots[slot].generation = guest_flow.policy.generation;
+    guest_flow.slots[slot].budget_ms = budget_ms;
     guest_flow.slot = slot;
     guest_flow.ticket = ticket;
     guest_flow.pending = guest_flow.active = 1;
@@ -3367,7 +3438,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     else if (g_psplit > 0 && S.pass_open == 1 && g_pass_draws == (uint64_t)g_psplit && S.daspect && !g_psplit_depth) { static int n; if (n++ < 3) VKLOG("pass split: pass %d (%ux%u) has depth (format %d): not split", g_sub_pass - 1, S.pass_w, S.pass_h, S.dfmt); }
     if (g_order_pending) { g_order_pending = 0; g_order_check = S.pass_open == 1; }   // an order-only barrier kept the pass open: decided below, once the draw's images are known
     int defer_pass = temporal_draw && S.pass_open != 1 && !g_order_check && !g_tracing &&
-        !g_bis_on && g_bis_trace < 0 && !dbg_draw() && V.has_dynrender;
+        !g_bis_on && g_bis_trace < 0 && !dbg_draw() && V.has_dynrender && V.timestamp_bits;
     if (!prepare_draw_pass(defer_pass)) { g_vkst.skip_rt++; return 0; }
     if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) g_tracing = 1;
     uint64_t t0 = tick();

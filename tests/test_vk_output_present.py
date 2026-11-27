@@ -28,7 +28,7 @@ static dm_recon_continuity g_recon_source;
 static struct {uint64_t ticket,last_real_ticket;dm_flow_budget policy;} g_flow;
 #define SP_OUTPUT 0
 static struct {
-    int live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
+    int flow_pressure, live_sources, encoding, report_physical, measured_mode, report_sharpness_requested, report_sharpness_applied, measured_history_reset;
     VkExtent2D report_input, report_allocated, measured_input, measured_output;
     VkImage report_image;
     int report_crop[4], report_recorded;
@@ -52,6 +52,8 @@ static vk_capture_scale_present_sample cap;
 int dm_recon_output_height(void){return configured;}
 int dm_spatial_mode(void){return mode;}
 int dm_perf_rate_fps(void){return 30;}
+static int reconstruction_pressure(dm_flow_cadence cadence){assert(cadence.period_us);return 0;}
+void vk_guest_flow_feedback(uint64_t ticket,uint32_t cadence,int stressed){assert(ticket&&cadence&&!stressed);}
 static void spatial_collect_sources(void){}
 static VkFormat present_window_format(VkFormat f){return f;}
 static void swap_destroy(void){dm_recon_source_invalidate(&g_recon_source);g_spatial.ticket=0;}

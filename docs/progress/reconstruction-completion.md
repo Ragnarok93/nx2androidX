@@ -610,3 +610,27 @@ reconstruct the target draw's vertices or covered region from a capture.
   1440p, 2160p and 2160p-to-1080p supersampling.
 - The integrated replay checkpoint at `ea6e9246671d80c3b93e3890e38cb462a60654fb`
   passed [software Vulkan and Android NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022215709).
+
+## 2026-11-27 — GSR 2 cadence and queue pressure
+
+- Milestone 5 is Host validated for the pacing policy. The per-stage
+  allowance follows the effective source cadence at 30, 40 and 60 FPS.
+  Independent queue backlog, measured frame work and observed display
+  misses drive a hysteretic cooldown. CPU replay and guest GPU time use
+  the larger measurement because they can overlap. Extra LSFG outputs
+  contribute display pressure once per source frame.
+- Replay measures its source copy and temporal passes in one elapsed GPU
+  interval and reads the query pair after its fence. A queue without
+  timestamps uses the spatial fallback. Repeated unavailable samples
+  defer the temporal path through resource backoff. Presentation retains
+  its own independently timed reconstruction and cooldown.
+- The 54-check reconstruction host runner passed, including 2.6–3.3 ms
+  samples with slack at 30, 40 and 60 FPS, duplicate pressure rejection,
+  isolated display misses, backlog, sustained overload and recovery.
+  Synchronization-validated Lavapipe passed the replay query pair,
+  original-shader composition, and the 1440p, 2160p and 2160p-to-1080p
+  readbacks. Actual Android pacing and hardware workload residency
+  are Awaiting device validation.
+- Source swizzle and coordinate phase guards at
+  `b6e3dce2f92070a719fae42aaefca896b81cc99e` passed
+  [software Vulkan and NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022704532).

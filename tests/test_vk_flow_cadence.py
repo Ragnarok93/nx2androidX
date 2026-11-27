@@ -10,15 +10,15 @@ int main(void) {
     // Guest asks for 60, host caps to 30 or 40: the temporal budget uses
     // the effective source period, not the nominal guest present interval.
     dm_flow_cadence c=dm_flow_cadence_estimate(1.0/60,30);
-    assert(c.period_us==33333 && c.budget_ms==2.5f);
+    assert(c.period_us==33333 && c.budget_ms>6.66f && c.budget_ms<6.67f);
     c=dm_flow_cadence_estimate(1.0/60,40);
-    assert(c.period_us==25000 && c.budget_ms==2.5f);
+    assert(c.period_us==25000 && c.budget_ms==5.0f);
     c=dm_flow_cadence_estimate(1.0/60,60);
-    assert(c.period_us==16667 && c.budget_ms>1.66f && c.budget_ms<1.67f);
+    assert(c.period_us==16667 && c.budget_ms>3.33f && c.budget_ms<3.34f);
     c=dm_flow_cadence_estimate(1.0/30,60);
-    assert(c.period_us==33333 && c.budget_ms==2.5f);
+    assert(c.period_us==33333 && c.budget_ms>6.66f && c.budget_ms<6.67f);
     c=dm_flow_cadence_estimate(0,30);
-    assert(c.period_us==33333 && c.budget_ms==2.5f);
+    assert(c.period_us==33333 && c.budget_ms>6.66f && c.budget_ms<6.67f);
     c=dm_flow_cadence_estimate(0,0);
     assert(c.period_us==0 && c.budget_ms==2.0f);
     c=dm_flow_cadence_estimate(1.0/60,0);

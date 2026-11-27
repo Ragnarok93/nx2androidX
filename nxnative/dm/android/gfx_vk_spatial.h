@@ -45,6 +45,7 @@ static struct {
     unsigned slot, encoding;
     float flow_budget_ms;
     uint32_t flow_cadence_us;
+    int flow_pressure;
     uint64_t ticket, attempted_ticket, retry_after, rcas_retry_after, measured_ticket;
     uint64_t report_alloc_wait_ns, report_slot_wait_ns;
     unsigned report_alloc_attempts, report_allocations, report_alloc_waits;
@@ -716,6 +717,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     g_spatial.completion_ticket[slot] = 0;
     spatial_retire_timing(slot, ticket);
 #if SP_TEMPORAL
+    if (wants_flow) dm_flow_budget_pressure(&g_flow.policy, ticket, g_spatial.flow_pressure);
     int budget_allows = wants_flow && dm_flow_budget_allow(&g_flow.policy, ticket);
     flow = budget_allows && (g_spatial.queries || g_spatial.flow_budget_ms == 0.0f) &&
         (src_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&

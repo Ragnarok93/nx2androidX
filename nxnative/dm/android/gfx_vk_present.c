@@ -1445,6 +1445,19 @@ static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_
 // While the game is held (the pause menu) no frame comes: dm_overlay_redraw presents the last one again with what the overlay now shows.
 static _Atomic int g_redraw;
 void dm_overlay_redraw(void) { atomic_store(&g_redraw, 1); pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }
+static _Atomic uint32_t g_recon_work_us;
+static int reconstruction_pressure(dm_flow_cadence cadence) {
+    // Present thread, or synchronous presentation, under g_present_mu.
+    static uint64_t seen_slip;
+    int missed = g_pace_slip > seen_slip;
+    seen_slip = g_pace_slip;
+    pthread_mutex_lock(&g_pq_mu);
+    unsigned queued = (unsigned)(g_pq_head - g_pq_tail);
+    pthread_mutex_unlock(&g_pq_mu);
+    return dm_flow_frame_stressed(cadence.period_us, atomic_load(&g_recon_work_us),
+                                  0, queued, missed);
+}
+
 static void present_window(vkimg_t *im, const int *crop, double period, uint64_t ticket, int redraw,
                            uint64_t source_ns, int docked, int flip_y,
                            const vk_reconstruction_input *physical) {
@@ -1500,6 +1513,8 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         // Quantize the workload key, not the budget, to avoid tiny period jitter.
         g_spatial.flow_cadence_us = ((cadence.period_us + 500u) / 1000u) * 1000u;
         g_spatial.flow_budget_ms = cadence.budget_ms;
+        g_spatial.flow_pressure = reconstruction_pressure(cadence);
+        vk_guest_flow_feedback(ticket, cadence.period_us, g_spatial.flow_pressure);
         reconstructed = spatial_reconstruct(im, raw, flip_y, target.width, target.height, ticket,
                                            full ? physical : NULL);
     }
@@ -1649,6 +1664,10 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     uint64_t ex = vk_replay_ns(), replay_ns = ex - last_exec;
     last_exec = ex;
     double gpu_ms = vk_gpu_ms_recent();
+    uint64_t cpu_us = replay_ns / 1000;
+    uint64_t gpu_us = gpu_ms >= 1000.0 ? 1000000 : gpu_ms > 0 ? (uint64_t)(gpu_ms * 1000.0) : 0;
+    uint64_t work_us = cpu_us > gpu_us ? cpu_us : gpu_us;
+    atomic_store(&g_recon_work_us, work_us > UINT32_MAX ? UINT32_MAX : (uint32_t)work_us);
     dm_perf_frame_cost((int64_t)replay_ns, gpu_ms > 0 ? (int64_t)(gpu_ms * 1e6) : 0);
     dm_perf_frame(period);   // paced to the game's frame period, and its work time reported to ADPF
     // A longer period goes to the window only once it has held for 60 presents; a shorter one at once. Super Mario Bros. Wonder's own controller (main+0xcfd24) asks

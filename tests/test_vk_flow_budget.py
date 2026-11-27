@@ -14,7 +14,46 @@ class FlowBudgetTests(unittest.TestCase):
         source = r'''
 #include <assert.h>
 #include "gfx_vk_flow_budget.h"
+static void check_cadence_pressure(void) {
+    const int rates[] = {30, 40, 60};
+    for (unsigned rate = 0; rate < sizeof rates / sizeof rates[0]; ++rate) {
+        dm_flow_cadence cadence = dm_flow_cadence_estimate(0.0, rates[rate]);
+        assert(cadence.period_us && cadence.budget_ms > 3.3f);
+        dm_flow_workload workload = {.iw = 1280, .ih = 720, .ow = 1920, .oh = 1080,
+            .cadence_us = cadence.period_us};
+        dm_flow_budget p = {0};
+        dm_flow_budget_set_workload(&p, &workload);
+        // Overlapped CPU/GPU work uses their maximum. One transient miss
+        // does not change residency, including with extra generated presents.
+        unsigned work_us = (cadence.period_us * 8) / 10;
+        assert(!dm_flow_frame_stressed(cadence.period_us, work_us, work_us, 1, 0));
+        for (uint64_t frame = 1; frame <= 200; ++frame) {
+            unsigned queued = frame == 20 ? 2 : frame % 2;
+            dm_flow_budget_pressure(&p, frame,
+                dm_flow_frame_stressed(cadence.period_us, work_us, work_us, queued, frame == 55));
+            dm_flow_budget_observe(&p, p.generation, frame, frame + 1, cadence.budget_ms,
+                frame % 2 ? 3.3 : 2.6);
+            assert(dm_flow_budget_allow(&p, frame + 1));
+        }
+        for (uint64_t frame = 201; frame <= 204; ++frame) {
+            assert(dm_flow_frame_stressed(cadence.period_us, work_us, work_us, 2, 1));
+            dm_flow_budget_pressure(&p, frame, 1);
+            // Multiple generated presents from this real frame do not
+            // count as additional pressure.
+            dm_flow_budget_pressure(&p, frame, 1);
+            assert(dm_flow_budget_allow(&p, frame) == (frame != 204));
+        }
+        assert(!dm_flow_budget_allow(&p, 323));
+        assert(dm_flow_budget_allow(&p, 324));
+        assert(dm_flow_frame_stressed(cadence.period_us, 0, cadence.period_us, 0, 0));
+    }
+    assert(!dm_flow_frame_stressed(0, 0, 0, 0, 0));
+    assert(dm_flow_cadence_estimate(0.0, 0).budget_ms == 2.0f);
+    assert(dm_flow_cadence_estimate(1.0 / 60, 30).period_us == 33333);
+}
+
 int main(void) {
+    check_cadence_pressure();
     dm_flow_budget p = {0};
     dm_flow_workload key = {.iw=1280, .ih=720, .ow=1920, .oh=1080,
         .cadence_us=33333, .source_format=1, .output_format=1};

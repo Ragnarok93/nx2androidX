@@ -334,8 +334,11 @@ still preferable.
 Gaps in real-frame tickets and changes in the stream or geometry invalidate
 history. Presentation also invalidates history on a surface rebuild.
 The backend budgets images and uniforms against Vulkan allocation requirements
-and a fraction of the local heap. The presentation path measures the
-reconstruction submission and backs off on repeated over-budget samples.
+and a fraction of the local heap. The replay and presentation paths time their own reconstruction work with
+GPU queries and apply a cadence-based budget. Queue backlog, display misses
+and frame work can bring on a cooldown even when reconstruction meets its
+stage budget. The policy uses the larger of CPU replay and GPU work to
+account for overlap. Replays with unavailable timing use the spatial fallback.
 Results are converted to the presentation format before LSFG. Replay-stage
 results enter the existing guest composition before its presentation handoff.
 
