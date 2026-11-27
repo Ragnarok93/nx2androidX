@@ -259,17 +259,22 @@ fallback. The reconstruction queue and GPU submission retain the physical
 backing independently of the replay cache. Replay can reuse a discarded
 allocation once it is the sole owner.
 
-When the game draws into its final display texture, presentation receives
-the native output of that draw. At equal input and output sizes the upscaler
-is idle, even if earlier passes used smaller physical attachments. The FFR
-docked reference capture shows a 1384×780 scene passing through an
-edge-directed 1728×972 enlargement and a smoothstep-filtered 1920×1080
-enlargement. Both draws write zero alpha. The second pass loads its
-attachment before drawing, so substitution also needs to prove which pixels
-the guest would overwrite. The existing frame path keeps the guest draws and
-later blending intact. Capture metadata and center tiles establish the
-dependency chain while leaving the valid source crop and exact geometry
-unresolved.
+The presentation upscaler still bypasses images that already match the
+requested extent. A separate in-replay Bilinear path can now modify an
+eligible guest enlargement before the later composition draws. Ordinary
+replay checks that a complete stored clear defined the same-frame source
+and that the selected view, sampler, format and write sequence still
+satisfy the source contract.
+
+The FFR docked reference capture showed a 1384×780 image feeding an
+edge-directed 1728×972 enlargement and then a smoothstep-filtered 1920×1080
+draw. Both write zero alpha. The audited final fragment program is
+identified by its translated binary certificate. Its Bilinear variant
+changes the coordinate warp and retains the guest UV clamps, level-zero
+sample and alpha stores. The guest vertex stage, scissor and output
+attachment continue to define the raster coverage and preserve loaded
+pixels outside the draw. The native pipeline remains the fallback when
+the resource proof or variant creation fails.
 
 The optional software Vulkan guest probe runs the local SPIR-V modules with
 synthetic vertices, uniforms and samplers. It tests a private reconstruction

@@ -512,3 +512,16 @@ reconstruct the target draw's vertices or covered region from a capture.
 - This does not yet wire FSR 1, GSR 1 or GSR 2 into replay or attribute
   final presentation consumption to the guest-stage Bilinear draw.
   Activation on the physical Galaxy device remains unverified.
+- The independently patched module passed `spirv-val --target-env vulkan1.3`.
+  A host harness compiled the production source admission functions and
+  confirmed the 1728×972 to 1920×1080 case while rejecting partial clear,
+  discarded store, stale write, wrong frame, alias and nonzero mip.
+  The 54-check reconstruction host runner passed.
+- At `2cc56e620ea81009888f44e3d82caef6f8ad07d2`, the
+  [reconstruction validation](https://github.com/Ragnarok93/nx2androidX/actions/runs/46015577294)
+  passed software Vulkan and the FFR Android NDK link. The
+  [signed Android workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46015577276)
+  ran 851 tests with nine skips and passed native smoke and signing
+  verification. GitHub listed the
+  [signed builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46015577276/artifacts/15206616216)
+  unexpired at inspection.
