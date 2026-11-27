@@ -80,7 +80,7 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
 
     def test_processing_order_and_redraw_exclusion(self):
         window = self.gfx.split("static void present_window(", 1)[1].split("static void *present_thread(", 1)[0]
-        present = self.gfx.split("static void present_one(", 1)[1].split("// headless frame shots", 1)[0]
+        present = self.gfx.split("static int present_one(", 1)[1].split("// headless frame shots", 1)[0]
         self.assertEqual(window.count("spatial_reconstruct("), 1)
         self.assertLess(window.index("if (redraw)"), window.index("spatial_reconstruct("))
         self.assertLess(window.index("spatial_reconstruct("), window.index("dm_fg_frame("))
@@ -90,7 +90,7 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         self.assertLess(present.index("vivid_record("), present.index("ov_render("))
 
     def test_fps_counts_generated_only_on_accepted_presents(self):
-        src = self.gfx[self.gfx.index("static void present_one("):self.gfx.index("// headless frame shots")]
+        src = self.gfx[self.gfx.index("static int present_one("):self.gfx.index("// headless frame shots")]
         self.assertLess(src.index("r = vkQueuePresentKHR"), src.index("if (period >= 0)"))
         self.assertIn("if (r >= 0)", src)
         self.assertIn("hud_count(with_meta, period", src)

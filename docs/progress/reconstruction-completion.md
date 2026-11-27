@@ -78,3 +78,28 @@ adding this section, resolved with
   by source ticket. Record source image/crop and allocated output separately
   from fallback consumption. Re-run host and Android build checks before
   starting observation-only source discovery.
+
+## 2026-11-27 — Milestone 0, presentation outcome checkpoint
+
+Milestone 0 is **In progress**. The previous checkpoint was
+`cbd0bb0bb6aae377ca80787c8c04629653123f5b`. Resolve the commit adding this
+entry with `git log -1 --format=%H -- docs/progress/reconstruction-completion.md`.
+
+- The present path records whether Vulkan accepted the real frame and how
+  many generated frames it accepted. The trace analyzer reports these results
+  separately from backend residency and the number of generated images
+  offered for presentation. Vulkan acceptance confirms queueing, while
+  compositor display timing still needs separate evidence.
+- Updated the capture writer, presenter, analyzer and relevant host fixtures.
+  The host reconstruction runner passed 51 checks. The standalone graphics
+  and FFR compatibility fixtures passed all 10 checks. The legacy archive
+  parsed successfully and `git diff --check` passed.
+- Full discovery at the runtime provenance checkpoint ran 835 tests, with
+  four missing-`javac` errors, three LeakSanitizer failures under ptrace and
+  20 skips. The reconstruction fixtures passed. Android provenance checkpoint
+  build [45965309706](https://github.com/Ragnarok93/nx2androidX/actions/runs/45965309706)
+  was in progress. Device validation remains outstanding.
+- Next action is to account for GPU completion even when timestamps are
+  unavailable, using the existing reconstruction slot fence retirement.
+  Record source image and valid crop, output allocation and recording state
+  independently. Then review runtime validation before starting Milestone 1.

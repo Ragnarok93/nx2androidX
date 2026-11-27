@@ -1236,27 +1236,27 @@ static VkExtent2D picture_extent(int width, int height) {
     return (VkExtent2D){w, h};
 }
 
-static void present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D picture,
+static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D picture,
                         int flip_y, double period, uint64_t ticket, int with_meta) {
     int cx = crop[0], cy = crop[1], cw = crop[2], ch = crop[3];
     uint32_t dw = picture.width, dh = picture.height;
-    if (g_present_failed || !dw || !dh || cw <= 0 || ch <= 0 || (!g_swap && !swap_make())) return;
+    if (g_present_failed || !dw || !dh || cw <= 0 || ch <= 0 || (!g_swap && !swap_make())) return 0;
     // A window resize between generated images can recreate the swapchain.
     if (dw > g_sext.width || dh > g_sext.height) {
         picture = picture_extent(cw, ch);
         dw = picture.width; dh = picture.height;
-        if (!dw || !dh) return;
+        if (!dw || !dh) return 0;
     }
     int dx = ((int)g_sext.width - (int)dw) / 2, dy = ((int)g_sext.height - (int)dh) / 2;
     // Count only after the swapchain accepted a present, not when a frame was
     // queued. The framegen images and paused redraws must not inflate source FPS.
     uint32_t k = g_pi++ % 8;
-    if (vkWaitForFences(V.dev, 1, &g_pfence[k], VK_TRUE, UINT64_MAX)) return;
+    if (vkWaitForFences(V.dev, 1, &g_pfence[k], VK_TRUE, UINT64_MAX)) return 0;
     spatial_forget_fence(g_pfence[k]);
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
-    if (r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return; }
-    if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return; }
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return 0; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return 0; }
+    if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return 0; }
     int turned = g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;   // composed into g_rot.img, then copied turned into the swapchain image
     VkImage tgt = turned ? g_rot.img : g_simg[idx]; VkImageView tview = turned ? g_rot.view : g_sview[idx];
     VkCommandBuffer cb = g_pcb[k];
@@ -1325,7 +1325,7 @@ static void present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D 
         pthread_mutex_unlock(&g_vk_queue_mu);
         g_present_failed = 1;
         VKRED_ONCE(91, "present submit failed");
-        return;
+        return 0;
     }
     if (vivid) g_spatial.image[SP_DISPLAY].last_use = g_pfence[k];
     if (src == g_spatial.image[SP_OUTPUT].texture.img)
@@ -1350,6 +1350,7 @@ static void present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D 
         VkSurfaceCapabilitiesKHR c; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &c);
         if ((c.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) != (VkSurfaceTransformFlagsKHR)g_pre) swap_destroy();
     }
+    return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
 }
 // headless frame shots
 static int shot_wanted(uint64_t n) {
@@ -1521,8 +1522,10 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     if (reconstructed && fg_fence) reconstructed->last_use = fg_fence;
     atomic_store(&g_fg_out_ns, out_period > 0 ? (uint64_t)(out_period * 1e9) : 0);
     atomic_store(&g_fg_images, ng > 0 ? ng + 1 : 1);
-    if (vk_pass_dump_user_active()) {
-        vk_capture_scale_present(ticket, (vk_capture_scale_present_sample){
+    const int capture = vk_pass_dump_user_active();
+    vk_capture_scale_present_sample sample;
+    if (capture) {
+        sample = (vk_capture_scale_present_sample){
             .requested = spatial_requested, .active = spatial_active,
             .physical = g_spatial.report_physical, .generated = ng,
             .source_w = g_spatial.report_input.width, .source_h = g_spatial.report_input.height,
@@ -1555,12 +1558,19 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             .timing_history_reset = g_spatial.measured_history_reset,
             .stage_ms = {g_spatial.measured_stage_ms[0], g_spatial.measured_stage_ms[1],
                          g_spatial.measured_stage_ms[2], g_spatial.measured_stage_ms[3]},
-        });
+        };
     }
     int generated_rect[4] = {0, 0, rect[2], rect[3]};
+    int accepted_generated = 0;
     for (int g = 0; g < ng; g++)
-        present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0);
-    present_one(source, source->img, rect, picture, flip_y, ng ? hold : period, ticket, 1);
+        accepted_generated += present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0);
+    int accepted_real = present_one(source, source->img, rect, picture, flip_y,
+                                    ng ? hold : period, ticket, 1);
+    if (capture) {
+        sample.present_accepted = accepted_real;
+        sample.generated_accepted = accepted_generated;
+        vk_capture_scale_present(ticket, sample);
+    }
 }
 
 static void *present_thread(void *arg) {

@@ -279,7 +279,12 @@ def summarize_presentation(rows, metadata):
         counts=Counter(r.get('active_upscaler','unknown') for r in rs)
         allocations=[v for r in rs if (v:=value(r,'reconstruction_allocations')) is not None]
         reset_flags=[v for r in rs if (v:=value(r,'source_reset_flags')) is not None]
+        present_status = Counter(r.get('present_accepted') for r in rs)
+        generated = [v for r in rs if (v := value(r, 'generated_accepted')) is not None]
         residency.append({'operation_mode':op,'internal_mode':internal,'requested':requested,
+            'real_presents_accepted':present_status['1'] if '0' in present_status or '1' in present_status else None,
+            'real_presents_rejected':present_status['0'] if '0' in present_status or '1' in present_status else None,
+            'generated_presents_accepted':int(sum(generated)) if generated else None,
             'real_frames':len(rs),'effective_counts':dict(sorted(counts.items())),
             'requested_residency_pct':100*counts[requested]/len(rs),
             'allocation_wait_ms':stats([v/1e6 for r in rs if (v:=value(r,'reconstruction_alloc_wait_ns')) is not None]),

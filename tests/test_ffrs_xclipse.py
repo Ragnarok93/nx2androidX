@@ -16,7 +16,7 @@ PROFILE = ROOT / "nxnative/dm/games/0100606026F12000/android.tsv"
 class ResonanceXclipseTests(unittest.TestCase):
     def test_fps_counts_successful_source_presents_not_only_gl(self):
         src = PRESENT.read_text(encoding="utf-8")
-        present = src[src.index("static void present_one("):src.index("static void present_window(")]
+        present = src[src.index("static int present_one("):src.index("static void present_window(")]
         self.assertLess(present.index("r = vkQueuePresentKHR"), present.index("hud_count(with_meta, period, mono_ns());"))
         self.assertIn("if (r >= 0)", present)
         # The standalone counter reports accepted output presents: source + LSFG.

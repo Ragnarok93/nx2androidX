@@ -21,6 +21,7 @@ typedef struct {
     unsigned drawable_w, drawable_h, swapchain_w, swapchain_h;
     int crop[4];
     int output_height, supersampling, reconstruction_submitted;
+    int present_accepted, generated_accepted;
     uint64_t timing_ticket;
     double gpu_ms;
     int timing_mode;

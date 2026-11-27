@@ -68,9 +68,10 @@ static int dm_fg_frame(vkimg_t *im,const int *rect,int flip,unsigned encoding,un
 }
 int vk_pass_dump_user_active(void){return 1;}
 void vk_capture_scale_present(uint64_t ticket,vk_capture_scale_present_sample sample){assert(ticket);cap=sample;capture_calls++;}
-static void present_one(vkimg_t *im,VkImage src,const int *crop,VkExtent2D picture,int flip,double period,uint64_t ticket,int meta){
+static int present_one(vkimg_t *im,VkImage src,const int *crop,VkExtent2D picture,int flip,double period,uint64_t ticket,int meta){
     (void)im;(void)period;assert(present_calls<4);unsigned i=present_calls++;
     observed[i].image=src;observed[i].w=crop[2];observed[i].h=crop[3];observed[i].meta=meta;observed[i].display=picture;observed[i].flip=flip;observed[i].ticket=ticket;
+    return src != 11;
 }
 '''+code[start:end]+r'''
 static vkimg_t src={1920,1080,37,11};
@@ -83,6 +84,7 @@ int main(void){
     for(unsigned i=0;i<2;i++)assert(observed[i].w==3840&&observed[i].h==2160&&observed[i].display.width==1920&&observed[i].display.height==1080&&!observed[i].flip);
     assert(observed[0].ticket==0&&observed[1].ticket==1);
     assert(g_spatial.image[0].last_use==44);
+    assert(cap.present_accepted==1&&cap.generated_accepted==1);
     // A paused setting change must not generate or reconstruct the old ticket.
     configured=1440;present_calls=0;
     present_window(&src,NULL,-1,1,1,33333333,1,1,NULL);
@@ -94,6 +96,7 @@ int main(void){
     // An allocation failure keeps native presentation alive, with native FG input.
     force_fail=1;real(4,1);assert(fg_input.width==1920&&fg_input.height==1080&&observed[1].image==11&&observed[1].flip);
     assert(!cap.reconstruction_submitted&&!cap.actual_w&&!cap.actual_h&&cap.final_source_w==1920);
+    assert(!cap.present_accepted&&cap.generated_accepted==1);
     force_fail=0;configured=1080;real(5,1);assert(rec_target.width==1920&&observed[1].image==11);
     // Handheld 720p input still reconstructs to explicit 1440p; LSFG disabled.
     src.w=1280;src.h=720;configured=1440;fg_on=0;real(6,0);
