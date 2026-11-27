@@ -265,6 +265,10 @@ eligible guest enlargement before the later composition draws. Ordinary
 replay checks that a complete stored clear defined the same-frame source
 and that the selected view, sampler, format and write sequence still
 satisfy the source contract.
+A rejected replay submission invalidates its clear proofs and earlier proofs
+in that frame. Storage-image bindings and CPU texture uploads invalidate the
+affected image's proof. The descriptor memo revisits storage bindings when
+a new clear is recorded.
 
 The FFR docked reference capture showed a 1384×780 image feeding an
 edge-directed 1728×972 enlargement and then a smoothstep-filtered 1920×1080

@@ -20,6 +20,7 @@ class GuestTemporalReplay(unittest.TestCase):
         code = (ANDROID / "gfx_vk_exec.c").read_text()
         end = code.index("} guest_flow;") + len("} guest_flow;")
         flow = code[code.rindex("static struct {", 0, end):end]
+        memo = next(line for line in code.splitlines() if line.endswith("} set_memo_t;"))
         source = r'''
 #define VK_NO_PROTOTYPES
 #include <assert.h>
@@ -36,7 +37,7 @@ typedef struct {
     VkImageLayout layout;
     uint32_t w, h, d, levels, layers, samples, novl;
     VkImageUsageFlags usage;
-    uint64_t pool, wseq, guest_clear_write, guest_clear_frame;
+    uint64_t pool, wseq, guest_clear_write, guest_clear_frame, guest_clear_submit;
     void *rs_backing, *bc_of;
 } vkimg_t;
 static struct { vkimg_t *im; uint32_t w, h; } P_att[1];
@@ -45,9 +46,22 @@ static VkRenderingAttachmentInfo P_ca[1];
 static struct { VkImage image; VkExtent2D extent; } g_guest_scene;
 static int g_guest_source_ok;
 static uint64_t g_tex_frame, g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
+static uint64_t g_guest_rejected_submit, g_guest_clear_revision = 1;
+static uint64_t submitted = 4;
+static uint64_t mtl_last_fence(void) { return submitted; }
 __thread VkFormat vk_view_fmt;
 __thread VkComponentMapping vk_view_swizzle;
 __thread VkImageSubresourceRange vk_view_range;
+
+typedef struct { const unsigned *b; unsigned ndyn; } vkshader_t;
+enum { MEMO_CB = 16 };
+static uint64_t g_set_epoch, g_bind_gen[6], g_tex_gen, g_samp_gen, g_ubo_gen[6], g_ubd_gen;
+static uint64_t g_num_um, g_num_im, g_num_r32;
+static uint32_t g_draw_binst;
+static uint32_t vk_pool_gen(void) { return 0; }
+static void cbuf_desc(int st, vkshader_t *s, const unsigned *b, VkDescriptorBufferInfo *out) {
+    (void)st; (void)s; (void)b; (void)out; assert(0);
+}
 
 static struct { VkDevice dev; } V;
 static int mode = SP_SGSR2, commits, last_commit, drops, query_drops;
@@ -62,6 +76,9 @@ static void vkDestroyQueryPool(VkDevice dev, VkQueryPool pool, const VkAllocatio
 '''
         source += "\n".join((
             flow,
+            memo,
+            "static set_memo_t g_smemo[3];",
+            replay_function(code, "static int set_memo_get("),
             replay_function(code, "static void guest_store_clear("),
             replay_function(code, "static void guest_check_source("),
             replay_function(code, "static void guest_flow_drop("),
@@ -97,6 +114,7 @@ static void source_proof(void) {
     P_ca[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     guest_store_clear();
     assert(scene.guest_clear_write == 20 && scene.guest_clear_frame == 11);
+    assert(scene.guest_clear_submit == 5 && g_guest_clear_revision == 2);
 
     P_att[0].im = &dst;
     P_att[0].w = 1920;
@@ -130,6 +148,13 @@ static void source_proof(void) {
     assert(!source_admitted(&scene));
     dst.pool = 2;
     assert(source_admitted(&scene));
+    submitted = 5;
+    vk_guest_flow_submitted(0, submitted);
+    assert(!source_admitted(&scene));
+    P_att[0].im = &scene;
+    guest_store_clear();
+    P_att[0].im = &dst;
+    assert(scene.guest_clear_submit == 6 && source_admitted(&scene));
     ++g_tex_frame;
     assert(!source_admitted(&scene));
 }
@@ -172,8 +197,20 @@ static void submission_ownership(void) {
     assert(!guest_flow.ctx && guest_flow.epoch == 1 && drops == 1 && query_drops == 1);
 }
 
+static void memo_clear_revision(void) {
+    vkshader_t s = {.ndyn = 1};
+    uint32_t offsets[1] = {0};
+    g_smemo[0] = (set_memo_t){.s = &s, .clear_revision = g_guest_clear_revision, .dofs = {32}};
+    assert(set_memo_get(0, &s, offsets) && offsets[0] == 32);
+    ++g_guest_clear_revision;
+    assert(!set_memo_get(0, &s, offsets));
+    g_smemo[0].clear_revision = 0;
+    assert(set_memo_get(0, &s, offsets) && offsets[0] == 32);
+}
+
 int main(void) {
     source_proof();
+    memo_clear_revision();
     submission_ownership();
     return 0;
 }

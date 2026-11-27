@@ -783,3 +783,19 @@ bindings. Docked FFR acceptance remains Awaiting device validation.
 - Milestone 9 is Host validated for integration and signed delivery.
   Physical docked FFR activation, device pacing, sustained memory use,
   and generated LSFG output remain Awaiting device validation.
+
+## 2026-11-27 — Replay source proof after intervening writes
+
+- The replay admission gate now rejects clears recorded in a submission
+  that failed before its command buffer was accepted. A new complete
+  clear can re-establish the source later in the same guest frame.
+- Storage-image bindings and CPU texture uploads invalidate the image's
+  prior clear proof. Cached storage views also invalidate it, including
+  when a compute submission exhausts its write-tracking list. The
+  descriptor memo revisits storage bindings after a new proof and
+  preserves the existing memo lifetime for sample-only descriptor sets.
+- The 55-check reconstruction suite, 28 focused host regressions, and
+  synchronization-validated native and temporal Vulkan suites passed.
+  The regressions exercise submission rejection, same-frame recovery,
+  storage view cache hits, compute write-list overflow, and descriptor
+  memo invalidation. Vulkan readbacks also passed through 5120×2880.

@@ -61,6 +61,7 @@ static void surface_dispatch(void) { abort(); }
 static void surface_alias_flush(void) { abort(); }
 static const int g_input_collect_descriptors = 0;
 static const int g_guest_filter_check = 0;
+static uint64_t g_guest_clear_revision = 1;
 static int g_guest_uniform_ok;
 static void input_capture_descriptor(const char *kind, int stage, int binding, unsigned element,
                                      VkDescriptorBufferInfo source, const char *sampler) { abort(); }

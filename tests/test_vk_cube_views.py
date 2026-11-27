@@ -167,9 +167,13 @@ int main(int argc, char **argv) {
     VkDescriptorImageInfo info;
     assert(tex_desc_for(0,&float_image,1,&info,0,0) == 0 && info.imageView && !image.gpu_w);
     assert(lookup_calls == 1);
+    image.guest_clear_write = 7;
     assert(tex_desc_for(0,&float_image,1,&info,0,1) == 0 && info.imageView && image.gpu_w);
+    assert(!image.guest_clear_write);
     assert(lookup_calls == 2);
+    image.guest_clear_write = 8;
     assert(tex_desc_for(0,&float_image,1,&info,0,1) == 0 && lookup_calls == 2);
+    assert(!image.guest_clear_write);
     reset(1,32,32,1,1);
     texture.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
     g_compute_image_count = 0;
@@ -183,6 +187,10 @@ int main(int argc, char **argv) {
     assert(g_compute_image_count == 1 && image.wseq == first_write);
     compute_images_written();
     assert(image.wseq > first_write);
+    g_compute_image_count = sizeof g_compute_images / sizeof g_compute_images[0];
+    image.guest_clear_write = 9;
+    assert(tex_desc_for(5,&float_image,1,&info,0,1) == 0 && lookup_calls == 1);
+    assert(!image.guest_clear_write);
     // The reported failure: an ordinary 2D view already exists in the cache.
     reset(1,16,16,1,1); assert(vk_tex_view(&texture,NULL,1,0,0,NULL)); rejected(0);
     assert(red_calls==1 && strstr(last_red,"[RED]") && strstr(last_red,"image 16x16x1") && strstr(last_red,"layers 1") && strstr(last_red,"cflags 0x"));

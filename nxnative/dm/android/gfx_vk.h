@@ -144,7 +144,7 @@ struct vkimg {
     struct vk_rs_variant *rs_backing; // only populated by explicit backing exchange; logical dimensions/key stay unchanged
     uint64_t rs_guest_addr; // captured direct guest address; zero means not proven
     uint8_t rs_presented; // asynchronous presentation may retain this owner
-    uint64_t guest_clear_frame, guest_clear_write; // last complete stored color clear
+    uint64_t guest_clear_frame, guest_clear_write, guest_clear_submit; // last complete stored color clear
     uint64_t wseq, rseen;             // when it was last rendered to (gfx_vk_tex.c g_wseq); the newest overlapping write already reported
 };
 // Physical resolution variants are deliberately separate from guest storage keys.

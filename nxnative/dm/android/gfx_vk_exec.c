@@ -707,6 +707,7 @@ static int g_input_collect_descriptors;
 static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_ok, g_guest_uniform_ok;
 static int g_guest_filter_bound, g_guest_sharpness_bound;
 static uint64_t g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
+static uint64_t g_guest_rejected_submit, g_guest_clear_revision = 1;
 static struct {
     VkImage image;
     VkExtent2D extent;
@@ -1466,6 +1467,8 @@ static void guest_store_clear(void) {
         return;
     im->guest_clear_frame = g_tex_frame + 1;
     im->guest_clear_write = im->wseq;
+    im->guest_clear_submit = mtl_last_fence() + 1;
+    ++g_guest_clear_revision;
 }
 
 void vk_end_pass(void) {
@@ -2430,6 +2433,9 @@ static vkimg_t *g_compute_images[96];
 static unsigned g_compute_image_count;
 static void note_storage_image(int stage, vkimg_t *im) {
     if (!im) return;
+    // A descriptor may write after the clear, even when the image was
+    // already resolved by the view cache or the compute write list is full.
+    im->guest_clear_write = 0;
     if (stage != 5) im->gpu_w = 1;
     else if (g_compute_image_count < sizeof g_compute_images / sizeof g_compute_images[0])
         g_compute_images[g_compute_image_count++] = im;
@@ -2484,6 +2490,7 @@ static void guest_check_source(const vkimg_t *im, VkImageView view) {
     g_guest_source_ok = im && dst && view && im->img != dst->img && im->pool && dst->pool &&
         im->pool != dst->pool && !im->novl && !im->rs_backing && im->wseq &&
         im->guest_clear_write == im->wseq && im->guest_clear_frame == g_tex_frame + 1 &&
+        im->guest_clear_submit > g_guest_rejected_submit &&
         im->fmt == VK_FORMAT_R8G8B8A8_UNORM && vk_view_fmt == im->fmt &&
         im->layout == VK_IMAGE_LAYOUT_GENERAL && im->levels == 1 && im->layers == 1 &&
         vk_view_range.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && !vk_view_range.baseMipLevel &&
@@ -2686,7 +2693,7 @@ static int cbuf_desc(int st, const vkshader_t *s, const dmsv_bind *b, VkDescript
 // buffers are marked written), nor for a shader that reads handles or addresses from uniform buffer memory (that memory changes under the same bindings).
 // DM_VK_X_NOSETMEMO=1 (live): always collected. DM_VK_X_SETVERIFY=1 (live): one hit in 64 is collected anyway and compared, [RED] on a difference
 enum { MEMO_CB = 16 };
-typedef struct { vkshader_t *s; uint64_t epoch, bind, ubo, ubd, tex, samp, h, um, im; uint32_t pool, binst, dofs[96]; int ncb; uint8_t ci[MEMO_CB], cpos[MEMO_CB]; VkDescriptorBufferInfo cd[MEMO_CB]; VkDescriptorSet set; } set_memo_t;
+typedef struct { vkshader_t *s; uint64_t epoch, bind, ubo, ubd, tex, samp, h, um, im, clear_revision; uint32_t pool, binst, dofs[96]; int ncb; uint8_t ci[MEMO_CB], cpos[MEMO_CB]; VkDescriptorBufferInfo cd[MEMO_CB]; VkDescriptorSet set; } set_memo_t;
 static set_memo_t g_smemo[3]; static uint64_t g_bind_gen[6], g_ubo_gen[6];   // a stage's handles or storage buffers changed (bind_handles_rec, OP_BIND_SSBO), its uniform buffers (OP_BIND_UBO)
 uint64_t g_set_memo, g_set_memo_bad;   // memo hits, and differences the verify mode found
 extern uint64_t g_ubd_gen; uint32_t vk_pool_gen(void);
@@ -2699,6 +2706,9 @@ static int set_memo_ok(vkshader_t *s) {
 }
 static int set_memo_get(int st, vkshader_t *s, uint32_t *dofs) {
     set_memo_t *m = &g_smemo[st];
+    // Revisit storage bindings after a new clear could have certified one
+    // of their images. Sample-only sets retain their normal cache lifetime.
+    if (m->clear_revision && m->clear_revision != g_guest_clear_revision) return 0;
     if (m->s != s || m->epoch != g_set_epoch || m->bind != g_bind_gen[st] || m->tex != g_tex_gen || m->samp != __atomic_load_n(&g_samp_gen, __ATOMIC_ACQUIRE) || m->pool != vk_pool_gen() || m->binst != g_draw_binst) return 0;
     if (m->ubo != g_ubo_gen[st] || m->ubd != g_ubd_gen) {   // the constant buffers again: most draws move only their offsets
         for (int c = 0; c < m->ncb; c++) { VkDescriptorBufferInfo d; cbuf_desc(st, s, &s->b[m->ci[c]], &d);
@@ -2722,6 +2732,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
     uint32_t vd[96]; uint64_t vum = 0, vim = 0;   // verify: what the memo gave
     if (memo && set_memo_get(st, s, dofs)) { static unsigned nv; if (!g_x_setverify || ++nv % 64) { g_set_memo++; return g_smemo[st].set; }
         verify = 1; memcpy(vd, dofs, sizeof *dofs * (size_t)s->ndyn); vum = g_num_um; vim = g_num_im; }
+    uint64_t clear_revision = 0, initial_clear_revision = g_guest_clear_revision;
     uint64_t gtex = g_tex_gen, gsamp = __atomic_load_n(&g_samp_gen, __ATOMIC_ACQUIRE); uint32_t gpool = vk_pool_gen();   // before collecting: a change racing it (game thread) leaves the memo outdated
     VkDescriptorSet set = VK_NULL_HANDLE; struct { uint32_t b, o; int i; } dp[96]; int nd = 0; uint64_t tb0 = tick();
     VkWriteDescriptorSet w[96]; VkDescriptorBufferInfo bi[96]; VkDescriptorImageInfo ii[96 * 4]; VkBufferView bv[128]; uint32_t nw = 0, nii = 0, nbv = 0;
@@ -2837,6 +2848,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
             nw++; continue;
         }
         case RK_IMG: case RK_IMG_UBO: {
+            clear_revision = initial_clear_revision;
             if (nii >= sizeof ii / sizeof *ii) die("[RED] [vk] storage image descriptor exceeds capacity");
             uint64_t h = b->kind == RK_IMG ? (b->reg >= 0 && b->reg < 32 ? S.img[st][b->reg] : 0) : mem_handle(ubo_word(st, b->reg, b->off));
             tex_desc_for(st, b, h, &ii[nii], 0, 1); wr->pImageInfo = &ii[nii++]; wr->descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; nw++;
@@ -2945,6 +2957,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
                             (unsigned long long)h, (unsigned long long)g_smemo[st].h, (unsigned long long)g_num_um, (unsigned long long)vum, (unsigned long long)g_num_im, (unsigned long long)vim, memcmp(vd, dofs, sizeof *dofs * (size_t)s->ndyn) ? "differ" : "same"); }
     if (memo) { set_memo_t *m = &g_smemo[st];   // (set_memo_ok: at most MEMO_CB constant buffers)
         m->s = s; m->epoch = g_set_epoch; m->bind = g_bind_gen[st]; m->ubo = g_ubo_gen[st]; m->ubd = g_ubd_gen; m->tex = gtex; m->samp = gsamp; m->pool = gpool; m->binst = g_draw_binst;
+        m->clear_revision = clear_revision;
         m->h = h; m->um = g_num_um; m->im = g_num_im; m->set = set; memcpy(m->dofs, dofs, sizeof *dofs * (size_t)s->ndyn); m->ncb = ncb; memcpy(m->ci, mci, (size_t)ncb); memcpy(m->cd, mcd, sizeof *mcd * (size_t)ncb);
         for (int c = 0; c < ncb; c++) { m->cpos[c] = 0xff; for (int j = 0; j < nd; j++) if (dp[j].i == mci[c]) m->cpos[c] = (uint8_t)j; } }
     return set;
@@ -3294,6 +3307,8 @@ unsigned vk_guest_reconstruction_flags(void) {
 }
 
 void vk_guest_flow_submitted(int accepted, uint64_t fence) {
+    // A dropped command buffer may never have stored its certified clear.
+    if (!accepted) g_guest_rejected_submit = fence;
     if (accepted && g_guest_sharpen_pending) g_guest_sharpen_submitted = g_guest_sharpen_pending;
     g_guest_sharpen_pending = 0;
     if (guest_flow.pending) {
@@ -3569,7 +3584,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
         nsets == 2 && !vk_rs_cache_has_scaled() && !g_order_check &&
         k.ncol == 1 && k.cfmt[0] == VK_FORMAT_R8G8B8A8_UNORM && k.wmask[0] == 15 &&
         !k.dfmt && !k.blend_en && !k.logic_en && !k.raster_discard && !k.a2c &&
-        k.samples == 1 && !k.alt && !k.debug_mode && !k.key[2] && !vsh->xfb;
+        k.samples == 1 && !k.alt && !k.debug_mode && !k.key[2] && !vsh->xfb && !shader_wmem(vsh);
     g_input_descriptor_count = 0;
     g_input_collect_descriptors = indexed && g_input_capture && g_input_vs &&
         g_pd_state == 1 && g_pd_full && input_capture_matches(k.key[0], k.key[1]);
@@ -3605,8 +3620,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     VkPipelineLayout guest_layout = VK_NULL_HANDLE;
     VkPipeline p = VK_NULL_HANDLE;
     if (defer_pass && S.pass_open == 2 && guest_mode == SP_SGSR2 && k.guest_filter &&
-        g_guest_scene.image && P_ri.layerCount == 1 && P_ca[0].storeOp == VK_ATTACHMENT_STORE_OP_STORE &&
-        !shader_wmem(S.sh[0])) {
+        g_guest_scene.image && P_ri.layerCount == 1 && P_ca[0].storeOp == VK_ATTACHMENT_STORE_OP_STORE) {
         k.guest_filter = SP_SGSR2;
         guest_layout = guest_spatial_layout(dsl, 1);
         p = guest_layout ? graphics_pipeline(&k, guest_layout) : VK_NULL_HANDLE;
