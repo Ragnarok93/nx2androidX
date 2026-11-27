@@ -769,3 +769,17 @@ display misses, history resets, and sustained memory remain device
 validation items on Samsung Vulkan, RADV Xclipse, Adreno 650 and newer
 Adreno. Engine-input GSR 2 still depends on proven guest semantic
 bindings. Docked FFR acceptance remains Awaiting device validation.
+
+### Delivery verification
+
+- Implementation commit `e3ac7a8e4ab6c8db429960d90cc0a9a97af94f19`
+  passed [reconstruction validation](https://github.com/Ragnarok93/nx2androidX/actions/runs/46081144361),
+  including software Vulkan and FFR Android NDK linking.
+- The [Android workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46081144350)
+  passed the app tests and APK signing-identity verification for that
+  implementation commit. The
+  [signed Android builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46081144350/artifacts/15237373663)
+  was available at verification.
+- Milestone 9 is Host validated for integration and signed delivery.
+  Physical docked FFR activation, device pacing, sustained memory use,
+  and generated LSFG output remain Awaiting device validation.
