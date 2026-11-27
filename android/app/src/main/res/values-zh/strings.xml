@@ -604,7 +604,9 @@
     <string name="upgrade_pick_installed">选择已安装游戏</string>
     <string name="upgrade_reading">正在检查选中的 APK…</string>
     <string name="upgrade_no_installed">未找到独立安装的 nx2android 游戏。</string>
-    <string name="upgrade_companion_required">请选择与此移植版匹配的游戏数据文件夹。</string>
+    <string name="upgrade_companion_required">升级此旧版移植游戏前，请选择匹配的游戏数据文件夹。</string>
+    <string name="upgrade_companion_optional">APK 已内置升级兼容性信息，可复用已导入的游戏数据；请保留游戏数据文件夹以便重新安装。</string>
+    <string name="upgrade_clear_companion">清除文件夹选择</string>
     <string name="upgrade_companion_location">游戏数据文件夹：%1$s</string>
     <string name="upgrade_action">升级选项</string>
     <string name="upgrade_runtime">更新运行时</string>
@@ -617,7 +619,7 @@
     <string name="upgrade_game_running">正在构建并打包游戏更新…</string>
     <string name="upgrade_install">安装更新</string>
     <string name="upgrade_allow_installs">请允许通过 nx2android 安装应用，然后再次点击安装更新。</string>
-    <string name="upgrade_key_explanation">系统会自动选择原签名密钥。如有需要，可恢复匹配的私钥备份。</string>
+    <string name="upgrade_key_explanation">新版移植游戏使用可复现的公开游戏标题签名密钥。请仅安装可信来源的 APK。旧版移植游戏仍需要原签名密钥或种子。</string>
     <string name="upgrade_restore_key">恢复原签名密钥</string>
     <string name="upgrade_clear_key">清除密钥选择</string>
     <string name="upgrade_pick_apk">选择游戏 APK</string>
