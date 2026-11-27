@@ -59,6 +59,9 @@ static int resolution_raw_span(uint64_t addr,uint64_t bytes,int tail) { abort();
 static void compute_images_written(void) {}
 static void surface_dispatch(void) { abort(); }
 static void surface_alias_flush(void) { abort(); }
+static const int g_input_collect_descriptors = 0;
+static void input_capture_descriptor(const char *kind, int stage, int binding, unsigned element,
+                                     VkDescriptorBufferInfo source, const char *sampler) { abort(); }
 static void surface_uniform_queue(uint64_t shader, int binding, int reg, VkDescriptorBufferInfo source) { abort(); }
 static void surface_compute_uniforms(VkCommandBuffer cb) { abort(); }
 static void pass_dump_aliases(void) { abort(); }

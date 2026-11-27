@@ -97,8 +97,8 @@ static vkimg_t *vk_tex_by_id(int tid, const view_t **v, const tex_t **t) {
     (void)tid; ++lookup_calls; *t=&texture; *v=has_subview?&subview:NULL; return &image;
 }
 static uint64_t mtl_last_fence(void) { return 4; }
-static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t h, int n) {
-    (void)st; (void)b; (void)h; (void)n; return (VkSampler)(uintptr_t)99;
+static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t h, int n, unsigned element) {
+    (void)st; (void)b; (void)h; (void)n; (void)element; return (VkSampler)(uintptr_t)99;
 }
 static VkImageView vk_dummy_view(int dim, int arr, int ms, int storage, int is_int) {
     ++dummy_calls; dummy_dim=dim; dummy_arr=arr; dummy_ms=ms; dummy_storage=storage; dummy_int=is_int;

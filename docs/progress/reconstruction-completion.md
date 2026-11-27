@@ -462,3 +462,10 @@ checkpoint fills the missing draw inputs in one scoped GPU capture.
   runner passed 54 checks and `git diff --check` passed. The report still
   requires actual draw geometry and producer coverage before any production
   replacement can be admitted.
+- Reconstruction validation [45975755961](https://github.com/Ragnarok93/nx2androidX/actions/runs/45975755961)
+  passed software Vulkan and the Android NDK link. Android app run
+  [45975755979](https://github.com/Ragnarok93/nx2androidX/actions/runs/45975755979)
+  reached the full suite and exposed two outdated descriptor stubs in the
+  cube-view and indirect-compute harnesses. Both harnesses now match the
+  production interfaces and pass locally. The runtime code is identical
+  to the NDK-validated checkpoint.
