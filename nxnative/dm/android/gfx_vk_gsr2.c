@@ -132,6 +132,8 @@ struct vk_gsr2 {
     temporal_pass passes[G2_PASS_MAX];
     temporal_image images[G2_IMAGES];
     temporal_image snapshots[2];
+    VkDescriptorPool replay_pool;
+    VkDescriptorSet replay_sets[VK_GSR2_SLOTS];
     dm_temporal_history history;
     dm_temporal_frame pending_frame;
     dm_temporal_plan pending_plan;
@@ -357,6 +359,29 @@ vk_gsr2 *vk_gsr2_create_image(VkExtent2D render, VkExtent2D output, VkDeviceSize
     return gsr2_create(DM_TEMPORAL_2FS, render, output, budget, 1);
 }
 
+VkDescriptorSetLayout vk_gsr2_create_replay_layout(void) {
+    VkDescriptorSetLayoutBinding binding = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        1, VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        NULL, 0, 1, &binding};
+    VkDescriptorSetLayout layout;
+    return vkCreateDescriptorSetLayout(V.dev, &info, NULL, &layout) == VK_SUCCESS ?
+        layout : VK_NULL_HANDLE;
+}
+
+int vk_gsr2_replay_bindings(vk_gsr2 *ctx, VkDescriptorSetLayout layout) {
+    if (!layout || ctx->replay_pool) return 0;
+    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_GSR2_SLOTS};
+    VkDescriptorPoolCreateInfo pool = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        NULL, 0, VK_GSR2_SLOTS, 1, &size};
+    if (vkCreateDescriptorPool(V.dev, &pool, NULL, &ctx->replay_pool)) return 0;
+    VkDescriptorSetLayout layouts[VK_GSR2_SLOTS];
+    for (unsigned i = 0; i < VK_GSR2_SLOTS; i++) layouts[i] = layout;
+    VkDescriptorSetAllocateInfo alloc = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        NULL, ctx->replay_pool, VK_GSR2_SLOTS, layouts};
+    return vkAllocateDescriptorSets(V.dev, &alloc, ctx->replay_sets) == VK_SUCCESS;
+}
+
 vk_gsr2 *vk_gsr2_create_replay(VkExtent2D render, VkExtent2D output, VkDeviceSize budget) {
     VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
     if (!gsr2_format_supported(format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
@@ -382,6 +407,7 @@ static void gsr2_drop_image(temporal_image *image) {
 
 void vk_gsr2_destroy(vk_gsr2 *ctx) {
     if (!ctx) return;
+    if (ctx->replay_pool) vkDestroyDescriptorPool(V.dev, ctx->replay_pool, NULL);
     if (ctx->descriptors) vkDestroyDescriptorPool(V.dev, ctx->descriptors, NULL);
     for (unsigned i = 0; i < ctx->pass_count; i++) {
         temporal_pass *pass = &ctx->passes[i];
@@ -852,6 +878,16 @@ int vk_gsr2_record_replay(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
         .previous_color = {previous->view, VK_IMAGE_LAYOUT_GENERAL}, .pre_exposure = 1.0f,
     };
     return vk_gsr2_record(ctx, cb, slot, &replay, &inputs, timing, output);
+}
+
+VkDescriptorSet vk_gsr2_replay_sample(vk_gsr2 *ctx, unsigned slot,
+                                      const vk_gsr2_output *result) {
+    VkDescriptorSet set = ctx->replay_sets[slot];
+    VkDescriptorImageInfo image = {ctx->samplers[0], result->view, result->layout};
+    VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,
+        set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &image};
+    vkUpdateDescriptorSets(V.dev, 1, &write, 0, NULL);
+    return set;
 }
 
 void vk_gsr2_commit(vk_gsr2 *ctx, int submitted) {

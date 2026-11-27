@@ -5,6 +5,9 @@
 #include "guest_edge_frag.spv.h"
 #include "guest_smooth_frag.spv.h"
 #include "guest_spatial_frag.spv.h"
+#ifdef SGSR2_HOST_PROBE
+#include "guest_temporal_frag.spv.h"
+#endif
 
 enum { GUEST_VS_UBO = 4096, GUEST_FS_UBO = 5120,
        GUEST_EDGE_UBO = 6144, GUEST_VERTEX_OFFSET = 7168 };
@@ -59,8 +62,9 @@ static VkPipeline guest_pipeline(VkPipelineLayout layout, const uint32_t *code, 
     return pipeline;
 }
 
-static void guest_draw(VkPipeline pipeline, VkPipelineLayout layout, const VkDescriptorSet sets[2],
-                       const spatial_image *target, VkAttachmentLoadOp load, unsigned coverage_w) {
+static void guest_draw_bound(VkPipeline pipeline, VkPipelineLayout layout, const VkDescriptorSet *sets,
+                             unsigned set_count, const spatial_image *target, VkAttachmentLoadOp load,
+                             unsigned coverage_w) {
     VkRenderingAttachmentInfo color = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL,
         target->view, VK_IMAGE_LAYOUT_GENERAL, VK_RESOLVE_MODE_NONE, VK_NULL_HANDLE,
         VK_IMAGE_LAYOUT_UNDEFINED, load, VK_ATTACHMENT_STORE_OP_STORE, {.color = {{0, 0, 0, 1}}}};
@@ -70,11 +74,16 @@ static void guest_draw(VkPipeline pipeline, VkPipelineLayout layout, const VkDes
     VkRect2D scissor = {{0, 0}, {coverage_w, OUT}};
     vkCmdBeginRendering(test_cb, &info);
     vkCmdBindPipeline(test_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(test_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 2, sets, 0, NULL);
+    vkCmdBindDescriptorSets(test_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, set_count, sets, 0, NULL);
     vkCmdBindVertexBuffers(test_cb, 0, 1, &pixels, &offset);
     vkCmdSetScissor(test_cb, 0, 1, &scissor);
     vkCmdDraw(test_cb, 3, 1, 0, 0);
     vkCmdEndRendering(test_cb);
+}
+
+static void guest_draw(VkPipeline pipeline, VkPipelineLayout layout, const VkDescriptorSet sets[2],
+                       const spatial_image *target, VkAttachmentLoadOp load, unsigned coverage_w) {
+    guest_draw_bound(pipeline, layout, sets, 2, target, load, coverage_w);
 }
 
 static void guest_readback(const spatial_image *target) {
@@ -380,6 +389,88 @@ static void check_guest_enlargement(void) {
         memcpy(mapped + GUEST_FS_UBO, constants[1], sizeof constants[1]);
         vkDestroyPipeline(V.dev, pipeline, NULL);
     }
+#ifdef SGSR2_HOST_PROBE
+    if (vk_gsr2_variants() & DM_TEMPORAL_2FS) {
+        const VkExtent2D scene_size = {SRC, SRC}, target_size = {OUT, OUT};
+        vk_gsr2 *temporal = vk_gsr2_create_replay(scene_size, target_size, 4 * 1024 * 1024);
+        assert(temporal);
+        VkDescriptorSetLayout sampling_layout = vk_gsr2_create_replay_layout();
+        assert(vk_gsr2_replay_bindings(temporal, sampling_layout));
+        VkDescriptorSetLayout temporal_layouts[] = {layouts[0], layouts[1], sampling_layout};
+        VkPipelineLayout temporal_layout;
+        li.setLayoutCount = 3;
+        li.pSetLayouts = temporal_layouts;
+        CHECK(vkCreatePipelineLayout(V.dev, &li, NULL, &temporal_layout));
+        VkPipeline pipeline = guest_pipeline(temporal_layout, guest_temporal_frag_spv,
+            sizeof guest_temporal_frag_spv, VK_FALSE, 0xf, 0);
+        dm_temporal_frame frame = {.ticket = 1, .stream = 1, .epoch = 1, .iw = SRC, .ih = SRC,
+            .ow = OUT, .oh = OUT, .inputs = DM_TEMPORAL_IMAGE_PAIR, .variants = DM_TEMPORAL_2FS,
+            .real = 1, .memory_ok = 1};
+        begin();
+        vk_gsr2_output result;
+        assert(vk_gsr2_record_replay(temporal, test_cb, 0, &frame, input.texture.img, NULL, &result));
+        VkDescriptorSet temporal_sets[] = {sets[0], sets[1], vk_gsr2_replay_sample(temporal, 0, &result)};
+        const float params[] = {OUT, OUT, 0};
+        vkCmdPushConstants(test_cb, temporal_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof params, params);
+        vkCmdClearColorImage(test_cb, guest_target.texture.img, VK_IMAGE_LAYOUT_GENERAL, &magenta, 1, &full);
+        vk_img_barrier_all(test_cb);
+        guest_draw_bound(pipeline, temporal_layout, temporal_sets, 3, &guest_target,
+                         VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        vk_img_barrier_all(test_cb);
+        const VkDescriptorSet temporal_overlay[] = {sets[0], sets[2]};
+        guest_draw(compose, layout, temporal_overlay, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT);
+        guest_readback(&guest_target);
+        vk_gsr2_commit(temporal, 1);
+        memcpy(guest, mapped, sizeof guest);
+
+        // A separate transfer reads the temporal result before the guest
+        // fragment's alpha policy and subsequent composition are applied.
+        begin();
+        VkBufferImageCopy reference = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            {0}, {OUT, OUT, 1}};
+        vkCmdCopyImageToBuffer(test_cb, result.image, result.layout, pixels, 1, &reference);
+        complete();
+        const uint16_t *fp16 = (const uint16_t *)mapped;
+        for (unsigned y = 0; y < OUT; ++y) {
+            for (unsigned x = 0; x < OUT - 1; ++x) {
+                unsigned i = (y * OUT + x) * 4;
+                for (unsigned c = 0; c < 3; ++c) {
+                    float value = fminf(fmaxf(unpack_fp16(fp16[i + c]), 0.0f), 1.0f);
+                    int expected = (int)lroundf(value * 255.0f);
+                    if (abs((int)guest[i + c] - expected) > 1)
+                        fprintf(stderr, "temporal result (%u,%u) channel %u: %u, expected %d\n",
+                                x, y, c, guest[i + c], expected);
+                    assert(abs((int)guest[i + c] - expected) <= 1);
+                }
+                assert(guest[i + 3] == 0);
+            }
+            assert(memcmp(guest + (y * OUT + OUT - 1) * 4, sentinel, sizeof sentinel) == 0);
+        }
+
+        // An incompatible mapping must retain the original smoothstep.
+        memcpy(mapped + GUEST_VS_UBO, vertex_constants, sizeof vertex_constants);
+        memcpy(mapped + GUEST_VERTEX_OFFSET, vertices, sizeof vertices);
+        float cropped[8];
+        memcpy(cropped, constants[1], sizeof cropped);
+        cropped[4] = 0.2f;
+        memcpy(mapped + GUEST_FS_UBO, cropped, sizeof cropped);
+        begin();
+        guest_draw(smooth, layout, sets, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        guest_readback(&guest_target);
+        memcpy(guest, mapped, sizeof guest);
+        begin();
+        vkCmdPushConstants(test_cb, temporal_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof params, params);
+        guest_draw_bound(pipeline, temporal_layout, temporal_sets, 3, &guest_target,
+                         VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        guest_readback(&guest_target);
+        assert(memcmp(guest, mapped, sizeof guest) == 0);
+        vkDestroyPipeline(V.dev, pipeline, NULL);
+        vkDestroyPipelineLayout(V.dev, temporal_layout, NULL);
+        vk_gsr2_destroy(temporal);
+        vkDestroyDescriptorSetLayout(V.dev, sampling_layout, NULL);
+        puts("guest GSR 2 replay sampling, composition and mapping fallback PASS");
+    }
+#endif
     selected_mode = saved_mode;
     sharpness = saved_sharpness;
     spatial_drop_images();

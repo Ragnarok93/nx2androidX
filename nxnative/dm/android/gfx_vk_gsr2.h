@@ -101,6 +101,12 @@ vk_gsr2 *vk_gsr2_create_replay(VkExtent2D render, VkExtent2D output, VkDeviceSiz
 int vk_gsr2_record_replay(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
                           const dm_temporal_frame *frame, VkImage scene,
                           const vk_gsr2_timing *timing, vk_gsr2_output *output);
+// The caller owns the layout. The context owns its sampling sets and pool.
+VkDescriptorSetLayout vk_gsr2_create_replay_layout(void);
+int vk_gsr2_replay_bindings(vk_gsr2 *ctx, VkDescriptorSetLayout layout);
+// Update the sampling descriptor in the same retired slot used to record result.
+VkDescriptorSet vk_gsr2_replay_sample(vk_gsr2 *ctx, unsigned slot,
+                                      const vk_gsr2_output *result);
 void vk_gsr2_destroy(vk_gsr2 *ctx);
 
 // Invoke on the GPU replay queue, outside a render pass. Slot must be retired

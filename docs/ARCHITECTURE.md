@@ -285,6 +285,18 @@ presentation path. Sharpness is a draw constant, so slider changes reuse
 the same pipeline. These variants preserve the guest attachment extent and
 its downstream composition.
 
+GSR 2 can run its image-driven passes outside the guest render pass,
+before a certified indexed enlargement draw. Replay proves the source is a
+complete, current, transferable scene image, copies it into one of two
+budgeted snapshots and keeps the prior snapshot across guest image rotation.
+The guest still owns the destination, viewport, scissor, sampled alpha
+contract and later composition. The replacement fragment reads the temporal
+RGB result on a verified full-source grid, applies optional RCAS after
+accumulation and retains smoothstep sampling for an unsupported mapping.
+The backend advances once per submitted draw. Resource or slot pressure
+falls back through GSR 1 to the original guest pipeline. Replay only retires
+descriptors and images after their submission fence.
+
 The optional software Vulkan guest probe runs the local SPIR-V modules with
 synthetic vertices, uniforms and samplers. It tests a private reconstruction
 image committed to the guest extent, including the original alpha contract,
@@ -319,14 +331,13 @@ A HUD already blended into a game image is reconstructed with that image.
 For pixel-accurate temporal accumulation, replay-certified game inputs are
 still preferable.
 
-Surface rebuilds, gaps in real-frame tickets, and changes in the input or
-output geometry invalidate history. The image-driven path runs below the
-existing output pixel limit, caps its history allocation at 48 MiB, and uses
-existing reconstruction timestamps to measure its complete GPU cost. It
-falls back for 120 frames after three consecutive measurements over the
-cadence-based budget. Results are converted to the presentation format
-before LSFG. The frame path uses rendered images directly across game and
-engine versions.
+Gaps in real-frame tickets and changes in the stream or geometry invalidate
+history. Presentation also invalidates history on a surface rebuild.
+The backend budgets images and uniforms against Vulkan allocation requirements
+and a fraction of the local heap. The presentation path measures the
+reconstruction submission and backs off on repeated over-budget samples.
+Results are converted to the presentation format before LSFG. Replay-stage
+results enter the existing guest composition before its presentation handoff.
 
 The GSR 2 backend accepts replay-certified scene color, [0,1] standard or
 reversed depth, object motion, camera reprojection, jitter and exposure.

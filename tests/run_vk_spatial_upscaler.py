@@ -9,7 +9,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = ROOT / "nxnative/dm/android"
-SHADERS = ("fsr.vert", "fsr_easu.frag", "fsr_rcas.frag", "gsr1.frag", "vivid.frag", "guest_spatial.frag")
+SHADERS = ("fsr.vert", "fsr_easu.frag", "fsr_rcas.frag", "gsr1.frag", "vivid.frag", "guest_spatial.frag", "guest_temporal.frag")
 GUEST_MODULES = {
     "6e9683d5d012ebac": ("guest_vert", 0),
     "16405ad0ea722934": ("guest_edge_frag", 1),

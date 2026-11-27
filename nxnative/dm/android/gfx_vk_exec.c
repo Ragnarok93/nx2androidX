@@ -6,6 +6,9 @@
 #include "gfx_vk.h"
 #include "spatial_upscaler.h"
 #include "gfx_vk_slot.h"
+#include "gfx_vk_gsr2.h"
+#include "gfx_vk_reconstruction_limits.h"
+#include "gfx_vk_flow_budget.h"
 #include "gfx_vk_passdump_plan.h"
 #include "gfx_vk_resolution_plan.h"
 #include "gfx_vk_resolution_raster.h"
@@ -703,6 +706,10 @@ static int g_input_collect_descriptors;
 // Replay-local and scoped to descriptor collection for one draw.
 static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_ok, g_guest_uniform_ok;
 static int g_guest_filter_bound;
+static struct {
+    VkImage image;
+    VkExtent2D extent;
+} g_guest_scene;
 #include "gfx_vk_surface_capture.inc"
 static void pass_dump_depth(void);
 static void pass_dump_depth_aspect(VkImageAspectFlags aspect);
@@ -1709,7 +1716,7 @@ static int depth_stencil_read_only(void) {
     return 1;
 }
 
-static int begin_draw_pass(void) {
+static int prepare_draw_pass(int defer) {
     if (!begin_pass()) return 0;
     int read_only = depth_stencil_read_only();
     if ((S.pass_open == 1 && read_only != (P_da.storeOp == VK_ATTACHMENT_STORE_OP_NONE ||
@@ -1725,8 +1732,10 @@ static int begin_draw_pass(void) {
         if (P_da.imageView) P_da.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
         if (P_sa.imageView) P_sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
     }
-    return pass_commit();
+    return defer || pass_commit();
 }
+
+static int begin_draw_pass(void) { return prepare_draw_pass(0); }
 
 static VkRect2D scissor_rect(void) {
     int32_t x = 0, y = 0; int64_t x1 = S.pass_w, y1 = S.pass_h;
@@ -1750,6 +1759,7 @@ static VkRect2D scissor_rect(void) {
 #include "maskclear_frag.spv.h"
 #include "flatdbg_frag.spv.h"
 #include "guest_spatial_frag.spv.h"
+#include "guest_temporal_frag.spv.h"
 typedef struct { uint32_t ncol, cfmt[8], dfmt, samples, mask; } mckey;
 static struct { VkPipelineLayout pl; VkShaderModule vs, fs; int bad; mckey k[32]; VkPipeline p[32]; int n; } g_mc;
 static VkPipeline mc_pipeline(uint32_t mask) {
@@ -2097,15 +2107,23 @@ static void build_dump(void) {   // (the crash handler: no locks, no allocation)
                 g_build[i].phase == 1 ? "making its shader modules" : "in the driver's pipeline compile", g_build[i].what); }
     if (!n) fprintf(stderr, "[dm] [vk] no pipeline was being built\n");
 }
-// Replay owns these two-set layouts and their pipelines for the device
+static VkDescriptorSetLayout guest_flow_layout(void) {
+    static VkDescriptorSetLayout layout;
+    if (!layout) layout = vk_gsr2_create_replay_layout();
+    return layout;
+}
+
+// Replay owns these layouts and their pipelines for the device
 // lifetime. Keep the optional push constant off ordinary guest layouts.
-static VkPipelineLayout guest_spatial_layout(const VkDescriptorSetLayout sets[2]) {
-    static nvn_hmap layouts = {.klen = 2 * sizeof(VkDescriptorSetLayout)};
+static VkPipelineLayout guest_spatial_layout(const VkDescriptorSetLayout guest[2], int temporal) {
+    VkDescriptorSetLayout sets[3] = {guest[0], guest[1]};
+    if (temporal && !(sets[2] = guest_flow_layout())) return VK_NULL_HANDLE;
+    static nvn_hmap layouts = {.klen = sizeof sets};
     VkPipelineLayout layout = nvn_hm_get(&layouts, sets);
     if (!layout) {
         VkPushConstantRange constants = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 3 * sizeof(float)};
         VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            NULL, 0, 2, sets, 1, &constants};
+            NULL, 0, temporal ? 3 : 2, sets, 1, &constants};
         if (vkCreatePipelineLayout(V.dev, &info, NULL, &layout) != VK_SUCCESS)
             return VK_NULL_HANDLE;
         nvn_hm_put(&layouts, sets, layout);
@@ -2113,27 +2131,29 @@ static VkPipelineLayout guest_spatial_layout(const VkDescriptorSetLayout sets[2]
     return layout;
 }
 
-static VkShaderModule guest_spatial_module(void) {
+static VkShaderModule guest_spatial_module(int temporal) {
     // Spatial variants are built on replay. Their specialized pipeline
     // layouts are excluded from background requests and persistent prewarm.
-    static VkShaderModule module;
-    static int attempted;
-    if (!attempted) {
-        attempted = 1;
+    static VkShaderModule module[2];
+    static int attempted[2];
+    if (!attempted[temporal]) {
+        attempted[temporal] = 1;
         VkShaderModuleCreateInfo info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            NULL, 0, sizeof guest_spatial_frag_spv, guest_spatial_frag_spv};
+            NULL, 0,
+            temporal ? sizeof guest_temporal_frag_spv : sizeof guest_spatial_frag_spv,
+            temporal ? guest_temporal_frag_spv : guest_spatial_frag_spv};
         VkShaderModule created = VK_NULL_HANDLE;
-        if (vkCreateShaderModule(V.dev, &info, NULL, &created) == VK_SUCCESS) module = created;
+        if (vkCreateShaderModule(V.dev, &info, NULL, &created) == VK_SUCCESS) module[temporal] = created;
     }
-    return module;
+    return module[temporal];
 }
 
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg_in[3]) {
     VkShaderModule guest_fragment = VK_NULL_HANDLE;
     if (k->guest_filter == SP_BILINEAR)
         guest_fragment = vk_shader_guest_bilinear(stg_in[1]);
-    else if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1)
-        guest_fragment = guest_spatial_module();
+    else if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1 || k->guest_filter == SP_SGSR2)
+        guest_fragment = guest_spatial_module(k->guest_filter == SP_SGSR2);
     if (k->guest_filter && !guest_fragment) return (VkPipeline)1;
     // DM_VK_PIPE_LOG: one line per pipeline built, with the state that decides how a material is drawn (shaders, cull/front, depth test/write/func,
     // colour formats, blend). For a game where some materials render wrong and others do not, the lines of the wrong material name the state to compare.
@@ -2163,7 +2183,7 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
         for (uint32_t i = 0; i < ns; ++i) {
             if (ss[i].stage != VK_SHADER_STAGE_FRAGMENT_BIT) continue;
             ss[i].module = guest_fragment;
-            if (k->guest_filter > SP_BILINEAR) ss[i].pSpecializationInfo = &guest_spec;
+            if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1) ss[i].pSpecializationInfo = &guest_spec;
         }
     }
     int flat = (int)k->debug_mode;
@@ -2468,6 +2488,10 @@ static void guest_check_source(const vkimg_t *im, VkImageView view) {
         vk_view_range.levelCount == 1 && !vk_view_range.baseArrayLayer && vk_view_range.layerCount == 1 &&
         im->w < P_att[0].w && im->h < P_att[0].h &&
         (uint64_t)im->w * P_att[0].h == (uint64_t)im->h * P_att[0].w;
+    if (g_guest_source_ok && im->samples == 1 && (im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        g_guest_scene.image = im->img;
+        g_guest_scene.extent = (VkExtent2D){im->w, im->h};
+    }
 }
 
 static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImageInfo *ii, unsigned element, int storage) {   // the view's view_num
@@ -3215,7 +3239,82 @@ static void resolution_draw_preflight(uint64_t index,int index_type,int count,in
         !resolution_preflight_targets(&scaled) || !resolution_preflight_stages(scaled))
         resolution_restore_before_recording();
 }
-static int prepare_draw(int prim, int indexed) {
+static struct {
+    vk_gsr2 *ctx;
+    VkExtent2D input, output;
+    uint64_t retire, ticket, epoch, retry_after;
+    uint64_t slots[VK_GSR2_SLOTS];
+    unsigned slot, failures;
+    int pending, drawn, active;
+} guest_flow;
+
+static void guest_flow_drop(void) {
+    vk_gsr2_destroy(guest_flow.ctx);
+    guest_flow.ctx = NULL;
+    memset(guest_flow.slots, 0, sizeof guest_flow.slots);
+}
+
+void vk_guest_flow_submitted(int accepted, uint64_t fence) {
+    if (guest_flow.pending) {
+        int commit = accepted && guest_flow.drawn;
+        vk_gsr2_commit(guest_flow.ctx, commit);
+        guest_flow.retire = guest_flow.slots[guest_flow.slot] = fence;
+        guest_flow.pending = guest_flow.drawn = 0;
+    }
+    if (guest_flow.ctx && dm_spatial_mode() != SP_SGSR2) {
+        if (guest_flow.active) ++guest_flow.epoch;
+        guest_flow.active = 0;
+        if (guest_flow.retire <= vk_fence_done()) guest_flow_drop();
+    }
+}
+
+static VkDescriptorSet guest_flow_record(VkCommandBuffer cb, uint64_t stream) {
+    const uint64_t ticket = g_tex_frame + 1;
+    const VkExtent2D iw = g_guest_scene.extent, ow = {P_att[0].w, P_att[0].h};
+    if (guest_flow.pending || guest_flow.ticket == ticket || iw.width < 16 || iw.height < 16 ||
+        !dm_recon_extent_ok(ow.width, ow.height, V.props.limits.maxFramebufferWidth,
+                                               V.props.limits.maxFramebufferHeight)) return VK_NULL_HANDLE;
+    const uint64_t done = vk_fence_done();
+    if (guest_flow.input.width != iw.width || guest_flow.input.height != iw.height ||
+        guest_flow.output.width != ow.width || guest_flow.output.height != ow.height) {
+        if (guest_flow.retire > done) return VK_NULL_HANDLE;
+        guest_flow_drop();
+        guest_flow.input = iw;
+        guest_flow.output = ow;
+        guest_flow.retry_after = guest_flow.failures = 0;
+        ++guest_flow.epoch;
+    }
+    if (ticket < guest_flow.retry_after) return VK_NULL_HANDLE;
+    if (!guest_flow.ctx) {
+        VkDeviceSize heap = 0;
+        for (uint32_t i = 0; i < V.mem.memoryHeapCount; ++i)
+            if ((V.mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
+                V.mem.memoryHeaps[i].size > heap) heap = V.mem.memoryHeaps[i].size;
+        guest_flow.ctx = vk_gsr2_create_replay(iw, ow, dm_recon_budget(heap));
+        if (!guest_flow.ctx || !vk_gsr2_replay_bindings(guest_flow.ctx, guest_flow_layout())) {
+            guest_flow_drop();
+            guest_flow.retry_after = dm_flow_resource_defer(&guest_flow.failures, ticket);
+            return VK_NULL_HANDLE;
+        }
+    }
+    unsigned slot = 0, pending = 0;
+    for (unsigned i = 0; i < VK_GSR2_SLOTS; ++i)
+        if (guest_flow.slots[i] > done) ++pending;
+        else slot = i;
+    if (pending >= 2) return VK_NULL_HANDLE;
+    dm_temporal_frame frame = {.ticket = ticket, .stream = stream, .epoch = guest_flow.epoch,
+        .iw = iw.width, .ih = iw.height, .ow = ow.width, .oh = ow.height,
+        .inputs = DM_TEMPORAL_IMAGE_PAIR, .variants = DM_TEMPORAL_2FS, .real = 1, .memory_ok = 1};
+    vk_gsr2_output result;
+    if (!vk_gsr2_record_replay(guest_flow.ctx, cb, slot, &frame, g_guest_scene.image,
+                               NULL, &result)) return VK_NULL_HANDLE;
+    guest_flow.slot = slot;
+    guest_flow.ticket = ticket;
+    guest_flow.pending = guest_flow.active = 1;
+    return vk_gsr2_replay_sample(guest_flow.ctx, slot, &result);
+}
+
+static int prepare_draw(int prim, int indexed, int temporal_draw) {
     g_guest_filter_bound = 0;
     // DM_VK_CB_DRAWS (read every submission, default 128, 0 = never): the replay is cut every that many draws and what is recorded goes to the GPU at once
     // (vk_cmd_split), so the GPU works on the frame while the rest is replayed instead of after all of it: NEO's Scramble Crossing 36.7 → 15.7 ms a frame
@@ -3261,7 +3360,9 @@ static int prepare_draw(int prim, int indexed) {
             vk_end_pass(); g_psplit_now = 1; } }
     else if (g_psplit > 0 && S.pass_open == 1 && g_pass_draws == (uint64_t)g_psplit && S.daspect && !g_psplit_depth) { static int n; if (n++ < 3) VKLOG("pass split: pass %d (%ux%u) has depth (format %d): not split", g_sub_pass - 1, S.pass_w, S.pass_h, S.dfmt); }
     if (g_order_pending) { g_order_pending = 0; g_order_check = S.pass_open == 1; }   // an order-only barrier kept the pass open: decided below, once the draw's images are known
-    if (!begin_draw_pass()) { g_vkst.skip_rt++; return 0; }
+    int defer_pass = temporal_draw && S.pass_open != 1 && !g_order_check && !g_tracing &&
+        !g_bis_on && g_bis_trace < 0 && !dbg_draw() && V.has_dynrender;
+    if (!prepare_draw_pass(defer_pass)) { g_vkst.skip_rt++; return 0; }
     if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) g_tracing = 1;
     uint64_t t0 = tick();
     VkCommandBuffer cb = vk_cmd();
@@ -3358,8 +3459,9 @@ static int prepare_draw(int prim, int indexed) {
     uint32_t dofs[5][96], ndofs = 0, dall[3 * 96];
     uint64_t t1d = tick();
     g_guest_source_ok = g_guest_sampler_ok = g_guest_uniform_ok = 0;
+    g_guest_scene.image = VK_NULL_HANDLE;
     int guest_mode = S.sh[1] && S.sh[1]->guest_filter_certified ? dm_spatial_mode() : SP_NATIVE;
-    g_guest_filter_check = guest_mode >= SP_BILINEAR && guest_mode <= SP_SGSR1 &&
+    g_guest_filter_check = guest_mode != SP_NATIVE && spatial_mode_valid(guest_mode) &&
         nsets == 2 && !vk_rs_cache_has_scaled() && !g_order_check &&
         k.ncol == 1 && k.cfmt[0] == VK_FORMAT_R8G8B8A8_UNORM && k.wmask[0] == 15 &&
         !k.dfmt && !k.blend_en && !k.logic_en && !k.raster_discard && !k.a2c &&
@@ -3373,7 +3475,7 @@ static int prepare_draw(int prim, int indexed) {
         g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0;
         if (g_rs_replay && !sets[S.sh[st]->set]) { g_input_collect_descriptors = g_guest_filter_check = 0; g_vkst.skip_rt++; return 0; } }
     if (g_guest_filter_check && g_guest_source_ok && g_guest_sampler_ok && g_guest_uniform_ok)
-        k.guest_filter = guest_mode;
+        k.guest_filter = guest_mode == SP_SGSR2 ? SP_SGSR1 : guest_mode;
     g_input_collect_descriptors = g_guest_filter_check = 0;
     if (g_order_check) {   // the order-only barrier before this draw (see g_order_keep): kept, or the pass ends here with it
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
@@ -3383,7 +3485,6 @@ static int prepare_draw(int prim, int indexed) {
             cb = vk_cmd();
         } else g_order_kept++;
     }
-    g_pass_wmem |= shader_wmem(S.sh[0]) | shader_wmem(k.raster_discard ? NULL : S.sh[1]) | shader_wmem(S.sh[2]);
     uint64_t tdesc = tick() - t1d; g_vkst.ns_desc += tdesc; if (g_prof_on) g_prof_ns[5] += tdesc;
     if (g_tracing) {
         VKLOG("  pipeline: topology %u restart %u discard %u cull %u front %u mode %u clamp %u bias %u; depth test %u write %u func %u stencil %u; attributes %u bindings %u; colour %u (format %u) samples %u a2c %u; blend enable %#x logic %u/%u; fragment depth variant %u (depth written by a shader at present %llu, now %llu)",
@@ -3396,8 +3497,24 @@ static int prepare_draw(int prim, int indexed) {
         for (uint32_t i = 0; i < k.nbind; i++) VKLOG("  binding %u stride %u rate %u divisor %u", k.bind[i].binding, k.bind[i].stride, k.bind[i].rate, k.bind[i].divisor);
     }
     crumb_draw(k.key[0], k.key[1], k.key[2]);
-    VkPipelineLayout guest_layout = k.guest_filter > SP_BILINEAR ? guest_spatial_layout(dsl) : layout;
-    VkPipeline p = guest_layout ? graphics_pipeline(&k, guest_layout) : VK_NULL_HANDLE;
+    VkDescriptorSet temporal_set = VK_NULL_HANDLE;
+    VkPipelineLayout guest_layout = VK_NULL_HANDLE;
+    VkPipeline p = VK_NULL_HANDLE;
+    if (defer_pass && S.pass_open == 2 && guest_mode == SP_SGSR2 && k.guest_filter &&
+        g_guest_scene.image && P_ri.layerCount == 1 && P_ca[0].storeOp == VK_ATTACHMENT_STORE_OP_STORE &&
+        !shader_wmem(S.sh[0])) {
+        k.guest_filter = SP_SGSR2;
+        guest_layout = guest_spatial_layout(dsl, 1);
+        p = guest_layout ? graphics_pipeline(&k, guest_layout) : VK_NULL_HANDLE;
+        if (p) temporal_set = guest_flow_record(cb, k.key[0] ^ k.key[1]);
+        if (!temporal_set) { p = VK_NULL_HANDLE; k.guest_filter = SP_SGSR1; }
+    }
+    if (!p) {
+        guest_layout = k.guest_filter > SP_BILINEAR ? guest_spatial_layout(dsl, 0) : layout;
+        p = guest_layout ? graphics_pipeline(&k, guest_layout) : VK_NULL_HANDLE;
+    }
+    if (!pass_commit()) { g_vkst.skip_rt++; return 0; }
+    g_pass_wmem |= shader_wmem(S.sh[0]) | shader_wmem(k.raster_discard ? NULL : S.sh[1]) | shader_wmem(S.sh[2]);
     if (!p && k.guest_filter) {
         k.guest_filter = SP_NATIVE;
         p = graphics_pipeline(&k, layout);
@@ -3470,6 +3587,9 @@ static int prepare_draw(int prim, int indexed) {
         if (fresh || g_bc.lay != layout || g_bc.nsets != (uint32_t)nsets || g_bc.ndofs != ndofs || memcmp(g_bc.sets, sets, sizeof *sets * (size_t)nsets) || memcmp(g_bc.dofs, dall, sizeof *dall * ndofs)) {
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, (uint32_t)nsets, sets, ndofs, dall);
             g_bc.lay = layout; g_bc.nsets = (uint32_t)nsets; g_bc.ndofs = ndofs; memcpy(g_bc.sets, sets, sizeof *sets * (size_t)nsets); memcpy(g_bc.dofs, dall, sizeof *dall * ndofs); } }
+    if (temporal_set)
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 2, 1,
+                                &temporal_set, 0, NULL);
     // vertex buffers
     for (uint32_t i = 0; i < k.nbind; i++) {
         uint32_t b = k.bind[i].binding; VkBuffer buf; VkDeviceSize off;
@@ -3727,7 +3847,7 @@ static void draw(const p_draw *d) {
     int prim = d->prim;
     // before prepare_draw, whose driver segment carries it (c0 + 0x644): set after it, each draw's segment had the draw before's. An indirect draw's is in GPU memory: 0
     g_draw_binst = d->ind ? 0 : (uint32_t)d->base_instance;
-    if (!prepare_draw(prim == 7 ? 4 : prim, prim == 7)) return;
+    if (!prepare_draw(prim == 7 ? 4 : prim, prim == 7, 0)) return;
     VkCommandBuffer cb = vk_cmd();
     int g_ok = draw_allowed(); if (g_ok == 2 || (g_tracing && g_x_tracepass >= 0)) trace_draw("draw", d->prim, (uint32_t)d->count, (uint32_t)d->instances, -1);
     if (g_tracing && g_x_tracepass >= 0 && !d->ind && S.vbuf[0].address) {   // the first vertices stream 0 gives the draw (with the deferred updates), every word as a float
@@ -3874,7 +3994,16 @@ static void draw_idx(const p_draw_idx *d) {
     VkBuffer mcb = VK_NULL_HANDLE; VkDeviceSize mco = 0; if (mdi_group(d->mdi_cnt, d->ind, d->mdi_i, d->mdi_max, d->mdi_stride, 20, &mcb, &mco)) return;
     int prim = d->prim;
     g_draw_binst = d->ind ? 0 : (uint32_t)d->base_instance;   // before prepare_draw (see draw)
-    if (!prepare_draw(prim == 7 ? 4 : prim, 1)) return;
+    int temporal_draw = 0;
+    if (!d->ind && d->count > 0 && prim != 7 && S.sh[1] && S.sh[1]->guest_filter_certified &&
+        dm_spatial_mode() == SP_SGSR2) {
+        VkBuffer indices;
+        VkDeviceSize offset;
+        unsigned stride = d->itype == 0 ? 1 : d->itype == 1 ? 2 : 4;
+        temporal_draw = vk_buf_at(d->ibuf, (uint64_t)d->count * stride, &indices, &offset) &&
+                        offset % stride == 0;
+    }
+    if (!prepare_draw(prim == 7 ? 4 : prim, 1, temporal_draw)) return;
     VkCommandBuffer cb = vk_cmd();
     int g_ok = draw_allowed(); if (g_ok == 2 || (g_tracing && g_x_tracepass >= 0)) trace_draw("indexed draw", d->prim, (uint32_t)d->count, (uint32_t)d->instances, d->itype);
     if (d->ind && g_tracing && g_x_tracepass >= 0) { uint32_t w[5]; vk_ubd_read(d->ind, 20, (uint8_t *)w);   // the arguments as the CPU sees them now (a GPU writer's last merged copy)
@@ -3931,6 +4060,7 @@ static void draw_idx(const p_draw_idx *d) {
             capture_indexed_inputs(d, VK_NULL_HANDLE, 0, VK_NULL_HANDLE, 0, ib, io, it);
         int xf = xfb_begin(cb);
         vkCmdDrawIndexed(cb, (uint32_t)d->count, inst, 0, d->base_vertex, (uint32_t)d->base_instance);
+        if (g_guest_filter_bound == SP_SGSR2) guest_flow.drawn = 1;
         if (g_guest_filter_bound && d->count > 0) {
             static unsigned logged;
             unsigned mode_bit = 1u << g_guest_filter_bound;

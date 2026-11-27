@@ -577,3 +577,28 @@ reconstruct the target draw's vertices or covered region from a capture.
 - The adapter itself does not yet select an eligible live draw or bind
   reconstruction output to its guest fragment. Live GSR 2 admission,
   composition, pacing and presentation attribution remain In progress.
+
+## 2026-11-27 — GSR 2 before guest composition
+
+- Milestone 4 is In progress. The certified indexed enlargement can
+  prepare an image-driven GSR 2 result before opening the guest render
+  pass. The fragment retains guest source checks, coverage and alpha.
+  RCAS reads the temporal result separately from history. Guest blend
+  and presentation still consume the regular guest target. Resources
+  remain live through the fence, and history commits only after the
+  consumer draw is recorded and the replay submission is accepted.
+- Replay uses GSR 1 on unavailable temporal resources or queue slots.
+  The original draw is the final fallback. A shader mapping that fails
+  the live grid check uses the original smoothstep sample. The retained
+  image-driven inputs supply no engine motion, depth or exposure.
+- Synchronization-validated Lavapipe compared the production fragment
+  and a later alpha-sensitive blend with a direct FP16 result readback.
+  Covered RGB agreed within one code value. Guest alpha and the loaded
+  scissored column were preserved. A narrow crop reproduced the guest
+  fragment byte-for-byte. The reconstruction host runner passed 54
+  checks. The NDK and signed CI checks for the integrated replay commit
+  follow this checkpoint.
+- The source-ownership checkpoint at `54a8f13e40f21ad5ecc591a428493dd48224e07d`
+  passed the [software Vulkan and NDK workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46021326701).
+  FFR docked admission, engine-input binding, full pacing and accepted
+  presentation attribution remain open.
