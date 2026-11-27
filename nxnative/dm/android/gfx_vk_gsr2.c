@@ -131,6 +131,7 @@ struct vk_gsr2 {
     const pass_spec *spec;
     temporal_pass passes[G2_PASS_MAX];
     temporal_image images[G2_IMAGES];
+    temporal_image snapshots[2];
     dm_temporal_history history;
     dm_temporal_frame pending_frame;
     dm_temporal_plan pending_plan;
@@ -163,16 +164,8 @@ uint32_t vk_gsr2_variants(void) {
     return variants;
 }
 
-static int gsr2_image(vk_gsr2 *ctx, unsigned index, VkExtent2D extent, VkFormat format) {
-    temporal_image *image = &ctx->images[index];
-    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                              (ctx->fragment ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_STORAGE_BIT);
-    // Only the exposed result needs transfer source usage.
-    if (index == G2_RESULT || (ctx->fragment && (index == G2_HISTORY0 || index == G2_HISTORY1)))
-        usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-#ifdef SGSR2_HOST_PROBE
-    if (index == ctx->spec[0].target) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-#endif
+static int gsr2_make_image(vk_gsr2 *ctx, temporal_image *image, VkExtent2D extent,
+                           VkFormat format, VkImageUsageFlags usage) {
     VkImageFormatProperties properties;
     if (vkGetPhysicalDeviceImageFormatProperties(V.pd, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
           usage, 0, &properties) ||
@@ -194,6 +187,19 @@ static int gsr2_image(vk_gsr2 *ctx, unsigned index, VkExtent2D extent, VkFormat 
         VK_IMAGE_VIEW_TYPE_2D, format, {0}, temporal_color};
     image->extent = extent;
     return vkCreateImageView(V.dev, &view, NULL, &image->view) == VK_SUCCESS;
+}
+
+static int gsr2_image(vk_gsr2 *ctx, unsigned index, VkExtent2D extent, VkFormat format) {
+    temporal_image *image = &ctx->images[index];
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                              (ctx->fragment ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_STORAGE_BIT);
+    // Only the exposed result needs transfer source usage.
+    if (index == G2_RESULT || (ctx->fragment && (index == G2_HISTORY0 || index == G2_HISTORY1)))
+        usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+#ifdef SGSR2_HOST_PROBE
+    if (index == ctx->spec[0].target) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+#endif
+    return gsr2_make_image(ctx, image, extent, format, usage);
 }
 
 static int gsr2_images(vk_gsr2 *ctx) {
@@ -351,6 +357,29 @@ vk_gsr2 *vk_gsr2_create_image(VkExtent2D render, VkExtent2D output, VkDeviceSize
     return gsr2_create(DM_TEMPORAL_2FS, render, output, budget, 1);
 }
 
+vk_gsr2 *vk_gsr2_create_replay(VkExtent2D render, VkExtent2D output, VkDeviceSize budget) {
+    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    if (!gsr2_format_supported(format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
+        return NULL;
+    vk_gsr2 *ctx = vk_gsr2_create_image(render, output, budget);
+    if (!ctx) return NULL;
+    for (unsigned i = 0; i < 2; i++) {
+        if (!gsr2_make_image(ctx, &ctx->snapshots[i], render, format,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+            vk_gsr2_destroy(ctx);
+            return NULL;
+        }
+    }
+    return ctx;
+}
+
+static void gsr2_drop_image(temporal_image *image) {
+    if (image->view) vkDestroyImageView(V.dev, image->view, NULL);
+    if (image->image) vkDestroyImage(V.dev, image->image, NULL);
+    if (image->memory) vkFreeMemory(V.dev, image->memory, NULL);
+}
+
 void vk_gsr2_destroy(vk_gsr2 *ctx) {
     if (!ctx) return;
     if (ctx->descriptors) vkDestroyDescriptorPool(V.dev, ctx->descriptors, NULL);
@@ -360,12 +389,8 @@ void vk_gsr2_destroy(vk_gsr2 *ctx) {
         if (pass->layout) vkDestroyPipelineLayout(V.dev, pass->layout, NULL);
         if (pass->set_layout) vkDestroyDescriptorSetLayout(V.dev, pass->set_layout, NULL);
     }
-    for (unsigned i = 0; i < G2_IMAGES; i++) {
-        temporal_image *image = &ctx->images[i];
-        if (image->view) vkDestroyImageView(V.dev, image->view, NULL);
-        if (image->image) vkDestroyImage(V.dev, image->image, NULL);
-        if (image->memory) vkFreeMemory(V.dev, image->memory, NULL);
-    }
+    for (unsigned i = 0; i < G2_IMAGES; i++) gsr2_drop_image(&ctx->images[i]);
+    for (unsigned i = 0; i < 2; i++) gsr2_drop_image(&ctx->snapshots[i]);
     for (unsigned i = 0; i < 2; i++) if (ctx->samplers[i]) vkDestroySampler(V.dev, ctx->samplers[i], NULL);
     if (ctx->ubo_mapped) vkUnmapMemory(V.dev, ctx->ubo_memory);
     if (ctx->ubo) vkDestroyBuffer(V.dev, ctx->ubo, NULL);
@@ -782,6 +807,51 @@ int vk_gsr2_record_image(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
         .color = current, .previous_color = previous, .pre_exposure = 1.0f,
     };
     return vk_gsr2_record(ctx, cb, slot, frame, &inputs, NULL, output);
+}
+
+int vk_gsr2_record_replay(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
+                          const dm_temporal_frame *frame, VkImage scene,
+                          const vk_gsr2_timing *timing, vk_gsr2_output *output) {
+    if (output) *output = (vk_gsr2_output){0};
+    if (!ctx || !cb || !frame || !scene || !output || slot >= VK_GSR2_SLOTS ||
+        ctx->pending || !ctx->snapshots[0].image) return 0;
+    dm_temporal_frame replay = *frame;
+    replay.inputs &= DM_TEMPORAL_IMAGE_PAIR;
+    replay.variants &= DM_TEMPORAL_2FS;
+    dm_temporal_plan plan = dm_temporal_choose(&ctx->history, &replay, DM_TEMPORAL_2FS);
+    if (!plan.variant ||
+        frame->iw != ctx->render.width || frame->ih != ctx->render.height ||
+        frame->ow != ctx->output.width || frame->oh != ctx->output.height) return 0;
+
+    // Replay owns the guest image only for this copy. Keep the other snapshot
+    // alive until the next accepted real frame, even if the guest recycles it.
+    temporal_image *current = &ctx->snapshots[ctx->next];
+    temporal_image *previous = plan.reset ? current : &ctx->snapshots[ctx->next ^ 1];
+    VkImageMemoryBarrier transfer = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, current->image, temporal_color};
+    // The same dependency makes the producer's original GENERAL image readable.
+    VkMemoryBarrier source = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 1, &source, 0, NULL, 1, &transfer);
+    const VkImageSubresourceLayers subresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    const VkImageCopy region = {subresource, {0}, subresource, {0},
+        {ctx->render.width, ctx->render.height, 1}};
+    vkCmdCopyImage(cb, scene, VK_IMAGE_LAYOUT_GENERAL, current->image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    transfer.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    transfer.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    transfer.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    transfer.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, NULL, 0, NULL, 1, &transfer);
+    const vk_gsr2_inputs inputs = {
+        .color = {current->view, VK_IMAGE_LAYOUT_GENERAL},
+        .previous_color = {previous->view, VK_IMAGE_LAYOUT_GENERAL}, .pre_exposure = 1.0f,
+    };
+    return vk_gsr2_record(ctx, cb, slot, &replay, &inputs, timing, output);
 }
 
 void vk_gsr2_commit(vk_gsr2 *ctx, int submitted) {

@@ -94,6 +94,13 @@ vk_gsr2 *vk_gsr2_create_image(VkExtent2D render, VkExtent2D output, VkDeviceSize
 int vk_gsr2_record_image(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
                          const dm_temporal_frame *frame, vk_gsr2_input current,
                          vk_gsr2_input previous, vk_gsr2_output *output);
+// Owns a budgeted pair of scene snapshots. Replay must prove that scene is
+// a fully defined RGBA8 UNORM color image in GENERAL, with one mip, one layer,
+// one sample, transfer source usage and exactly the context's render extent.
+vk_gsr2 *vk_gsr2_create_replay(VkExtent2D render, VkExtent2D output, VkDeviceSize budget);
+int vk_gsr2_record_replay(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
+                          const dm_temporal_frame *frame, VkImage scene,
+                          const vk_gsr2_timing *timing, vk_gsr2_output *output);
 void vk_gsr2_destroy(vk_gsr2 *ctx);
 
 // Invoke on the GPU replay queue, outside a render pass. Slot must be retired

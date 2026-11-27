@@ -492,11 +492,83 @@ static void check_physical_image_temporal(void) {
     puts("SGSR 2 physical replay handoff and sRGB presentation passed");
 }
 
+static void check_replay_snapshots(void) {
+    if (!(vk_gsr2_variants() & DM_TEMPORAL_2FS)) return;
+    const VkExtent2D input = {24, 24}, output = {32, 32};
+    g_sfmt = VK_FORMAT_R8G8B8A8_UNORM;
+    spatial_image source = source_image(24), rotated = source_image(24);
+    vk_gsr2 *sized = vk_gsr2_create_image(input, output, UINT64_MAX);
+    assert(sized);
+    VkDeviceSize base_budget = sized->bytes;
+    vk_gsr2_destroy(sized);
+    assert(!vk_gsr2_create_replay(input, output, base_budget));
+    vk_gsr2 *ctx = vk_gsr2_create_replay(input, output, 2 * 1024 * 1024);
+    assert(ctx && ctx->bytes > base_budget);
+    dm_temporal_frame frame = {.ticket = 70, .stream = 1, .epoch = 1,
+        .iw = 24, .ih = 24, .ow = 32, .oh = 32, .inputs = DM_TEMPORAL_IMAGE_PAIR,
+        .variants = DM_TEMPORAL_2FS, .real = 1, .memory_ok = 1};
+    vk_gsr2_output result;
+    flow_frame(&source, 0, 0);
+    begin();
+    assert(vk_gsr2_record_replay(ctx, test_cb, 0, &frame, source.texture.img, NULL, &result));
+    assert(ctx->pending_plan.reset && !ctx->history.valid);
+    assert(!vk_gsr2_record_replay(ctx, test_cb, 1, &frame, source.texture.img, NULL, &result));
+    complete();
+    vk_gsr2_commit(ctx, 1);
+    assert(ctx->history.ticket == frame.ticket);
+
+    // Overwrite the old guest image before submitting a different handle.
+    flow_frame(&source, 0, 1);
+    flow_frame(&rotated, 2, 0);
+    ++frame.ticket;
+    begin();
+    assert(vk_gsr2_record_replay(ctx, test_cb, 1, &frame, rotated.texture.img, NULL, &result));
+    assert(!ctx->pending_plan.reset);
+    temporal_image flow = ctx->images[G2_CLIP];
+    VkBufferImageCopy region = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0}, {3, 3, 1}};
+    vkCmdCopyImageToBuffer(test_cb, flow.image, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &region);
+    complete();
+    vk_gsr2_commit(ctx, 1);
+    const uint16_t *motion = (const uint16_t *)mapped;
+    int found = 0;
+    for (unsigned i = 0; i < 9; ++i)
+        found |= unpack_fp16(motion[i * 4 + 2]) < 0.1f &&
+            fabsf(unpack_fp16(motion[i * 4]) - 4.0f / 24.0f) < 0.002f;
+    assert(found);
+
+    begin();
+    assert(!vk_gsr2_record_replay(ctx, test_cb, 2, &frame, source.texture.img, NULL, &result));
+    ++frame.ticket;
+    assert(vk_gsr2_record_replay(ctx, test_cb, 2, &frame, source.texture.img, NULL, &result));
+    CHECK(vkEndCommandBuffer(test_cb));
+    CHECK(vkResetCommandBuffer(test_cb, 0));
+    vk_gsr2_commit(ctx, 0);
+    assert(!ctx->history.valid);
+    ++frame.ticket;
+    begin();
+    assert(vk_gsr2_record_replay(ctx, test_cb, 3, &frame, source.texture.img, NULL, &result));
+    assert(ctx->pending_plan.reset);
+    region.imageExtent = (VkExtent3D){32, 32, 1};
+    vkCmdCopyImageToBuffer(test_cb, result.image, result.layout, pixels, 1, &region);
+    complete();
+    vk_gsr2_commit(ctx, 1);
+    const uint16_t *readout = (const uint16_t *)mapped;
+    for (unsigned i = 0; i < 32 * 32 * 4; i += 4) {
+        assert(fabsf(unpack_fp16(readout[i]) - 239.0f / 255.0f) < 0.01f);
+        assert(fabsf(unpack_fp16(readout[i + 3]) - 173.0f / 255.0f) < 0.01f);
+    }
+    vk_gsr2_destroy(ctx);
+    spatial_image_drop(&rotated);
+    spatial_image_drop(&source);
+    puts("GSR 2 replay snapshots passed rotation, overwrite, budget, duplicate and submit rollback");
+}
+
 static void check_temporal(void) {
     uint32_t supported = vk_gsr2_variants();
     assert(supported);
     for (uint32_t variant = 1; variant <= DM_TEMPORAL_3CS; variant <<= 1)
         if (supported & variant) check_variant(variant);
     check_image_temporal();
+    check_replay_snapshots();
     check_physical_image_temporal();
 }

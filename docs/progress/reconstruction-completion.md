@@ -559,3 +559,21 @@ reconstruct the target draw's vertices or covered region from a capture.
   [signed builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46018793186/artifacts/15207033236)
   was available at inspection. The device cost of inline RCAS and
   physical FFR activation remain unmeasured.
+
+## 2026-11-27 — GSR 2 replay source ownership
+
+- Milestone 4 remains In progress. The Vulkan backend can snapshot a
+  proven pre-composition RGBA8 source in the replay command buffer.
+  Both snapshots count against the budget using Vulkan allocation
+  requirements. The adapter leaves the original image in GENERAL and
+  does not retain its handle as history. The next frame uses the prior
+  submitted snapshot with matching stream and geometry.
+- Software Vulkan with synchronization validation passed the snapshot
+  readback. The fixture overwrote the old guest image, rotated to a new
+  image, and recovered the expected image motion. It also checked
+  allocation rejection, duplicate rejection, a discarded command buffer,
+  and color and alpha on the first frame after recovery. The existing
+  guest shader and presentation readbacks passed in the same run.
+- The adapter itself does not yet select an eligible live draw or bind
+  reconstruction output to its guest fragment. Live GSR 2 admission,
+  composition, pacing and presentation attribution remain In progress.
