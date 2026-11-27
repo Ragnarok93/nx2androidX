@@ -235,3 +235,28 @@ validation**. The preceding remote checkpoint was
 - Next action is to implement bounded selection on live replay events and
   verify that viewport/scissor coverage and shader semantics establish an
   eligible scene input across docked and handheld paths.
+
+## 2026-11-27 — Harness-based acceptance checkpoint
+
+Milestone 0 is **Host validated** with device-specific checks outstanding.
+Milestone 1 remains **In progress**. Milestones 2–9 remain **Pending**.
+
+- Presentation harness checks the exact image routed to frame generation,
+  including docked 2160p output and native 1080p fallback for Bilinear, FSR 1,
+  GSR 1 and GSR 2. The trace harness verifies that delayed fence retirement
+  is assigned to its originating ticket, and catches completion attributed
+  to a fallback frame. Ran all 54 required host checks successfully.
+- Reconstruction CI now runs automatically for relevant changes on this
+  development branch. Its host runner installs its required dependency and
+  gets the repository import path. Software Vulkan checks shader execution
+  and readbacks up to 2160p, while the matched NDK job compiles and links the
+  FFR runtime without a device.
+- Use host and software Vulkan evidence for selection, geometry, handoff,
+  failure and pixel correctness wherever possible. Physical-device follow-up
+  is limited to title data and workloads that the fixtures cannot reproduce,
+  proprietary/custom driver behavior, presentation pacing and peak memory.
+  A fixture selecting native fallback at 1080p does not close the docked
+  scene-source selection regression.
+- Next action remains the live replay selection path. Use synthetic draw and
+  presentation sequences to verify scene-source eligibility, alias rejection,
+  lifetime and unchanged fallback before relying on FFR captures.

@@ -148,6 +148,33 @@ class TraceTests(unittest.TestCase):
         r=chain();r[1]['mips']='2';self.assertFalse(analyze(r)['candidates'])
     def test_no_native_enlargement(self):
         r=chain();r[-1].update(width='1384',height='780');self.assertFalse(analyze(r)['candidates'])
+    def test_fence_completion_joins_the_original_real_frame(self):
+        submitted = {
+            'ticket': '10', 'presentation_seen': '1', 'mode': 'Off',
+            'docked_at_enqueue': '1', 'requested_upscaler': 'FSR 1',
+            'active_upscaler': 'FSR 1', 'reconstruction_recorded': '1',
+            'reconstruction_submitted': '1', 'actual_reconstruction_w': '3840',
+            'actual_reconstruction_h': '2160', 'output_w': '3840', 'output_h': '2160',
+            'final_source_w': '3840', 'final_source_h': '2160',
+            'reconstruction_allocated_w': '3840', 'reconstruction_allocated_h': '2160',
+            'present_accepted': '1', 'generated_accepted': '2',
+        }
+        fallback = dict(submitted, ticket='11', active_upscaler='None',
+                        reconstruction_recorded='0', reconstruction_submitted='0',
+                        actual_reconstruction_w='0', actual_reconstruction_h='0',
+                        reconstruction_allocated_w='0', reconstruction_allocated_h='0',
+                        final_source_w='1920', final_source_h='1080',
+                        reconstruction_completed_ticket='10', present_accepted='0',
+                        generated_accepted='0')
+        summary = summarize_presentation([submitted, fallback], [])
+        self.assertEqual(summary['observed_completed_tickets'], 1)
+        self.assertFalse(summary['submission_integrity'])
+        self.assertEqual(summary['residency'][0]['generated_presents_accepted'], 2)
+        self.assertEqual(summary['residency'][0]['real_presents_accepted'], 1)
+        later = dict(fallback, ticket='12', reconstruction_completed_ticket='11')
+        summary = summarize_presentation([submitted, fallback, later], [])
+        self.assertEqual(summary['submission_integrity']['completion_without_submission'], [11])
+
     def test_delayed_timing_uses_origin_and_separates_operation_mode(self):
         def frame(t,op,active,**extra):
             r={'ticket':str(t),'presentation_seen':'1','mode':'Off','docked_at_enqueue':str(op),
