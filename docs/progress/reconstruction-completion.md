@@ -808,3 +808,11 @@ bindings. Docked FFR acceptance remains Awaiting device validation.
   the image descriptor switch independently. Revision tracking now runs
   in the surrounding memo collection loop. The descriptor-capacity
   fixture and the reconstruction host suite passed locally.
+
+- Corrected implementation commit `54e038213298cf90d876fcd93f1d9ef5e04af922`
+  passed the [software Vulkan and FFR NDK workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46083105388).
+  The [Android app workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46083105408)
+  passed the app tests, native link smoke test, and signing-identity check.
+  Its [signed builder APK](https://github.com/Ragnarok93/nx2androidX/actions/runs/46083105408/artifacts/15237952734)
+  was available at verification. Docked FFR admission on the device and
+  engine-input GSR 2 semantics remain open.
