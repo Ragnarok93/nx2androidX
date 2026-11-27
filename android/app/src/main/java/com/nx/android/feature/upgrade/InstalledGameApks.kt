@@ -3,6 +3,7 @@ package com.nx.android.feature.upgrade
 import android.content.Context
 import android.content.Intent
 import android.os.Environment
+import com.nx.android.data.StandaloneApkAssets
 import org.json.JSONObject
 import java.io.File
 import java.util.zip.ZipFile
@@ -49,17 +50,9 @@ object InstalledGameApks {
         ZipFile(file).use { zip ->
             if (zip.getEntry("lib/arm64-v8a/libdmhost.so") == null ||
                 zip.getEntry("classes.dex") == null) return@use null
-            if (zip.getEntry("assets/nx2a-data.zip") != null) return@use Layout(false, null)
-            val entry = zip.getEntry("assets/nx2a-companion.json") ?: return@use null
-            if (entry.size !in 1L..65536L) return@use null
-            // InputStream.readNBytes is not available on every supported Android API.
-            val bytes = ByteArray(entry.size.toInt())
-            val exact = java.io.DataInputStream(zip.getInputStream(entry)).use {
-                it.readFully(bytes)
-                it.read() == -1
-            }
-            if (!exact) return@use null
-            val folder = JSONObject(bytes.toString(Charsets.UTF_8)).optString("folder")
+            if (StandaloneApkAssets.contains(zip, StandaloneApkAssets.EMBEDDED)) return@use Layout(false, null)
+            val text = StandaloneApkAssets.readText(zip, StandaloneApkAssets.COMPANION) ?: return@use null
+            val folder = JSONObject(text).optString("folder")
                 .takeIf { it.isNotBlank() && it != "." && it != ".." && '/' !in it && '\\' !in it }
             Layout(true, folder)
         }

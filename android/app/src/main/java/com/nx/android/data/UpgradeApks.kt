@@ -7,12 +7,12 @@ import android.os.Build
 import android.os.Environment
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.nx.android.feature.upgrade.InstalledGameApks
-import java.io.DataInputStream
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipFile
+import org.json.JSONException
 import org.json.JSONObject
 import javax.inject.Inject
 
@@ -74,16 +74,23 @@ class UpgradeApks @Inject constructor(@ApplicationContext private val context: C
         val (embedded, companion, digest) = ZipFile(apk).use { zip ->
             check(zip.getEntry("classes.dex") != null &&
                 zip.getEntry("lib/arm64-v8a/libdmhost.so") != null &&
-                (zip.getEntry("assets/nx2a-data.zip") != null ||
-                    zip.getEntry("assets/nx2a-companion.json") != null)) {
+                (StandaloneApkAssets.contains(zip, StandaloneApkAssets.EMBEDDED) ||
+                    StandaloneApkAssets.contains(zip, StandaloneApkAssets.COMPANION))) {
                 "This APK is not a supported standalone nx2android game."
             }
-            if (zip.getEntry("assets/nx2a-data.zip") != null) Triple(true, null, null)
+            if (StandaloneApkAssets.contains(zip, StandaloneApkAssets.EMBEDDED)) Triple(true, null, null)
             else {
-                val descriptor = JSONObject(readAsset(zip, "nx2a-companion.json").orEmpty())
-                val digest = descriptor.getString("manifest_sha256")
+                val text = checkNotNull(StandaloneApkAssets.readText(zip, StandaloneApkAssets.COMPANION)) {
+                    "The game APK has missing, empty or oversized companion data metadata."
+                }
+                val descriptor = try {
+                    JSONObject(text)
+                } catch (e: JSONException) {
+                    throw IllegalStateException("The game APK has malformed companion data metadata.", e)
+                }
+                val digest = descriptor.optString("manifest_sha256")
                 check(digest.matches(Regex("[a-f0-9]{64}"))) { "Invalid companion game data descriptor." }
-                val baked = readAsset(zip, "nx2a-data.txt")
+                val baked = StandaloneApkAssets.readText(zip, StandaloneApkAssets.DATA_PATH)
                     ?.takeIf { it.startsWith("/") }?.let(::File)
                 val adjacent = apk.resolveSibling("${apk.nameWithoutExtension}-data")
                 val folderName = descriptor.optString("folder")
@@ -104,16 +111,6 @@ class UpgradeApks @Inject constructor(@ApplicationContext private val context: C
 
     fun installedGames(): List<Pair<String, File>> =
         InstalledGameApks.discover(context).map { it.name to it.source }
-
-    private fun readAsset(zip: ZipFile, name: String): String? =
-        zip.getEntry(name)?.takeIf { it.size in 1L..65536L }?.let { entry ->
-            val bytes = ByteArray(entry.size.toInt())
-            DataInputStream(zip.getInputStream(entry)).use { input ->
-                input.readFully(bytes)
-                check(input.read() == -1) { "Invalid APK asset length." }
-            }
-            bytes.toString(Charsets.UTF_8).trim()
-        }
 
     fun matchesCompanion(folder: File, expected: String?): Boolean {
         val manifest = File(folder, "nx2a-data.json")
