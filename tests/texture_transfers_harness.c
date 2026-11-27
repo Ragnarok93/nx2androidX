@@ -105,8 +105,9 @@ static void vkCmdBlitImage(VkCommandBuffer cb,VkImage s,VkImageLayout sl,VkImage
 static void vkCmdClearColorImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearColorValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)r;assert(n==1);last_clear=*v;}
 static void vkCmdClearDepthStencilImage(VkCommandBuffer cb,VkImage im,VkImageLayout l,const VkClearDepthStencilValue *v,uint32_t n,const VkImageSubresourceRange *r) {(void)cb;(void)im;(void)l;(void)v;(void)n;(void)r;abort();}
 static int g_pd_state, g_pd_full;
-static void surface_transfer(const vkimg_t *im, VkImageSubresourceLayers sub, const char *role) {
-    (void)im; (void)sub; (void)role;
+static void surface_transfer(const vkimg_t *im, VkImageSubresourceLayers sub, const char *role,
+                             const char *status) {
+    (void)im; (void)sub; (void)role; (void)status;
     abort();
 }
 static void surface_clear(const vkimg_t *im, VkImageSubresourceRange range, const VkClearValue *clear) {

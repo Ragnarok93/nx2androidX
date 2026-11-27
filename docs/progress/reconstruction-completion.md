@@ -302,3 +302,39 @@ and source-coverage evidence for safe replacement.
   DMSV bundle in a host harness to inspect the two fragment modules and
   their shared vertex module (6e9683d5d012ebac), then check coverage and
   color equivalence while preserving the subsequent composition.
+
+## 2026-11-27 — Milestone 2 evidence intake and Android CI repair
+
+Milestone 2 is **In progress**. Milestones 0 and 1 retain their host results
+and device acceptance remains open. Milestones 3–9 are **Pending**.
+
+- Verified the starting branch at `579a4dc79b2e82a411f1c728c9b8c5a320598dd6`.
+  The signed Android build [45970378346](https://github.com/Ragnarok93/nx2androidX/actions/runs/45970378346)
+  at `5704ea06` failed in the full test gate. Repository signing preparation
+  passed. Packaging was skipped and GitHub listed zero artifacts. The two
+  reconstruction validation jobs succeeded in run
+  [45970378481](https://github.com/Ragnarok93/nx2androidX/actions/runs/45970378481).
+- The transfer harness stub still used the old three-argument capture
+  signature. Its fourth argument now matches production. All 10 transfer
+  tests passed locally. This changes only the test double.
+- Extracted the three supplied modules and passed independent
+  `spirv-val --target-env vulkan1.3` on each. Both fragment and the
+  shared vertex entry points match the archived present 16745 draw state.
+  Fragment `16405ad0ea722934` uses an RGB edge-directed six-sample filter
+  with negative-lobe taps and zero output alpha. Fragment `7d05eef41136554f`
+  remaps texel fractions with cubic smoothstep, clamps the coordinates
+  using a uniform buffer, samples RGB once at explicit LOD zero, and also
+  forces output alpha to zero. The vertex shader uses guest attributes
+  and uniform transforms for position and normalized sample coordinates.
+  Neither fragment shader reads history or applies exposure or tone mapping.
+- The capture establishes full-size viewport/scissor, one color attachment,
+  no blend/depth/stencil on passes 75 and 76, and mip 0/layer 0 RGBA8 UNORM
+  inputs. Pass 75 clears, while pass 76 loads. The sampled binding rows do
+  not resolve sampler state, and the draw input dump does not include
+  these draws. Guest vertices, indices and graphics uniforms are needed
+  to establish exact coverage and coordinate semantics. Both filters
+  change RGB relative to straight bilinear sampling, and an unmodified
+  alpha-preserving recorder cannot replace either draw as written.
+- Next action is a patterned software Vulkan fixture with explicit
+  synthetic uniforms and coverage. Compare RGB and alpha contracts
+  before admitting any production insertion.
