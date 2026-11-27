@@ -31,7 +31,7 @@ static struct {
     struct { const vkimg_t *im; surface_binding_t binding; } storage[96];
     unsigned alias_count;
     struct { vkimg_t image; surface_binding_t binding; const char *role; } aliases[32];
-    int alloc_failed;
+    int alloc_failed, metadata_only;
     // A direct-mapped cache suppresses identical descriptor bindings in the
     // same pass or dispatch. A collision emits the row instead of hiding it.
     surface_binding_t bindings[2048];
@@ -40,6 +40,8 @@ static struct {
 static int surface_capture_arm(void) {
     const char *root = vk_pass_dump_root();
     memset(&g_sc, 0, sizeof g_sc);
+    const char *mode = getenv("DM_VK_SURFACE_METADATA_ONLY");
+    g_sc.metadata_only = mode && !strcmp(mode, "1");
     snprintf(g_sc.path, sizeof g_sc.path, "%s/surface_usage.tsv", root ? root : ".");
     snprintf(g_sc.temp, sizeof g_sc.temp, "%s/surface_usage.tsv.tmp", root ? root : ".");
     g_sc.usage = fopen(g_sc.temp, "w");
@@ -197,6 +199,10 @@ static void surface_uniform_queue(uint64_t shader, int binding, int reg, VkDescr
 // Snapshot the effective descriptor before dispatch, including any uniform
 // shadow produced by replay. The dispatch may itself change the original bytes.
 static void surface_compute_uniforms(VkCommandBuffer cb) {
+    if (g_sc.metadata_only) {
+        g_sc.uniform_count = 0;
+        return;
+    }
     int copied = 0;
     for (unsigned i = 0; i < g_sc.uniform_count; i++) {
         const VkDescriptorBufferInfo *src = &g_sc.uniforms[i].source;
@@ -270,6 +276,10 @@ static void surface_read(const char *role, const vkimg_t *im, surface_binding_t 
     if (!g_sc.usage) return;
     int load = att ? (int)att->loadOp : -1, store = att ? (int)att->storeOp : -1;
     const VkClearValue *clear = att && att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? &att->clearValue : NULL;
+    if (g_sc.metadata_only) {
+        surface_usage(role, &b, load, store, clear, reason ? reason : im ? "metadata" : "unresolved");
+        return;
+    }
     unsigned bw = 1, bh = 1, bpb = 0;
     if (!reason && !im) reason = "unresolved";
     if (!reason && att && att->storeOp != VK_ATTACHMENT_STORE_OP_STORE &&
@@ -447,8 +457,8 @@ static void surface_capture_write(void) {
         unlink(raw_tmp); unlink(index_tmp);
         unlink(raw); unlink(index);
     }
-    int note = fprintf(g_sc.usage, "# rows=%u dropped_rows=%u completed_samples=%u\n",
-                      g_sc.rows, g_sc.dropped, ok ? g_sc.count : 0);
+    int note = fprintf(g_sc.usage, "# rows=%u dropped_rows=%u completed_samples=%u metadata_only=%d\n",
+                      g_sc.rows, g_sc.dropped, ok ? g_sc.count : 0, g_sc.metadata_only);
     int closed = fclose(g_sc.usage);
     if (note < 0 || closed != 0 || rename(g_sc.temp, g_sc.path) != 0) unlink(g_sc.temp);
     g_sc.usage = NULL;

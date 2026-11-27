@@ -997,6 +997,11 @@ static void pass_dump_aliases(void) {
 }
 
 static void pass_dump(void) {
+    if (g_pd_state == 1 && g_pd_full && g_sc.metadata_only) {
+        surface_alias_flush();
+        surface_pass();
+        return;
+    }
     texdump_flush();
     if (g_pd_state != 1) return;
     if (g_pd_full) {
@@ -1099,7 +1104,7 @@ static void texdump_flush(void) {   // DM_VK_TEXDUMP: outside a render pass (pas
     VKLOG("texdump: %ux%u fmt %d layers %u levels %u (level %u dumped) at pool %#llx+%#llx: dumps with pass -100 - layer", im->w, im->h, im->fmt, im->layers, im->levels, lv, (unsigned long long)im->pool, (unsigned long long)im->off);
 }
 static void pass_dump_depth_aspect(VkImageAspectFlags aspect) {
-    if (g_pd_state == 1) pass_dump_bound_depth(aspect);
+    if (g_pd_state == 1 && !(g_pd_full && g_sc.metadata_only)) pass_dump_bound_depth(aspect);
 }
 static void pass_dump_depth(void) {
     pass_dump_depth_aspect(VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -1188,7 +1193,7 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
         g_pd_shadow_reads = 0;
         g_pd_mrt_written = g_pd_effect_passes = g_pd_small_effect_passes = g_pd_alias_images = 0;
         g_pd_prepass_written = 0; g_pd_control_written = 0;
-        input_capture_arm();
+        if (!(g_pd_full && g_sc.metadata_only)) input_capture_arm();
         setenv("DM_VK_PASSDUMP", "0", 1);
         unsetenv("DM_VK_PASSDUMP_FULL");
         VKLOG("pass dump: next submission from pass %d, limit %d images, %llu MB raw readback",
@@ -1204,7 +1209,7 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
                 present ? present->fmt : VK_FORMAT_UNDEFINED, range, -1, -1, 0);
             surface_present_identity(&binding, crop, ticket);
             int captured = 0;
-            if (present && present->layout == VK_IMAGE_LAYOUT_GENERAL) {
+            if (!g_sc.metadata_only && present && present->layout == VK_IMAGE_LAYOUT_GENERAL) {
                 uint64_t mtl_sub_commit(void);
                 int slot = g_npd;
                 uint64_t submission = g_set_epoch;
@@ -1214,7 +1219,8 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
                 mtl_sub_commit();
             }
             surface_usage("presentation-source", &binding, -1, -1, NULL,
-                          captured ? "full-image" : present ? "full-image-unavailable" : "unresolved");
+                          captured ? "full-image" : !present ? "unresolved" :
+                          g_sc.metadata_only ? "metadata" : "full-image-unavailable");
         }
         g_pd_state = 2;
         capture_fence = mtl_last_fence() + !g_pd_full;
@@ -4138,7 +4144,11 @@ static void dispatch(const p_dispatch *d) {
     else vkCmdDispatch(cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     if (d->ind || (d->x && d->y && d->z)) compute_images_written();
     vk_pass_ts(1, (uint32_t)d->x, (uint32_t)d->y, PT_DISPATCH, (uint32_t)d->z);
-    if (g_pd_state == 1 && g_pd_full) { surface_dispatch(); pass_dump_aliases(); }
+    if (g_pd_state == 1 && g_pd_full) {
+        surface_dispatch();
+        if (g_sc.metadata_only) surface_alias_flush();
+        else pass_dump_aliases();
+    }
     if (!g_x_nodispbar) vk_img_barrier_all(cb);   // DM_VK_X_NODISPBAR=1 (live, a cost measurement that may draw wrong): no barrier after the dispatch
     if (crumbs_on()) { crumb_t *c = crumb_cur(); if (c->n < 8) { c->k[c->n][0] = 0; c->k[c->n][1] = 0; c->k[c->n][2] = cs->key; c->n++; } crumb_mark(1); }
     if (g_x_tracepass == -2 || mdi_log_now()) {   // (DM_VK_TRACE_PASS=-2 lists the dispatches too, with their storage buffers: the addresses for a DM_CTL memdump)

@@ -156,6 +156,15 @@ int main(int argc, char **argv) {
            shown.present_crop[2] == im.w && shown.present_crop[3] == im.h);
     surface_capture_write();
     assert(invalidates == 1);
+    assert(setenv("DM_VK_SURFACE_METADATA_ONLY", "1", 1) == 0);
+    assert(surface_capture_arm());
+    surface_read("color", &im, surface_binding(&im, NULL, bc.vk, range, 0, -1, 0), NULL, NULL);
+    surface_uniform_queue(0x1234, 8, 2, (VkDescriptorBufferInfo){(VkBuffer)(uintptr_t)2, 256, 8192});
+    surface_compute_uniforms(vk_cmd());
+    assert(copies == 3 && uniform_copies == 1 && !g_sc.buffer && !g_sc.count && !g_sc.uniform_count);
+    surface_capture_abort();
+    assert(unsetenv("DM_VK_SURFACE_METADATA_ONLY") == 0);
+
 
     // The menu capture runs first depth/stencil, an MRT, and a later effect.
     vkimg_t ds = {.w=96, .h=48, .d=1, .layers=1, .levels=1, .samples=1,

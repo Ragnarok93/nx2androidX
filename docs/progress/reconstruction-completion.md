@@ -171,3 +171,32 @@ this entry with `git log -1 --format=%H -- docs/progress/reconstruction-completi
   Correlate exact transfer/resolve and compute producer events before
   enabling any candidate substitution. Preserve ambiguous or overflowed
   observations without authorizing replacement.
+
+## 2026-11-27 — Milestone 1, metadata-only replay capture checkpoint
+
+Milestone 1 is **In progress**. Milestone 0 remains **Awaiting device
+validation**. The previous checkpoint was
+`581c632732f2a45488330c7138e320c7ea87c73b`. Resolve this checkpoint with
+`git log -1 --format=%H -- docs/progress/reconstruction-completion.md`.
+
+- Set `DM_VK_SURFACE_METADATA_ONLY=1` in the runtime environment before
+  arming full graphics capture to retain the three bounded surface catalogs
+  and exact present marker without GPU image, uniform or draw-input
+  readbacks. Existing full capture remains available with the variable
+  unset. The surface TSV footer records the mode and dropped-row count.
+- Reuses the existing attachment, sampled/storage, transfer and alias
+  records, including formats and subresources. The replay present boundary
+  still publishes the complete marker. This is diagnostic observation and
+  does not substitute resources in the rendering path.
+- The reconstruction host suite passed all 52 tests. Its surface fixture
+  verified the metadata-only path emits no image or uniform copy and
+  allocates no readback buffer. `git diff --check` passed. No shader source
+  changed. Device CPU and memory overhead remain unmeasured.
+- To validate on device, repeat the 1080p docked FFR capture with the flag
+  enabled. Export the ZIP and inspect the completed surface TSVs for
+  `metadata_only=1`, zero completed samples and the two expected upstream
+  enlargement observations. Compare replay metrics with capture disabled
+  and confirm identical rendering.
+- Next action is to give transfer, resolve and compute observations exact
+  operation-level producer/consumer identity, then bound the runtime graph
+  and assess safe eligibility at the first observed enlargement boundary.
