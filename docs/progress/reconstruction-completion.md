@@ -432,3 +432,33 @@ dependency order. Milestones 0 and 1 still await device validation.
   was available and unexpired at inspection. This verifies the build of
   the capture and fixture checkpoint. FFR replay substitution, device
   acceptance and the dependent production milestones remain open.
+
+## 2026-11-27 — Targeted graphics descriptor capture
+
+Milestone 2 implementation and FFR device acceptance remain open. This
+checkpoint fills the missing draw inputs in one scoped GPU capture.
+
+- Targeted indexed draw diagnostics now include bounded GPU copies of the
+  effective graphics constant buffer and embedded C1 descriptor prefixes.
+  Copies use the resolved buffer and offset before dynamic descriptor
+  offsets are applied. The report includes stage, binding and array element
+  alongside the exact draw ordinal. Passes with graphics memory writes or
+  transform feedback still invalidate these deferred samples.
+- Combined-sampler rows record the parameters actually selected by the
+  sampler lookup and identify dummy fallback. The diagnostic resolves
+  supported graphics sampler bindings during full captures only.
+- A fragment filter now narrows the existing vertex filter. For the FFR
+  final enlargement, set the two entries below in the game's data
+  `env.txt`, relaunch the upgraded standalone runtime, then export a full
+  GPU snapshot from the in-game menu in docked gameplay.
+
+  ```ini
+  DM_VK_PASSDUMP_INPUT_VS=6e9683d5d012ebac
+  DM_VK_PASSDUMP_INPUT_FS=7d05eef41136554f
+  ```
+
+- The capture harness checks both stage filters, the binding-specific
+  deferred UBO bytes and zero-copy sampler metadata. The reconstruction host
+  runner passed 54 checks and `git diff --check` passed. The report still
+  requires actual draw geometry and producer coverage before any production
+  replacement can be admitted.

@@ -2,7 +2,7 @@
 // Copy at the natural end of the render pass, before any attachment writeback
 // or later dispatch. A pass with graphics memory writes or transform feedback
 // cannot establish that its end-of-pass bytes match its draws' input bytes.
-enum { INPUT_MAX = 96, INPUT_BYTES = 256, INPUT_PER_PASS = 4 };
+enum { INPUT_MAX = 96, INPUT_BYTES = 256, INPUT_PER_PASS = 4, INPUT_DESCRIPTORS = 8 };
 typedef struct {
     VkBuffer buffer;
     VkDeviceSize offset;
@@ -12,13 +12,17 @@ typedef struct {
     uint32_t first_instance, instances;
     int32_t vertex_offset;
     struct { uint32_t location, format, offset; } attr[16];
-    int pass, index_type, stream;
+    int pass, index_type, stream, stage, binding;
+    unsigned element;
+    char sampler[240];
     const char *kind;
 } input_sample_t;
 static input_sample_t g_inputs[INPUT_MAX];
+static input_sample_t g_input_descriptors[INPUT_DESCRIPTORS];
+static unsigned g_input_descriptor_count;
 static unsigned g_input_count, g_input_pending, g_input_draws, g_input_rejected;
 static int g_input_capture, g_input_alloc_failed;
-static uint64_t g_input_vs;
+static uint64_t g_input_vs, g_input_fs;
 static VkBuffer g_input_buffer;
 static VkDeviceMemory g_input_memory;
 static void *g_input_map;
@@ -33,11 +37,17 @@ static void input_capture_arm(void) {
     const char *shader = getenv("DM_VK_PASSDUMP_INPUT_VS");
     g_input_capture = enable && atoi(enable);
     g_input_vs = shader ? strtoull(shader, NULL, 16) : 0;
+    shader = getenv("DM_VK_PASSDUMP_INPUT_FS");
+    g_input_fs = shader ? strtoull(shader, NULL, 16) : 0;
     g_input_count = g_input_pending = g_input_draws = g_input_rejected = 0;
     g_input_alloc_failed = 0;
     char path[1024];
     input_capture_path(path, "");
     unlink(path);
+}
+
+static int input_capture_matches(uint64_t vs, uint64_t fs) {
+    return (!g_input_vs || g_input_vs == vs) && (!g_input_fs || g_input_fs == fs);
 }
 
 static void input_capture_free(void) {
@@ -99,6 +109,34 @@ static int input_capture_add(input_sample_t sample, const char *kind, uint64_t a
     return 1;
 }
 
+static void input_capture_descriptor(const char *kind, int stage, int binding, unsigned element,
+                                     VkDescriptorBufferInfo source, const char *sampler) {
+    if (g_input_descriptor_count == INPUT_DESCRIPTORS) return;
+    VkDeviceSize size = source.range < INPUT_BYTES ? source.range : INPUT_BYTES;
+    size &= ~(VkDeviceSize)3;
+    if (!sampler && (!source.buffer || source.offset % 4 || !size)) return;
+    input_sample_t *sample = &g_input_descriptors[g_input_descriptor_count++];
+    *sample = (input_sample_t){.kind = kind, .stage = stage, .binding = binding, .element = element,
+        .buffer = source.buffer, .offset = source.offset, .binding_extent = source.range, .size = (unsigned)size};
+    if (sampler) snprintf(sample->sampler, sizeof sample->sampler, "%s", sampler);
+}
+
+static void input_capture_draw_descriptors(const input_sample_t *draw) {
+    for (unsigned i = 0; i < g_input_descriptor_count && g_input_count + g_input_pending < INPUT_MAX; i++) {
+        input_sample_t sample = g_input_descriptors[i];
+        sample.present = draw->present;
+        sample.submission = draw->submission;
+        sample.pass = draw->pass;
+        sample.draw = draw->draw;
+        sample.dispatches = draw->dispatches;
+        sample.vs = draw->vs;
+        sample.fs = draw->fs;
+        sample.gs = draw->gs;
+        sample.index_type = sample.stream = -1;
+        g_inputs[g_input_count + g_input_pending++] = sample;
+    }
+}
+
 static int input_capture_direct(input_sample_t sample, uint64_t address, VkBuffer buffer,
                                VkDeviceSize offset, unsigned index_bytes, unsigned count) {
     if (!index_bytes || !count || count > INPUT_BYTES / index_bytes || offset % 4) return 0;
@@ -124,6 +162,7 @@ static void input_capture_end_pass(void) {
                          0, 1, &before, 0, NULL, 0, NULL);
     for (unsigned i = g_input_count; i < g_input_count + g_input_pending; i++) {
         const input_sample_t *s = &g_inputs[i];
+        if (!s->size) continue;
         VkBufferCopy copy = {s->offset, (VkDeviceSize)i * INPUT_BYTES, s->size};
         vkCmdCopyBuffer(cb, s->buffer, g_input_buffer, 1, &copy);
     }
@@ -150,7 +189,7 @@ static void input_capture_write(void) {
             input_capture_path(tmp, ".tmp");
             FILE *f = fopen(tmp, "w");
             if (f) {
-                fputs("present\tsubmission\tpass\tdraw\tprior_dispatches\tvs\tfs\tgs\tkind\tindex_type\tstream\tstride\tcount\tguest_address\tpool\tpool_offset\tpool_serial\tvk_buffer_offset\tbinding_extent\tdivisor\tattributes\tbytes\tfnv1a64\traw_hex\tvertex_offset\tfirst_instance\tinstances\n", f);
+                fputs("present\tsubmission\tpass\tdraw\tprior_dispatches\tvs\tfs\tgs\tkind\tindex_type\tstream\tstride\tcount\tguest_address\tpool\tpool_offset\tpool_serial\tvk_buffer_offset\tbinding_extent\tdivisor\tattributes\tbytes\tfnv1a64\traw_hex\tvertex_offset\tfirst_instance\tinstances\tstage\tbinding\telement\tsampler\n", f);
                 for (unsigned i = 0; i < g_input_count; i++) {
                     const input_sample_t *s = &g_inputs[i];
                     const uint8_t *bytes = (const uint8_t *)g_input_map + i * INPUT_BYTES;
@@ -167,7 +206,10 @@ static void input_capture_write(void) {
                                 s->attr[a].format, s->attr[a].offset);
                     fprintf(f, "\t%u\t%016llx\t", s->size, (unsigned long long)vk_pd_hash(bytes, s->size));
                     for (unsigned j = 0; j < s->size; j++) fprintf(f, "%02x", bytes[j]);
-                    fprintf(f, "\t%d\t%u\t%u\n", s->vertex_offset, s->first_instance, s->instances);
+                    fprintf(f, "\t%d\t%u\t%u", s->vertex_offset, s->first_instance, s->instances);
+                    if (s->index_type < 0)
+                        fprintf(f, "\t%d\t%d\t%u\t%s\n", s->stage, s->binding, s->element, s->sampler);
+                    else fputs("\t\t\t\t\n", f);
                 }
                 int ok = !ferror(f);
                 if (fclose(f) != 0) ok = 0;

@@ -28,11 +28,15 @@ class DrawInputCapture(unittest.TestCase):
             with (tmp / "gpu_draw_inputs.tsv").open() as report:
                 rows = list(csv.DictReader(report, delimiter="\t"))
             self.assertEqual([row["kind"] for row in rows],
-                             ["indexed-indirect", "index-binding-prefix", "indexed-direct"])
+                             ["indexed-indirect", "index-binding-prefix", "indexed-direct",
+                              "graphics-ubo", "graphics-sampler"])
             self.assertEqual([rows[2][key] for key in
                               ("count", "stride", "binding_extent", "vertex_offset", "first_instance", "instances")],
                              ["3", "2", "6", "-2", "7", "1"])
-            for row, offset, value in zip(rows, [32, 68, 60], [0xAB, 0xCD, 0xEF]):
+            self.assertEqual([rows[3][k] for k in ("stage", "binding", "bytes")], ["1", "2", "8"])
+            self.assertEqual([rows[4][k] for k in ("stage", "binding", "bytes", "sampler", "raw_hex")],
+                             ["1", "1", "0", "min=1;mag=1", ""])
+            for row, offset, value in zip(rows[:4], [32, 68, 60, 52], [0xAB, 0xCD, 0xEF, 0xF1]):
                 self.assertEqual(int(row["vk_buffer_offset"]), offset)
                 self.assertEqual(row["draw"], "19")
                 raw = bytes.fromhex(row["raw_hex"])

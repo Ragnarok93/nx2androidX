@@ -2074,12 +2074,18 @@ static const samp_par *samp_at(int sid, uint64_t seq) {   // under g_rmu: the ve
     for (int k = 0; k < SREG_OLD; k++) if (o[k].seq && o[k].seq <= seq) return &o[k].p;
     return &g_sreg[sid];   // older than what is kept: the newest
 }
-VkSampler vk_samp_at(int sid, uint64_t seq, int nearest) {   // the sampler a bind made after seq registrations sees (gfx_vk_exec.c samp_for)
+VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size) {   // the sampler a bind made after seq registrations sees (gfx_vk_exec.c samp_for)
     pthread_mutex_lock(&g_rmu);
     VkSampler s = VK_NULL_HANDLE; const samp_par *q = samp_at(sid, seq);
     if (q) { samp_par p = *q;
         if (nearest) { p.magf = 0; p.minf = p.minf == 1 ? 0 : p.minf == 3 || p.minf == 4 || p.minf == 5 ? 2 : p.minf; p.aniso = 1; p.reduction = 0; }
-        if (!(s = nvn_hm_get(&g_samp_cache, &p)) && (s = make_sampler(&p))) nvn_hm_put(&g_samp_cache, &p, s); }
+        if (!(s = nvn_hm_get(&g_samp_cache, &p)) && (s = make_sampler(&p))) nvn_hm_put(&g_samp_cache, &p, s);
+        if (s && description) snprintf(description, size,
+            "wrap=%d,%d,%d;min=%d;mag=%d;lod=%.9g,%.9g;bias=%.9g;aniso=%.9g;compare=%d,%d;reduction=%d;border=%.9g,%.9g,%.9g,%.9g",
+            p.ws, p.wt, p.wr, p.minf, p.magf, p.lod_min, p.lod_max, p.lod_bias, p.aniso,
+            p.cmp_mode, p.cmp_func, p.reduction, p.border[0], p.border[1], p.border[2], p.border[3]);
+    }
+    if (!s && description) snprintf(description, size, "dummy");
     pthread_mutex_unlock(&g_rmu);
     return s;
 }

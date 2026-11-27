@@ -944,6 +944,8 @@ static int diag_capture_arm(int delay, int full) {
                 fprintf(f, "%s=%s\n", settings[i][0], settings[i][1]);
             const char *input_vs = getenv("DM_VK_PASSDUMP_INPUT_VS");
             fprintf(f, "DM_VK_PASSDUMP_INPUT_VS=%016llx\n", input_vs ? strtoull(input_vs, NULL, 16) : 0);
+            const char *input_fs = getenv("DM_VK_PASSDUMP_INPUT_FS");
+            fprintf(f, "DM_VK_PASSDUMP_INPUT_FS=%016llx\n", input_fs ? strtoull(input_fs, NULL, 16) : 0);
         }
         fclose(f);
     }

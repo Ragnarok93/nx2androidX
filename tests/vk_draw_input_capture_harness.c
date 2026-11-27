@@ -100,8 +100,13 @@ static const char *vk_pass_dump_root(void) { return getenv("DM_ROOT"); }
 int main(void) {
     const input_sample_t draw = {.present = 5, .draw = 19, .vs = 0x1234};
     setenv("DM_VK_PASSDUMP_INPUTS", "1", 1);
+    setenv("DM_VK_PASSDUMP_INPUT_VS", "1234", 1);
+    setenv("DM_VK_PASSDUMP_INPUT_FS", "abcd", 1);
     input_capture_arm();
     assert(g_input_capture);
+    assert(input_capture_matches(0x1234, 0xabcd));
+    assert(!input_capture_matches(0x1234, 0xfedc));
+    assert(!input_capture_matches(0x4321, 0xabcd));
     assert(!input_capture_add(draw, "bad-range", 0x105e, pool.buf, 110, 4, 0));
     assert(!input_capture_add(draw, "bad-buffer", 0x1010, (VkBuffer)3, 32, 20, 0));
     assert(!input_capture_add(draw, "bad-offset", 0x1010, pool.buf, 0, 20, 0));
@@ -128,14 +133,18 @@ int main(void) {
     assert(!input_capture_direct(direct, 0x102a, pool.buf, 58, 2, 3));
     assert(!input_capture_direct(direct, 0x102c, pool.buf, 60, 2, 129));
     assert(input_capture_direct(direct, 0x102c, pool.buf, 60, 2, 3));
+    input_capture_descriptor("graphics-ubo", 1, 2, 0, (VkDescriptorBufferInfo){pool.buf, 52, 8}, NULL);
+    input_capture_descriptor("graphics-sampler", 1, 1, 0, (VkDescriptorBufferInfo){0}, "min=1;mag=1");
+    input_capture_draw_descriptors(&draw);
     input_capture_end_pass();
-    assert(ncopy == 3 && nbarrier == 2 && mapped && recorded[1].size == 44 && recorded[2].size == 8);
+    assert(ncopy == 4 && nbarrier == 2 && mapped && recorded[1].size == 44 && recorded[2].size == 8);
     assert(g_pd_bytes == sizeof dst + 4096);
 
     // Simulate the producer's device writes occurring after CPU recording.
     memset(src + 32, 0xab, 20);
     memset(src + 68, 0xcd, 44);
     memset(src + 60, 0xef, 8);
+    memset(src + 52, 0xf1, 8);
     for (unsigned i = 0; i < ncopy; i++)
         memcpy(dst + recorded[i].dstOffset, src + recorded[i].srcOffset, recorded[i].size);
     complete = 1;

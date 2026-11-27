@@ -698,6 +698,7 @@ static int pass_dump_limit(void) {
     return n > 0 && n < PD_MAX ? n : PD_MAX;
 }   // state 0 off, 1 dumping this submission's passes, 2 waiting to write
 #include "gfx_vk_input_capture.inc"
+static int g_input_collect_descriptors;
 #include "gfx_vk_surface_capture.inc"
 static void pass_dump_depth(void);
 static void pass_dump_depth_aspect(VkImageAspectFlags aspect);
@@ -2291,7 +2292,7 @@ static VkSampler samp_cached(int sid) {
     VkSampler s = vk_samp_by_id(sid); c[k].gen = g; c[k].sid = sid; c[k].s = s; return s;
 }
 static uint64_t g_tex_sseq;   // stage_set: the bind count of the texture slot being collected (0 for handles read from memory)
-static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest) {   // nearest: its unfiltered twin (integer views)
+static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest, unsigned element) {   // nearest: its unfiltered twin (integer views)
     int sid = 0; uint64_t seq = 0;
     switch (b->samp) {
     case RS_TEX: sid = (int)(texh >> 20); seq = g_tex_sseq; break;
@@ -2300,9 +2301,16 @@ static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest
     case RS_UBO: sid = (int)(mem_handle(ubo_word(st, b->samp_arg & 0xff, b->samp_arg >> 8) & ~0xfffffull) >> 20); break;
     default: break;
     }
-    VkSampler vk_samp_by_id_nearest(int sid), vk_samp_at(int sid, uint64_t seq, int nearest); uint64_t mtl_samp_seq(void);
+    VkSampler vk_samp_by_id_nearest(int sid), vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size); uint64_t mtl_samp_seq(void);
     if (!g_samp_snap || seq >= mtl_samp_seq()) seq = 0;   // no registration since the bind: the newest (the cached lookups)
-    VkSampler s = !sid ? VK_NULL_HANDLE : seq ? vk_samp_at(sid, seq, nearest) : nearest ? vk_samp_by_id_nearest(sid) : samp_cached(sid);
+    VkSampler s;
+    if (st < 3 && g_input_collect_descriptors) {
+        char description[240];
+        s = vk_samp_at(sid, seq, nearest, description, sizeof description);
+        input_capture_descriptor("graphics-sampler", st, b->binding, element,
+                                 (VkDescriptorBufferInfo){0}, description);
+    } else s = !sid ? VK_NULL_HANDLE : seq ? vk_samp_at(sid, seq, nearest, NULL, 0)
+                                         : nearest ? vk_samp_by_id_nearest(sid) : samp_cached(sid);
     static int nsl; if (g_tracing || (g_x_logfs && S.sh[1] && S.sh[1]->key == g_x_logfs && nsl++ < 60)) { char d[256]; void vk_samp_describe_at(int sid, uint64_t seq, char *out, size_t n); vk_samp_describe_at(sid, seq, d, sizeof d); VKLOG("  %sbinding %d: %s (texture handle %#llx, present %llu, pass %d, thread %d)", g_tracing ? "" : "logfs ", b->binding, d, (unsigned long long)texh, (unsigned long long)g_tex_frame, g_sub_pass - 1, (int)gettid()); }
     return s ? s : vk_dummy_sampler();
 }
@@ -2390,7 +2398,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         if (storage) note_storage_image(st, g_tvc[ck].im);
         if (vk_rs_tracking()) resolution_note_binding(st,b,g_tvc[ck].im,storage);
         if (g_rs_collect) resolution_collect_sample(st,b,g_tvc[ck].im,storage);
-        if (!storage) ii->sampler = samp_for(st, b, h, g_tvc[ck].num != 0);
+        if (!storage) ii->sampler = samp_for(st, b, h, g_tvc[ck].num != 0, element);
         return g_tvc[ck].num;
     }
     int num = 0;
@@ -2454,7 +2462,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
         const vkfmt_t *f = t ? vk_fmt(t->d.format) : NULL;
         ii->imageView = vk_dummy_view(b->dim == 0xff ? 1 : b->dim, b->flags & 1, (b->flags & 2) != 0, storage, f && f->is_int); num = f && f->is_int ? (f->is_sint ? 2 : 1) : 0;
     }
-    if (!storage) ii->sampler = samp_for(st, b, h, num != 0);
+    if (!storage) ii->sampler = samp_for(st, b, h, num != 0, element);
     return num;
 }
 // Reuse within a submission (the cache is emptied when it begins, vk_exec_reset): descriptor sets by their whole content (layout, and every buffer range,
@@ -2609,11 +2617,18 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         VkBuffer buf; VkDeviceSize off, len;
         switch (b->kind) {
         case RK_SUPPORT: bi[nw] = (VkDescriptorBufferInfo){vk_support_buffer(), 0, 65536}; if (g_rs_collect) rs_support=(int)nw; break;
-        case RK_C1: vk_shader_c1(s, &buf, &off, &len); bi[nw] = (VkDescriptorBufferInfo){buf, off, len}; break;
+        case RK_C1:
+            vk_shader_c1(s, &buf, &off, &len);
+            bi[nw] = (VkDescriptorBufferInfo){buf, off, len};
+            if (st < 3 && g_input_collect_descriptors && s->c1_len)
+                input_capture_descriptor("graphics-c1", st, b->binding, 0, bi[nw], NULL);
+            break;
         case RK_CBUF: {
             int bound = cbuf_desc(st, s, b, &bi[nw]);
             if (bound && st == 5 && g_sc.usage)
                 surface_uniform_queue(s->key, b->binding, b->reg, bi[nw]);
+            if (bound && st < 3 && g_input_collect_descriptors)
+                input_capture_descriptor("graphics-ubo", st, b->binding, 0, bi[nw], NULL);
             if (ncb < MEMO_CB) { mci[ncb] = (uint8_t)i; mcd[ncb++] = bi[nw]; }
             break;
         }
@@ -3248,11 +3263,15 @@ static int prepare_draw(int prim, int indexed) {
     VkDescriptorSet sets[5] = {0};
     uint32_t dofs[5][96], ndofs = 0, dall[3 * 96];
     uint64_t t1d = tick();
+    g_input_descriptor_count = 0;
+    g_input_collect_descriptors = indexed && g_input_capture && g_input_vs &&
+        g_pd_state == 1 && g_pd_full && input_capture_matches(k.key[0], k.key[1]);
     for (int st = 0; st < 3; st++) if (S.sh[st] && !(st == 1 && k.raster_discard)) {
         uint64_t m0 = g_set_memo; int n0 = g_stn[st]; g_stn[st] = 0; g_coll_st = st;   // the images it is collected with (vk_watch); a memoized set keeps the last ones
         sets[S.sh[st]->set] = stage_set(st, S.sh[st], dofs[S.sh[st]->set], NULL); k.um[st] = g_num_um; k.im[st] = g_num_im; k.r32[st] = g_num_r32;
         g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0;
-        if (g_rs_replay && !sets[S.sh[st]->set]) { g_vkst.skip_rt++; return 0; } }
+        if (g_rs_replay && !sets[S.sh[st]->set]) { g_input_collect_descriptors = 0; g_vkst.skip_rt++; return 0; } }
+    g_input_collect_descriptors = 0;
     if (g_order_check) {   // the order-only barrier before this draw (see g_order_keep): kept, or the pass ends here with it
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
         if (g_pass_wmem || shader_wmem(S.sh[0]) || shader_wmem(fs) || shader_wmem(S.sh[2]) || order_feedback(3)) {
@@ -3352,7 +3371,7 @@ static int prepare_draw(int prim, int indexed) {
         if (!(dbg_draw() & 2) && b < 17) { int fresh = bc_fresh(); if (fresh || g_bc.vb[b] != buf || g_bc.vo[b] != off) { vkCmdBindVertexBuffers(cb, b, 1, &buf, &off); g_bc.vb[b] = buf; g_bc.vo[b] = off; } }
     }
     if (g_input_capture && g_pd_state == 1 && indexed &&
-        (!g_input_vs || g_input_vs == k.key[0])) g_input_key = k;
+        input_capture_matches(k.key[0], k.key[1])) g_input_key = k;
     return 1;
 }
 // quads without an index buffer: one buffer of 0 1 2 0 2 3, 4 5 6 4 6 7, ... for up to QUAD_MAX quads (more are drawn as the first QUAD_MAX)
@@ -3671,7 +3690,8 @@ static void indirect_log(const p_draw_idx *d) {
 static void capture_indexed_inputs(const p_draw_idx *d, VkBuffer arguments, VkDeviceSize argument_offset,
                                    VkBuffer count_buffer, VkDeviceSize count_offset,
                                    VkBuffer indices, VkDeviceSize index_offset, VkIndexType type) {
-    if (g_input_draws >= INPUT_PER_PASS || (g_input_vs && g_input_vs != S.sh[0]->key)) return;
+    if (g_input_draws >= INPUT_PER_PASS ||
+        !input_capture_matches(S.sh[0]->key, S.sh[1] ? S.sh[1]->key : 0)) return;
     input_sample_t sample = {
         .present = g_tex_frame, .submission = g_set_epoch, .pass = g_sub_pass - 1,
         .draw = g_vkst.draws, .dispatches = g_vkst.dispatches, .vs = S.sh[0]->key,
@@ -3707,6 +3727,7 @@ static void capture_indexed_inputs(const p_draw_idx *d, VkBuffer arguments, VkDe
                                   (unsigned)d->count)) return;
     }
     ++g_input_draws;
+    input_capture_draw_descriptors(&sample);
     sample.count = 0;
     // A prefix is only a sample of the binding. Draw offsets can point
     // beyond it even when the complete index range fits.
