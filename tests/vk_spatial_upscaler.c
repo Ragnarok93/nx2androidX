@@ -322,6 +322,7 @@ static void check_spatial_slider(void) {
             assert(out && spatial_active == mode);
             readback(out->texture.img, OUT, OUT);
             uint64_t distance = slider_distance(unsharpened, mapped, sizeof unsharpened);
+            fprintf(stderr, "slider mode=%d strength=%d distance=%llu\n", mode, sharpness, (unsigned long long)distance);
             // Saturation and quantization can flatten individual steps.
             assert(distance >= previous);
             if (sharpness == 25) quarter = distance;

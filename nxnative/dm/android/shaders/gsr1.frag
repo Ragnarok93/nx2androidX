@@ -61,9 +61,13 @@ void main() {
 
     float minY = min(min(left.y, left.z), min(right.x, right.w));
     float maxY = max(max(left.y, left.z), max(right.x, right.w));
-    // The midpoint uses the upstream edge sharpness of 2. Ranging from 1
-    // to 3 keeps the reconstruction filter active throughout the slider.
-    float finalY = clamp((1.0 + 2.0 * params.sharpness) * weights.y / weights.x, minY, maxY);
+    // Keep the full-strength edge correction inside the original local-range
+    // and delta bounds. Apply strength after both clamps: multiplying before
+    // them made the slider collapse to identical values on saturated edges.
+    // Retain one third of the adaptive correction at zero so GSR1 does not
+    // become bilinear; maximum is unchanged from the previous strength 3.
+    float finalY = clamp(3.0 * weights.y / weights.x, minY, maxY);
     float delta = clamp(finalY - (base.g - mean), -23.0 / 255.0, 23.0 / 255.0);
+    delta *= mix(1.0 / 3.0, 1.0, clamp(params.sharpness, 0.0, 1.0));
     color.rgb = clamp(base.rgb + delta, 0.0, 1.0);
 }
