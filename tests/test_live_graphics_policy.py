@@ -83,7 +83,16 @@ int main(void) {
         front=(ANDROID/'front_android.c').read_text()
         layout=(ANDROID/'overlay_layout.h').read_text()
         present=(ANDROID/'gfx_vk_present.c').read_text()
-        self.assertIn('OVM_DRS, OVM_DRS_MIN, OVM_RS_MAX, OVM_DRS_NOW, OVM_DRS_HOOK',layout)
+        import re
+        table = layout.split("OVM_TAB_ITEMS[OVM_PAGES][OVM_PER_TAB] = {", 1)[1].split("};", 1)[0]
+        rows = [re.findall(r"OVM_\w+", row) for row in re.findall(r"\{([^{}]+)\}", table)]
+        self.assertEqual(rows[2], ["OVM_VIVID", "OVM_FSR", "OVM_FSR_SHARP", "OVM_OUTPUT_HEIGHT",
+                                   "OVM_DRS", "OVM_DRS_MIN", "OVM_RS_MAX"])
+        self.assertIn("OVM_DRS_NOW", rows[4])
+        self.assertEqual(sum(row.count("OVM_DRS_NOW") for row in rows), 1)
+        self.assertFalse(any("OVM_DRS_HOOK" in row for row in rows))
+        self.assertIn("item==OVM_DRS_MIN) menu_drs_min(", front)
+        self.assertIn("item == OVM_DRS_MIN) { menu_drs_min(", front)
         self.assertIn('ov_menu_dyn_min_value',layout)
         self.assertIn('OVM_DRS_MIN) menu_drs_min(',front)
         self.assertIn('OVM_RATE) { menu_rate_step(',front)

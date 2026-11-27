@@ -126,17 +126,22 @@ int main(int argc, char **argv) {
     assert(g_scale_capture_ticket == last); // cancellation does not resume capture
     assert(setenv("DM_ROOT", argv[1], 1) == 0);
     assert(vk_pass_dump_export_begin() && !g_scale_capture);
-    char path[1024], line[1024];
+    char path[1024], *line = NULL;
+    size_t capacity = 0;
     snprintf(path, sizeof path, "%s/scaling_frames.tsv", argv[1]);
     FILE *trace = fopen(path, "r");
-    assert(trace && fgets(line, sizeof line, trace) && strstr(line, "overwritten_rows=1"));
-    assert(fgets(line, sizeof line, trace) && strstr(line, "runtime_elf_build_id="));
-    assert(fgets(line, sizeof line, trace) && strstr(line, "requested_upscaler"));
-    assert(fgets(line, sizeof line, trace) && !strncmp(line, "2\tFixed", 7));
-    while (fgets(line, sizeof line, trace)) {
-        if (strstr(line, "GSR 2\tGSR 1\t1\t960\t540\t1280\t720")) break;
+    assert(trace && getline(&line, &capacity, trace) >= 0 && strstr(line, "overwritten_rows=1"));
+    assert(getline(&line, &capacity, trace) >= 0 && strstr(line, "runtime_elf_build_id="));
+    assert(getline(&line, &capacity, trace) >= 0 && strstr(line, "requested_upscaler"));
+    assert(strstr(line, "\tconfigured_output_short_edge\tsupersampling\n"));
+    assert(getline(&line, &capacity, trace) >= 0 && !strncmp(line, "2\tFixed", 7));
+    int found = 0;
+    while (getline(&line, &capacity, trace) >= 0) {
+        if (strstr(line, "GSR 2\tGSR 1\t1\t960\t540\t1280\t720")) { found = 1; break; }
     }
-    assert(!feof(trace) && !fclose(trace));
+    assert(found && !ferror(trace));
+    free(line);
+    assert(!fclose(trace));
     vk_pass_dump_export_end();
     assert(!g_scale_capture && !vk_pass_dump_user_active());
 }

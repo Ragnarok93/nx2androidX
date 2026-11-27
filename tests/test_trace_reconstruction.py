@@ -1,6 +1,6 @@
 import sys, unittest, tempfile, zipfile, io, csv
 from pathlib import Path
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'devtools'))
 from trace_reconstruction import analyze, inspect, REQUIRED, summarize_presentation
 
 def row(role, p, im='a', seq='7', w='1384', h='780', **changes):

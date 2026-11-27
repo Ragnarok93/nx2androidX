@@ -48,9 +48,15 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
         import re
         table = self.menu.split("OVM_TAB_ITEMS[OVM_PAGES][OVM_PER_TAB] = {", 1)[1].split("};", 1)[0]
         rows = [re.findall(r"OVM_\w+", row) for row in re.findall(r"\{([^{}]+)\}", table)]
-        self.assertEqual(rows[1], ["OVM_FPS", "OVM_MODE", "OVM_EXPORT", "OVM_IMPORT", "OVM_AUDIO"])
-        self.assertEqual(rows[2], ["OVM_VIVID", "OVM_FSR", "OVM_FSR_SHARP", "OVM_DRS",
-                                   "OVM_DRS_MIN", "OVM_RS_MAX", "OVM_DRS_NOW", "OVM_DRS_HOOK", "OVM_DRIVER"])
+        self.assertEqual(rows[1], ["OVM_FPS", "OVM_MODE", "OVM_EXPORT", "OVM_IMPORT", "OVM_AUDIO", "OVM_DRIVER"])
+        self.assertEqual(rows[2], ["OVM_VIVID", "OVM_FSR", "OVM_FSR_SHARP", "OVM_OUTPUT_HEIGHT",
+                                   "OVM_DRS", "OVM_DRS_MIN", "OVM_RS_MAX"])
+        self.assertEqual(rows[4], ["OVM_DIAG_CAPTURE", "OVM_DIAG_SNAPSHOT", "OVM_DIAG_DELAY", "OVM_DIAG_STOP",
+                                   "OVM_DIAG_EXPORT", "OVM_DIAG_STATUS", "OVM_DIAG_FLAGS", "OVM_DRS_NOW", "OVM_DIAG_BACK"])
+        self.assertEqual(rows[6], ["OVM_OUTPUT_AUTO", "OVM_OUTPUT_720", "OVM_OUTPUT_1080", "OVM_OUTPUT_1440",
+                                   "OVM_OUTPUT_1800", "OVM_OUTPUT_2160", "OVM_OUTPUT_2880", "OVM_OUTPUT_4320",
+                                   "OVM_OUTPUT_CUSTOM", "OVM_OUTPUT_BACK"])
+        self.assertFalse(any("OVM_DRS_HOOK" in row for row in rows))
         self.assertEqual(rows[3], ["OVM_RATE", "OVM_FG", "OVM_FG_MULT", "OVM_FG_FLOW", "OVM_DIAG_OPEN"])
         self.assertIn('[OVM_VIVID]="HDR"', self.gfx)
         self.assertIn("vivid=%d", self.front)

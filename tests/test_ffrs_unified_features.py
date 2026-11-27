@@ -11,7 +11,10 @@ class FinalFantasyResonanceUnifiedFeatures(unittest.TestCase):
         front = (ANDROID / "front_android.c").read_text()
         raster = (ANDROID / "gfx_vk_present.c").read_text()
         self.assertIn("#define OVM_TABS 4", header)
-        self.assertIn("#define OVM_PAGES (OVM_TABS + 2)", header)
+        self.assertIn("#define OVM_PAGES (OVM_TABS + 3)", header)
+        self.assertIn("OVM_OUTPUT_PAGE = OVM_TABS + 2", header)
+        self.assertIn("OVM_OUTPUT_STATE", raster)
+        self.assertIn("OVM_OUTPUT_PAGE", front)
         for k in ("OVM_FSR", "OVM_FSR_SHARP", "OVM_RATE", "OVM_DRS_MIN",
                   "OVM_DIAG_OPEN", "OVM_DIAG_CAPTURE", "OVM_DIAG_EXPORT",
                   "OVM_DIAG_FLAGS", "OVM_FLAG_BC"):
