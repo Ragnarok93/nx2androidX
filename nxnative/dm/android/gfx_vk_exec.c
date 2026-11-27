@@ -702,7 +702,7 @@ static int pass_dump_limit(void) {
 static int g_input_collect_descriptors;
 // Replay-local and scoped to descriptor collection for one draw.
 static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_ok, g_guest_uniform_ok;
-static int g_guest_bilinear_bound;
+static int g_guest_filter_bound;
 #include "gfx_vk_surface_capture.inc"
 static void pass_dump_depth(void);
 static void pass_dump_depth_aspect(VkImageAspectFlags aspect);
@@ -1749,6 +1749,7 @@ static VkRect2D scissor_rect(void) {
 #include "maskclear_vert.spv.h"
 #include "maskclear_frag.spv.h"
 #include "flatdbg_frag.spv.h"
+#include "guest_spatial_frag.spv.h"
 typedef struct { uint32_t ncol, cfmt[8], dfmt, samples, mask; } mckey;
 static struct { VkPipelineLayout pl; VkShaderModule vs, fs; int bad; mckey k[32]; VkPipeline p[32]; int n; } g_mc;
 static VkPipeline mc_pipeline(uint32_t mask) {
@@ -1929,7 +1930,7 @@ typedef struct {
     uint32_t ncol, cfmt[8], dfmt, samples, a2c, blend_en, logic_en, logic_op, wmask[8];
     struct { uint32_t src, dst, srca, dsta, eq, eqa; } bl[8];
     uint32_t clip_neg1, alt, fdz, dual;   // fdz: the fragment shader's variant that writes gl_FragDepth = gl_FragCoord.z (fdz below); dual: its dual-source variant (below)
-    uint32_t guest_bilinear;
+    uint32_t guest_filter;
     uint64_t um[3], im[3], r32[3];   // each stage's sampled bindings given integer views (vk_shader_module)
 } pkey;
 static nvn_hmap g_pipes = {.klen = sizeof(pkey)}; static pthread_mutex_t g_pipe_mu = PTHREAD_MUTEX_INITIALIZER;   // the replay thread and the prewarm threads
@@ -1971,7 +1972,7 @@ static void *async_pipe_thread(void *arg) {
     return NULL;
 }
 static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); under nothing (takes g_pipe_mu)
-    if (!g_async_pipe || k->guest_bilinear || k->raster_discard || (S.sh[0] && S.sh[0]->xfb) || (S.sh[2] && S.sh[2]->xfb)) return 0;
+    if (!g_async_pipe || k->guest_filter || k->raster_discard || (S.sh[0] && S.sh[0]->xfb) || (S.sh[2] && S.sh[2]->xfb)) return 0;
     for (int i = 0; i < S.ncol && i < 8; i++) if (S.rt_has_col[i] && (S.rt_col[i].d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) return 0;   // (the CPU reads it: lin_back)
     int natt = 0; for (int i = 0; i < 9; i++) { const vkimg_t *a = P_att[i].im; if (!a) continue; natt++; if (a->rt_frames < 3) {
             if (g_prof_on) { static int n; if (n++ < 300) VKLOG("pipeline built here: attachment %d %ux%u nvn format %#x drawn in %llu presents in a row (shaders %016llx %016llx)", i, a->w, a->h, a->nvn_format, (unsigned long long)a->rt_frames, (unsigned long long)k->key[0], (unsigned long long)k->key[1]); }
@@ -2032,7 +2033,7 @@ static void *pipe_record_thread(void *arg) {
     return NULL;
 }
 static void pipe_record(const pkey *k) {   // (under g_pipe_mu: only queued here)
-    if (!g_prec || k->alt) return;   // DM_VK_SPV_ALT's pipelines are a debugging run's own
+    if (!g_prec || k->alt || k->guest_filter > SP_BILINEAR) return;   // DM_VK_SPV_ALT's pipelines are a debugging run's own
     pthread_mutex_lock(&g_precq_mu);
     if (!g_precw_on) { g_precw_on = 1; pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, pipe_record_thread, NULL); pthread_attr_destroy(&a); }
     if (g_precq_n < PREC_Q) g_precq[g_precq_n++] = *k;   // (a full queue drops the record: that pipeline is only not prewarmed next time)
@@ -2096,9 +2097,44 @@ static void build_dump(void) {   // (the crash handler: no locks, no allocation)
                 g_build[i].phase == 1 ? "making its shader modules" : "in the driver's pipeline compile", g_build[i].what); }
     if (!n) fprintf(stderr, "[dm] [vk] no pipeline was being built\n");
 }
+// Replay owns these two-set layouts and their pipelines for the device
+// lifetime. Keep the optional push constant off ordinary guest layouts.
+static VkPipelineLayout guest_spatial_layout(const VkDescriptorSetLayout sets[2]) {
+    static nvn_hmap layouts = {.klen = 2 * sizeof(VkDescriptorSetLayout)};
+    VkPipelineLayout layout = nvn_hm_get(&layouts, sets);
+    if (!layout) {
+        VkPushConstantRange constants = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 3 * sizeof(float)};
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            NULL, 0, 2, sets, 1, &constants};
+        if (vkCreatePipelineLayout(V.dev, &info, NULL, &layout) != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+        nvn_hm_put(&layouts, sets, layout);
+    }
+    return layout;
+}
+
+static VkShaderModule guest_spatial_module(void) {
+    // Spatial variants are built on replay. Their specialized pipeline
+    // layouts are excluded from background requests and persistent prewarm.
+    static VkShaderModule module;
+    static int attempted;
+    if (!attempted) {
+        attempted = 1;
+        VkShaderModuleCreateInfo info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            NULL, 0, sizeof guest_spatial_frag_spv, guest_spatial_frag_spv};
+        VkShaderModule created = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(V.dev, &info, NULL, &created) == VK_SUCCESS) module = created;
+    }
+    return module;
+}
+
 static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshader_t *const stg_in[3]) {
-    VkShaderModule guest_fragment = k->guest_bilinear ? vk_shader_guest_bilinear(stg_in[1]) : VK_NULL_HANDLE;
-    if (k->guest_bilinear && !guest_fragment) return (VkPipeline)1;
+    VkShaderModule guest_fragment = VK_NULL_HANDLE;
+    if (k->guest_filter == SP_BILINEAR)
+        guest_fragment = vk_shader_guest_bilinear(stg_in[1]);
+    else if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1)
+        guest_fragment = guest_spatial_module();
+    if (k->guest_filter && !guest_fragment) return (VkPipeline)1;
     // DM_VK_PIPE_LOG: one line per pipeline built, with the state that decides how a material is drawn (shaders, cull/front, depth test/write/func,
     // colour formats, blend). For a game where some materials render wrong and others do not, the lines of the wrong material name the state to compare.
     { static int on = -1; if (on < 0) on = getenv("DM_VK_PIPE_LOG") ? atoi(getenv("DM_VK_PIPE_LOG")) : 0;
@@ -2121,9 +2157,15 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     if (stg[0]) xo[0] = (stg[2] ? stg[2]->in_locs : fs ? fs->in_locs : 0) & ~stg[0]->out_locs;
     if (stg[2]) xo[2] = (fs ? fs->in_locs : 0) & ~stg[2]->out_locs;
     for (int i = 0; i < 3; i++) if (stg[i] && !(i == 1 && k->raster_discard)) ss[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, vk_sg_pin(fl[i], NULL), 0, fl[i], vk_shader_module(stg[i], k->um[i], k->im[i], k->r32[i], k->alt && !k->um[i] && !k->im[i] && !k->r32[i] && !xo[i] ? 1u << 31 : xo[i], i == 1 ? (k->fdz ? 1 : 0) | (k->dual ? 2 : 0) : 0), "main", NULL};   // (pNext: DM_VK_SUBGROUP_PIN)
-    if (guest_fragment)
-        for (uint32_t i = 0; i < ns; ++i)
-            if (ss[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT) ss[i].module = guest_fragment;
+    VkSpecializationMapEntry guest_mode = {0, 0, sizeof k->guest_filter};
+    VkSpecializationInfo guest_spec = {1, &guest_mode, sizeof k->guest_filter, &k->guest_filter};
+    if (guest_fragment) {
+        for (uint32_t i = 0; i < ns; ++i) {
+            if (ss[i].stage != VK_SHADER_STAGE_FRAGMENT_BIT) continue;
+            ss[i].module = guest_fragment;
+            if (k->guest_filter > SP_BILINEAR) ss[i].pSpecializationInfo = &guest_spec;
+        }
+    }
     int flat = (int)k->debug_mode;
     if (!fs) flat = 0;
     if (flat & 1) {   // DM_VK_X_FLAT_VS: the fragment stage becomes flatdbg.frag
@@ -3174,7 +3216,7 @@ static void resolution_draw_preflight(uint64_t index,int index_type,int count,in
         resolution_restore_before_recording();
 }
 static int prepare_draw(int prim, int indexed) {
-    g_guest_bilinear_bound = 0;
+    g_guest_filter_bound = 0;
     // DM_VK_CB_DRAWS (read every submission, default 128, 0 = never): the replay is cut every that many draws and what is recorded goes to the GPU at once
     // (vk_cmd_split), so the GPU works on the frame while the rest is replayed instead of after all of it: NEO's Scramble Crossing 36.7 → 15.7 ms a frame
     g_cb_draws++;   // the cut itself happens between passes (begin_pass); inside one only with DM_VK_PASS_SPLIT (below): a pass cut in two stores and reloads its attachments
@@ -3316,8 +3358,9 @@ static int prepare_draw(int prim, int indexed) {
     uint32_t dofs[5][96], ndofs = 0, dall[3 * 96];
     uint64_t t1d = tick();
     g_guest_source_ok = g_guest_sampler_ok = g_guest_uniform_ok = 0;
-    g_guest_filter_check = S.sh[1] && S.sh[1]->guest_filter_certified &&
-        dm_spatial_mode() == SP_BILINEAR && !vk_rs_cache_has_scaled() && !g_order_check &&
+    int guest_mode = S.sh[1] && S.sh[1]->guest_filter_certified ? dm_spatial_mode() : SP_NATIVE;
+    g_guest_filter_check = guest_mode >= SP_BILINEAR && guest_mode <= SP_SGSR1 &&
+        nsets == 2 && !vk_rs_cache_has_scaled() && !g_order_check &&
         k.ncol == 1 && k.cfmt[0] == VK_FORMAT_R8G8B8A8_UNORM && k.wmask[0] == 15 &&
         !k.dfmt && !k.blend_en && !k.logic_en && !k.raster_discard && !k.a2c &&
         k.samples == 1 && !k.alt && !k.debug_mode && !k.key[2] && !vsh->xfb;
@@ -3329,7 +3372,8 @@ static int prepare_draw(int prim, int indexed) {
         sets[S.sh[st]->set] = stage_set(st, S.sh[st], dofs[S.sh[st]->set], NULL); k.um[st] = g_num_um; k.im[st] = g_num_im; k.r32[st] = g_num_r32;
         g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0;
         if (g_rs_replay && !sets[S.sh[st]->set]) { g_input_collect_descriptors = g_guest_filter_check = 0; g_vkst.skip_rt++; return 0; } }
-    k.guest_bilinear = g_guest_filter_check && g_guest_source_ok && g_guest_sampler_ok && g_guest_uniform_ok;
+    if (g_guest_filter_check && g_guest_source_ok && g_guest_sampler_ok && g_guest_uniform_ok)
+        k.guest_filter = guest_mode;
     g_input_collect_descriptors = g_guest_filter_check = 0;
     if (g_order_check) {   // the order-only barrier before this draw (see g_order_keep): kept, or the pass ends here with it
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
@@ -3352,14 +3396,15 @@ static int prepare_draw(int prim, int indexed) {
         for (uint32_t i = 0; i < k.nbind; i++) VKLOG("  binding %u stride %u rate %u divisor %u", k.bind[i].binding, k.bind[i].stride, k.bind[i].rate, k.bind[i].divisor);
     }
     crumb_draw(k.key[0], k.key[1], k.key[2]);
-    VkPipeline p = graphics_pipeline(&k, layout);
-    if (!p && k.guest_bilinear) {
-        k.guest_bilinear = 0;
+    VkPipelineLayout guest_layout = k.guest_filter > SP_BILINEAR ? guest_spatial_layout(dsl) : layout;
+    VkPipeline p = guest_layout ? graphics_pipeline(&k, guest_layout) : VK_NULL_HANDLE;
+    if (!p && k.guest_filter) {
+        k.guest_filter = SP_NATIVE;
         p = graphics_pipeline(&k, layout);
-    }
+    } else if (p) layout = guest_layout;
     uint64_t t1 = tick(); g_vkst.ns_pipe += t1 - t0 - tdesc;
     if (!p) { g_vkst.skip_pipe++; return 0; }
-    g_guest_bilinear_bound = k.guest_bilinear;
+    g_guest_filter_bound = k.guest_filter;
     // A per-pass trace of the *actual* Vulkan raster/depth pipeline state.
     // Read only for an explicitly armed one-shot capture; at most three
     // samples from each depth-using pass and 72 lines per submission. The
@@ -3433,6 +3478,10 @@ static int prepare_draw(int prim, int indexed) {
         else if (S.vbuf[b].size) { vkpool_t *vp = vk_pool_of(S.vbuf[b].address, 1); if (vp && S.vbuf[b].address + S.vbuf[b].size > vp->hi && vp->hi < vp->end) vk_cross(2, S.vbuf[b].address, S.vbuf[b].size, vp); }
         if (g_var_now == 5) { buf = vk_zero_buffer(); off = 0; }
         if (!(dbg_draw() & 2) && b < 17) { int fresh = bc_fresh(); if (fresh || g_bc.vb[b] != buf || g_bc.vo[b] != off) { vkCmdBindVertexBuffers(cb, b, 1, &buf, &off); g_bc.vb[b] = buf; g_bc.vo[b] = off; } }
+    }
+    if (k.guest_filter > SP_BILINEAR) {
+        float constants[] = {(float)P_att[0].w, (float)P_att[0].h, dm_fsr_sharpness() / 100.0f};
+        vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, constants);
     }
     if (g_input_capture && g_pd_state == 1 && indexed &&
         input_capture_matches(k.key[0], k.key[1])) g_input_key = k;
@@ -3882,11 +3931,14 @@ static void draw_idx(const p_draw_idx *d) {
             capture_indexed_inputs(d, VK_NULL_HANDLE, 0, VK_NULL_HANDLE, 0, ib, io, it);
         int xf = xfb_begin(cb);
         vkCmdDrawIndexed(cb, (uint32_t)d->count, inst, 0, d->base_vertex, (uint32_t)d->base_instance);
-        if (g_guest_bilinear_bound && d->count > 0) {
-            static int logged;
-            if (!logged) VKLOG("[upscale] guest Bilinear draw recorded: frame %llu, attachment %ux%u",
-                               (unsigned long long)g_tex_frame, P_att[0].w, P_att[0].h);
-            logged = 1;
+        if (g_guest_filter_bound && d->count > 0) {
+            static unsigned logged;
+            unsigned mode_bit = 1u << g_guest_filter_bound;
+            if (!(logged & mode_bit))
+                VKLOG("[upscale] guest %s variant recorded: frame %llu, attachment %ux%u",
+                      spatial_mode_name(g_guest_filter_bound), (unsigned long long)g_tex_frame,
+                      P_att[0].w, P_att[0].h);
+            logged |= mode_bit;
         }
         if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf);
     }

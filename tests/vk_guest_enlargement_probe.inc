@@ -4,12 +4,13 @@
 #include "guest_vert.spv.h"
 #include "guest_edge_frag.spv.h"
 #include "guest_smooth_frag.spv.h"
+#include "guest_spatial_frag.spv.h"
 
 enum { GUEST_VS_UBO = 4096, GUEST_FS_UBO = 5120,
        GUEST_EDGE_UBO = 6144, GUEST_VERTEX_OFFSET = 7168 };
 
 static VkPipeline guest_pipeline(VkPipelineLayout layout, const uint32_t *code, size_t size,
-                                 VkBool32 blend_enabled, VkColorComponentFlags write_mask) {
+                                 VkBool32 blend_enabled, VkColorComponentFlags write_mask, unsigned spatial_mode) {
     VkShaderModule modules[2];
     VkShaderModuleCreateInfo vertex = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0,
                                        sizeof guest_vert_spv, guest_vert_spv};
@@ -20,6 +21,9 @@ static VkPipeline guest_pipeline(VkPipelineLayout layout, const uint32_t *code, 
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, modules[0], "main"},
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, modules[1], "main"},
     };
+    VkSpecializationMapEntry mode = {0, 0, sizeof spatial_mode};
+    VkSpecializationInfo spec = {1, &mode, sizeof spatial_mode, &spatial_mode};
+    if (spatial_mode) stages[1].pSpecializationInfo = &spec;
     VkVertexInputBindingDescription binding = {0, 8 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription attributes[] = {
         {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0},
@@ -199,11 +203,11 @@ static void check_guest_enlargement(void) {
         {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, sets[2], 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &over},
     };
     vkUpdateDescriptorSets(V.dev, sizeof writes / sizeof writes[0], writes, 0, NULL);
-    VkPipeline edge = guest_pipeline(layout, guest_edge_frag_spv, sizeof guest_edge_frag_spv, VK_FALSE, 0xf);
-    VkPipeline smooth = guest_pipeline(layout, guest_smooth_frag_spv, sizeof guest_smooth_frag_spv, VK_FALSE, 0xf);
-    VkPipeline compose = guest_pipeline(layout, guest_smooth_frag_spv, sizeof guest_smooth_frag_spv, VK_TRUE, 0xf);
+    VkPipeline edge = guest_pipeline(layout, guest_edge_frag_spv, sizeof guest_edge_frag_spv, VK_FALSE, 0xf, 0);
+    VkPipeline smooth = guest_pipeline(layout, guest_smooth_frag_spv, sizeof guest_smooth_frag_spv, VK_FALSE, 0xf, 0);
+    VkPipeline compose = guest_pipeline(layout, guest_smooth_frag_spv, sizeof guest_smooth_frag_spv, VK_TRUE, 0xf, 0);
     VkPipeline alpha_only = guest_pipeline(layout, guest_smooth_frag_spv, sizeof guest_smooth_frag_spv,
-                                           VK_FALSE, VK_COLOR_COMPONENT_A_BIT);
+                                           VK_FALSE, VK_COLOR_COMPONENT_A_BIT, 0);
     assert(spatial_image_ready(SP_OUTPUT, OUT, OUT,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, g_sfmt));
     spatial_image *target = &g_spatial.image[SP_OUTPUT];
@@ -287,7 +291,7 @@ static void check_guest_enlargement(void) {
     uint32_t patched[sizeof guest_smooth_frag_spv / sizeof(uint32_t)];
     memcpy(patched, guest_smooth_frag_spv, sizeof patched);
     assert(dm_guest_bilinear_patch(patched, sizeof patched / sizeof patched[0]));
-    VkPipeline guest_linear = guest_pipeline(layout, patched, sizeof patched, VK_FALSE, 0xf);
+    VkPipeline guest_linear = guest_pipeline(layout, patched, sizeof patched, VK_FALSE, 0xf, 0);
     begin();
     vkCmdClearColorImage(test_cb, target->texture.img, VK_IMAGE_LAYOUT_GENERAL, &magenta, 1, &full);
     vk_img_barrier_all(test_cb);
@@ -304,6 +308,83 @@ static void check_guest_enlargement(void) {
         assert(memcmp(mapped + last, sentinel, sizeof sentinel) == 0);
     }
     puts("guest Bilinear shader variant preserves raster coverage and alpha PASS");
+    VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 3 * sizeof(float)};
+    li.pushConstantRangeCount = 1;
+    li.pPushConstantRanges = &pc;
+    VkPipelineLayout spatial_layout;
+    CHECK(vkCreatePipelineLayout(V.dev, &li, NULL, &spatial_layout));
+    spatial_image guest_target = *target;
+    *target = (spatial_image){0};
+    int saved_mode = selected_mode, saved_sharpness = sharpness;
+    uint64_t ticket = 0;
+    const int source_crop[] = {0, 0, SRC, SRC};
+    for (int mode = SP_FSR1; mode <= SP_SGSR1; ++mode) {
+        VkPipeline pipeline = guest_pipeline(spatial_layout, guest_spatial_frag_spv,
+            sizeof guest_spatial_frag_spv, VK_FALSE, 0xf, (unsigned)mode);
+        selected_mode = mode;
+        uint8_t unsharpened[sizeof baseline];
+        uint64_t previous = 0;
+        for (sharpness = 0; sharpness <= 100; sharpness += 25) {
+            spatial_image *reference = spatial_reconstruct(&input.texture, source_crop, 0, OUT, OUT, ++ticket, NULL);
+            assert(reference && spatial_active == mode);
+            begin();
+            guest_readback(reference);
+            memcpy(baseline, mapped, sizeof baseline);
+
+            begin();
+            float constants[] = {OUT, OUT, sharpness / 100.0f};
+            vkCmdPushConstants(test_cb, spatial_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, constants);
+            vkCmdClearColorImage(test_cb, guest_target.texture.img, VK_IMAGE_LAYOUT_GENERAL, &magenta, 1, &full);
+            vk_img_barrier_all(test_cb);
+            guest_draw(pipeline, spatial_layout, sets, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+            guest_readback(&guest_target);
+            unsigned max_error = 0;
+            for (unsigned y = 0; y < OUT; ++y) {
+                for (unsigned x = 0; x < OUT - 1; ++x) {
+                    size_t at = (y * OUT + x) * 4;
+                    for (unsigned c = 0; c < 3; ++c) {
+                        unsigned error = (unsigned)abs((int)mapped[at + c] - baseline[at + c]);
+                        if (error > max_error) max_error = error;
+                    }
+                    assert(mapped[at + 3] == 0);
+                }
+                size_t last = (y * OUT + OUT - 1) * 4;
+                assert(memcmp(mapped + last, sentinel, sizeof sentinel) == 0);
+            }
+            fprintf(stderr, "guest %s at %d%% max RGB error %u\n", spatial_mode_name(mode), sharpness, max_error);
+            assert(max_error <= 2);
+            if (!sharpness) memcpy(unsharpened, mapped, sizeof unsharpened);
+            uint64_t distance = slider_distance(unsharpened, mapped, sizeof unsharpened);
+            assert(distance >= previous);
+            if (sharpness == 25) assert(distance);
+            previous = distance;
+        }
+        // A narrowed guest crop rejects adaptive taps. The fallback preserves
+        // the original shader's coordinate warp, mask and alpha.
+        float cropped[8];
+        memcpy(cropped, constants[1], sizeof cropped);
+        cropped[4] = 0.2f;
+        memcpy(mapped + GUEST_FS_UBO, cropped, sizeof cropped);
+        begin();
+        guest_draw(smooth, layout, sets, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        guest_readback(&guest_target);
+        memcpy(guest, mapped, sizeof guest);
+        begin();
+        float draw_params[] = {OUT, OUT, 0.5f};
+        vkCmdPushConstants(test_cb, spatial_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof draw_params, draw_params);
+        guest_draw(pipeline, spatial_layout, sets, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        guest_readback(&guest_target);
+        assert(memcmp(guest, mapped, sizeof guest) == 0);
+        puts(mode == SP_FSR1 ? "guest FSR 1 reference, sharpness and fallback PASS"
+                            : "guest GSR 1 reference, sharpness and fallback PASS");
+        memcpy(mapped + GUEST_FS_UBO, constants[1], sizeof constants[1]);
+        vkDestroyPipeline(V.dev, pipeline, NULL);
+    }
+    selected_mode = saved_mode;
+    sharpness = saved_sharpness;
+    spatial_drop_images();
+    *target = guest_target;
+    vkDestroyPipelineLayout(V.dev, spatial_layout, NULL);
     vkDestroyPipeline(V.dev, guest_linear, NULL);
     vkDestroyPipeline(V.dev, alpha_only, NULL);
     vkDestroyPipeline(V.dev, compose, NULL);

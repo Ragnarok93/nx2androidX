@@ -260,7 +260,7 @@ backing independently of the replay cache. Replay can reuse a discarded
 allocation once it is the sole owner.
 
 The presentation upscaler still bypasses images that already match the
-requested extent. A separate in-replay Bilinear path can now modify an
+requested extent. A separate in-replay spatial path can modify an
 eligible guest enlargement before the later composition draws. Ordinary
 replay checks that a complete stored clear defined the same-frame source
 and that the selected view, sampler, format and write sequence still
@@ -275,6 +275,15 @@ sample and alpha stores. The guest vertex stage, scissor and output
 attachment continue to define the raster coverage and preserve loaded
 pixels outside the draw. The native pipeline remains the fallback when
 the resource proof or variant creation fails.
+
+The FSR 1 and GSR 1 variants use the same replay admission. They also check
+the guest uniform's full-source bounds and the interpolated output grid
+before using neighborhood taps. An unsupported mapping follows the guest's
+smoothstep sample. FSR 1 uses EASU and evaluates the RCAS neighborhood in the
+same draw when sharpening is enabled. GSR 1 shares its filter with the
+presentation path. Sharpness is a draw constant, so slider changes reuse
+the same pipeline. These variants preserve the guest attachment extent and
+its downstream composition.
 
 The optional software Vulkan guest probe runs the local SPIR-V modules with
 synthetic vertices, uniforms and samplers. It tests a private reconstruction

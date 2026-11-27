@@ -525,3 +525,25 @@ reconstruct the target draw's vertices or covered region from a capture.
   verification. GitHub listed the
   [signed builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46015577276/artifacts/15206616216)
   unexpired at inspection.
+
+## 2026-11-27 — FSR 1 and GSR 1 in guest replay
+
+- Extended the certified enlargement path to FSR 1 and GSR 1. The same
+  attachment, vertex stage, scissor, alpha contract, and downstream passes
+  carry through from the Bilinear checkpoint. The shaders check the live
+  source bounds and affine output grid before using neighborhood taps.
+  Unsupported inputs stay on the original smoothstep sampling behavior.
+- FSR 1 runs EASU and applies optional RCAS by evaluating its neighboring
+  EASU outputs in the same draw. It adds shader work without allocating a
+  second image. GSR 1 shares its filter with presentation. Both read the
+  slider as a push constant independent of their pipeline key.
+- With the supplied guest vertex and fragment modules and synchronization
+  validation, Lavapipe readbacks matched the production FSR 1 and GSR 1
+  presentation reference byte-for-byte in covered RGB at 0, 25, 50, 75 and
+  100 percent sharpness. Both retained zero output alpha, preserved the
+  loaded pixels outside the scissor, and reproduced guest pixels under
+  narrow-source fallback. This is a host validation of the eligible
+  draw, with physical FFR admission and GPU timing still open.
+- GSR 2 still needs a synchronized pre-composition source and history.
+  Presentation telemetry also does not yet attribute an accepted frame to
+  a replay-stage reconstruction variant.
