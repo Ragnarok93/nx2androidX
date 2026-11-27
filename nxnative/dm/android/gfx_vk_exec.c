@@ -2479,6 +2479,7 @@ static int guest_filter_source(int st, const dmsv_bind *binding, unsigned elemen
 static void guest_check_source(const vkimg_t *im, VkImageView view) {
     const vkimg_t *dst = P_att[0].im;
     extern __thread VkFormat vk_view_fmt;
+    extern __thread VkComponentMapping vk_view_swizzle;
     g_guest_source_ok = im && dst && view && im->img != dst->img && im->pool && dst->pool &&
         im->pool != dst->pool && !im->novl && !im->rs_backing && im->wseq &&
         im->guest_clear_write == im->wseq && im->guest_clear_frame == g_tex_frame + 1 &&
@@ -2488,7 +2489,12 @@ static void guest_check_source(const vkimg_t *im, VkImageView view) {
         vk_view_range.levelCount == 1 && !vk_view_range.baseArrayLayer && vk_view_range.layerCount == 1 &&
         im->w < P_att[0].w && im->h < P_att[0].h &&
         (uint64_t)im->w * P_att[0].h == (uint64_t)im->h * P_att[0].w;
-    if (g_guest_source_ok && im->samples == 1 && (im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+    if (!g_guest_source_ok || im->samples != 1 || !(im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return;
+    const VkComponentMapping swz = vk_view_swizzle;
+    if ((swz.r == VK_COMPONENT_SWIZZLE_IDENTITY || swz.r == VK_COMPONENT_SWIZZLE_R) &&
+        (swz.g == VK_COMPONENT_SWIZZLE_IDENTITY || swz.g == VK_COMPONENT_SWIZZLE_G) &&
+        (swz.b == VK_COMPONENT_SWIZZLE_IDENTITY || swz.b == VK_COMPONENT_SWIZZLE_B) &&
+        (swz.a == VK_COMPONENT_SWIZZLE_IDENTITY || swz.a == VK_COMPONENT_SWIZZLE_A)) {
         g_guest_scene.image = im->img;
         g_guest_scene.extent = (VkExtent2D){im->w, im->h};
     }

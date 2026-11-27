@@ -602,3 +602,11 @@ reconstruct the target draw's vertices or covered region from a capture.
   passed the [software Vulkan and NDK workflow](https://github.com/Ragnarok93/nx2androidX/actions/runs/46021326701).
   FFR docked admission, engine-input binding, full pacing and accepted
   presentation attribution remain open.
+
+- The guarded replay path also rejects source channel remapping for raw
+  snapshot copies and requires destination-pixel-aligned sampling.
+  Synchronization-validated Lavapipe reproduced the original guest output
+  for a quarter-pixel UV shift. The same run passed all four backends at
+  1440p, 2160p and 2160p-to-1080p supersampling.
+- The integrated replay checkpoint at `ea6e9246671d80c3b93e3890e38cb462a60654fb`
+  passed [software Vulkan and Android NDK linking](https://github.com/Ragnarok93/nx2androidX/actions/runs/46022215709).

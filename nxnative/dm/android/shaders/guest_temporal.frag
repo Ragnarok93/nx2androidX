@@ -16,7 +16,9 @@ void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 
 void main() {
     vec2 uv = interpolated.xy;
-    if (!guestFullGrid(uv, vec2(textureSize(tex, 0)))) {
+    vec2 targetPixel = uv * draw.targetSize;
+    bool centered = all(lessThanEqual(abs(fract(targetPixel) - 0.5), vec2(0.002)));
+    if (!guestFullGrid(uv, vec2(textureSize(tex, 0))) || !centered) {
         color = vec4(guestSmoothstep(uv), 0.0);
         return;
     }

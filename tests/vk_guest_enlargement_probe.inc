@@ -464,6 +464,23 @@ static void check_guest_enlargement(void) {
                          VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
         guest_readback(&guest_target);
         assert(memcmp(guest, mapped, sizeof guest) == 0);
+        // Keep the derivative but shift the UV phase by a fraction of an
+        // output pixel. A temporal result uses a discrete pixel grid.
+        memcpy(mapped + GUEST_FS_UBO, constants[1], sizeof constants[1]);
+        float shifted[3][8];
+        memcpy(shifted, vertices, sizeof shifted);
+        for (unsigned i = 0; i < 3; i++) shifted[i][4] += 0.25f / OUT;
+        memcpy(mapped + GUEST_VERTEX_OFFSET, shifted, sizeof shifted);
+        begin();
+        guest_draw(smooth, layout, sets, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        guest_readback(&guest_target);
+        memcpy(guest, mapped, sizeof guest);
+        begin();
+        vkCmdPushConstants(test_cb, temporal_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof params, params);
+        guest_draw_bound(pipeline, temporal_layout, temporal_sets, 3, &guest_target,
+                         VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        guest_readback(&guest_target);
+        assert(memcmp(guest, mapped, sizeof guest) == 0);
         vkDestroyPipeline(V.dev, pipeline, NULL);
         vkDestroyPipelineLayout(V.dev, temporal_layout, NULL);
         vk_gsr2_destroy(temporal);
