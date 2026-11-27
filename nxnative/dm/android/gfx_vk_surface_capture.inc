@@ -15,6 +15,7 @@ typedef struct {
     uint32_t aspect, mip, mips, layer, layers, w, h, d, samples, usage;
     uint32_t nvn_format;
 } surface_binding_t;
+#include "gfx_vk_scene_observe.inc"
 static struct {
     FILE *usage;
     char path[1024], temp[1024];
@@ -42,6 +43,7 @@ static int surface_capture_arm(void) {
     memset(&g_sc, 0, sizeof g_sc);
     const char *mode = getenv("DM_VK_SURFACE_METADATA_ONLY");
     g_sc.metadata_only = mode && !strcmp(mode, "1");
+    if (g_sc.metadata_only) scene_observe_reset();
     snprintf(g_sc.path, sizeof g_sc.path, "%s/surface_usage.tsv", root ? root : ".");
     snprintf(g_sc.temp, sizeof g_sc.temp, "%s/surface_usage.tsv.tmp", root ? root : ".");
     g_sc.usage = fopen(g_sc.temp, "w");
@@ -80,7 +82,7 @@ static void surface_present_identity(surface_binding_t *b, const int crop[4], ui
     b->present_crop[3] = crop && crop[3] ? (int64_t)crop[3] : (int64_t)b->h;
 }
 
-static void surface_usage(const char *role, const surface_binding_t *b, int load, int store,
+static void surface_write_row(const char *role, const surface_binding_t *b, int load, int store,
     const VkClearValue *clear, const char *status) {
     if (!g_sc.usage) return;
     if (g_sc.rows >= SC_ROWS) { g_sc.dropped++; return; }
@@ -96,6 +98,22 @@ static void surface_usage(const char *role, const surface_binding_t *b, int load
         (unsigned long long)b->real_ticket, (long long)b->present_crop[0], (long long)b->present_crop[1],
         (long long)b->present_crop[2], (long long)b->present_crop[3]) >= 0)
         g_sc.rows++;
+}
+
+static void surface_usage(const char *role, const surface_binding_t *b, int load, int store,
+                          const VkClearValue *clear, const char *status) {
+    if (g_sc.usage && g_sc.metadata_only) {
+        scene_observe_access(role, b, load, store, status);
+        if (!strcmp(role, "presentation-source")) {
+            const surface_binding_t *source = scene_observe_source(b);
+            surface_binding_t observation = source ? *source : *b;
+            observation.real_ticket = b->real_ticket;
+            surface_write_row("scene-observation", &observation, -1, -1, NULL,
+                              source ? "plausible-enlargement-input" :
+                              g_scene_overflow ? "event-budget-exhausted" : "no-unambiguous-input");
+        }
+    }
+    surface_write_row(role, b, load, store, clear, status);
 }
 
 static void surface_descriptor(const vkimg_t *im, VkImageView view, int st, int binding, unsigned element, int storage) {

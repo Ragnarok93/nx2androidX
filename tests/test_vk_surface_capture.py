@@ -171,6 +171,47 @@ int main(int argc, char **argv) {
     surface_dispatch();
     assert(g_sc.rows == 2 && !g_sc.buffer && !g_sc.count);
 
+    scene_observe_reset();
+    surface_binding_t low = {.present=17,.submission=4,.pass=1,.image=101,.pool=1,
+        .write_sequence=41,.w=1384,.h=780,.samples=1,.aspect=1,.mips=1,.layers=1,
+        .storage_format=37,.view_format=37,.size=100};
+    scene_observe_access("color", &low, 1, 0, "metadata");
+    surface_binding_t read = low;
+    read.pass = 2; read.view = 201; read.stage = 1; read.draws = 12;
+    scene_observe_access("sampled-binding", &read, -1, -1, "metadata");
+    surface_binding_t up = read;
+    up.image = 102; up.pool = 2; up.w = 1920; up.h = 1080; up.write_sequence = 42;
+    up.draws = 13;
+    surface_binding_t area = {.present=17,.submission=4,.pass=2,.w=1920,.h=1080};
+    scene_observe_access("render-area", &area, -1, -1, "dynamic-rendering");
+    scene_observe_access("color", &up, 1, 0, "metadata");
+    up.pass = 3; up.write_sequence++;
+    scene_observe_access("color", &up, 0, 0, "metadata");
+    surface_binding_t shown_scene = up;
+    surface_present_identity(&shown_scene, NULL, 91);
+    const surface_binding_t *candidate = scene_observe_source(&shown_scene);
+    assert(candidate && candidate->image == low.image);
+    g_scene_events[2].binding.render_x = 1;
+    assert(!scene_observe_source(&shown_scene));
+    g_scene_events[2].binding.render_x = 0;
+    scene_observe_access("compute-image", &shown_scene, -1, -1, "potential-write");
+    assert(!scene_observe_source(&shown_scene));
+    --g_scene_count;
+    shown_scene.present_crop[0] = 1;
+    assert(!scene_observe_source(&shown_scene));
+    shown_scene.present_crop[0] = 0;
+    shown_scene.present++;
+    assert(!scene_observe_source(&shown_scene));
+    shown_scene.present--;
+    surface_binding_t alias = up;
+    alias.image = 199;
+    scene_observe_access("copy-destination", &alias, -1, -1, "recorded");
+    assert(!scene_observe_source(&shown_scene));
+    --g_scene_count;
+    while (g_scene_count < SCENE_EVENTS)
+        scene_observe_access("sampled-binding", &read, -1, -1, "metadata");
+    scene_observe_access("sampled-binding", &read, -1, -1, "metadata");
+    assert(g_scene_overflow && !scene_observe_source(&shown_scene));
     surface_capture_abort();
     assert(unsetenv("DM_VK_SURFACE_METADATA_ONLY") == 0);
 

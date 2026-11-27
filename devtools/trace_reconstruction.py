@@ -236,10 +236,17 @@ def enlargement_evidence(src, dst, producer, areas, states, entries, path):
 def analyze(rows, max_candidates=200, shader_index=None):
     groups=defaultdict(list); writes=defaultdict(list); linked_results=[]; other_results=[]; stats=Counter()
     shortlist=[]
+    live_observations=[]
     for i,r in enumerate(rows):
         if None in context(r): raise ValueError('invalid present/submission/pass')
         groups[context(r)].append((i,r))
         if r['role'] in WRITES: writes[context(r)[0]].append((i,r))
+        if r['role'] == 'scene-observation' and len(live_observations) < max_candidates:
+            stats['live_scene_' + r['status']] += 1
+            live_observations.append({
+                'row': i + 1, 'ticket': number(r, 'real_ticket'), 'status': r['status'],
+                'input_extent': extent(r) if r['status'] == 'plausible-enlargement-input' else None,
+            })
     links,presentation_reports=presentation_links(rows,groups,writes)
     for ctx,entries in groups.items():
         colors=[(i,r) for i,r in entries if r['role']=='color' and resource(r) and extent(r)]
@@ -319,7 +326,7 @@ def analyze(rows, max_candidates=200, shader_index=None):
                         draw_state=states, static_shader_evidence=(shader_index or {}).get(src['shader'].lower()), downstream=downstream, presentation_link=link, reasons=reasons, enlargement_screening_rejections=screening))
     results=(linked_results+other_results)[:max_candidates]
     return dict(rows=len(rows), counts=dict(stats), candidates=results, presentation_sources=presentation_reports,
-                plausible_enlargement_boundaries=shortlist,
+                plausible_enlargement_boundaries=shortlist, live_scene_observations=live_observations,
                 truncated=stats['candidates']>len(results))
 
 def summarize_presentation(rows, metadata):

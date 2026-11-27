@@ -260,3 +260,30 @@ Milestone 1 remains **In progress**. Milestones 2–9 remain **Pending**.
 - Next action remains the live replay selection path. Use synthetic draw and
   presentation sequences to verify scene-source eligibility, alias rejection,
   lifetime and unchanged fallback before relying on FFR captures.
+
+## 2026-11-27 — Milestone 1, live replay discovery checkpoint
+
+Milestone 1 is **Host validated** for observation-only discovery. Driver and
+title validation remain outstanding. Milestone 2 still requires shader
+and source-coverage evidence for safe replacement.
+
+- The metadata-only replay path now searches bounded live resource events
+  from the exact present image. It follows preserved attachment contents
+  and full-color transfers, and looks for a single sampled color input to
+  a full-size enlargement. It reports a ticket-bound observation in the
+  surface catalog. The existing offline report retains the fuller path
+  and raster screening evidence.
+- Discovery retains no Vulkan resources and is disabled during normal
+  presentation. The observer stores at most 8,192 replay events and follows
+  at most 16 writer hops. It rejects incomplete/overflowed history, a cropped
+  presentation root, unresolved subresources, and relevant cross-image pool
+  aliases. Replay CPU cost on an actual game workload remains unmeasured.
+- All 54 required host checks passed. The metadata harness exercised a
+  synthetic 1384×780 → 1920×1080 enlargement followed by a loaded composition
+  pass, with cropped, aliased, cross-frame and overflow rejection paths.
+  The predecessor's Vulkan and Android native link CI jobs passed
+  (run 45969835111). This checkpoint changes no shaders.
+- Next action is to admit only proven equivalences at the replay insertion
+  point. Record sampler and producer coverage and establish the guest
+  shader's behavior independently. A plausible observation cannot authorize
+  a substitution, and the docked reconstruction regression remains open.
