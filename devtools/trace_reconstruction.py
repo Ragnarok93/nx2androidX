@@ -286,6 +286,35 @@ def summarize_presentation(rows, metadata):
             'slot_wait_ms':stats([v/1e6 for r in rs if (v:=value(r,'reconstruction_slot_wait_ns')) is not None]),
             'allocations':sum(allocations) if allocations else None,
             'source_reset_frames':sum(v>0 for v in reset_flags) if reset_flags else None})
+    bypasses = Counter()
+    integrity = defaultdict(list)
+    for ticket, row in frames.items():
+        requested = row.get('requested_upscaler')
+        active = row.get('active_upscaler')
+        if requested not in (None, 'None', '-') and active == 'None':
+            bypasses[operation(row), requested, row.get('reason') or 'unspecified'] += 1
+        # Older captures wrote the guest crop into actual_reconstruction on
+        # bypass. Only apply extent checks to the explicit submission schema.
+        submitted = row.get('reconstruction_submitted')
+        if submitted is None:
+            continue
+        actual = (number(row, 'actual_reconstruction_w'), number(row, 'actual_reconstruction_h'))
+        target = (number(row, 'output_w'), number(row, 'output_h'))
+        final = (number(row, 'final_source_w'), number(row, 'final_source_h'))
+        if submitted not in ('0', '1'):
+            integrity['invalid_submission_status'].append(ticket)
+        elif submitted == '1':
+            if active in (None, 'None', '-'):
+                integrity['submitted_without_effective_backend'].append(ticket)
+            if not all(dimension and dimension > 0 for dimension in actual) or actual != target:
+                integrity['submitted_extent_mismatch'].append(ticket)
+            if final != actual:
+                integrity['final_source_extent_mismatch'].append(ticket)
+        else:
+            if active not in (None, 'None', '-'):
+                integrity['effective_backend_without_submission'].append(ticket)
+            if actual != (0, 0):
+                integrity['output_extent_without_submission'].append(ticket)
     samples={}; conflicts=set(); no_backend=0
     for t,r in frames.items():
         origin=number(r,'reconstruction_timing_ticket')
@@ -314,7 +343,10 @@ def summarize_presentation(rows, metadata):
     build_ids=[line.split('=',1)[1] for line in metadata if line.startswith('# runtime_elf_build_id=')]
     return {'runtime_elf_build_ids':build_ids,'residency':residency,'timings':timings,
         'conflicting_real_tickets':len(duplicates),'conflicting_timing_tickets':len(conflicts),
-        'timing_rows_missing_backend':no_backend}
+        'timing_rows_missing_backend':no_backend,
+        'bypasses': [{'operation_mode': op, 'requested': backend, 'reason': reason, 'frames': count}
+                     for (op, backend, reason), count in sorted(bypasses.items())],
+        'submission_integrity': dict(sorted(integrity.items()))}
 
 def inspect(path, limit):
     report={'archive':str(path),'scopes':[],'scaling':[],'warnings':[]}

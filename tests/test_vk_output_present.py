@@ -42,6 +42,7 @@ static _Atomic int g_fg_images;
 static int configured=2160,mode=SP_SGSR2,force_fail,fg_on=1;
 static unsigned rec_calls,fg_calls,present_calls,capture_calls,reset_flags;
 static VkExtent2D rec_target,fg_input,display={1920,1080};
+static VkExtent2D g_sext={1920,1080},g_next={1920,1080};
 static struct {VkImage image;int w,h,meta,flip;VkExtent2D display;uint64_t ticket;} observed[4];
 static vk_capture_scale_present_sample cap;
 int dm_recon_output_height(void){return configured;}
@@ -92,6 +93,7 @@ int main(void){
     real(3,1);assert(!reset_flags&&g_spatial.retry_after==122&&g_spatial.rcas_retry_after==122);
     // An allocation failure keeps native presentation alive, with native FG input.
     force_fail=1;real(4,1);assert(fg_input.width==1920&&fg_input.height==1080&&observed[1].image==11&&observed[1].flip);
+    assert(!cap.reconstruction_submitted&&!cap.actual_w&&!cap.actual_h&&cap.final_source_w==1920);
     force_fail=0;configured=1080;real(5,1);assert(rec_target.width==1920&&observed[1].image==11);
     // Handheld 720p input still reconstructs to explicit 1440p; LSFG disabled.
     src.w=1280;src.h=720;configured=1440;fg_on=0;real(6,0);

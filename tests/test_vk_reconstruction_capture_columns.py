@@ -36,7 +36,10 @@ int main(int argc, char **argv) {
         .requested=SP_SGSR2,.active=SP_SGSR2,.source_w=1280,.source_h=720,
         .output_w=2560,.output_h=1440,.timing_ticket=9,.gpu_ms=2.25,
         .display_w=1920,.display_h=1080,.actual_w=2560,.actual_h=1440,
-        .output_height=1440,.supersampling=1,
+        .output_height=1440,.supersampling=1,.reconstruction_submitted=1,
+        .guest_w=1280,.guest_h=720,.crop={8,4,1264,712},
+        .final_source_w=2560,.final_source_h=1440,
+        .drawable_w=1920,.drawable_h=1080,.swapchain_w=1080,.swapchain_h=1920,
         .timing_mode=SP_SGSR2,.timing_iw=1280,.timing_ih=720,
         .timing_ow=2560,.timing_oh=1440,.timing_budget_ms=2.5,
         .timing_cadence_us=33000,.timing_generation=7,.timing_history_epoch=5,
@@ -70,6 +73,13 @@ int main(int argc, char **argv) {
             self.assertEqual(a['actual_reconstruction_h'],'1440')
             self.assertEqual(a['configured_output_short_edge'],'1440')
             self.assertEqual(a['supersampling'],'1')
+            self.assertEqual(a['reconstruction_submitted'],'1')
+            self.assertEqual(a['guest_w'],'1280')
+            self.assertEqual(a['guest_crop_x'],'8')
+            self.assertEqual(a['final_source_w'],'2560')
+            self.assertEqual(a['drawable_w'],'1920')
+            self.assertEqual(a['swapchain_w'],'1080')
+            self.assertEqual(b['reconstruction_submitted'],'0')
             self.assertEqual(a['active_upscaler'],'GSR 2')
             self.assertEqual(a['timing_backend'],'GSR 2')
             self.assertEqual(a['timing_generation'],'7')

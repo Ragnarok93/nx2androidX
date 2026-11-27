@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
     assert(trace && getline(&line, &capacity, trace) >= 0 && strstr(line, "overwritten_rows=1"));
     assert(getline(&line, &capacity, trace) >= 0 && strstr(line, "runtime_elf_build_id="));
     assert(getline(&line, &capacity, trace) >= 0 && strstr(line, "requested_upscaler"));
-    assert(strstr(line, "\tconfigured_output_short_edge\tsupersampling\n"));
+    assert(strstr(line, "\tconfigured_output_short_edge\tsupersampling\tguest_w"));
     assert(getline(&line, &capacity, trace) >= 0 && !strncmp(line, "2\tFixed", 7));
     int found = 0;
     while (getline(&line, &capacity, trace) >= 0) {

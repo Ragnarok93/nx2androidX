@@ -17,7 +17,10 @@ typedef struct {
     int requested, active, physical, generated;
     unsigned source_w, source_h, output_w, output_h;
     unsigned display_w, display_h, actual_w, actual_h;
-    int output_height, supersampling;
+    unsigned guest_w, guest_h, final_source_w, final_source_h;
+    unsigned drawable_w, drawable_h, swapchain_w, swapchain_h;
+    int crop[4];
+    int output_height, supersampling, reconstruction_submitted;
     uint64_t timing_ticket;
     double gpu_ms;
     int timing_mode;

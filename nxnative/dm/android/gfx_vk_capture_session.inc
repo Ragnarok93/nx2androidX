@@ -68,7 +68,7 @@ static int capture_scale_write(const char *root) {
                  "replay_cpu_us\tsource_monotonic_us\trecent_replay_gpu_ms\t"
                  "presentation_seen\trequested_upscaler\tactive_upscaler\tphysical_candidate\t"
                  "source_w\tsource_h\toutput_w\toutput_h\tgenerated_frames\t"
-                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\ttiming_backend\ttiming_iw\ttiming_ih\ttiming_ow\ttiming_oh\ttiming_budget_ms\ttiming_cadence_us\ttiming_generation\ttiming_history_epoch\ttiming_history_reset\tsharpness_requested\tsharpness_applied\tstage_input_ms\tstage_motion_ms\tstage_accumulate_ms\tstage_output_ms\tsource_enqueue_ns\tsource_reset_flags\tdocked_at_enqueue\treconstruction_alloc_attempts\treconstruction_allocations\treconstruction_alloc_waits\treconstruction_alloc_wait_ns\treconstruction_slot_wait_ns\tdisplay_w\tdisplay_h\tactual_reconstruction_w\tactual_reconstruction_h\tconfigured_output_short_edge\tsupersampling\n",
+                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\ttiming_backend\ttiming_iw\ttiming_ih\ttiming_ow\ttiming_oh\ttiming_budget_ms\ttiming_cadence_us\ttiming_generation\ttiming_history_epoch\ttiming_history_reset\tsharpness_requested\tsharpness_applied\tstage_input_ms\tstage_motion_ms\tstage_accumulate_ms\tstage_output_ms\tsource_enqueue_ns\tsource_reset_flags\tdocked_at_enqueue\treconstruction_alloc_attempts\treconstruction_allocations\treconstruction_alloc_waits\treconstruction_alloc_wait_ns\treconstruction_slot_wait_ns\tdisplay_w\tdisplay_h\tactual_reconstruction_w\tactual_reconstruction_h\tconfigured_output_short_edge\tsupersampling\tguest_w\tguest_h\tguest_crop_x\tguest_crop_y\tguest_crop_w\tguest_crop_h\tfinal_source_w\tfinal_source_h\tdrawable_w\tdrawable_h\tswapchain_w\tswapchain_h\treconstruction_submitted\n",
             (unsigned long long)g_scale_capture_overwritten, runtime_id);
     uint64_t end = g_scale_capture_ticket;
     uint64_t first = end >= SCALE_CAPTURE_FRAMES ? end - SCALE_CAPTURE_FRAMES + 1 : 1;
@@ -79,7 +79,7 @@ static int capture_scale_write(const char *root) {
         const vk_capture_scale_replay_sample *r = &row->replay;
         const vk_capture_scale_present_sample *p = &row->present;
         fprintf(out, "%llu\t%s\t%u\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llu\t%.3f\t%d\t"
-                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\t%s\t%u\t%u\t%u\t%u\t%.3f\t%u\t%llu\t%llu\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%llu\t%u\t%d\t%u\t%u\t%u\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\n",
+                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\t%s\t%u\t%u\t%u\t%u\t%.3f\t%u\t%llu\t%llu\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%llu\t%u\t%d\t%u\t%u\t%u\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%d\n",
                 (unsigned long long)ticket, r->mode < 3 ? modes[r->mode] : "-", r->min, r->max,
                 r->target, r->passes, (unsigned long long)r->passes_total, r->logical_w, r->logical_h,
                 r->physical_w, r->physical_h, r->renderer_available, r->gpu_snapshot,
@@ -101,7 +101,10 @@ static int capture_scale_write(const char *root) {
                 p->alloc_attempts, p->allocations, p->alloc_waits,
                 (unsigned long long)p->alloc_wait_ns, (unsigned long long)p->slot_wait_ns,
                 p->display_w, p->display_h, p->actual_w, p->actual_h,
-                p->output_height, p->supersampling);
+                p->output_height, p->supersampling, p->guest_w, p->guest_h,
+                p->crop[0], p->crop[1], p->crop[2], p->crop[3],
+                p->final_source_w, p->final_source_h, p->drawable_w, p->drawable_h,
+                p->swapchain_w, p->swapchain_h, p->reconstruction_submitted);
     }
     int ok = !ferror(out);
     if (fclose(out) || !ok || rename(tmp, path)) {
