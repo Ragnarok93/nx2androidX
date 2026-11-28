@@ -517,8 +517,10 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     lsfg_plan plan = lsfg_pacer_plan(&F.pacer, LSFG_MAX_GENERATIONS, mult, target, mono_s());
     uint64_t count = F.count++;
     int warm = plan.warm && count + 1 >= 2;
-    F.warm_streak = warm ? F.warm_streak + 1 : 0;
-    size_t ng = warm && F.warm_streak >= 2 ? plan.generations : 0;
+    // Beta consumes three chronological alpha entries, not just two input
+    // images. Never read undefined/stale alpha after a pacing interruption.
+    F.warm_streak = warm ? (F.warm_streak < LSFG_GRAPH_HISTORY_COUNT ? F.warm_streak + 1 : F.warm_streak) : 0;
+    size_t ng = warm && F.warm_streak >= LSFG_GRAPH_HISTORY_COUNT ? plan.generations : 0;
     if (ng > LSFG_MAX_GENERATIONS) ng = LSFG_MAX_GENERATIONS;
     // Generated frames only as many as the refreshes in the game's own period leave room for (the panel shows one image a refresh; more would hold
     // the FIFO present, and the game with it, to a fraction of its rate — Banana's Honor phone note). DM_VK_FG_REFRESH_CAP=0: no cap
@@ -571,8 +573,13 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     if (flip_y) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up, the chain sees it upright
     vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(record_chain, record_count), VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
     fg_timing_stamp(cb,qb+1);
-    if (warm) lsfg_chain_shared_timed(record_chain,cb,record_count,F.timing_queries,qb+2);
-    else fg_timing_stamp(cb,qb+2);
+    if (ng) lsfg_chain_shared_timed(record_chain,cb,record_count,F.timing_queries,qb+2);
+    else {
+        // Seed only when generation is suppressed; do not read beta's
+        // three history slots until they are all populated.
+        if(warm)lsfg_chain_seed(record_chain,cb,record_count);
+        fg_timing_stamp(cb,qb+2);
+    }
     fg_timing_stamp(cb,qb+3);
     for (size_t g = 0; g < ng; g++) {
         lsfg_chain_generate_timed(record_chain,cb,record_count,ng,g,F.timing_queries,qb+4+2*g);
@@ -647,7 +654,7 @@ report:;
         static int ncap; if (st2 == 2 && capped && ncap++ < 4) VLOG("frame generation: not generating, %s (game frame period %.1f ms)", why + 4, period * 1e3);
     }
     fg_decision.reason=ng?"generated":seed_only_generation?"adaptive flow warmup":capped?"refresh cap":met?"target met":
-        !plan.warm?"pacer not warm or floor cooldown":!warm||F.warm_streak<2?"history warmup":"pacer issued zero";
+        !plan.warm?"pacer not warm or floor cooldown":!warm||F.warm_streak<LSFG_GRAPH_HISTORY_COUNT?"history warmup":"pacer issued zero";
     was_capped = st2 == 2 && capped;
     was_met = st2 == 2 && met;
     return (int)ng;
