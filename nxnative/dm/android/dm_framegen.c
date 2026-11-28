@@ -7,6 +7,7 @@
 #include "dm_framegen.h"
 #include "gfx_vk_fg_flow.h"
 #include "gfx_vk_fg_cadence.h"
+#include "gfx_vk_present_admission.h"
 #include "gfx_vk_fg_timing.h"
 #include "gfx_vk_fg_governor.h"
 #include "gfx_vk_fg_warmup.h"
@@ -527,7 +528,8 @@ static VkResult begin_slot(fg_slot *slot) {
         if (result) { slot->fence = VK_NULL_HANDLE; return result; }
     }
     if (slot->pending) {
-        result = vk.vkWaitForFences(V.dev, 1, &slot->fence, VK_TRUE, UINT64_MAX);
+        // Generation is optional: do not wait for a previous FG submission.
+        result = vk.vkWaitForFences(V.dev, 1, &slot->fence, VK_TRUE, 0);
         if (result) return result;
         vk_fg_fence_retired(slot->fence);
         slot->pending = 0;
@@ -702,6 +704,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // Generated frames only as many as the refreshes in the game's own period leave room for (the panel shows one image a refresh; more would hold
     // the FIFO present, and the game with it, to a fraction of its rate — Banana's Honor phone note). DM_VK_FG_REFRESH_CAP=0: no cap
     int seed_only_generation=0;
+    const char *admission_reason = NULL;
     uint64_t rns = getenv("DM_VK_FG_REFRESH_CAP") && !atoi(getenv("DM_VK_FG_REFRESH_CAP")) ? 0 : vk_refresh_cycle_ns(); int capped = 0;
     fg_decision.measured_ms=F.pacer.smoothed_interval*1000.0;
     fg_decision.planned=(unsigned)plan.generations;
@@ -732,9 +735,26 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         if (ng > fit) { ng = fit; capped = 1; F.pacer.issued = ng; }
     }
 
+    // Optional work cannot recover an already-expired WSI deadline.
+    if (ng) {
+        double scheduled_hold = dm_fg_output_hold(period, F.pacer.smoothed_interval, fixed_base, (unsigned)ng, rns);
+        uint64_t deadline = dm_present_optional_deadline(F.source_ns, scheduled_hold, (unsigned)ng);
+        if (deadline && !dm_present_optional_wait((uint64_t)(mono_s()*1e9), deadline, scheduled_hold)) {
+            admission_reason = "generated GPU deadline expired";
+            F.count = F.warm_streak = F.pacer.issued = 0;
+            ng = 0;
+            goto report;
+        }
+    }
     unsigned slot_index=F.fi++%NFG;
     fg_slot *slot = &F.fr[slot_index];
     VkResult result = begin_slot(slot);
+    if (result == VK_TIMEOUT) {
+        admission_reason = "generated GPU slot busy";
+        F.count = F.warm_streak = F.pacer.issued = 0;
+        ng = 0;
+        goto report;
+    }
     if (result) goto command_error;
     VkCommandBuffer cb = slot->cb;
     lsfg_graph_owner_retire_slot(&F.graph,slot_index);
@@ -834,7 +854,7 @@ report:;
         reason("%s", st2 == 1 ? "generating" : capped ? why : met ? "on, the target rate is met: no frame to add" : "on, waiting for a steady frame rate");
         static int ncap; if (st2 == 2 && capped && ncap++ < 4) VLOG("frame generation: not generating, %s (game frame period %.1f ms)", why + 4, period * 1e3);
     }
-    fg_decision.reason=ng?"generated":seed_only_generation?"adaptive flow warmup":F.pacer.base_blocked?"explicit base cadence protection":capped?"refresh cap":met?"target met":
+    fg_decision.reason=admission_reason?admission_reason:ng?"generated":seed_only_generation?"adaptive flow warmup":F.pacer.base_blocked?"explicit base cadence protection":capped?"refresh cap":met?"target met":
         !plan.warm?"pacer not warm or floor cooldown":!warm||F.warm_streak<LSFG_GRAPH_HISTORY_COUNT?"history warmup":"pacer issued zero";
     was_capped = st2 == 2 && capped;
     was_met = st2 == 2 && met;
