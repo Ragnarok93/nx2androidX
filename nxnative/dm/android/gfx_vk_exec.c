@@ -709,6 +709,7 @@ static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_caps, g_gues
 static int g_guest_filter_bound, g_guest_sharpness_bound;
 static VkImageView g_guest_sample_view;
 static uint64_t g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
+static unsigned g_guest_sharpness_pending, g_guest_sharpness_submitted;
 static uint64_t g_guest_rejected_submit, g_guest_clear_revision = 1;
 static struct {
     VkImage image;
@@ -3436,15 +3437,19 @@ static void guest_flow_drop(void) {
 // replay draw may have applied the slider before later composition.
 unsigned vk_guest_reconstruction_flags(void) {
     uint64_t ticket = g_tex_frame + 1;
-    return (g_guest_sharpen_submitted == ticket ? SP_REPLAY_SHARPENED : 0) |
-           (g_guest_temporal_submitted == ticket ? SP_REPLAY_TEMPORAL : 0);
+    return spatial_replay_pack(g_guest_sharpen_submitted == ticket ? g_guest_sharpness_submitted : 0,
+                               g_guest_temporal_submitted == ticket);
 }
 
 void vk_guest_flow_submitted(int accepted, uint64_t fence) {
     // A dropped command buffer may never have stored its certified clear.
     if (!accepted) g_guest_rejected_submit = fence;
-    if (accepted && g_guest_sharpen_pending) g_guest_sharpen_submitted = g_guest_sharpen_pending;
+    if (accepted && g_guest_sharpen_pending) {
+        g_guest_sharpen_submitted = g_guest_sharpen_pending;
+        g_guest_sharpness_submitted = g_guest_sharpness_pending;
+    }
     g_guest_sharpen_pending = 0;
+    g_guest_sharpness_pending = 0;
     if (guest_flow.pending) {
         int commit = accepted && guest_flow.drawn;
         vk_gsr2_commit(guest_flow.ctx, commit);
@@ -3901,7 +3906,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     }
     if (k.guest_filter > SP_BILINEAR) {
         float sharpness = dm_recon_sharpness(dm_fsr_sharpness());
-        g_guest_sharpness_bound = sharpness > 0 && k.guest_filter!=SP_GUEST_GRID_BILINEAR;
+        g_guest_sharpness_bound = k.guest_filter!=SP_GUEST_GRID_BILINEAR ? (int)(sharpness * 100.0f + 0.5f) : 0;
         float constants[] = {(float)P_att[0].w, (float)P_att[0].h, sharpness};
         vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, constants);
     }
@@ -4188,7 +4193,10 @@ static void draw(const p_draw *d) {
         return;
     }
     if (!(dbg_draw() & 1) && g_ok) { int xf = xfb_begin(cb); vkCmdDraw(cb, (uint32_t)d->count, inst, (uint32_t)d->first, (uint32_t)d->base_instance); if (xf) xfb_end(cb, prim, (uint32_t)d->count, inst, xf);
-        if (g_guest_sharpness_bound && d->count > 0) g_guest_sharpen_pending = g_tex_frame + 1;
+        if (g_guest_sharpness_bound && d->count > 0) {
+            g_guest_sharpen_pending = g_tex_frame + 1;
+            g_guest_sharpness_pending = (unsigned)g_guest_sharpness_bound;
+        }
     }
 }
 // DM_VK_INDIRECT_LOG_AT=<present>: bounded, read-only diagnostics for GPU
@@ -4372,7 +4380,10 @@ static void draw_idx(const p_draw_idx *d) {
         int xf = xfb_begin(cb);
         vkCmdDrawIndexed(cb, (uint32_t)d->count, inst, 0, d->base_vertex, (uint32_t)d->base_instance);
         if (g_guest_filter_bound == SP_SGSR2) guest_flow.drawn = 1;
-        if (g_guest_sharpness_bound && d->count > 0) g_guest_sharpen_pending = g_tex_frame + 1;
+        if (g_guest_sharpness_bound && d->count > 0) {
+            g_guest_sharpen_pending = g_tex_frame + 1;
+            g_guest_sharpness_pending = (unsigned)g_guest_sharpness_bound;
+        }
         if (g_guest_filter_bound && d->count > 0) {
             static unsigned logged;
             unsigned mode_bit = 1u << g_guest_filter_bound;
