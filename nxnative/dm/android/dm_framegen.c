@@ -356,6 +356,9 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // refresh
     if (ng && rns) { double r = *hold * 1e9 / (double)rns, w = floor(r + 0.5); if (w >= 1 && fabs(r - w) <= 0.15) *hold = w * (double)rns / 1e9; }
 report:;
+    // The floor's unloaded baseline must reflect submitted GPU work, not
+    // the pacer's theoretical count before warm-up and refresh capping.
+    F.pacer.issued = ng;
     int st2 = ng ? 1 : 2;
     // The target rate is met: there is no frame to add (the game already runs at the target, or faster)
     int met = target > 0 && F.pacer.smoothed_interval > 0 && 1.0 / F.pacer.smoothed_interval >= target * 0.95;

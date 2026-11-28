@@ -144,14 +144,28 @@ lsfg_plan lsfg_pacer_plan(lsfg_pacer *p, size_t capacity, int multiplier, int ta
         float base = 1.0f / p->smoothed_interval;
         int slowed = p->decoupled ? base < p->min_base
                                   : (p->min_base > 0 && base < p->min_base && p->unloaded_base_rate > p->min_base);
-        if (slowed) {
+        // A suppressed interval cannot prove generation is slowing the
+        // game. Previously the fixed-mode deficit timer kept extending its
+        // own cooldown, even with no generations submitted. Keep a bounded
+        // backoff, then allow a fresh probe under the same floor protection.
+        if (p->next_probe && now < p->next_probe) {
+            p->below_since = 0;
+            p->output_credit = 0;
+            return none;
+        }
+        if (p->next_probe) {
+            p->next_probe = 0;
+            p->below_since = 0;
+        }
+        if (slowed && previous_generations) {
             if (!p->below_since) p->below_since = now;
             else if (now - p->below_since >= DEFICIT_DURATION) {
                 p->probe_failures = p->probe_failures + 1 < MAX_PROBE_FAILURES ? p->probe_failures + 1 : MAX_PROBE_FAILURES;
                 p->next_probe = now + probe_backoff(p->probe_failures);
                 p->below_since = 0;
+                p->output_credit = 0;
+                return none;
             }
-            if (p->next_probe && now < p->next_probe) { p->output_credit = 0; p->issued = 0; return none; }
         } else p->below_since = 0;
         p->limit = zmin((size_t)(multiplier - 1), ceiling);   // Settings::FrameGenGenerations
         p->output_credit = 0; p->issued = p->limit;

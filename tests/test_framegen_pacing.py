@@ -148,6 +148,31 @@ int main(void) {
     for (int i = 0; i < 400; i++) { pl = lsfg_pacer_plan(&p, 3, 2, 0, t); t += 1.0 / 60.0; }
     assert(pl.generations == 1);            // the back-off is over and the game is at its own rate: the generation is back
 
+    // Sustained low base FPS without any generation cannot extend the
+    // fixed-mode cooldown indefinitely. Keep its first deadline, then probe.
+    lsfg_pacer_reset(&p);
+    p.min_base = 30.0f;
+    t = 100.0;
+    for (int i = 0; i < 20; ++i) { pl = lsfg_pacer_plan(&p, 3, 2, 0, t); t += 1.0/60.0; }
+    while (pl.generations && t < 104.0) { pl = lsfg_pacer_plan(&p, 3, 2, 0, t); t += 1.0/20.0; }
+    assert(!pl.generations && p.next_probe > t);
+    double deadline = p.next_probe;
+    while (t < deadline) {
+        pl = lsfg_pacer_plan(&p, 3, 2, 0, t);
+        assert(!pl.generations && p.next_probe == deadline);
+        t += 1.0/20.0;
+    }
+    pl = lsfg_pacer_plan(&p, 3, 2, 0, t);
+    assert(pl.generations == 1 && !p.next_probe);
+    // Model a plan rejected by the caller (refresh cap or history warmup).
+    // No actual GPU generation is issued, even while the base is slow.
+    for (int i=0;i<80;++i) {
+        p.issued=0;
+        t+=1.0/20.0;
+        pl=lsfg_pacer_plan(&p,3,2,0,t);
+        assert(pl.generations==1 && !p.next_probe);
+    }
+
     // decoupled (the game's speed follows its measured rate, so a slower base does not slow it down): the floor is what holds it back
     lsfg_pacer_reset(&p);
     p.decoupled = 1; p.min_base = 30.0f;
