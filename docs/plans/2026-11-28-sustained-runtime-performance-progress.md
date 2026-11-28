@@ -10,7 +10,7 @@ Primary target: FFR 1.0.1, S25 FE, Xclipse 940 RADV cc87fdf712, 8 GB, internal s
 | --- | --- |
 | M0 | Partial: focused recorder regression reproduced; full correlated instrumentation and trace replay outstanding |
 | M1 | Partial: recorder synchronization fix, focused host RED/GREEN and stress cases; full native/CI validation outstanding |
-| M2 | Not started |
+| M2 | Partial: fixed-cadence hold/refresh policy and source-clock integration; adaptive admission and integrated validation outstanding |
 | M3 | Not started |
 | M4 | Not started |
 | M5 | Not started |
@@ -104,3 +104,13 @@ Prior M1a commit: `84b473583c27a1ef063fe915b113f745e9f7993a`. Verified remote ex
 Baseline Actions run 46131889107 was independently confirmed successful at 906f30b4e6df87b1068c31878c4857e4896254d1. The M1a push triggered Android app run 46136471470; resolution validation was in progress when checked. A subsequent push touching tests triggers another run; inspect the exact checkpoint's run rather than using the older artifact. Full Android and device acceptance remains open. No tag or release change.
 
 M0 and M1 remain partial. Resume at the latest verified branch head, finish the correlated instrumentation, retrieve/replay the original archive, inspect CI for native link and full suite, then proceed with M2. Do not require repeated gameplay captures for the already reproduced drain defect.
+
+## M2a: separate source clock from fixed requested output cadence
+
+Prior checkpoint `6b097ffcd1e2586c30536eaf4be06ca1bdb559e8`. At inspection Android run 46136561472 was still in progress. Re-ran extracted recorder stress unittest: 1/1 passed in 2.002 s. Network clone remains unavailable, and the named capture is still unavailable locally.
+
+RED/GREEN: extended devtools/reproduce_fg_cadence.py before implementing the production helper, ran against extracted audited source: exit 1, frame 299 40.042 FPS, hold 12.487 ms, service 24.974 ms. With the new production helper called from the same hold seam: exit 0, frame 39 measured 40.042 FPS, hold 8.333 ms, next service 16.667 ms; frame 299 60.000 FPS. Additional assertions for 30/40/60 FPS with 1/2/3 generated images and variable-rate measured interval passed. Compiler flags -Wall -Wextra -Werror. Register as test_vk_fg_cadence_feedback.py in normal discovery. This is an isolated mocked-service model, not real WSI or full pacer validation.
+
+Implementation: use already available source_ns from dm_fg_prepare_workload even for nonadaptive Flow Scale, instead of worker invocation timestamp for lsfg_pacer_plan. Explicit 30/40/60 source tickets use requested period for refresh admission and output hold; only variable-rate modes use max(measured, requested). Avoid rounding fixed holds up except sub-microsecond noise. The default min_base becomes 90% of explicit target (27/36/54 FPS); variable rate retains 30, user override retained. This initial tolerance is a tuning decision, not device-proven. Reset pacer and warm streak on explicit rate transitions, not graph ownership. Current fixed configuration is matched to ticket period; exact enqueue-time settings snapshot and explicit lifecycle epochs are still open. Unlocked mode remains the existing no-FG behavior, not an artificial 60 FPS lock.
+
+No new shader format, graph allocation, WSI ownership or display vote changes. The helper/hold seam was executed locally; source-clock hookup, default-floor integration and Android link were reviewed but not run in full checkout. M0 remains partial: queue entry/dequeue/WSI and other timing instrumentation still outstanding. M2 remains partial: adaptive output target continued-overload protection, source ticket-based admission, attributed GPU/WSI evidence and jitter/overload integrated tests remain. Next: finish those seams before claiming the entire cadence feedback architecture fixed.

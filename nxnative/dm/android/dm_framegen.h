@@ -2,7 +2,7 @@
 // GPL-3.0-or-later): the present thread hands each game frame here before presenting it. The frame's picture
 // (the window texture's crop) is copied into the chain's input, the shared passes run, and the generated frames
 // between the previous game frame and this one land in images of their own, which the present shows before the
-// game frame, each held for an equal share of the game's measured frame interval (display timing). One command
+// game frame, each held for a share of the requested explicit or measured variable-rate interval (display timing). One command
 // buffer per game frame on the one queue: the submission lands after the game's own (queue order makes the
 // texture read safe — the game cannot redraw the texture before NVN's acquire, which waits for the present's
 // ticket), so no extra semaphore wait is needed. Off by default; the user's own Lossless.dll (the app finds it

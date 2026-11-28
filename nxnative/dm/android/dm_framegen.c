@@ -6,6 +6,7 @@
 // and the status vocabulary stay Banana's.
 #include "dm_framegen.h"
 #include "gfx_vk_fg_flow.h"
+#include "gfx_vk_fg_cadence.h"
 #include "gfx_vk_fg_timing.h"
 #include "gfx_vk_fg_governor.h"
 #include "gfx_vk_fg_warmup.h"
@@ -130,7 +131,8 @@ static struct {
     dm_fg_governor shadow;
     uint64_t shadow_workload;
     dm_fg_coordination coordination;
-    uint64_t coordination_ns;
+    uint64_t coordination_ns, source_ns;
+    int fixed_base;
     struct {uint64_t serial,workload; double budget,elapsed;int accepted;} shadow_rows[8];
     double command_retry_at;
     unsigned fi;
@@ -207,6 +209,9 @@ static void fg_timing_invalidate(void) {
 }
 
 void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked) {
+    // This source clock is required for fixed and manual modes too. Never
+    // sample the time the worker happens to reach the generation stage.
+    F.source_ns=ns;
     if(!fg_live_enabled())return;
     F.coordination_ns=ns;
     if(dm_fg_coordination_update(&F.coordination,key,ns,blocked))fg_timing_invalidate();
@@ -590,7 +595,15 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     if (!load()) return fg_skip("shader or device unavailable");
     // The game's frame period is never shorter than the host's own frame limit allows (the adaptive rate, perf_android.c): a game that asks for interval 1
     // (16.7 ms) but is held to 30 fps has two refreshes of a 60 Hz panel a frame, room for one generated frame, and its output rate is 60, not 120
-    { int lim = dm_perf_rate_fps(); if (lim > 0 && period < 1.0 / lim) period = 1.0 / lim; }
+    extern int dm_graphics_target_fps(void);
+    int configured_base = dm_graphics_target_fps();
+    // period belongs to this source ticket. A queued ticket from a previous
+    // setting must not be retroactively assigned the new explicit target.
+    int fixed_base = (configured_base==30 || configured_base==40 || configured_base==60) &&
+        fabs(period*configured_base-1.0)<0.01 ? configured_base : 0;
+    if (!fixed_base && configured_base==0) {
+        int lim = dm_perf_rate_fps(); if (lim > 0 && period < 1.0 / lim) period = 1.0 / lim;
+    }
     // The window's frame rate: a shorter output period at once, a longer one only after it held for 2 s (a game that switches its own present
     // interval would flip the panel's mode back and forth; the generated frames are paced by hold, not by the panel's rate)
     double want = target > 0 ? 1.0 / target : period / (mult < 2 ? 2 : mult > 4 ? 4 : mult), tnow = mono_s();
@@ -663,13 +676,21 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         fg_cancel_request();
         VLOG("LSFG_FLOW_GRAPH build cancelled or failed");
     } else if(graph_poll>0) F.graph_deadline=tnow+1.0;
-    // The floor for the game's own rate (DM_LSFG_MIN_FPS, default 30): the generation's work must not push the game under it
-    F.pacer.min_base = 30.0f;
+    if (F.fixed_base != fixed_base) {
+        // Rate changes invalidate cadence evidence, not graph ownership.
+        F.fixed_base = fixed_base;
+        lsfg_pacer_reset(&F.pacer);
+        F.count = F.warm_streak = 0;
+    }
+    // Target-aware default floor; the existing explicit override remains.
+    F.pacer.min_base = dm_fg_base_floor(fixed_base);
     { const char *e = getenv("DM_LSFG_MIN_FPS"); if (e && atoi(e) > 0) F.pacer.min_base = (float)atoi(e); }
     // Decoupled (the pacer's other measure of the game's own rate): a game whose speed follows its measured rate keeps its speed at any rate, so a
     // slower base does not slow it down. Every game here is held by a limiter or by its own engine, so a slower base slows it too: not decoupled.
     F.pacer.decoupled = 0;
-    lsfg_plan plan = lsfg_pacer_plan(&F.pacer, LSFG_MAX_GENERATIONS, mult, target, mono_s());
+    lsfg_plan plan = F.source_ns ?
+        lsfg_pacer_plan(&F.pacer, LSFG_MAX_GENERATIONS, mult, target, (double)F.source_ns / 1e9) :
+        (lsfg_plan){0, 0};
     uint64_t count = F.count++;
     int warm = plan.warm && count + 1 >= 2;
     // Beta consumes three chronological alpha entries, not just two input
@@ -686,8 +707,9 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     fg_decision.warm_streak=F.warm_streak;
     fg_decision.refresh_ns=rns;
     if (rns && period > 0) {
-        // The game's frame period: the requested one (the limit's, above) or the measured one when longer (a throttled game's frames are further apart)
-        double gp = F.pacer.smoothed_interval > period ? F.pacer.smoothed_interval : period;
+        // Explicit base deadlines cannot gain optional refresh slots just
+        // because the presentation worker or source has fallen behind.
+        double gp = dm_fg_schedule_period(period, F.pacer.smoothed_interval, fixed_base);
         double n = gp * 1e9 / (double)rns;   // the refreshes in a game frame
         size_t fit = n < 1.9 ? 0 : (size_t)(n + 0.1) - 1;
         if (!fit) {
@@ -783,13 +805,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     }
     *consumer = slot->fence;
     for (size_t g = 0; g < ng; g++) gen[g] = F.out[g];
-    double interval = F.pacer.smoothed_interval > 0 ? F.pacer.smoothed_interval : period;
-    if (interval < period) interval = period;
-    if (ng) *hold = interval / (double)(ng + 1);
-    // A hold within 0.15 refresh of a whole number of refreshes is that number: the measured interval runs a little long (34 ms at a 30 fps frame step), and a hold
-    // of 17 ms on a 16.7 ms panel let each image's desired time (the previous one's plus the hold) drift across a refresh every few dozen frames, two images in one
-    // refresh
-    if (ng && rns) { double r = *hold * 1e9 / (double)rns, w = floor(r + 0.5); if (w >= 1 && fabs(r - w) <= 0.15) *hold = w * (double)rns / 1e9; }
+    if (ng) *hold = dm_fg_output_hold(period, F.pacer.smoothed_interval, fixed_base, ng, rns);
 report:;
     fg_decision.graph_phase=F.graph.phase;
     fg_decision.pending_flow=(F.graph.phase==LSFG_GRAPH_BUILDING||F.graph.phase==LSFG_GRAPH_WARMING)?F.graph.scale:0;
