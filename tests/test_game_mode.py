@@ -84,7 +84,7 @@ class GameMode(unittest.TestCase):
         if not cc: self.skipTest('C compiler required')
         with tempfile.TemporaryDirectory(prefix='nx2a_game_mode_') as temp:
             c = Path(temp) / 'test.c'; exe = Path(temp) / 'test'; c.write_text(source, encoding='utf-8')
-            result = subprocess.run([cc, '-std=c11', '-D_POSIX_C_SOURCE=200809L', *['-I' + str(x) for x in includes], str(c), '-o', str(exe)], capture_output=True, text=True)
+            result = subprocess.run([cc, '-std=c11', '-D_POSIX_C_SOURCE=200809L', '-pthread', *['-I' + str(x) for x in includes], str(c), '-o', str(exe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(exe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -260,7 +260,8 @@ int main(void) {
         policy = policy.replace('__attribute__((weak)) int dm_fps_ceiling(void) { return 0; }',
                                 'int dm_fps_ceiling(void) { return PROFILE_CEILING; }')
         fixture = (ROOT/'tests/game_mode_hint_fixture.c').read_text(encoding='utf-8')
-        code = policy + '\n' + function(source, 'hint_report') + '\n' + function(source, 'dm_perf_frame')
+        work = source[source.index('static int64_t g_prev_present;'):source.index('// The window\'s frame rate:')]
+        code = policy + '\n' + function(source, 'hint_report') + '\n' + work
         for ceiling in (0, 30):
             with self.subTest(ceiling=ceiling):
-                self.compile_run(f'#define PROFILE_CEILING {ceiling}\n' + fixture.replace('/* PRODUCTION */', code))
+                self.compile_run(f'#define PROFILE_CEILING {ceiling}\n' + fixture.replace('/* PRODUCTION */', code), includes=(ANDROID,))
