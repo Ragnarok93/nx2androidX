@@ -47,6 +47,20 @@ static inline int spatial_guest_report_mode(int mode) {
 
 // Conservative indications of replay work submitted on this real frame.
 enum { SP_REPLAY_SHARPENED = 1, SP_REPLAY_TEMPORAL = 2 };
+// The low two bits remain the original flags; the upper bits carry the
+// submitted slider value so delayed presentation never reads a newer setting.
+static inline unsigned spatial_replay_pack(unsigned sharpness, int temporal) {
+    if (sharpness > 100) sharpness = 100;
+    return (sharpness ? SP_REPLAY_SHARPENED : 0u) |
+           (temporal ? SP_REPLAY_TEMPORAL : 0u) | (sharpness << 2);
+}
+static inline unsigned spatial_replay_sharpness(unsigned flags) {
+    return (flags & SP_REPLAY_SHARPENED) ? flags >> 2 : 0;
+}
+static inline unsigned spatial_replay_bits(unsigned flags) {
+    return flags & (SP_REPLAY_SHARPENED | SP_REPLAY_TEMPORAL);
+}
+
 
 int dm_spatial_mode(void);
 int dm_fsr_sharpness(void);
