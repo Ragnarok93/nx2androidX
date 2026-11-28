@@ -12,6 +12,7 @@
 #include "nvn_hmap.h"
 #include "nvn_dirty.h"
 #include "gfx_vk_pool_pressure.h"
+#include "gfx_vk_fg_pressure.h"
 #include <android/hardware_buffer.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -244,7 +245,7 @@ void vk_init(void) {
     VkExtensionProperties *ex = calloc(ne, sizeof *ex); vkEnumerateDeviceExtensionProperties(V.pd, NULL, &ne, ex);
     const char *want[] = {"VK_KHR_swapchain", "VK_ANDROID_external_memory_android_hardware_buffer", "VK_EXT_queue_family_foreign", "VK_EXT_custom_border_color",
                           "VK_EXT_robustness2", "VK_EXT_depth_clip_control", "VK_EXT_provoking_vertex", "VK_EXT_index_type_uint8", "VK_EXT_transform_feedback",
-                          "VK_GOOGLE_display_timing"};
+                          "VK_GOOGLE_display_timing", "VK_EXT_memory_budget"};
     V.driver_id = -1;
     // Identify the physical device used by the replay, including when a custom
     // loader falls back. The custom-loader discovery probe enumerates separately.
@@ -352,6 +353,7 @@ void vk_init(void) {
     V.has_custom_border = fcb.customBorderColors && has_ext(ex, ne, "VK_EXT_custom_border_color");
     V.has_robust2 = fr2.nullDescriptor && has_ext(ex, ne, "VK_EXT_robustness2");
     V.has_depth_clip_ctl = fdc.depthClipControl && has_ext(ex, ne, "VK_EXT_depth_clip_control");
+    V.has_memory_budget=has_ext(ex,ne,"VK_EXT_memory_budget") && vkGetPhysicalDeviceMemoryProperties2;
     V.has_dtiming = has_ext(ex, ne, "VK_GOOGLE_display_timing");   // frame pacing on the display (gfx_vk_present.c pace_*)
     V.has_depth_bounds = ff.features.depthBounds;
     V.has_bc = ff.features.textureCompressionBC; V.has_astc = ff.features.textureCompressionASTC_LDR; V.has_gs = ff.features.geometryShader;
@@ -553,6 +555,63 @@ static void zcf_trim_to(uint64_t budget) {
 // terminate the process without vkAllocateMemory reporting OOM: MemAvailable
 // is a better system-wide pressure signal than MemFree. Never wait for fences
 // here; in-flight buffers remain until a later pass observes their completion.
+// Pressure sampling is off the present thread. A short trylock copies the
+// coherent sample; a busy monitor is treated as unknown, not a wait.
+static pthread_mutex_t fg_pressure_mu=PTHREAD_MUTEX_INITIALIZER;
+static dm_fg_pressure fg_pressure;
+uint64_t vk_fg_transition_cap(int upward) {
+    if(pthread_mutex_trylock(&fg_pressure_mu))return 0;
+    dm_fg_pressure s=fg_pressure;
+    pthread_mutex_unlock(&fg_pressure_mu);
+    return dm_fg_pressure_cap(&s,mem_diag_ns(),upward);
+}
+static uint64_t fg_heap_available(void) {
+    if(!V.has_memory_budget)return 0;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 p={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,.pNext=&budget};
+    vkGetPhysicalDeviceMemoryProperties2(V.pd,&p);
+    // LSFG selects device-local images and coherent host-visible uniforms.
+    // Use the smallest headroom of any eligible heap, rather than summing
+    // heaps which may describe the same physical RAM on a mobile GPU.
+    uint64_t free_bytes=UINT64_MAX;int found=0;
+    for(uint32_t i=0;i<p.memoryProperties.memoryTypeCount;i++){
+        VkMemoryType t=p.memoryProperties.memoryTypes[i];
+        VkMemoryPropertyFlags host=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if(!(t.propertyFlags&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (t.propertyFlags&host)!=host)continue;
+        if(t.heapIndex>=p.memoryProperties.memoryHeapCount)return 0;
+        uint64_t b=budget.heapBudget[t.heapIndex],u=budget.heapUsage[t.heapIndex];
+        uint64_t head=b>u?b-u:0;
+        if(head<free_bytes)free_bytes=head;
+        found=1;
+    }
+    return found?free_bytes:0;
+}
+static int fg_thermal_status(void) {
+    // Dynamic lookup keeps older Android API levels supported. The pressure
+    // monitor owns this process-lifetime manager, no JNI or sysfs guessing.
+    static int tried;static void *manager;
+    static int (*status)(void *);
+    if(!tried){
+        tried=1;
+        void *lib=dlopen("libandroid.so",RTLD_NOW|RTLD_LOCAL);
+        if(lib){
+            // AThermal_acquireManager takes no arguments.
+            void *(*get_manager)(void)=(void *(*)(void))dlsym(lib,"AThermal_acquireManager");
+            status=(int (*)(void *))dlsym(lib,"AThermal_getCurrentThermalStatus");
+            if(get_manager&&status)manager=get_manager();
+        }
+    }
+    if(!manager || !status)return -1;
+    int s=status(manager);return s>=0&&s<=6?s:-1;
+}
+static void fg_pressure_publish(uint64_t available_kb) {
+    const char *enabled=getenv("DM_LSFG_ADAPTIVE_AUTO");
+    if(!enabled||!atoi(enabled))return;
+    dm_fg_pressure s={.sampled_ns=mem_diag_ns(),
+        .os_available=available_kb<=UINT64_MAX/1024?available_kb*1024:0,
+        .heap_available=fg_heap_available(),.thermal=fg_thermal_status()};
+    pthread_mutex_lock(&fg_pressure_mu);fg_pressure=s;pthread_mutex_unlock(&fg_pressure_mu);
+}
 static void *zcf_pressure_main(void *unused) {
     (void)unused; crash_thread_init();
     vk_pool_recovery recovery={0};
@@ -567,6 +626,7 @@ static void *zcf_pressure_main(void *unused) {
             if (available && total) break;
         }
         fclose(f);
+        fg_pressure_publish(total?available:0);
         if (!total || !available) continue;  // incomplete /proc data is not pressure
         uint64_t budget = vk_pool_reuse_budget_update(&recovery,
             atomic_load_explicit(&g_zcf_budget,memory_order_relaxed),available,total);
