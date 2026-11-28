@@ -30,6 +30,12 @@ int main(void){
     assert(lsfg_graph_history_ready(&h,7,16));
     assert(!lsfg_graph_history_ready(&h,7,17));
     assert(!lsfg_graph_history_ready(&h,8,16));
+    // If activation is deferred, continue rotating both input and alpha rings.
+    assert(lsfg_graph_history_index(&h,16)==3);
+    assert(lsfg_graph_history_submit(&h,7,16,1));
+    assert(lsfg_graph_history_index(&h,17)==4);
+    assert(lsfg_graph_history_submit(&h,7,17,1));
+    assert(h.filled==3&&lsfg_graph_history_ready(&h,7,18)&&h.next_index==5);
     lsfg_graph_history_reset(&h,8);
     assert(h.initialized&&!h.filled&&!lsfg_graph_history_ready(&h,8,16));
     assert(lsfg_graph_history_index(&h,16)==0);
