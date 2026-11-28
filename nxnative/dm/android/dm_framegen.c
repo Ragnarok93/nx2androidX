@@ -583,6 +583,13 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // refresh
     if (ng && rns) { double r = *hold * 1e9 / (double)rns, w = floor(r + 0.5); if (w >= 1 && fabs(r - w) <= 0.15) *hold = w * (double)rns / 1e9; }
 report:;
+    fg_decision.graph_phase=F.graph.phase;
+    fg_decision.pending_flow=(F.graph.phase==LSFG_GRAPH_BUILDING||F.graph.phase==LSFG_GRAPH_WARMING)?F.graph.scale:0;
+    fg_decision.seed_policy=(unsigned)F.seed_policy;
+    fg_decision.seed_count=F.graph.phase==LSFG_GRAPH_WARMING?F.graph.history.filled:0;
+    fg_decision.active_bytes=lsfg_chain_bytes(F.chain);
+    fg_decision.extra_bytes=lsfg_chain_bytes(F.graph.extra);
+    fg_decision.build_limit=F.graph.phase==LSFG_GRAPH_BUILDING?F.graph.job.byte_limit:0;
     // The floor's unloaded baseline must reflect submitted GPU work, not
     // the pacer's theoretical count before warm-up and refresh capping.
     F.pacer.issued = ng;

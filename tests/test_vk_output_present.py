@@ -64,7 +64,9 @@ static int dm_fg_wants_input(void){return fg_on;}
 double vk_gpu_ms_recent(void){return 8.0;}
 static void dm_fg_shadow_present(int real,int generated,double replay,double recon,uint64_t workload){(void)real;(void)generated;(void)replay;(void)recon;(void)workload;}
 typedef struct {const char *reason;double period_ms,measured_ms;uint64_t refresh_ns;unsigned planned,warm_streak;
-    int requested_flow,active_flow;uint64_t submission_serial;dm_fg_timing timing;} dm_fg_decision;
+    int requested_flow,active_flow;uint64_t submission_serial;dm_fg_timing timing;
+    unsigned graph_phase,pending_flow,seed_policy,seed_count;
+    uint64_t active_bytes,extra_bytes,build_limit;} dm_fg_decision;
 static dm_fg_decision dm_fg_last_decision(void){return (dm_fg_decision){.reason=fg_on?"test fg":"disabled",.period_ms=33.333,.planned=fg_on?1:0};}
 static spatial_image *spatial_display_resolved(uint64_t ticket){return resolved_ticket==ticket?&resolve:NULL;}
 static int reconstruction_pressure(dm_flow_cadence cadence,uint64_t ticket){assert(cadence.period_us && ticket);return 0;}

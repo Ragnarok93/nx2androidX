@@ -57,6 +57,8 @@ int main(int argc, char **argv) {
         .fg_reason="refresh cap",.fg_period_ms=16.667,.fg_measured_ms=18.5,
         .fg_refresh_ns=8333333,.fg_planned=1,.fg_warm_streak=2,
         .fg_requested_flow=0,.fg_active_flow=50,.fg_submission_serial=13,
+        .fg_graph_phase=2,.fg_pending_flow=40,.fg_seed_policy=2,.fg_seed_count=1,
+        .fg_active_bytes=123456,.fg_extra_bytes=65432,.fg_build_limit=0,
         .fg_timing={.valid=1,.serial=10,.epoch=2,.scale=50,.width=1920,.height=1080,.generated=1,
             .copy_ms=.25,.mip_ms=.5,.shared_ms=1,.refine_ms=2,.output_ms=.75,.total_ms=4.5},
         .reason="image-driven motion"});
@@ -138,7 +140,15 @@ int main(int argc, char **argv) {
             self.assertEqual(a['fg_refine_ms'],'2.000')
             self.assertEqual(a['fg_output_ms'],'0.750')
             self.assertEqual(a['fg_total_ms'],'4.500')
+            self.assertEqual(a['fg_graph_phase'],'2')
+            self.assertEqual(a['fg_pending_flow'],'40')
+            self.assertEqual(a['fg_seed_policy'],'2')
+            self.assertEqual(a['fg_seed_count'],'1')
+            self.assertEqual(a['fg_active_bytes'],'123456')
+            self.assertEqual(a['fg_extra_bytes'],'65432')
+            self.assertEqual(a['fg_build_limit'],'0')
             self.assertEqual(b['fg_timing_serial'],'0')
+            self.assertEqual(b['fg_graph_phase'],'0')
             self.assertEqual(b['fg_reason'],'-')
             self.assertEqual(b['presentation_seen'],'0')
             self.assertEqual(b['timing_backend'],'-')
