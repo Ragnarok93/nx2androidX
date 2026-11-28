@@ -2484,7 +2484,10 @@ static void drv_segment(int st, int bank, uint8_t *d, int dyn) {
         if (st != 5) { const float mp = 2047.0f; memcpy(d + 0x610, &mp, 4); memcpy(d + 0x644, &g_draw_binst, 4); }
         else { memcpy(d + 0x200, g_dispatch, 12); for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); } }
     } else if (!dyn) {
-        for (int off = 0x20; off < 0x968; off += 8) { uint64_t h = c2_handle(st, off); memcpy(d + off, &h, 8); }
+        memcpy(d + 0x20, S.tex[st], 32 * sizeof(uint64_t));
+        memcpy(d + 0x120, S.img[st], 8 * sizeof(uint64_t));
+        memcpy(d + 0x168, S.tex[st] + 128, 128 * sizeof(uint64_t));
+        memcpy(d + 0x568, S.samp[st], 128 * sizeof(uint64_t));
     } else {
         // Slot-index handles only for profiles declaring tex_dyn_slots.
         for (int r = 0; r < 8; r++) { uint32_t h = (uint32_t)S.img[st][r]; memcpy(d + 0x120 + 8*r, &h, 4); }
@@ -2731,6 +2734,11 @@ static size_t g_set_key_used;
 // The maximum live prefix is c2's 0x968 bytes; bytes beyond each prefix are zero.
 // GPU-written segments must stay outside this immutable cache.
 static struct { uint64_t h, epoch; VkBuffer b; VkDeviceSize o; size_t n; uint8_t data[0x968]; } g_drvc[DRVC];
+static uint64_t g_bind_gen[6];
+// C2 contains only replay-owned handle bindings, not pointed-to guest data.
+// Keep a fast path per stage and encoding, scoped to immutable scratch in
+// the current submission. C0 (including indirect compute) stays unchanged.
+static struct { uint64_t epoch, bind; VkBuffer b; VkDeviceSize o; } g_c2_memo[6][2];
 uint64_t g_set_key_bypass;   // cacheable misses left uncached because the per-submission key arena is full
 uint64_t g_set_hits, g_set_new, g_ns_set_build, g_ns_set_hash, g_ns_set_new;   // descriptor sets: reused, new; time collecting their descriptors, hashing them, allocating and writing new ones
 // content hash of descriptor sets and driver segments: 8 bytes a step (a set with 32-slot texture arrays is several KB, which byte-wise FNV took milliseconds a frame over)
@@ -2758,6 +2766,10 @@ static size_t set_key(uint64_t key[SET_KEY_WORDS], VkDescriptorSetLayout layout,
     return n;
 }
 static void drv_shared(int st, int bank, VkBuffer *buf, VkDeviceSize *off, int dyn) {   // the driver segment: built, then one copy per distinct content in the submission
+    typeof(g_c2_memo[0][0]) *m = bank && !g_x_nodrvc && !g_x_setverify ? &g_c2_memo[st][!!dyn] : NULL;
+    if (m && m->epoch == g_set_epoch && m->bind == g_bind_gen[st] && m->b) {
+        *buf = m->b; *off = m->o; return;
+    }
     uint8_t d[0x1000]; drv_segment(st, bank, d, dyn);
     // only the bytes drv_segment can write are hashed (bank 0 ends at 0x648, the c2 table at 0x968; the rest is always zero): 4 KB was 512 hash steps a segment
     size_t n = bank ? 0x968 : 0x648;
@@ -2765,10 +2777,13 @@ static void drv_shared(int st, int bank, VkBuffer *buf, VkDeviceSize *off, int d
     // If different banks hash alike, include the longer live prefix so its tail
     // cannot be mistaken for the shorter bank's implicit zeros.
     size_t compare = n > g_drvc[k].n ? n : g_drvc[k].n;
-    if (g_drvc[k].epoch == g_set_epoch && g_drvc[k].h == h && !g_x_nodrvc && !memcmp(g_drvc[k].data, d, compare)) { *buf = g_drvc[k].b; *off = g_drvc[k].o; return; }
-    uint8_t *p = vk_scratch(0x1000, V.props.limits.minUniformBufferOffsetAlignment, buf, off); memcpy(p, d, sizeof d);
-    g_drvc[k].h = h; g_drvc[k].epoch = g_set_epoch; g_drvc[k].b = *buf; g_drvc[k].o = *off; g_drvc[k].n = n;
-    memcpy(g_drvc[k].data, d, n); memset(g_drvc[k].data + n, 0, sizeof g_drvc[k].data - n);
+    if (g_drvc[k].epoch == g_set_epoch && g_drvc[k].h == h && !g_x_nodrvc && !memcmp(g_drvc[k].data, d, compare)) { *buf = g_drvc[k].b; *off = g_drvc[k].o; }
+    else {
+        uint8_t *p = vk_scratch(0x1000, V.props.limits.minUniformBufferOffsetAlignment, buf, off); memcpy(p, d, sizeof d);
+        g_drvc[k].h = h; g_drvc[k].epoch = g_set_epoch; g_drvc[k].b = *buf; g_drvc[k].o = *off; g_drvc[k].n = n;
+        memcpy(g_drvc[k].data, d, n); memset(g_drvc[k].data + n, 0, sizeof g_drvc[k].data - n);
+    }
+    if (m) *m = (typeof(*m)){g_set_epoch, g_bind_gen[st], *buf, *off};
 }
 // A binding that runs past its chunk's end into the pool's next chunk (pools over ZC_CHUNK come in chunks, each its own buffer, and the replay looks a binding up by its first byte):
 // the GPU would read past the buffer, and with robustBufferAccess off it saw zeros. Found with smaller chunks in a fork: Pokemon Pokopia's per-frame constants, a 64 MB ring, crossed
@@ -2817,7 +2832,7 @@ static int cbuf_desc(int st, const vkshader_t *s, const dmsv_bind *b, VkDescript
 // DM_VK_X_NOSETMEMO=1 (live): always collected. DM_VK_X_SETVERIFY=1 (live): one hit in 64 is collected anyway and compared, [RED] on a difference
 enum { MEMO_CB = 16 };
 typedef struct { vkshader_t *s; uint64_t epoch, bind, ubo, ubd, tex, samp, h, um, im, clear_revision; uint32_t pool, binst, dofs[96]; int ncb; uint8_t ci[MEMO_CB], cpos[MEMO_CB]; VkDescriptorBufferInfo cd[MEMO_CB]; VkDescriptorSet set; } set_memo_t;
-static set_memo_t g_smemo[3]; static uint64_t g_bind_gen[6], g_ubo_gen[6];   // a stage's handles or storage buffers changed (bind_handles_rec, OP_BIND_SSBO), its uniform buffers (OP_BIND_UBO)
+static set_memo_t g_smemo[3]; static uint64_t g_ubo_gen[6];   // a stage's handles or storage buffers changed (bind_handles_rec, OP_BIND_SSBO), its uniform buffers (OP_BIND_UBO)
 uint64_t g_set_memo, g_set_memo_bad;   // memo hits, and differences the verify mode found
 extern uint64_t g_ubd_gen; uint32_t vk_pool_gen(void);
 static int set_memo_ok(vkshader_t *s) {
