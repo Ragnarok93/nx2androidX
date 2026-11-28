@@ -1669,7 +1669,11 @@ static void begin_segment(int continuing) {
     // the next slot of the ring (g_cur is -1 between submissions, so it cannot say where the ring is: every submission took slot 0 and waited in slot_recycle
     // for the one before to finish on the GPU, which kept the replay of a frame from overlapping the GPU work of the last)
     static int next; int slot = next; next = (next + 1) % NSLOT; vksub_t *s = &g_slot[slot];
+    uint64_t recycle_start=mem_diag_ns();
     slot_recycle(s);
+    uint64_t recycle_ns=mem_diag_ns()-recycle_start;
+    if (recycle_ns>=50000000ull)
+        VKLOG("[perf] REPLAY_SLOT_STALL slot=%d fence=%llu total=%.2f",slot,(unsigned long long)s->fence,recycle_ns/1e6);
     // Do not publish a recycled slot (or its future fence) until the old
     // submission and command-buffer/descriptor reset have completed.
     pthread_mutex_lock(&g_df_mu);
@@ -2052,7 +2056,17 @@ uint64_t mtl_sub_commit(void) {
         if (f > NFRING) mtl_wait(f - NFRING, ~0ull);
         fe = g_fring[f % NFRING]; VKCHK(vkResetFences(V.dev, 1, &fe)); si.pNext = NULL; si.signalSemaphoreCount = 0;
     }
-    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); pthread_mutex_lock(&g_vk_queue_mu); VkResult r = vkQueueSubmit(V.q, 1, &si, fe); pthread_mutex_unlock(&g_vk_queue_mu); clock_gettime(CLOCK_MONOTONIC, &t1); g_ns_submit += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
+    uint64_t submit_start=mem_diag_ns();
+    pthread_mutex_lock(&g_vk_queue_mu);
+    uint64_t submit_lock=mem_diag_ns();
+    VkResult r=vkQueueSubmit(V.q,1,&si,fe);
+    uint64_t submit_end=mem_diag_ns();
+    pthread_mutex_unlock(&g_vk_queue_mu);
+    g_ns_submit+=submit_end-submit_start;
+    if (submit_end-submit_start>=50000000ull)
+        VKLOG("[perf] REPLAY_SUBMIT_STALL frame=%llu fence=%llu lock=%.2f submit=%.2f cbs=%u result=%d",
+            (unsigned long long)__atomic_load_n(&g_cur_frame,__ATOMIC_RELAXED),
+            (unsigned long long)f,(submit_lock-submit_start)/1e6,(submit_end-submit_lock)/1e6,ncb,r);
     if (r) { void vk_crumbs_report(void); vk_crumbs_report(); die("[vk] vkQueueSubmit: %d (device lost?)", r); }
     void vk_guest_flow_submitted(int accepted, uint64_t fence);
     vk_guest_flow_submitted(er >= 0, f);
