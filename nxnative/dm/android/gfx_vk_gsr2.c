@@ -814,7 +814,18 @@ int vk_gsr2_record(vk_gsr2 *ctx, VkCommandBuffer cb, unsigned slot,
         gsr2_dispatch(ctx, cb, slot, i);
         if (timing && timing->pool)
             vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timing->pool, timing->first + 2 * i + 1);
-        vk_img_barrier_all(cb);
+        if (ctx->image_driven && i == 0) {
+            // The flow conversion pass writes only G2_CLIP; accumulation
+            // samples that image. Keep the external entry/exit barriers,
+            // but avoid a device-wide dependency between these two passes.
+            VkImageMemoryBarrier ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                ctx->images[G2_CLIP].image, temporal_color};
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &ready);
+        } else vk_img_barrier_all(cb);
     }
 
     const temporal_image *result = &ctx->images[ctx->fragment ? G2_HISTORY0 + ctx->next : G2_RESULT];
