@@ -83,6 +83,34 @@ static int chain_stopped(lsfg_chain *c) {
     if(c->cancel && atomic_load_explicit(c->cancel,memory_order_acquire))c->bad=1;
     return c->bad;
 }
+// A policy rejection is not a Vulkan result. Preserve the exact selected
+// memory type, heap, requirement and charged bytes for later admission audit.
+static int graph_memory_allocate(lsfg_chain *c, const VkMemoryAllocateInfo *ai,
+                                 VkDeviceMemory *out, const char *kind) {
+    uint32_t type=ai->memoryTypeIndex;
+    uint32_t heap=type<V.mem.memoryTypeCount?V.mem.memoryTypes[type].heapIndex:UINT32_MAX;
+    *out=VK_NULL_HANDLE;
+    if (heap==UINT32_MAX) {
+        VRED("LSFG_ALLOC_REJECT origin=memory_type kind=%s type=%u heap=%u bytes=%llu",kind,type,heap,
+             (unsigned long long)ai->allocationSize);
+        return 0;
+    }
+    if (!lsfg_graph_fits(&c->budget,ai->allocationSize)) {
+        VLOG("LSFG_ALLOC_REJECT origin=policy_budget kind=%s type=%u heap=%u bytes=%llu used=%llu limit=%llu",
+             kind,type,heap,(unsigned long long)ai->allocationSize,
+             (unsigned long long)c->budget.used,(unsigned long long)c->budget.limit);
+        return 0;
+    }
+    VkResult r=vk.vkAllocateMemory(V.dev,ai,NULL,out);
+    if (r) {
+        *out=VK_NULL_HANDLE;
+        VRED("LSFG_ALLOC_FAILURE origin=driver_allocate kind=%s type=%u heap=%u bytes=%llu result=%d",
+             kind,type,heap,(unsigned long long)ai->allocationSize,r);
+        return 0;
+    }
+    lsfg_graph_charge(&c->budget,ai->allocationSize);
+    return 1;
+}
 static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
     if (chain_stopped(c)) return NULL;
     if (c->nimg >= MAX_IMAGES) { VRED("lsfg: more than %d images", MAX_IMAGES); c->bad = 1; return NULL; }
@@ -95,12 +123,8 @@ static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
     if (r) im->img=VK_NULL_HANDLE;
     VkMemoryRequirements mr = {0}; if (!r) vk.vkGetImageMemoryRequirements(V.dev, im->img, &mr);
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
-    if (!r && (ai.memoryTypeIndex == UINT32_MAX || !lsfg_graph_fits(&c->budget,mr.size)))
-        r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    if (!r) {
-        r = vk.vkAllocateMemory(V.dev, &ai, NULL, &im->mem);
-        if (r) im->mem=VK_NULL_HANDLE;
-        else lsfg_graph_charge(&c->budget,mr.size);
+    if (!r && !graph_memory_allocate(c,&ai,&im->mem,"image")) {
+        c->bad=1; return NULL;
     }
     if (!r) r = vk.vkBindImageMemory(V.dev, im->img, im->mem, 0);
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = im->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -233,16 +257,12 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     VkMemoryRequirements mr = {0}; if (!r) vk.vkGetBufferMemoryRequirements(V.dev, c->ubuf, &mr);
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
         .memoryTypeIndex = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0)};
-    if (!r && (ai.memoryTypeIndex == UINT32_MAX || !lsfg_graph_fits(&c->budget,mr.size)))
-        r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    if (!r) {
-        r = vk.vkAllocateMemory(V.dev, &ai, NULL, &c->umem);
-        if (r) c->umem=VK_NULL_HANDLE;
-        else lsfg_graph_charge(&c->budget,mr.size);
-    }
-    if (!r) r = vk.vkBindBufferMemory(V.dev, c->ubuf, c->umem, 0);
-    void *map = NULL; if (!r) r = vk.vkMapMemory(V.dev, c->umem, 0, VK_WHOLE_SIZE, 0, &map);
-    if (r) { VRED("lsfg: uniform buffer: %d", r); c->bad = 1; } else c->umap = map;
+    int allocated = !r && graph_memory_allocate(c,&ai,&c->umem,"uniform");
+    if (allocated) r = vk.vkBindBufferMemory(V.dev, c->ubuf, c->umem, 0);
+    void *map = NULL; if (allocated && !r) r = vk.vkMapMemory(V.dev, c->umem, 0, VK_WHOLE_SIZE, 0, &map);
+    if (r) { VRED("lsfg: uniform buffer: %d", r); c->bad = 1; }
+    else if (!allocated) c->bad=1;
+    else c->umap = map;
 
     // Inputs
     for (int i = 0; i < 2; i++) c->frames[i] = img_new(c, ext, LSFG_FORMAT);

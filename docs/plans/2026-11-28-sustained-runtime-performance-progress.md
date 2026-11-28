@@ -13,7 +13,7 @@ Primary target: FFR 1.0.1, S25 FE, Xclipse 940 RADV cc87fdf712, 8 GB, internal s
 | M2 | Partial: fixed-cadence hold/refresh policy and source-clock integration; adaptive admission and integrated validation outstanding |
 | M3 | Partial: bounded WSI acquisition, chronological rejection, retirement predicate; dependency pacing and integrated validation pending |
 | M4 | Partial: explicit standalone lifecycle epochs, queue gating and resume rebase; pacer/ADPF accounting pending |
-| M5 | Not started |
+| M5 | Partial: distinct allocation origins; per-heap reservation and cold upward recovery pending |
 | M6 | Not started |
 | M7 | Not started |
 | M8 | Not started |
@@ -192,3 +192,11 @@ Local test against extracted actual pacer body and header declarations from M2: 
 Parent `634e929b153f32b3b20ff2aa1969ab3dd776e2f6`. Acquire publishes start, pacing and queue wait with lifecycle epoch in a small mutex-protected snapshot, replacing separately written unsynchronized fields. Present consumes once; held and cross-epoch observations are excluded; first valid work after resume uses current acquire start, not the old present timestamp. Known active epochs no longer discard work merely because it exceeds 250 ms. Legacy frontends without explicit epoch retain ambiguity guard. Preserve workload estimates and rate policy. No changes to ADPF queue-wait classification, thread registration, or full ticket-based pairing in this checkpoint; those remain M8 work. Actual display timing intervals can still span a hold and need ticket/epoch attribution.
 
 RED/GREEN: actual extracted perf_android.c frame start/report block with mocked clock and hint API, `python3 -m unittest discover -s tests -p test_vk_perf_lifecycle.py -v`. RED exit 1, short hold reported as work: 25000000 (0.047 s). GREEN exit 0, 1/1 (0.050 s); verified normal 10 ms work, exclusion of short pause, reported 1 s active stall, held interval, resumed 9 ms work, legacy fallback. Native CI pending, not an ADPF device performance measurement. M4 still requires full integration and safe redraw/mid-flight transition validation; M5–M8 outstanding.
+
+## M5a: distinguish internal graph budget rejection from driver allocation failure
+
+Parent `95ca85ae3a17c4c179a8c411b00d974e7de73a34`. The private graph image and UBO allocations formerly converted policy/no-type rejection into VK_ERROR_OUT_OF_DEVICE_MEMORY. A shared helper now reports LSFG_ALLOC_REJECT origin=policy_budget (type, heap, required/used/limit bytes) or origin=memory_type separately from LSFG_ALLOC_FAILURE origin=driver_allocate (actual VkResult). No driver allocation on policy rejection; successful VkDeviceMemory is charged once; image/buffer handles retained for existing teardown and failed memory handles cleared. No cap, reservation, graph ownership or initial allocation policy changes.
+
+RED/GREEN against actual extracted image allocator with mocked Vulkan memory boundary: `python3 -m unittest discover -s tests -p test_vk_fg_allocation_origin.py -v`, RED exit 1 (0.042 s), 'policy rejection indistinguishable: lsfg: image 1920x1080 format 37: -2'. GREEN exit 0 (0.056 s), 1/1. 8,294,400-byte RGBA8 requirement at 6 MiB limit rejected before allocator; no compatible memory type separately classified; driver error -2 correctly logged; successful allocation charged. Updated existing allocation fault fixture to provide memory type properties; full real-Vulkan/UBO integration pending CI. These are simulated requirements, not actual measured device alignment.
+
+Remaining M5: per-heap budget/usage snapshot and reservations, full graph requirement preflight, safe same-extent upward cold replacement with rollback to last valid scale, backoff and cancellation. Current downward cold path retries failed requested scale instead of restoring last valid graph; do not increase memory caps simply to solve the 6 MiB report. M4 still needs integration; M6–M8 outstanding.

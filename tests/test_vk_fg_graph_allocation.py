@@ -21,13 +21,15 @@ class FGGraphAllocation(unittest.TestCase):
 #include <stdint.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <stdio.h>
 #include <vulkan/vulkan_core.h>
 #include "lsfg/lsfg_graph_budget.h"
-#define VRED(...) ((void)0)
+#define VRED(...) do { if (0) fprintf(stderr,__VA_ARGS__); } while (0)
+#define VLOG(...) VRED(__VA_ARGS__)
 enum {MAX_IMAGES=192};
 typedef struct {VkImage img;VkDeviceMemory mem;VkImageView view;VkExtent2D ext;VkFormat fmt;} limg;
 typedef struct {int bad,nimg;lsfg_graph_budget budget;const atomic_int *cancel;limg imgs[MAX_IMAGES];} lsfg_chain;
-static struct {VkDevice dev;} V;
+static struct {VkDevice dev; VkPhysicalDeviceMemoryProperties mem;} V={.mem={.memoryTypeCount=1,.memoryTypes={{.heapIndex=0}}}};
 static unsigned fail,allocs,layouts;
 static uint64_t req_bytes=4096;
 static VkResult create(VkDevice d,const VkImageCreateInfo *i,const VkAllocationCallbacks *a,VkImage *out){
