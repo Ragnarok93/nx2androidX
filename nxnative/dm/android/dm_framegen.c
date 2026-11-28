@@ -114,7 +114,7 @@ static struct {
     lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
     lsfg_graph_owner graph;
     lsfg_graph_job cold_job;
-    struct { unsigned phase, scale, failures; uint64_t limit, epoch; double retry_at; } cold;
+    struct { unsigned phase, scale, failures, prior_scale, restoring; uint64_t limit, epoch, prior_limit; double retry_at; } cold;
     int cold_init;
     uint64_t graph_ticket;
     int auto_applied,requested_flow;
@@ -454,6 +454,8 @@ static int fg_cold_advance(double now) {
             lsfg_graph_owner_retire_slot(&F.graph,i);
         }
         if (F.graph.active_slots) return 0;
+        F.cold.prior_scale=(unsigned)F.flow;
+        F.cold.prior_limit=lsfg_chain_bytes(F.chain);
         if (!lsfg_graph_job_start_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
                 F.out_view,F.cold.limit,F.cold.epoch,F.chain)) {
             memset(&F.cold,0,sizeof F.cold);
@@ -468,6 +470,7 @@ static int fg_cold_advance(double now) {
     }
     if (F.cold.phase==FG_COLD_RETRY) {
         if (!extra_cap || now<F.cold.retry_at) return 0;
+        F.cold.epoch=F.timing_epoch;
         if (!lsfg_graph_job_start(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
                 F.out_view,F.cold.limit,F.cold.epoch)) {
             F.cold.retry_at=now+2.0;
@@ -476,10 +479,19 @@ static int fg_cold_advance(double now) {
         F.cold.phase=FG_COLD_BUILD;
         return 0;
     }
-    if (!extra_cap) lsfg_graph_job_cancel(&F.cold_job);
+    if (!extra_cap || F.cold.epoch!=F.timing_epoch) lsfg_graph_job_cancel(&F.cold_job);
     lsfg_chain *replacement=NULL;
     if (!lsfg_graph_job_take(&F.cold_job,F.cold.epoch,&replacement)) return 0;
     if (!replacement) {
+        // Do not repeatedly rebuild an unaffordable new graph after the old
+        // one has been destroyed. Restore its last validated private budget.
+        if (!F.cold.restoring && F.cold.prior_scale && F.cold.prior_limit) {
+            VLOG("LSFG_FLOW_GRAPH cold replacement failed at %u%%; restoring %u%%",
+                F.cold.scale,F.cold.prior_scale);
+            F.cold.scale=F.cold.prior_scale;
+            F.cold.limit=F.cold.prior_limit;
+            F.cold.restoring=1;
+        }
         unsigned shift=F.cold.failures<4?F.cold.failures++:4;
         F.cold.retry_at=now+(double)(2u<<shift);
         F.cold.phase=FG_COLD_RETRY;
@@ -498,6 +510,12 @@ static int fg_cold_advance(double now) {
     dm_fg_governor_reset(&F.shadow,(unsigned)F.flow,F.timing_epoch);
     dm_fg_governor_preset(&F.shadow,F.requested_flow);
     F.shadow.backoff=2.0;
+    if (F.cold.restoring) {
+        F.shadow.failed_requests=F.cold.failures?F.cold.failures:1;
+        unsigned shift=F.shadow.failed_requests<4?F.shadow.failed_requests:4;
+        F.shadow.backoff=(double)(2u<<shift);
+        VLOG("LSFG_FLOW_GRAPH restored last valid scale %d%%",F.flow);
+    }
     memset(&F.cold,0,sizeof F.cold);
     VLOG("LSFG_FLOW_GRAPH cold activated %d%%, private bytes %llu",F.flow,
         (unsigned long long)lsfg_chain_bytes(F.chain));

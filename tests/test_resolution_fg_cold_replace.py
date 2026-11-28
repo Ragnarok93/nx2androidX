@@ -31,7 +31,7 @@ typedef struct {VkFence fence;int pending;} fg_slot;
 typedef struct {unsigned active_slots;} owner;
 static struct {
     lsfg_graph_job cold_job;
-    struct {unsigned phase,scale,failures;uint64_t limit,epoch;double retry_at;} cold;
+    struct {unsigned phase,scale,failures,prior_scale,restoring;uint64_t limit,epoch,prior_limit;double retry_at;} cold;
     int cold_init,flow,auto_applied,requested_flow;
     lsfg_chain *chain;lsfg_modules mods;VkExtent2D ext;VkImageView out_view[3];
     owner graph;fg_slot fr[NFG];
@@ -61,13 +61,13 @@ uint64_t lsfg_chain_bytes(const lsfg_chain *p){return p?p->bytes:0;}
 void lsfg_chain_free(lsfg_chain *p){if(p){assert(atomic_fetch_sub(&live,1)==1);free(p);}}
 lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods,VkExtent2D e,float f,
         const VkImageView v[LSFG_MAX_GENERATIONS],uint64_t bytes,const atomic_int *cancel){
-    assert(mods==&F.mods&&e.width==1920&&e.height==1080&&f==.45f&&bytes==100);
+    assert(mods==&F.mods&&e.width==1920&&e.height==1080&&f==(F.cold.restoring?.50f:.45f)&&bytes==100);
     assert(v[0]==1&&v[1]==2&&v[2]==3);
     assert(atomic_load(&live)==0); // old graph must already be destroyed
     atomic_store(&entered,1);
     while(!atomic_load(&release_build))sched_yield();
     if(atomic_load(&fail_build)||atomic_load(cancel))return NULL;
-    return make_chain(90);
+    return make_chain(F.cold.restoring?100:90);
 }
 static void wait_entered(void){while(!atomic_load(&entered))sched_yield();}
 static void finish_build(void){atomic_store(&release_build,1);while(!atomic_load(&F.cold_job.done))sched_yield();}
@@ -92,10 +92,12 @@ int main(void){
     reset_request();signalled=3;atomic_store(&fail_build,1);
     assert(!fg_cold_advance(6));wait_entered();finish_build();
     assert(!fg_cold_advance(7)&&F.cold.phase==FG_COLD_RETRY&&!F.chain&&F.cold.retry_at==9);
+    assert(F.cold.restoring&&F.cold.scale==50&&F.cold.limit==100);
     cap=0;assert(!fg_cold_advance(10)&&!F.cold_job.running);
     cap=6;atomic_store(&entered,0);atomic_store(&release_build,0);atomic_store(&fail_build,0);
     assert(!fg_cold_advance(11));wait_entered();finish_build();
-    assert(fg_cold_advance(12)&&F.chain&&F.flow==45);
+    assert(fg_cold_advance(12)&&F.chain&&F.flow==50);
+    assert(F.shadow.failed_requests==1&&F.shadow.backoff>=4.0&&lsfg_chain_bytes(F.chain)==100);
     lsfg_chain_free(F.chain);F.chain=NULL;assert(!atomic_load(&live));
     return 0;
 }'''
