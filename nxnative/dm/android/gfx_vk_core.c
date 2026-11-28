@@ -13,6 +13,7 @@
 #include "nvn_dirty.h"
 #include "gfx_vk_pool_pressure.h"
 #include "gfx_vk_fg_pressure.h"
+#include "gfx_vk_quality_recovery.h"
 #include <android/hardware_buffer.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -557,6 +558,15 @@ static void zcf_trim_to(uint64_t budget) {
 // here; in-flight buffers remain until a later pass observes their completion.
 // Pressure sampling is off the present thread. A short trylock copies the
 // coherent sample; a busy monitor is treated as unknown, not a wait.
+static dm_quality_recovery quality_recovery;
+extern int dm_fg_adaptive_auto_active(void);
+int vk_quality_recovery_try(unsigned hold_ms) {
+    if(!dm_fg_adaptive_auto_active())return 1;
+    return dm_quality_recovery_claim(&quality_recovery,mem_diag_ns(),hold_ms);
+}
+void vk_quality_recovery_hold(unsigned hold_ms) {
+    if(dm_fg_adaptive_auto_active())dm_quality_recovery_hold(&quality_recovery,mem_diag_ns(),hold_ms);
+}
 static pthread_mutex_t fg_pressure_mu=PTHREAD_MUTEX_INITIALIZER;
 static dm_fg_pressure fg_pressure;
 uint64_t vk_fg_transition_cap(int upward) {

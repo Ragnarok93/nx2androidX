@@ -3530,8 +3530,10 @@ static VkDescriptorSet guest_flow_record(VkCommandBuffer cb, uint64_t stream) {
     const int new_feedback = source_ticket && source_ticket != guest_flow.feedback_ticket;
     guest_flow.feedback_ticket = source_ticket;
     dm_flow_budget_pressure(&guest_flow.policy, ticket, backlog >= 2 || (new_feedback && (feedback & 1)));
-    if (slot == VK_GSR2_SLOTS || backlog >= 2 || ticket < guest_flow.retry_after ||
-        !dm_flow_budget_allow(&guest_flow.policy, ticket)) return VK_NULL_HANDLE;
+    if (slot == VK_GSR2_SLOTS || backlog >= 2 || ticket < guest_flow.retry_after) return VK_NULL_HANDLE;
+    if(dm_flow_budget_recovery_due(&guest_flow.policy,ticket) && !vk_quality_recovery_try(4000))
+        return VK_NULL_HANDLE;
+    if(!dm_flow_budget_allow(&guest_flow.policy,ticket))return VK_NULL_HANDLE;
     dm_temporal_frame frame = {.ticket = ticket, .stream = stream, .epoch = guest_flow.epoch,
         .iw = iw.width, .ih = iw.height, .ow = ow.width, .oh = ow.height,
         .inputs = DM_TEMPORAL_IMAGE_PAIR, .variants = DM_TEMPORAL_2FS, .real = 1, .memory_ok = 1};

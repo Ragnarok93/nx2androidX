@@ -804,7 +804,12 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     spatial_retire_timing(slot, ticket);
 #if SP_TEMPORAL
     if (wants_flow) dm_flow_budget_pressure(&g_flow.policy, ticket, g_spatial.flow_pressure);
-    int budget_allows = wants_flow && dm_flow_budget_allow(&g_flow.policy, ticket);
+    int recovery_allows=1;
+#ifndef SPATIAL_HOST_PROBE
+    if(wants_flow && dm_flow_budget_recovery_due(&g_flow.policy,ticket))
+        recovery_allows=vk_quality_recovery_try(4000);
+#endif
+    int budget_allows = wants_flow && recovery_allows && dm_flow_budget_allow(&g_flow.policy, ticket);
     flow = budget_allows && (g_spatial.queries || g_spatial.flow_budget_ms == 0.0f) &&
         (src_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
         (dst_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
@@ -813,7 +818,8 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         mode = SP_SGSR2;
         reason = "image-driven motion";
     } else if (wants_flow) {
-        if (!budget_allows) reason = g_flow.policy.retry_after == UINT64_MAX ?
+        if (!recovery_allows) reason="temporal recovery deferred by competing quality probe";
+        else if (!budget_allows) reason = g_flow.policy.retry_after == UINT64_MAX ?
             "temporal sustained overload; waiting for workload change" : "temporal sustained overload cooldown";
         else if (!g_spatial.queries && g_spatial.flow_budget_ms > 0.0f)
             reason = "temporal timing capability unavailable";

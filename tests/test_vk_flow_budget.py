@@ -88,7 +88,12 @@ int main(void) {
     dm_flow_budget_observe(&p, gen, 605, 610, 2.5f, 9.0);
     assert(p.retry_after == 725);
     assert(!dm_flow_budget_allow(&p, 724));
+    assert(!dm_flow_budget_recovery_due(&p,724));
+    assert(dm_flow_budget_recovery_due(&p,725));
+    // A competing recovery veto leaves the original retry epoch intact.
+    assert(dm_flow_budget_recovery_due(&p,726)&&p.retry_after==725);
     assert(dm_flow_budget_allow(&p, 725));
+    assert(!dm_flow_budget_recovery_due(&p,726));
     uint64_t probe = p.generation;
     assert(probe != gen);
     for (uint64_t t=725; t<730; ++t)

@@ -57,6 +57,9 @@ static inline void dm_flow_budget_set_workload(dm_flow_budget *p, const dm_flow_
     *p = (dm_flow_budget){.key=*k, .generation=generation, .backoff=120, .valid=1};
 }
 
+static inline int dm_flow_budget_recovery_due(const dm_flow_budget *p,uint64_t ticket) {
+    return p->valid && p->retry_after && p->retry_after!=UINT64_MAX && ticket>=p->retry_after;
+}
 static inline int dm_flow_budget_allow(dm_flow_budget *p, uint64_t ticket) {
     if (!p->valid || p->retry_after == UINT64_MAX || ticket < p->retry_after) return 0;
     if (p->retry_after) {

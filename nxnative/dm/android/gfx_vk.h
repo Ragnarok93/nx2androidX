@@ -69,6 +69,8 @@ const void *vk_sg_pin(VkShaderStageFlagBits stage, const uint32_t *local);   // 
 // NULL when there is nothing the stage lacks (why empty) or it uses something not covered (why names it); the module then stays as it is
 uint32_t *spv_one_lane(const uint32_t *w, uint32_t nw, uint32_t ops, uint32_t *onw, char *why, size_t nwhy);
 uint32_t vk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid);
+int vk_quality_recovery_try(unsigned hold_ms);
+void vk_quality_recovery_hold(unsigned hold_ms);
 uint64_t vk_fg_transition_cap(int upward); // fresh pressure snapshot; zero vetoes allocation
 void vk_init(void);   // once, from mtl_init or the first use
 

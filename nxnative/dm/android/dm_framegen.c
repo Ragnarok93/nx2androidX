@@ -65,6 +65,17 @@ int dm_fg_wants_input(void) {
 #endif
 }
 
+// Read-only cross-thread opt-in check; no settings initialization or graph
+// access from replay. Fixed/manual/disabled operation preserves old policy.
+int dm_fg_adaptive_auto_active(void) {
+#ifdef NX_LSFG
+    const char *e=getenv("DM_LSFG_ADAPTIVE_AUTO");
+    return e&&atoi(e)&&atomic_load(&g_on)>0&&!atomic_load(&g_flow)&&atomic_load(&g_state)>0;
+#else
+    return 0;
+#endif
+}
+
 int dm_fg_status(char *buf, int n) {
     settings_init();
     int st = atomic_load(&g_state);
@@ -283,13 +294,15 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
             uint64_t cap=up?recovery_cap:vk_fg_transition_cap(0);
             int seed=dm_fg_seed_policy(&s,req.pct,F.shadow_rows[j].budget,!up);
             report->allocation_cap=cap;
-            if(cap && seed && lsfg_graph_owner_start(&F.graph,&F.mods,F.ext,req.pct,F.out_view,cap,F.timing_epoch)) {
+            int admitted=cap && seed && (!up || vk_quality_recovery_try(12000));
+            if(admitted && lsfg_graph_owner_start(&F.graph,&F.mods,F.ext,req.pct,F.out_view,cap,F.timing_epoch)) {
+                if(!up)vk_quality_recovery_hold(12000);
                 report->status="build requested";
                 F.seed_policy=seed;F.graph_deadline=mono_s()+10.0;
                 VLOG("LSFG_FLOW_GRAPH request %u%%, cap %llu, warmup %d",req.pct,(unsigned long long)cap,seed);
                 return; // wait for publication or cancellation to acknowledge
             }
-            report->status=!cap?"memory or recovery veto":!seed?"warmup budget veto":"build refused";
+            report->status=!cap?"memory or recovery veto":!seed?"warmup budget veto":!admitted?"competing quality recovery":"build refused";
             VLOG("LSFG_FLOW_GRAPH request refused (cap %llu, warmup %d)",(unsigned long long)cap,seed);
         }
         dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);

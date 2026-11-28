@@ -2228,6 +2228,9 @@ static void dyn_scale_tick(uint64_t presents) {
 // Present producer only. Never use generated presents or create new queries.
 int vk_rs_live_available(void);
 __attribute__((weak)) unsigned dm_rs_live_config(void) {return 0;}
+// Strong Android Vulkan implementation coordinates adaptive recovery; the
+// weak fallback preserves isolated HLE test/link paths.
+__attribute__((weak)) int vk_quality_recovery_try(unsigned hold_ms) {(void)hold_ms;return 1;}
 static nx_rs_live_policy g_rs_live_policy;
 static void rs_live_tick(uint64_t frame,double gpu,const lf_rec *r) {
     unsigned target;
@@ -2238,6 +2241,14 @@ static void rs_live_tick(uint64_t frame,double gpu,const lf_rec *r) {
     int changed=nx_rs_live_update(&next,dm_rs_live_config(),(unsigned)fps,frame,
                                   r && frame>=8?frame-8:0,gpu_us,cpu,&target);
     int vk_rs_set_scale_request(unsigned);
+    // User reconfiguration is not a recovery probe. On veto retain the old
+    // requested scale and consume the sample/dwell, not the quality increase.
+    if(changed && g_rs_live_policy.initialized && next.config==g_rs_live_policy.config &&
+        next.fps==g_rs_live_policy.fps && nx_rs_live_unpack(next.config).mode==NX_RS_ADAPTIVE &&
+        target>g_rs_live_policy.adaptive.scale && !vk_quality_recovery_try(4000)) {
+        next.adaptive.scale=g_rs_live_policy.adaptive.scale;
+        g_rs_live_policy=next;return;
+    }
     if (!changed || vk_rs_set_scale_request(target)) g_rs_live_policy=next;
 }
 static int rs_adaptive_on(void) {
@@ -2277,6 +2288,9 @@ static void rs_adaptive_tick(uint64_t frame,double gpu,const lf_rec *r) {
     unsigned cpu=r->f==frame-8?r->rs_cpu_us:0;
     unsigned old=policy.scale;
     if (nx_rs_adaptive_sample(&policy,frame-8,gpu_us,cpu)) {
+        if(policy.scale>old && !vk_quality_recovery_try(4000)){
+            policy.scale=old;nx_rs_adaptive_requested(&policy,frame);return;
+        }
         if (!vk_rs_set_scale_request(policy.scale)) { policy.scale=old; return; }
         nx_rs_adaptive_requested(&policy,frame);
         LOG("[resolution] adaptive target %u%% (source GPU %.2f ms, conservative CPU %.2f ms, cap %d); not effective scale",policy.scale,gpu,cpu/1000.0,fps);
