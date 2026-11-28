@@ -54,6 +54,8 @@ int main(int argc, char **argv) {
         .stage_ms={0.125,0.5,1.0,0.625},.source_ns=123456789,
         .source_reset=8,.docked=1,.alloc_attempts=3,.allocations=2,
         .alloc_waits=1,.alloc_wait_ns=42,.slot_wait_ns=17,
+        .fg_reason="refresh cap",.fg_period_ms=16.667,.fg_measured_ms=18.5,
+        .fg_refresh_ns=8333333,.fg_planned=1,.fg_warm_streak=2,
         .reason="image-driven motion"});
     assert(vk_pass_dump_export_begin());
     vk_pass_dump_export_end();
@@ -112,6 +114,13 @@ int main(int argc, char **argv) {
             self.assertEqual(a['reconstruction_allocations'],'2')
             self.assertEqual(a['reconstruction_alloc_wait_ns'],'42')
             self.assertEqual(a['reconstruction_slot_wait_ns'],'17')
+            self.assertEqual(a['fg_reason'],'refresh cap')
+            self.assertEqual(a['fg_period_ms'],'16.667')
+            self.assertEqual(a['fg_measured_ms'],'18.500')
+            self.assertEqual(a['fg_refresh_ns'],'8333333')
+            self.assertEqual(a['fg_planned'],'1')
+            self.assertEqual(a['fg_warm_streak'],'2')
+            self.assertEqual(b['fg_reason'],'-')
             self.assertEqual(b['presentation_seen'],'0')
             self.assertEqual(b['timing_backend'],'-')
 

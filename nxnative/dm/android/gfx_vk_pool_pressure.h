@@ -16,4 +16,15 @@ static inline uint64_t vk_pool_reuse_budget_bytes(uint64_t available_kb, uint64_
     if (available_kb < low) return 64ull << 20;
     return full;
 }
+// Tighten immediately; relax only after three consecutive observations
+// agree that the higher tier is safe. A single low sample cancels recovery.
+typedef struct { uint64_t candidate; unsigned count; } vk_pool_recovery;
+static inline uint64_t vk_pool_reuse_budget_update(vk_pool_recovery *s,
+        uint64_t prior,uint64_t available_kb,uint64_t total_kb) {
+    uint64_t wanted=vk_pool_reuse_budget_bytes(available_kb,total_kb);
+    if(wanted<=prior){s->count=0;s->candidate=0;return wanted;}
+    if(s->candidate!=wanted){s->candidate=wanted;s->count=0;}
+    if(++s->count<3)return prior;
+    s->count=0;s->candidate=0;return wanted;
+}
 #endif

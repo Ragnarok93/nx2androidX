@@ -36,6 +36,10 @@ typedef struct {
     uint64_t source_ns, alloc_wait_ns, slot_wait_ns;
     unsigned source_reset, alloc_attempts, allocations, alloc_waits;
     int docked;
+    const char *fg_reason; // immutable frame-generation decision
+    double fg_period_ms, fg_measured_ms;
+    uint64_t fg_refresh_ns;
+    unsigned fg_planned, fg_warm_streak;
     const char *reason; // immutable reconstruction status string
 } vk_capture_scale_present_sample;
 

@@ -555,6 +555,7 @@ static void zcf_trim_to(uint64_t budget) {
 // here; in-flight buffers remain until a later pass observes their completion.
 static void *zcf_pressure_main(void *unused) {
     (void)unused; crash_thread_init();
+    vk_pool_recovery recovery={0};
     for (;;) {
         sleep(2);
         FILE *f = fopen("/proc/meminfo", "r"); if (!f) continue;
@@ -567,7 +568,8 @@ static void *zcf_pressure_main(void *unused) {
         }
         fclose(f);
         if (!total || !available) continue;  // incomplete /proc data is not pressure
-        uint64_t budget = vk_pool_reuse_budget_bytes(available, total);
+        uint64_t budget = vk_pool_reuse_budget_update(&recovery,
+            atomic_load_explicit(&g_zcf_budget,memory_order_relaxed),available,total);
         uint64_t prior = atomic_exchange_explicit(&g_zcf_budget, budget, memory_order_relaxed);
         if (budget < ZCF_BYTES) zcf_trim_to(budget);
         if (budget != prior)

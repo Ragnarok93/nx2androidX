@@ -698,10 +698,15 @@ static void rs_scope_try_begin(const uint8_t *next) {
             rs_scope_reject("attachment view");
             return;
         }
-        if (!(group.addr[i]=rs_scope_addr(t)) || !t->pool ||
-            !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || t->set_swz ||
-            t->has_layout || t->has_pkg_data) {
-            rs_scope_reject("attachment storage provenance");
+        group.addr[i]=rs_scope_addr(t);
+        const char *storage_reason=!t->pool?"attachment storage provenance: no pool":
+            !group.addr[i]?"attachment storage provenance: no guest address":
+            !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)?"attachment storage provenance: CPU-accessible pool":
+            t->set_swz?"attachment storage provenance: explicit swizzle":
+            t->has_layout?"attachment storage provenance: explicit layout":
+            t->has_pkg_data?"attachment storage provenance: packaged data":NULL;
+        if (storage_reason) {
+            rs_scope_reject(storage_reason);
             return;
         }
         group.target[i]=t;group.mask|=1u<<i;

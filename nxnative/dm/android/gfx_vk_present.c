@@ -1572,7 +1572,10 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     const int capture = vk_pass_dump_user_active();
     vk_capture_scale_present_sample sample;
     if (capture) {
+        dm_fg_decision fd=dm_fg_last_decision();
         sample = (vk_capture_scale_present_sample){
+            .fg_reason=fd.reason,.fg_period_ms=fd.period_ms,.fg_measured_ms=fd.measured_ms,
+            .fg_refresh_ns=fd.refresh_ns,.fg_planned=fd.planned,.fg_warm_streak=fd.warm_streak,
             .requested = spatial_requested, .active = spatial_active,
             .physical = g_spatial.report_physical, .generated = ng,
             .source_w = g_spatial.report_input.width, .source_h = g_spatial.report_input.height,

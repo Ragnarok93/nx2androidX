@@ -22,6 +22,16 @@ enum { DM_FG_OFF = 0, DM_FG_GENERATING = 1, DM_FG_ON_NOT_GENERATING = 2, DM_FG_U
 int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, unsigned source_reset,
                 double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer);
 
+// Present-thread-only snapshot of the most recent real-frame decision.
+// Strings are immutable literals, safe to retain in the capture ring.
+typedef struct {
+    const char *reason;
+    double period_ms, measured_ms;
+    uint64_t refresh_ns;
+    unsigned planned, warm_streak;
+} dm_fg_decision;
+dm_fg_decision dm_fg_last_decision(void);
+
 // The drawer's live switch and status line (the reason string follows the state int, Banana's "<state> <reason>")
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 int dm_fg_status(char *buf, int n);

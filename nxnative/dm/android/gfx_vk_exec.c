@@ -4075,6 +4075,13 @@ static void indirect_log(const p_draw_idx *d) {
     if (entries++ >= 48) return;
     uint32_t guest[5] = {0}, shadow[5] = {0};
     vkpool_t *p = vk_pool_of(d->ind, sizeof guest);
+    // This diagnostic must not read GPU-pending guest or shadow bytes.
+    // The ordered input-capture copy is the authoritative alternative.
+    if (vk_gpu_pending(d->ind,sizeof guest)) {
+        VKLOG("[indirect] present %llu pass %d arguments %#llx: GPU write pending; CPU sample omitted",
+              (unsigned long long)g_tex_frame,g_sub_pass-1,(unsigned long long)d->ind);
+        return;
+    }
     vk_ubd_read(d->ind, sizeof guest, (uint8_t *)guest);
     int has_shadow = p && p->shadow;
     if (has_shadow) memcpy(shadow, p->shadow + (d->ind - p->lo), sizeof shadow);

@@ -17,6 +17,9 @@
 
 static _Atomic int g_on = -1, g_mult = 2, g_target, g_flow = 75, g_state, g_reprobe;   // g_state: 0 off, 1 generating, 2 on and not generating, -1 unavailable
 static char g_reason[256] = "off";
+static _Thread_local dm_fg_decision fg_decision;
+dm_fg_decision dm_fg_last_decision(void) { return fg_decision; }
+static int fg_skip(const char *why) { fg_decision.reason=why; return 0; }
 static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
 // The host's frame rate limit (the adaptive rate, perf_android.c): the rate's own strong definition wins this weak one; 0 = no limit here
 __attribute__((weak)) int dm_perf_rate_fps(void) { return 0; }
@@ -68,8 +71,9 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     (void)im; (void)crop; (void)period; (void)gen; (void)flip_y; (void)encoding; (void)source_reset;
     *consumer = VK_NULL_HANDLE;
     settings_init(); *hold = 0; *out_period = 0;
+    fg_decision=(dm_fg_decision){0};
     if (atomic_load(&g_on) > 0) { atomic_store(&g_state, -1); reason("%s", "not in this build (built without NX_LSFG)"); }
-    return 0;
+    return fg_skip(atomic_load(&g_on)>0?"not compiled":"disabled");
 }
 #else
 enum { NFG = 3 };
@@ -226,12 +230,13 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
                 double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
     settings_init();
     *hold = 0; *out_period = 0; *consumer = VK_NULL_HANDLE;
+    fg_decision=(dm_fg_decision){.period_ms=period*1000.0};
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;
         if (F.chain) { teardown(); VLOG("frame generation off"); }
         if (F.state >= 0) { atomic_store(&g_state, 0); reason("%s", "off"); }
-        return 0;
+        return fg_skip("disabled");
     }
     // Unlocked source has no fixed cadence; do not invent an LSFG hold or
     // let generated images impose a hidden rate limit. Resume on fixed mode.
@@ -239,25 +244,26 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         if (F.chain) teardown();
         atomic_store(&g_state, 2);
         reason("%s", "uncapped source rate; select a fixed FPS mode for frame generation");
-        return 0;
+        return fg_skip("uncapped source");
     }
     if (!im || !im->img || im->layout != VK_IMAGE_LAYOUT_GENERAL) {
         F.count = F.warm_streak = 0;
-        return 0;
+        return fg_skip(!im?"no reconstructed resolve":!im->img?"no source image":"source layout not general");
     }
     if (atomic_exchange(&g_reprobe, 0) && F.state < 0) {
         F.state = 0;
         atomic_store(&g_state, 0);
         reason("%s", "retrying user-selected Lossless.dll");
     }
-    if (!load()) return 0;
+    if (!load()) return fg_skip("shader or device unavailable");
     // The game's frame period is never shorter than the host's own frame limit allows (the adaptive rate, perf_android.c): a game that asks for interval 1
     // (16.7 ms) but is held to 30 fps has two refreshes of a 60 Hz panel a frame, room for one generated frame, and its output rate is 60, not 120
     { int lim = dm_perf_rate_fps(); if (lim > 0 && period < 1.0 / lim) period = 1.0 / lim; }
     // The window's frame rate: a shorter output period at once, a longer one only after it held for 2 s (a game that switches its own present
     // interval would flip the panel's mode back and forth; the generated frames are paced by hold, not by the panel's rate)
     double want = target > 0 ? 1.0 / target : period / (mult < 2 ? 2 : mult > 4 ? 4 : mult), tnow = mono_s();
-    if (tnow < F.command_retry_at) return 0;
+    fg_decision.period_ms=period*1000.0;
+    if (tnow < F.command_retry_at) return fg_skip("command retry cooldown");
     if (F.out_period <= 0 || want < F.out_period - 1e-4) { F.out_period = want; F.longer_since = 0; }
     else if (want > F.out_period + 1e-4) { if (!F.longer_since) F.longer_since = tnow; else if (tnow - F.longer_since >= 2.0) { F.out_period = want; F.longer_since = 0; } }
     else F.longer_since = 0;
@@ -267,7 +273,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     VkFormatProperties fp = {0}; vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->fmt, &fp);
     if (!im->img || !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || cw <= 0 || ch <= 0) {
         VKRED_ONCE(96, "frame generation: the window texture (format %d) cannot be copied into the chain: not generating", im->fmt);
-        F.warm_streak = 0; atomic_store(&g_state, 2); return 0;
+        F.warm_streak = 0; atomic_store(&g_state, 2); return fg_skip("source format or crop unsupported");
     }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
@@ -275,13 +281,13 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         // LSFG shaders unavailable. Retry a different geometry immediately;
         // bound same-geometry retries to avoid an allocation storm.
         if (tnow < F.rebuild_retry_at && e.width == F.failed_extent.width &&
-            e.height == F.failed_extent.height && flow == F.failed_flow) return 0;
+            e.height == F.failed_extent.height && flow == F.failed_flow) return fg_skip("allocation retry cooldown");
         if (!rebuild(e, flow)) {
             F.failed_extent = e; F.failed_flow = flow;
             F.rebuild_retry_at = tnow + 2.0;
             atomic_store(&g_state, 2);
             reason("%s", "frame generation chain allocation unavailable; retrying");
-            return 0;
+            return fg_skip("chain allocation failed");
         }
         F.rebuild_retry_at = 0;
     }
@@ -305,6 +311,10 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // Generated frames only as many as the refreshes in the game's own period leave room for (the panel shows one image a refresh; more would hold
     // the FIFO present, and the game with it, to a fraction of its rate — Banana's Honor phone note). DM_VK_FG_REFRESH_CAP=0: no cap
     uint64_t rns = getenv("DM_VK_FG_REFRESH_CAP") && !atoi(getenv("DM_VK_FG_REFRESH_CAP")) ? 0 : vk_refresh_cycle_ns(); int capped = 0;
+    fg_decision.measured_ms=F.pacer.smoothed_interval*1000.0;
+    fg_decision.planned=(unsigned)plan.generations;
+    fg_decision.warm_streak=F.warm_streak;
+    fg_decision.refresh_ns=rns;
     if (rns && period > 0) {
         // The game's frame period: the requested one (the limit's, above) or the measured one when longer (a throttled game's frames are further apart)
         double gp = F.pacer.smoothed_interval > period ? F.pacer.smoothed_interval : period;
@@ -353,6 +363,8 @@ report:;
         reason("%s", st2 == 1 ? "generating" : capped ? why : met ? "on, the target rate is met: no frame to add" : "on, waiting for a steady frame rate");
         static int ncap; if (st2 == 2 && capped && ncap++ < 4) VLOG("frame generation: not generating, %s (game frame period %.1f ms)", why + 4, period * 1e3);
     }
+    fg_decision.reason=ng?"generated":capped?"refresh cap":met?"target met":
+        !plan.warm?"pacer not warm or floor cooldown":!warm||F.warm_streak<2?"history warmup":"pacer issued zero";
     was_capped = st2 == 2 && capped;
     was_met = st2 == 2 && met;
     return (int)ng;
@@ -367,6 +379,6 @@ command_error:
         atomic_store(&g_state, 2);
         reason("%s", "GPU command failed; retrying");
     }
-    return 0;
+    return fg_skip("GPU command failed");
 }
 #endif
