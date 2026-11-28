@@ -57,7 +57,7 @@ static inline dm_fg_flow_request dm_fg_governor_observe(dm_fg_governor *g,const 
     if (g->last && s->serial!=g->last+1) dm_fg_governor_gap(g);
     g->last=s->serial;
     if (!dm_fg_timing_fresh(s,g->epoch,g->last-1) || s->scale!=g->applied ||
-        !accepted || !(budget>0) || !isfinite(budget) || !(elapsed>0) ||
+        !accepted || !isfinite(budget) || !(elapsed>0) ||
         !isfinite(elapsed) || !(s->total_ms>0) || !isfinite(s->total_ms)) {
         dm_fg_governor_gap(g);return hold;
     }
@@ -67,7 +67,8 @@ static inline dm_fg_flow_request dm_fg_governor_observe(dm_fg_governor *g,const 
     if (g->probe) {
         // Compare only the same generation workload and approximately the
         // same available budget. Incomparable probes never justify rollback.
-        if (s->generated!=g->probe_count || fabs(budget-g->base_budget)>.15*g->base_budget) {
+        if (!(budget>0) || !(g->base_budget>0) || s->generated!=g->probe_count ||
+            fabs(budget-g->base_budget)>.15*g->base_budget) {
             g->probe=0;dm_fg_governor_gap(g);return hold;
         }
         g->probe_time+=elapsed;g->probe_sum+=s->total_ms*elapsed;
