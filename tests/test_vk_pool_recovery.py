@@ -18,8 +18,9 @@ int main(void) {
     assert(b==0);
     b=vk_pool_reuse_budget_update(&s,b,1100ull*1024,total);assert(b==0);
     b=vk_pool_reuse_budget_update(&s,b,822ull*1024,total);assert(b==0);
-    for(int i=0;i<2;i++){b=vk_pool_reuse_budget_update(&s,b,1100ull*1024,total);assert(b==0);}
-    b=vk_pool_reuse_budget_update(&s,b,1100ull*1024,total);assert(b==low);
+    for(int i=0;i<3;i++){b=vk_pool_reuse_budget_update(&s,b,1100ull*1024,total);assert(b==0);}
+    for(int i=0;i<2;i++){b=vk_pool_reuse_budget_update(&s,b,1300ull*1024,total);assert(b==0);}
+    b=vk_pool_reuse_budget_update(&s,b,1300ull*1024,total);assert(b==low);
     for(int i=0;i<2;i++){b=vk_pool_reuse_budget_update(&s,b,2000ull*1024,total);assert(b==low);}
     b=vk_pool_reuse_budget_update(&s,b,2000ull*1024,total);assert(b==full);
     b=vk_pool_reuse_budget_update(&s,b,822ull*1024,total);assert(b==0);

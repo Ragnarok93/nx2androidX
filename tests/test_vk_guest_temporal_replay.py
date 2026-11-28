@@ -47,6 +47,7 @@ static struct { VkImage image; VkExtent2D extent; } g_guest_scene;
 static int g_guest_source_ok;
 static VkImageView g_guest_sample_view;
 static uint64_t g_tex_frame, g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
+static unsigned g_guest_sharpness_pending, g_guest_sharpness_submitted;
 static uint64_t g_guest_rejected_submit, g_guest_clear_revision = 1;
 static uint64_t submitted = 4;
 static uint64_t mtl_last_fence(void) { return submitted; }
@@ -174,15 +175,18 @@ static void submission_ownership(void) {
 
     guest_flow.pending = guest_flow.drawn = 1;
     g_guest_sharpen_pending = g_tex_frame + 1;
+    g_guest_sharpness_pending = 25;
     vk_guest_flow_submitted(0, 8);
     assert(commits == 2 && !last_commit && !vk_guest_reconstruction_flags());
 
     guest_flow.pending = guest_flow.drawn = 1;
     guest_flow.ticket = guest_flow.slots[2].ticket = g_tex_frame + 1;
     g_guest_sharpen_pending = g_tex_frame + 1;
+    g_guest_sharpness_pending = 75;
     vk_guest_flow_submitted(1, 9);
     assert(commits == 3 && last_commit &&
-           vk_guest_reconstruction_flags() == (SP_REPLAY_SHARPENED | SP_REPLAY_TEMPORAL));
+           spatial_replay_bits(vk_guest_reconstruction_flags()) == (SP_REPLAY_SHARPENED | SP_REPLAY_TEMPORAL) &&
+           spatial_replay_sharpness(vk_guest_reconstruction_flags()) == 75);
     assert(guest_flow.slots[2].ticket == g_tex_frame + 1 && guest_flow.slots[2].fence == 9);
     vk_guest_flow_submitted(1, 10);
     assert(commits == 3 && guest_flow.retire == 9);

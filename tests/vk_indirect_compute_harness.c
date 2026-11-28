@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "runtime.h"
+#include "gfx_vk_retire_queue.h"
+#include "gfx_vk_set_cache.h"
 #include "nvn_hmap.h"
 #include "gfx_vk_slot.h"
 #include "gfx_vk_resolution_raster.h"

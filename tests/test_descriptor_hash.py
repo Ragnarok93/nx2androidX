@@ -24,6 +24,7 @@ class DescriptorHash(unittest.TestCase):
         dynamic = source[dynamic_start:source.index('        nw++;', dynamic_start)]
         code = r'''
 #include <vulkan/vulkan_core.h>
+#include "gfx_vk_set_cache.h"
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -31,6 +32,7 @@ class DescriptorHash(unittest.TestCase):
 #include <string.h>
 static uint64_t g_set_epoch = 1, g_set_hits, g_set_new, g_set_key_bypass, g_ns_set_hash, g_ns_set_new;
 static int g_tracing, g_x_nosetc, updates, force_collision;
+static uint64_t forced_hash;
 static struct { VkDevice dev; } V;
 static uint64_t tick(void) { return 0; }
 static VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
@@ -43,12 +45,12 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(VkDevice device, uint32_t nw,
 ''' + cache + fnv.replace('static inline uint64_t fnv(', 'static inline uint64_t fnv_real(', 1) + r'''
 // Inject collisions deterministically; never search for a naturally colliding key.
 static uint64_t fnv(uint64_t h, const void *p, size_t n) {
-    return force_collision ? 0x1234 : fnv_real(h, p, n);
+    return forced_hash ? forced_hash : force_collision ? 0x1234 : fnv_real(h, p, n);
 }
 
 static VkDescriptorSet cached(VkDescriptorSetLayout layout, VkWriteDescriptorSet *w, uint32_t nw) {
     struct { VkDescriptorSetLayout dsl; } shader = {layout}, *s = &shader;
-    VkDescriptorSet set;
+    VkDescriptorSet set = VK_NULL_HANDLE;
     uint64_t tb1 = 0;
 ''' + block + r'''
     return set;
@@ -138,7 +140,7 @@ static void ownership_and_modes(void) {
     images[1].imageView = (VkImageView)(uintptr_t)999;
     VkDescriptorSet changed = cached(VK_NULL_HANDLE, &w, 1); assert(changed != first);
     w.pImageInfo = original;
-    VkDescriptorSet restored = cached(VK_NULL_HANDLE, &w, 1); assert(restored != changed);
+    VkDescriptorSet restored = cached(VK_NULL_HANDLE, &w, 1); assert(restored == first && restored != changed);
     assert(cached(VK_NULL_HANDLE, &w, 1) == restored);
     for (int mode = 0; mode < 2; mode++) {
         if (mode) g_tracing = 1; else g_x_nosetc = 1;
@@ -183,31 +185,38 @@ static void large_mixed_key(void) {
 }
 static void exhausted_storage(void) {
     reset(); force_collision = 1;
+    // A full four-way bucket does not evict admitted keys or burn arena bytes.
     VkDescriptorBufferInfo b = {(VkBuffer)(uintptr_t)1, 0, 64};
     VkWriteDescriptorSet w = {.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = 1, .pBufferInfo = &b};
-    VkDescriptorSet previous = VK_NULL_HANDLE; int bypassed = 0;
-    // Replacements must eventually bypass a bounded key store, never alias old content.
-    for (unsigned i = 1; i <= 1000000; i++) {
-        b.offset = i * 256ull;
-        VkDescriptorSet a = cached(VK_NULL_HANDLE, &w, 1), same = cached(VK_NULL_HANDLE, &w, 1);
-        assert(a != previous);
-        if (same != a) { bypassed = 1; break; }
-        previous = a;
+    VkDescriptorSet admitted[4];
+    for (unsigned i=0;i<4;i++) { b.offset=i*256ull; admitted[i]=cached(VK_NULL_HANDLE,&w,1); }
+    size_t used=g_set_key_used;
+    b.offset=1024; VkDescriptorSet a=cached(VK_NULL_HANDLE,&w,1);
+    assert(cached(VK_NULL_HANDLE,&w,1)!=a && g_set_key_bypass==2 && g_set_key_used==used);
+    for (unsigned i=0;i<4;i++) { b.offset=i*256ull; assert(cached(VK_NULL_HANDLE,&w,1)==admitted[i]); }
+    // Separately exhaust the arena with large keys spread across buckets.
+    reset(); force_collision=0;
+    VkDescriptorImageInfo images[384]; w=image_write(images,384);
+    VkDescriptorSet previous=VK_NULL_HANDLE; unsigned i;
+    for(i=1;i<=2048;i++) {
+        forced_hash=i; images[383].imageView=(VkImageView)(uintptr_t)(1000+i);
+        a=cached(VK_NULL_HANDLE,&w,1);
+        assert(a!=previous);
+        if(cached(VK_NULL_HANDLE,&w,1)!=a) break;
+        previous=a;
     }
-    assert(bypassed && g_set_key_bypass == 2);
-    // A retained entry still hits even after later misses exhaust the arena.
-    b.offset -= 256;
-    assert(cached(VK_NULL_HANDLE, &w, 1) == previous && g_set_key_bypass == 2);
-    b.offset += 256;
-    VkDescriptorSet a = cached(VK_NULL_HANDLE, &w, 1); assert(cached(VK_NULL_HANDLE, &w, 1) != a);
-    assert(g_set_key_bypass == 4);
-    // Explicitly disabled caching is not an arena-capacity bypass.
-    g_x_nosetc = 1; cached(VK_NULL_HANDLE, &w, 1); g_x_nosetc = 0;
-    g_tracing = 1; cached(VK_NULL_HANDLE, &w, 1); g_tracing = 0;
-    assert(g_set_key_bypass == 4);
-    g_set_epoch++; a = cached(VK_NULL_HANDLE, &w, 1);
-    assert(cached(VK_NULL_HANDLE, &w, 1) == a && g_set_key_bypass == 4);
+    assert(i<=2048 && g_set_key_bypass==2 && g_set_key_used>SET_KEY_ARENA_WORDS-1200);
+    forced_hash=i-1; images[383].imageView=(VkImageView)(uintptr_t)(999+i);
+    assert(cached(VK_NULL_HANDLE,&w,1)==previous && g_set_key_bypass==2);
+    forced_hash=i; images[383].imageView=(VkImageView)(uintptr_t)(1000+i);
+    a=cached(VK_NULL_HANDLE,&w,1); assert(cached(VK_NULL_HANDLE,&w,1)!=a && g_set_key_bypass==4);
+    g_x_nosetc=1; cached(VK_NULL_HANDLE,&w,1); g_x_nosetc=0;
+    g_tracing=1; cached(VK_NULL_HANDLE,&w,1); g_tracing=0;
+    assert(g_set_key_bypass==4);
+    g_set_epoch++; a=cached(VK_NULL_HANDLE,&w,1);
+    assert(cached(VK_NULL_HANDLE,&w,1)==a && g_set_key_bypass==4);
+    forced_hash=0;
 }
 static void oversized_key(void) {
     reset(); VkDescriptorImageInfo images[4096];
@@ -265,7 +274,8 @@ int main(int argc, char **argv) {
         src.write_text(code)
         subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
                         *(['-fsanitize=address,undefined', '-g'] if os.environ.get('NX2A_TEST_SANITIZERS') else []), '-I',
-                        str(ROOT / 'nxnative/dm/third_party/vulkan-headers/include'),
+                        str(ROOT / 'nxnative/dm/third_party/vulkan-headers/include'), '-I',
+                        str(ROOT / 'nxnative/dm/android'),
                         str(src), '-o', str(cls.exe)], check=True, capture_output=True, text=True)
 
     def run_case(self, case):

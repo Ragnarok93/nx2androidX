@@ -44,6 +44,8 @@ static void check_cadence_pressure(void) {
             assert(dm_flow_budget_allow(&p, frame) == (frame != 204));
         }
         assert(!dm_flow_budget_allow(&p, 323));
+        assert(!dm_flow_budget_allow(&p, 324));
+        for (uint64_t t=295;t<=324;t++) dm_flow_budget_pressure(&p,t,0);
         assert(dm_flow_budget_allow(&p, 324));
         assert(dm_flow_frame_stressed(cadence.period_us, 0, cadence.period_us, 0, 0));
     }
@@ -89,10 +91,13 @@ int main(void) {
     assert(p.retry_after == 725);
     assert(!dm_flow_budget_allow(&p, 724));
     assert(!dm_flow_budget_recovery_due(&p,724));
+    assert(!dm_flow_budget_recovery_due(&p,725));
+    for (uint64_t t=696;t<=725;t++) dm_flow_budget_pressure(&p,t,0);
     assert(dm_flow_budget_recovery_due(&p,725));
     // A competing recovery veto leaves the original retry epoch intact.
+    dm_flow_budget_pressure(&p,726,0);
     assert(dm_flow_budget_recovery_due(&p,726)&&p.retry_after==725);
-    assert(dm_flow_budget_allow(&p, 725));
+    assert(dm_flow_budget_allow(&p, 726));
     assert(!dm_flow_budget_recovery_due(&p,726));
     uint64_t probe = p.generation;
     assert(probe != gen);
@@ -101,11 +106,13 @@ int main(void) {
     assert(!dm_flow_budget_allow(&p, 730));
     assert(p.retry_after == 970);
     // Two more failed probes end the recurring bursts under an unchanged workload.
+    for (uint64_t t=941;t<=970;t++) dm_flow_budget_pressure(&p,t,0);
     assert(dm_flow_budget_allow(&p, 970));
     uint64_t probe2 = p.generation;
     for (uint64_t t=970; t<975; ++t)
         dm_flow_budget_observe(&p, probe2, t, t+1, 2.5f, 3.8);
     assert(p.retry_after == 1455);
+    for (uint64_t t=1426;t<=1455;t++) dm_flow_budget_pressure(&p,t,0);
     assert(dm_flow_budget_allow(&p, 1455));
     uint64_t probe3 = p.generation;
     for (uint64_t t=1455; t<1460; ++t)

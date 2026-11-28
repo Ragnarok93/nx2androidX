@@ -163,6 +163,8 @@ static int mock_mprotect(void *p, size_t n, int prot) { assert(p == anon_pages &
 #endif
 static void *mock_mremap(void *old, size_t n, size_t n2, int flags, void *to) { assert(old == anon_pages && n == n2 && flags == (MREMAP_MAYMOVE | MREMAP_FIXED)); memcpy(to, old, n); moved++; return to; }
 #define mremap mock_mremap
+#define die(...) abort()
+#include "gfx_vk_pool_restore.h"
 static uint32_t vk_mem_type(uint32_t bits, uint32_t want, uint32_t avoid) { (void)bits; (void)want; (void)avoid; return 0; }
 static VkResult vkGetAndroidHardwareBufferPropertiesANDROID(VkDevice d, AHardwareBuffer *a, VkAndroidHardwareBufferPropertiesANDROID *out) {
     (void)d; assert(a); out->allocationSize = 64; out->memoryTypeBits = 1; return failure == 7 ? VK_ERROR_UNKNOWN : VK_SUCCESS;
@@ -256,6 +258,6 @@ int main(void) {
             c, exe = Path(tmp) / 'check.c', Path(tmp) / 'check'
             c.write_text(harness)
             subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers', '-Wno-misleading-indentation',
-                            '-idirafter', str(headers), str(c), '-o', str(exe)], check=True)
+                            '-idirafter', str(headers), '-I', str(Path(__file__).resolve().parents[1] / 'nxnative/dm/android'), str(c), '-o', str(exe)], check=True)
             for enabled in ('0', '1'):
                 subprocess.run([str(exe)], env=dict(os.environ, DM_VK_MEM_DIAG=enabled), check=True)
