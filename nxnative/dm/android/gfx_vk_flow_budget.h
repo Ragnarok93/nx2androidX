@@ -1,6 +1,7 @@
 #ifndef DM_VK_FLOW_BUDGET_H
 #define DM_VK_FLOW_BUDGET_H
 #include <stdint.h>
+#include "gfx_vk_source_continuity.h"
 
 /* The host rate limiter may impose a slower cadence than the guest interval.
  * This is an estimate of source period, not a GPU headroom measurement. */
@@ -117,5 +118,17 @@ static inline void dm_flow_budget_retire_samples(dm_flow_budget *p) {
     p->generation++;
     p->last_sample = 0;
     p->slow = p->affordable = 0;
+}
+// Temporal history is invalidated on every discontinuity, but a menu pause
+// or skipped source ticket does not make the same GPU workload cheaper.
+// Preserve measured overload and reject old in-flight timing samples.
+static inline void dm_flow_budget_source_reset(dm_flow_budget *p,unsigned flags) {
+    const unsigned changed=DM_RECON_SOURCE_INITIAL|DM_RECON_SOURCE_MODE|
+        DM_RECON_SOURCE_GEOMETRY|DM_RECON_SOURCE_ENCODING|DM_RECON_SOURCE_SURFACE;
+    if(flags&changed)dm_flow_budget_invalidate(p);
+    else if(flags&&p->valid) {
+        dm_flow_budget_retire_samples(p);
+        p->pressure=0;
+    }
 }
 #endif

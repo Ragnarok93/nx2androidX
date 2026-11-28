@@ -13,3 +13,7 @@ Baseline: `366c2af2e7b3da46546d861bc705883530573530`. Archive: nx2android-render
 ## Remaining
 
 Resolve attachment ownership using the specific rejection and lifetime proof; validate docked pre-composition source; isolate FG pacing without snapshots; optimize temporal stages against measured budget; make snapshot export nonblocking where lifetime permits; subtract intentional pauses; expose requested/active backend and actual extent. Do not disable safety fallbacks or force speculative scene replacement.
+
+## Checkpoint 2
+
+Preserve GSR 2 measured overload cooldown across pause/gap discontinuities while retiring timing samples and resetting temporal image history. Geometry, encoding, operation mode and surface changes can still invalidate the workload. This removes pause-induced recovery bursts without raising the GPU budget or guaranteeing 1440p GSR 2 performance.

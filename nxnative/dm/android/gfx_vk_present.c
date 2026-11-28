@@ -1521,7 +1521,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             }
             g_flow.ticket = 0;
             g_flow.last_real_ticket = 0;
-            dm_flow_budget_invalidate(&g_flow.policy);
+            dm_flow_budget_source_reset(&g_flow.policy,source_reset);
         }
         // Match LSFG's source-rate cap. This is not measured GPU headroom.
         extern int dm_perf_rate_fps(void);

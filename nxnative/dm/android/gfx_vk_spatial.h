@@ -744,7 +744,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         // Actual source tickets, not successful temporal tickets, define a gap.
         // Failed or spatial fallback frames must not restart the overload policy.
         if (g_flow.last_real_ticket && ticket - g_flow.last_real_ticket != 1) {
-            dm_flow_budget_invalidate(&g_flow.policy);
+            dm_flow_budget_source_reset(&g_flow.policy,DM_RECON_SOURCE_GAP);
             g_flow.ticket = 0;
         }
         g_flow.last_real_ticket = ticket;

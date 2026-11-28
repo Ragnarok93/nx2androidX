@@ -78,6 +78,12 @@ int main(void) {
     dm_flow_budget_observe(&p, gen, 604, 605, 2.5f, 3.8);
     assert(!dm_flow_budget_allow(&p, 605));
     assert(p.retry_after == 725);
+    // Pause and skipped source tickets reset history, not measured overload.
+    uint64_t before_pause=p.generation;
+    dm_flow_budget_source_reset(&p,DM_RECON_SOURCE_PAUSE);
+    assert(p.valid && p.generation!=before_pause && p.retry_after==725);
+    dm_flow_budget_source_reset(&p,DM_RECON_SOURCE_GAP);
+    assert(p.valid && p.retry_after==725 && p.overload_events==1);
     // In-flight results from before the demotion cannot extend the cooldown.
     dm_flow_budget_observe(&p, gen, 605, 610, 2.5f, 9.0);
     assert(p.retry_after == 725);
@@ -100,7 +106,11 @@ int main(void) {
     for (uint64_t t=1455; t<1460; ++t)
         dm_flow_budget_observe(&p, probe3, t, t+1, 2.5f, 3.8);
     assert(p.retry_after == UINT64_MAX && !dm_flow_budget_allow(&p, 5000));
-    // A geometry or cadence change can trigger a new probe immediately.
+    dm_flow_budget_source_reset(&p,DM_RECON_SOURCE_PAUSE);
+    assert(p.retry_after==UINT64_MAX && !dm_flow_budget_allow(&p,5000));
+    // A genuine geometry change can trigger a new probe immediately.
+    dm_flow_budget_source_reset(&p,DM_RECON_SOURCE_GEOMETRY);
+    assert(!p.valid);
     key.iw = 1024;
     dm_flow_budget_set_workload(&p, &key);
     assert(dm_flow_budget_allow(&p, 5001));
