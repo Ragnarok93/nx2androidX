@@ -38,7 +38,7 @@ enum { PRES_TIMES = 64 };
 static struct { uint64_t ticket, ns; } g_pres_t[PRES_TIMES];
 static struct { uint32_t id; uint64_t ticket; } g_pres_ids[PRES_TIMES];
 static pthread_mutex_t g_pres_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_pres_recorded;   // display times recorded so far (present_time_record): none after 240 presents with display timing on, the hand-over time stands in
+static _Atomic uint64_t g_pres_recorded;   // display times recorded so far (present_time_record): none after 240 presents with display timing on, the hand-over time stands in
 static void present_time_begin(uint64_t ticket, uint64_t ns) {   // ns: the time to report now (no display times on this device), or 0 for the display's
     pthread_mutex_lock(&g_pres_mu);
     g_pres_t[ticket % PRES_TIMES] = (typeof(g_pres_t[0])){ticket, ns};
@@ -1166,6 +1166,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
 // desired present time: the last one's plus the game's period, on the display's vsync grid (anchored at a past frame's actual present time), half a vsync before that vsync so
 // it cannot go out early. A frame that would not be ready in time moves the cadence to the first vsync it can make (a "resync": one longer frame, and from then on a vsync of
 // slack). The pause menu's redraws carry no time. DM_VK_PACE=0 (live) presents without times
+static _Atomic uint64_t g_refresh_published;
 static uint64_t g_refresh_ns, g_pace_target, g_pace_ideal, g_pace_anchor, g_pace_n, g_pace_resync, g_pace_slip; static uint32_t g_pace_id; static int g_pace_on = 1;
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 // ---- the frame generation's state, for the paths outside the present thread ----
@@ -1216,7 +1217,7 @@ void dm_present_sample(uint64_t out[5]) {
     out[3] = atomic_load_explicit(&g_hud_span_n, memory_order_relaxed);
     out[4] = vk_refresh_cycle_ns();
 }
-static void pace_reset(void) { g_pace_target = g_pace_ideal = g_pace_anchor = g_refresh_ns = 0; }
+static void pace_reset(void) { g_pace_target = g_pace_ideal = g_pace_anchor = g_refresh_ns = 0; atomic_store(&g_refresh_published,0); }
 static uint64_t pace_snap(uint64_t t) {   // the first vsync at or after t on the grid through the anchor
     return vk_pace_snap(t,g_refresh_ns,g_pace_anchor);
 }
@@ -1235,6 +1236,7 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
             // merely in the logging/reset decision.
             if (vkGetRefreshCycleDurationGOOGLE(V.dev, g_swap, &rc) == VK_SUCCESS &&
                 vk_pace_refresh_update(&g_refresh_ns,rc.refreshDuration)) {
+                atomic_store(&g_refresh_published,g_refresh_ns);
                 VKLOG("[perf] display timing: refresh %.3f ms", g_refresh_ns / 1e6); g_pace_target = 0;
             }
         }
@@ -1858,7 +1860,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
               (unsigned long long)shown, (unsigned long long)no_img, (unsigned long long)undrawn, (unsigned long long)g_ubd_landed, (unsigned long long)g_ubd_superseded, (unsigned long long)g_ubd_shadows, (unsigned long long)g_ubd_racy, (unsigned long long)g_vkst.rt_kept, (unsigned long long)g_vkst.max_pass_draws);
         double nd = g_vkst.draws > pdr ? (double)(g_vkst.draws - pdr) / 600 : 0;
         VKLOG("replay per frame (last 600): %.0f draws, replay %.2f ms (descriptor sets %.2f, pipeline keys %.2f), queue submit %.2f ms, uniform shadows %.0f KB; GPU busy %.2f ms; texture uploads %.1f (%.2f MB, %.2f ms); descriptor sets reused %llu, new %llu, key arena bypasses %llu (collecting %.2f ms, hashing %.2f, new ones %.2f), kept per stage %.0f a frame (memo differences %llu)",
-              nd, (g_vkst.ns_exec - pe) / 6e8, (g_vkst.ns_desc - pd) / 6e8, (g_vkst.ns_pipe - pp) / 6e8, (g_ns_submit - ps) / 6e8, (g_ubd_bytes - pb) / 600.0 / 1024, (g_gpu_ns - pg) / 6e8, (g_pkg_n - pkn) / 600.0, (g_pkg_bytes - pkb) / 600.0 / 1048576, (g_pkg_ns - pkt) / 6e8, (unsigned long long)g_set_hits, (unsigned long long)g_set_new, (unsigned long long)g_set_key_bypass, (g_ns_set_build - psb) / 6e8, (g_ns_set_hash - psh) / 6e8, (g_ns_set_new - psn) / 6e8,
+              nd, (g_vkst.ns_exec - pe) / 6e8, (g_vkst.ns_desc - pd) / 6e8, (g_vkst.ns_pipe - pp) / 6e8, (g_ns_submit - ps) / 6e8, (g_ubd_bytes - pb) / 600.0 / 1024, (__atomic_load_n(&g_gpu_ns,__ATOMIC_RELAXED) - pg) / 6e8, (g_pkg_n - pkn) / 600.0, (g_pkg_bytes - pkb) / 600.0 / 1048576, (g_pkg_ns - pkt) / 6e8, (unsigned long long)g_set_hits, (unsigned long long)g_set_new, (unsigned long long)g_set_key_bypass, (g_ns_set_build - psb) / 6e8, (g_ns_set_hash - psh) / 6e8, (g_ns_set_new - psn) / 6e8,
               (g_set_memo - psm) / 600.0, (unsigned long long)g_set_memo_bad);
         { extern uint64_t g_graphics_demand_builds, g_graphics_demand_ns;
           static uint64_t builds, ns;
@@ -1877,7 +1879,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
           if (g_order_kept + g_order_ended > pk + pn) VKLOG("order-only barriers per frame (last 600): %.1f kept inside their pass, %.1f ended it", (g_order_kept - pk) / 600.0, (g_order_ended - pn) / 600.0);
           pk = g_order_kept; pn = g_order_ended; }
         void vk_pass_report(void); vk_pass_report();
-        pe = g_vkst.ns_exec; pd = g_vkst.ns_desc; pp = g_vkst.ns_pipe; ps = g_ns_submit; pb = g_ubd_bytes; pdr = g_vkst.draws; pg = g_gpu_ns; pkn = g_pkg_n; pkb = g_pkg_bytes; pkt = g_pkg_ns; psb = g_ns_set_build; psh = g_ns_set_hash; psn = g_ns_set_new; psm = g_set_memo;
+        pe = g_vkst.ns_exec; pd = g_vkst.ns_desc; pp = g_vkst.ns_pipe; ps = g_ns_submit; pb = g_ubd_bytes; pdr = g_vkst.draws; pg = __atomic_load_n(&g_gpu_ns,__ATOMIC_RELAXED); pkn = g_pkg_n; pkb = g_pkg_bytes; pkt = g_pkg_ns; psb = g_ns_set_build; psh = g_ns_set_hash; psn = g_ns_set_new; psm = g_set_memo;
     }
     // A game that crops its layer through vi (hle_vi.c) and not through its NVN window: The Legend of Zelda: Link's Awakening in handheld mode keeps a 1920x1080
     // window texture, draws into its 1280x720 corner and calls vi::SetLayerCrop 0,0 1280x720. Without the window's own crop the whole texture was shown and the picture
@@ -1947,8 +1949,8 @@ void mtl_present_wait(uint64_t tk) {   // NVN acquire: the window texture's last
     pthread_mutex_unlock(&g_pq_mu);
 }
 double mtl_presented_time(uint64_t n) { return present_time_get(n); }
-double vk_refresh_ms(void) { return V.has_dtiming && g_pres_recorded && g_refresh_ns ? g_refresh_ns / 1e6 : 0; }   // perf_android.c's late check: the display's refresh, when display times are what it gets
-uint64_t vk_refresh_cycle_ns(void) { return V.has_dtiming ? g_refresh_ns : 0; }   // dm_framegen.c: the refresh cap (how many presented images fit a game frame)
+double vk_refresh_ms(void) { return V.has_dtiming && atomic_load(&g_pres_recorded) ? atomic_load(&g_refresh_published) / 1e6 : 0; }   // perf_android.c's late check: the display's refresh, when display times are what it gets
+uint64_t vk_refresh_cycle_ns(void) { return V.has_dtiming ? atomic_load(&g_refresh_published) : 0; }   // dm_framegen.c: the refresh cap (how many presented images fit a game frame)
 uint32_t mtl_present_qos(void) { return 0; }
 int mtl_link_active(void) { return 0; }
 int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; return 0; }
