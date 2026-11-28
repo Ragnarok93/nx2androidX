@@ -1083,7 +1083,9 @@ static void menu_touch(const dm_java_event *e,float W,float H) {
     float x=i<e->pointers?e->ptr[i].x:0,y=i<e->pointers?e->ptr[i].y:0,p[4],v[4];
     ov_menu_rect(W,H,p);ov_settings_view(p,v);
     int page=menu_active_tab(),scroll=ov_settings_clamp(page,dm_menu_scroll_units());
-    int c=ctl_at(x,y,W,H),row=c>=0&&OV_CTLS[c].kind==OV_MENU?-3:ov_settings_hit(p,page,scroll,x,y);
+    int c=ctl_at(x,y,W,H),row=ov_settings_hit(p,page,scroll,x,y);
+    // The floating menu control is hidden while paused; it must not steal panel touches.
+    if(row==-2&&c>=0&&OV_CTLS[c].kind==OV_MENU)row=-3;
     int item=row>=0?ov_menu_item(page,row):-1;
     if(g_menu_ptr>=0&&(W!=g_menu_down_w||H!=g_menu_down_h)){
         if(g_menu_gesture==OV_SETTINGS_SLIDER)settings_save();
@@ -1102,7 +1104,7 @@ static void menu_touch(const dm_java_event *e,float W,float H) {
             float kx=e->ptr[k].x,ky=e->ptr[k].y,dy=ky-g_menu_down_y,dx=kx-g_menu_down_x;
             int down=g_menu_row,down_item=down>=0?ov_menu_item(page,down):-1;
             int in_body=g_menu_down_y>=v[1]&&g_menu_down_y<v[1]+v[3]&&g_menu_down_x>=v[0]&&g_menu_down_x<v[0]+v[2];
-            int slider=ov_settings_slider(down_item)&&g_menu_down_x>=v[0]+v[2]*0.38f;
+            int slider=ov_settings_slider(down_item)&&g_menu_down_x>=v[0]+v[2]*OV_SETTINGS_SLIDER_HIT;
             if(in_body)g_menu_gesture=ov_settings_gesture(slider,g_menu_gesture,dx,dy,v[3]/OV_SETTINGS_VIEW_ROWS);
             if(g_menu_gesture==OV_SETTINGS_SCROLL){
                 if(atomic_exchange(&g_menu_hi,-1)!=-1)dm_overlay_redraw();
@@ -1120,7 +1122,7 @@ static void menu_touch(const dm_java_event *e,float W,float H) {
             else if(gesture==OV_SETTINGS_PENDING&&row==down){
                 // Large horizontal motions are not taps; vertical drags may end on the same row.
                 if(fmaxf(fabsf(x-g_menu_down_x),fabsf(y-g_menu_down_y))<v[3]/OV_SETTINGS_VIEW_ROWS*0.14f){
-                    if(ov_settings_slider(item)){if(x>=v[0]+v[2]*0.38f){menu_slider_set(item,x,p);settings_save();}}
+                    if(ov_settings_slider(item)){if(x>=v[0]+v[2]*OV_SETTINGS_SLIDER_HIT){menu_slider_set(item,x,p);settings_save();}}
                     else if(item==OVM_OUTPUT_CUSTOM){menu_output_step(x<p[0]+p[2]*0.5f?-1:1,1);dm_haptics_android_tap();}
                     else if(item>=0&&item!=OVM_TAB)menu_do(item);
                     else if(row==-2||row==-3){dm_haptics_android_tap();menu_close();}

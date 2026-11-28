@@ -71,9 +71,18 @@ static inline int ov_settings_gesture(int slider,int current,float dx,float dy,f
     if(fmaxf(fabsf(dx),fabsf(dy))<rh*0.14f)return OV_SETTINGS_PENDING;
     return fabsf(dy)>=fabsf(dx)?OV_SETTINGS_SCROLL:slider?OV_SETTINGS_SLIDER:OV_SETTINGS_PENDING;
 }
+// Reserve a label column and a fixed percentage column, including thumb clearance.
+#define OV_SETTINGS_TRACK_START 0.49f
+#define OV_SETTINGS_TRACK_END 0.77f
+#define OV_SETTINGS_SLIDER_HIT 0.44f
+static inline void ov_settings_track(const float r[4],float t[3]) {
+    t[0]=r[0]+r[2]*OV_SETTINGS_TRACK_START;
+    t[1]=r[1]+r[3]*0.5f;
+    t[2]=r[2]*(OV_SETTINGS_TRACK_END-OV_SETTINGS_TRACK_START);
+}
 static inline float ov_settings_fraction(float x,const float p[4]) {
-    float v[4];ov_settings_view(p,v);
-    float f=(x-v[0]-v[2]*0.40f)/(v[2]*0.44f);
+    float v[4],t[3];ov_settings_view(p,v);ov_settings_track(v,t);
+    float f=(x-t[0])/t[2];
     return f<0?0:f>1?1:f;
 }
 #endif

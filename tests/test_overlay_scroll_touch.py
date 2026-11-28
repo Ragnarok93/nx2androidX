@@ -21,7 +21,8 @@ int dm_menu_rs_live(void){return 1;}
 enum{AMOTION_EVENT_ACTION_DOWN=0,AMOTION_EVENT_ACTION_UP=1,AMOTION_EVENT_ACTION_MOVE=2,AMOTION_EVENT_ACTION_CANCEL=3,AMOTION_EVENT_ACTION_POINTER_DOWN=5,AMOTION_EVENT_ACTION_POINTER_UP=6,AMOTION_EVENT_ACTION_MASK=255,AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT=8,OV_MENU=1};
 typedef struct{int action,pointers;struct{int id;float x,y;}ptr[4];}dm_java_event;
 static struct{int kind;}OV_CTLS[1];
-static int ctl_at(float x,float y,float w,float h){(void)x;(void)y;(void)w;(void)h;return -1;}
+static int fake_menu_overlap;
+static int ctl_at(float x,float y,float w,float h){(void)x;(void)y;(void)w;(void)h;return fake_menu_overlap?0:-1;}
 static int g_menu_ptr=-1,g_menu_row,g_menu_down_scroll,g_menu_down_page,g_menu_gesture;
 static float g_menu_down_x,g_menu_down_y,g_menu_down_w,g_menu_down_h;
 static _Atomic int g_menu_hi;
@@ -58,16 +59,19 @@ int main(void){
     send(0,x,v[1]+rh);send(2,x,v[1]+rh*5);send(1,x,v[1]+rh*5);
     assert(scroll==0&&actions==0&&slider_calls==0);
     // Horizontal slider gesture locks to its track and saves on release.
-    send(0,v[0]+v[2]*.45f,y);send(2,v[0]+v[2]*.84f,y);send(1,v[0]+v[2]*.84f,y);
+    send(0,v[0]+v[2]*OV_SETTINGS_TRACK_START,y);send(2,v[0]+v[2]*OV_SETTINGS_TRACK_END,y);send(1,v[0]+v[2]*OV_SETTINGS_TRACK_END,y);
     assert(sharpness==100&&slider_calls>0&&saves==1&&scroll==0&&actions==0);
     // A single tap works too; it is not applied on down.
-    int before=slider_calls;send(0,v[0]+v[2]*.40f,y);assert(slider_calls==before);send(1,v[0]+v[2]*.40f,y);assert(sharpness==0&&saves==2);
+    int before=slider_calls;send(0,v[0]+v[2]*OV_SETTINGS_TRACK_START,y);assert(slider_calls==before);send(1,v[0]+v[2]*OV_SETTINGS_TRACK_START,y);assert(sharpness==0&&saves==2);
+    // A tap in the label column must not change the slider.
+    before=slider_calls;send(0,v[0]+v[2]*.40f,y);send(1,v[0]+v[2]*.40f,y);assert(slider_calls==before&&saves==2);
     // Last setting is reachable; a swipe ending on a row cannot trigger it.
     send(0,x,v[1]+rh*5);send(2,x,v[1]-rh*6);send(1,x,v[1]-rh*6);
     assert(scroll==ov_settings_max(2)&&actions==0&&closed==0);
     ov_settings_row(p,2,7,scroll,r);send(0,x,r[1]+rh/2);send(1,x,r[1]+rh/2);
     assert(actions==0&&saves==3); // last row is a slider, not a button
-    ov_settings_row(p,2,4,scroll,r);send(0,x,r[1]+rh/2);send(1,x,r[1]+rh/2);
+    ov_settings_row(p,2,4,scroll,r);OV_CTLS[0].kind=OV_MENU;fake_menu_overlap=1;
+    send(0,x,r[1]+rh/2);send(1,x,r[1]+rh/2);fake_menu_overlap=0;
     assert(actions==1&&last==OVM_OUTPUT_HEIGHT&&page==OVM_OUTPUT_PAGE&&scroll==0);
     send(0,x,v[1]+rh*5);send(2,x,v[1]-rh*6);send(1,x,v[1]-rh*6);
     assert(scroll==ov_settings_max(OVM_OUTPUT_PAGE)&&actions==1);

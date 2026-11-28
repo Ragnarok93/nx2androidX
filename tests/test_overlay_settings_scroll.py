@@ -28,6 +28,12 @@ int main(void){
         float W=screens[k][0],H=screens[k][1],a[4],b[4],v[4];
         ov_menu_rect(W,H,p); ov_settings_view(p,v);
         ov_settings_row(p,2,0,0,a); ov_settings_row(p,2,OVM_ROWS-1,0,b);
+        float track[3];ov_settings_track(a,track);
+        assert(track[0]>=v[0]+v[2]*0.48f);
+        assert(track[0]+track[2]<=v[0]+v[2]*0.78f);
+        assert(fabsf(ov_settings_fraction(track[0],p))<0.001f);
+        assert(fabsf(ov_settings_fraction(track[0]+track[2]*0.5f,p)-0.5f)<0.001f);
+        assert(fabsf(ov_settings_fraction(track[0]+track[2],p)-1)<0.001f);
         assert(a[1]+a[3]<=v[1]+0.01f && v[1]+v[3]<=b[1]+0.01f);
         assert(p[0]>=0&&p[1]>=0&&p[0]+p[2]<=W+0.01f&&p[1]+p[3]<=H+0.01f);
         int max=ov_settings_max(2);
