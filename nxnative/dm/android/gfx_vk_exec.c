@@ -10,6 +10,7 @@
 #include "gfx_vk_reconstruction_limits.h"
 #include "gfx_vk_flow_budget.h"
 #include "gfx_vk_graphics_history.h"
+#include "gfx_vk_set_cache.h"
 #include "gfx_vk_passdump_plan.h"
 #include "gfx_vk_resolution_plan.h"
 #include "gfx_vk_resolution_raster.h"
@@ -2720,7 +2721,7 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
 // view, sampler and texel buffer view written), and driver segments by their bytes. Unity draws many times with the same bindings, and every new set
 // is an allocation and a vkUpdateDescriptorSets; the driver segment's copy is shared so that a set using it can match.
 enum { SETC = 8192, DRVC = 1024 };
-static struct { uint64_t h, epoch; VkDescriptorSetLayout l; VkDescriptorSet set; size_t off, n; } g_setc[SETC];
+static vk_set_cache_entry g_setc[SETC];
 // A hash collision must not reuse different descriptors (#2). Keys own explicit Vulkan fields, never scratch pointers or C padding.
 // The CPU arena is bounded at 16 MiB and reused at the next submission. When full, new sets simply stay uncached.
 enum { SET_KEY_WORDS = 2048, SET_KEY_ARENA_WORDS = 2 * 1024 * 1024 };
@@ -3059,16 +3060,18 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
     uint64_t key[SET_KEY_WORDS]; size_t nk = set_key(key, s->dsl, w, nw);
     uint64_t h = fnv(0xcbf29ce484222325ull, key, nk * sizeof *key);
     if (g_set_key_epoch != g_set_epoch) { g_set_key_used = 0; g_set_key_epoch = g_set_epoch; }
-    unsigned k = (unsigned)(h % SETC); uint64_t tb2 = tick(); g_ns_set_hash += tb2 - tb1;
     int cacheable = nk && !g_tracing && !g_x_nosetc;
-    if (cacheable && g_setc[k].epoch == g_set_epoch && g_setc[k].h == h && g_setc[k].l == s->dsl && g_setc[k].n == nk &&
-        !memcmp(g_set_keys + g_setc[k].off, key, nk * sizeof *key)) { g_set_hits++; set = g_setc[k].set; }
+    // set_key includes the layout handle, and the lookup compares the full key.
+    vk_set_cache_entry *entry = cacheable ?
+        vk_set_cache_find(g_setc, SETC, g_set_keys, g_set_epoch, h, key, nk, &set) : NULL;
+    uint64_t tb2 = tick(); g_ns_set_hash += tb2 - tb1;
+    if (set) { g_set_hits++; }
     else { set = vk_alloc_set(s->dsl); g_set_new++;
         for (uint32_t i = 0; i < nw; i++) w[i].dstSet = set;
         vkUpdateDescriptorSets(V.dev, nw, w, 0, NULL);
-        if (cacheable && nk <= SET_KEY_ARENA_WORDS - g_set_key_used) {
+        if (entry && nk <= SET_KEY_ARENA_WORDS - g_set_key_used) {
             memcpy(g_set_keys + g_set_key_used, key, nk * sizeof *key);
-            g_setc[k].h = h; g_setc[k].epoch = g_set_epoch; g_setc[k].l = s->dsl; g_setc[k].set = set; g_setc[k].off = g_set_key_used; g_setc[k].n = nk;
+            *entry = (vk_set_cache_entry){h, g_set_epoch, set, g_set_key_used, nk};
             g_set_key_used += nk;
         } else if (cacheable) g_set_key_bypass++;
         g_ns_set_new += tick() - tb2; }
