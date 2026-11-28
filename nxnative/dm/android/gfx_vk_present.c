@@ -1582,10 +1582,8 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     unsigned encoding = (unsigned)source->fmt * 1024u;
     if (reconstructed) encoding += g_spatial.encoding;
     // Include replay changes even when the final image needs no extra pass.
-    encoding = (encoding * 8u + (unsigned)dm_spatial_mode()) * 4u + replay_flags;
-    encoding *= 128u;
-    if (replay_flags & SP_REPLAY_SHARPENED)
-        encoding += (unsigned)(dm_recon_sharpness(dm_fsr_sharpness()) * 100.0f + 0.5f);
+    encoding = (encoding * 8u + (unsigned)dm_spatial_mode()) * 4u + spatial_replay_bits(replay_flags);
+    encoding = encoding * 128u + spatial_replay_sharpness(replay_flags);
     // Both consumers use the display-oriented resolve when it exists.
     // A failed resolve preserves the offscreen real result and skips FG.
     vkimg_t *fg_source = needs_fg_resolve && reconstructed && !resolved ? NULL : source;
@@ -1595,7 +1593,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     uint64_t fg_workload=((uint64_t)target.width<<32)|target.height;
     fg_workload=fg_workload*131u+(unsigned)spatial_active;
     fg_workload=fg_workload*131u+(unsigned)docked;
-    fg_workload=fg_workload*131u+replay_flags;
+    fg_workload=fg_workload*131u+spatial_replay_bits(replay_flags);
     fg_workload=fg_workload*131u+(unsigned)dm_spatial_mode();
     fg_workload=fg_workload*131u+(recorded_scale>>7?recorded_scale&127:100);
     fg_workload=fg_workload*131u+g_spatial.report_input.width;
@@ -1680,7 +1678,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     dm_fg_shadow_present(accepted_real,accepted_generated,vk_gpu_ms_recent(),fg_recon_ms,fg_workload);
     if(dm_fg_menu_publish(&g_menu_fg,accepted_real,dm_fg_last_decision().active_flow))g_ov.panel=-1;
     if (dm_recon_menu_publish(&g_menu_recon,accepted_real,spatial_active,
-            reconstructed!=NULL,replay_flags,
+            reconstructed!=NULL,spatial_replay_bits(replay_flags),
             reconstructed?reconstructed->texture.w:(unsigned)raw[2],
             reconstructed?reconstructed->texture.h:(unsigned)raw[3]))
         g_ov.panel=-1; // re-rasterize even when the settings bits did not change
