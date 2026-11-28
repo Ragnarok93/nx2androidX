@@ -9,6 +9,12 @@ on:
       - 'nxnative/dm/android/dm_framegen*'
       - 'nxnative/dm/android/lsfg/**'
       - 'tests/test_vk_fg_*'
+      - 'tests/vk_fg_graph_transition.c'
+      - 'tests/run_vk_fg_graph_transition.py'
+      - 'tests/test_vk_capture_session.py'
+      - 'tests/test_overlay_settings_scroll.py'
+      - 'nxnative/dm/android/front_android.c'
+      - 'nxnative/dm/android/overlay_layout.h'
       - 'nxnative/dm/host/hle_os.c'
       - 'nxnative/dm/gfx/nvn/hle_nvn.c'
       - 'tests/test_vk_pause_accounting.py'
@@ -48,6 +54,7 @@ jobs:
           test -n "$VK_ICD_FILENAMES"
           export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
           export VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+          python3 tests/run_vk_fg_graph_transition.py
           python3 tests/run_vk_spatial_upscaler.py
           python3 tests/run_vk_spatial_upscaler.py --gsr2
           DM_TEST_LARGE_RECONSTRUCTION=1 python3 tests/run_vk_spatial_upscaler.py --gsr2 2>&1 | tee "$RUNNER_TEMP/reconstruction-large.log"
