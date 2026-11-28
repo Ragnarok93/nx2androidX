@@ -67,7 +67,7 @@ static void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked){(void)k
 double vk_gpu_ms_recent(void){return 8.0;}
 static void dm_fg_shadow_present(int real,int generated,double replay,double recon,uint64_t workload){(void)real;(void)generated;(void)replay;(void)recon;(void)workload;}
 typedef struct {const char *reason;double period_ms,measured_ms;uint64_t refresh_ns;unsigned planned,warm_streak;
-    int requested_flow,active_flow;uint64_t submission_serial;dm_fg_timing timing;
+    int requested_flow,active_flow;uint64_t submission_serial;dm_fg_timing timing;dm_fg_governor_report governor;
     unsigned graph_phase,pending_flow,seed_policy,seed_count;
     uint64_t active_bytes,extra_bytes,build_limit;} dm_fg_decision;
 static int test_flow=50;

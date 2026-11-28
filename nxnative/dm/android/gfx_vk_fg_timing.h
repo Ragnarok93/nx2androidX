@@ -24,3 +24,13 @@ static inline int dm_fg_timing_decode(dm_fg_timing *s,const uint64_t *t,unsigned
 static inline int dm_fg_timing_fresh(const dm_fg_timing *s,uint64_t epoch,uint64_t last) {
     return s->valid && s->generated && s->epoch==epoch && s->serial>last;
 }
+
+ // Decision after presentation, referring to an older completed timing serial.
+ // String values are static literals; capture rows may retain them.
+typedef struct {
+    const char *status;
+    uint64_t workload,matched_serial,allocation_cap;
+    double budget_ms;
+    unsigned requested_pct,reason;
+    int live,recovery_allowed,matched;
+} dm_fg_governor_report;

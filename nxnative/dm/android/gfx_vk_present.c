@@ -1674,6 +1674,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     if (capture) {
         sample.present_accepted = accepted_real;
         sample.generated_accepted = accepted_generated;
+        sample.fg_governor=dm_fg_last_decision().governor;
         vk_capture_scale_present(ticket, sample);
     }
 }

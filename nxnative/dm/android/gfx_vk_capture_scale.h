@@ -60,6 +60,7 @@ typedef struct {
     int fg_requested_flow,fg_active_flow;
     uint64_t fg_submission_serial;
     dm_fg_timing fg_timing;
+    dm_fg_governor_report fg_governor;
     unsigned fg_graph_phase,fg_pending_flow,fg_seed_policy,fg_seed_count;
     uint64_t fg_active_bytes,fg_extra_bytes,fg_build_limit;
     const char *reason; // immutable reconstruction status string

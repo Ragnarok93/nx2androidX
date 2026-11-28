@@ -10,6 +10,7 @@
 #include "gfx_vk_fg_governor.h"
 #include "gfx_vk_fg_warmup.h"
 #include "gfx_vk_fg_coordination.h"
+#include "gfx_vk_capture_scale.h"
 #include "vka.h"
 #include <math.h>
 #include <stdio.h>
@@ -74,7 +75,8 @@ int dm_fg_status(char *buf, int n) {
 #ifndef NX_LSFG
 void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked){(void)key;(void)ns;(void)blocked;}
 void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
-    (void)real;(void)generated;(void)replay_ms;(void)recon_ms;(void)workload;
+    (void)real;(void)generated;(void)replay_ms;(void)recon_ms;
+    fg_decision.governor=(dm_fg_governor_report){.status="not compiled",.workload=workload};
 }
 int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, unsigned source_reset,
                 double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
@@ -228,8 +230,13 @@ static void fg_timing_stamp(VkCommandBuffer cb,uint32_t index) {
 void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
     const char *enabled=getenv("DM_LSFG_FLOW_SHADOW");
     int live=fg_live_enabled();
-    if (!live && (!enabled || !atoi(enabled))) return;
+    dm_fg_governor_report *report=&fg_decision.governor;
+    *report=(dm_fg_governor_report){.status="fixed Auto",.workload=workload,.live=live};
+    // Capture automatically runs the non-mutating shadow policy, not live
+    // transitions. No second debug switch or verbose log mode is needed.
+    if (!live && (!enabled || !atoi(enabled)) && !vk_pass_dump_user_active()) return;
     dm_fg_decision d=fg_decision;
+    report->status=d.requested_flow?"manual flow":!d.active_flow?"no graph":!d.submission_serial?"no submission":!real?"real present rejected":"awaiting timing";
     if (d.requested_flow || !d.active_flow || !d.submission_serial || !real) {
         if(live)fg_cancel_request();
         dm_fg_governor_gap(&F.shadow);return;
@@ -254,14 +261,20 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     if (!s.valid) {dm_fg_governor_gap(&F.shadow);return;}
     unsigned j=s.serial%8;
     int matched=F.shadow_rows[j].serial==s.serial && F.shadow_rows[j].workload==workload;
-    if (!matched) {dm_fg_governor_gap(&F.shadow);return;}
+    if (!matched) {report->status="unmatched timing";dm_fg_governor_gap(&F.shadow);return;}
+    report->matched=1;report->matched_serial=s.serial;report->budget_ms=F.shadow_rows[j].budget;
     // Pending and retiring graphs cannot launch a third graph. Do not let
     // transition-only workload contaminate profitability or dwell evidence.
-    if(live && F.graph.phase!=LSFG_GRAPH_EMPTY)return;
+    if(live && F.graph.phase!=LSFG_GRAPH_EMPTY){report->status="graph transition in flight";return;}
     uint64_t recovery_cap=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)?vk_fg_transition_cap(1):0;
+    report->recovery_allowed=recovery_cap!=0;
+    int accepted=F.shadow_rows[j].accepted==(int)s.generated && generated>0 && s.generated;
+    report->status=!accepted?"generated batch not accepted":!(report->budget_ms>0)?"budget unavailable":"hold";
     dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
-        F.shadow_rows[j].elapsed,F.shadow_rows[j].accepted==(int)s.generated && generated>0,recovery_cap!=0);
+        F.shadow_rows[j].elapsed,accepted,recovery_cap!=0);
+    report->requested_pct=req.pct;report->reason=req.reason;
     if (req.reason!=FG_FLOW_HOLD) {
+        report->status=live?"request evaluated":"shadow recommendation";
         VLOG("LSFG_FLOW_SHADOW serial=%llu epoch=%llu active=%d suggested=%u reason=%u gpu_ms=%.3f estimated_budget_ms=%.3f",
             (unsigned long long)s.serial,(unsigned long long)s.epoch,d.active_flow,req.pct,req.reason,
             s.total_ms,F.shadow_rows[j].budget);
@@ -269,11 +282,14 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
             int up=req.pct>(unsigned)F.flow;
             uint64_t cap=up?recovery_cap:vk_fg_transition_cap(0);
             int seed=dm_fg_seed_policy(&s,req.pct,F.shadow_rows[j].budget,!up);
+            report->allocation_cap=cap;
             if(cap && seed && lsfg_graph_owner_start(&F.graph,&F.mods,F.ext,req.pct,F.out_view,cap,F.timing_epoch)) {
+                report->status="build requested";
                 F.seed_policy=seed;F.graph_deadline=mono_s()+10.0;
                 VLOG("LSFG_FLOW_GRAPH request %u%%, cap %llu, warmup %d",req.pct,(unsigned long long)cap,seed);
                 return; // wait for publication or cancellation to acknowledge
             }
+            report->status=!cap?"memory or recovery veto":!seed?"warmup budget veto":"build refused";
             VLOG("LSFG_FLOW_GRAPH request refused (cap %llu, warmup %d)",(unsigned long long)cap,seed);
         }
         dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);

@@ -33,6 +33,7 @@ typedef struct {
     int requested_flow,active_flow;
     uint64_t submission_serial;
     dm_fg_timing timing;
+    dm_fg_governor_report governor;
     unsigned graph_phase, pending_flow, seed_policy, seed_count;
     uint64_t active_bytes, extra_bytes, build_limit;
 } dm_fg_decision;
