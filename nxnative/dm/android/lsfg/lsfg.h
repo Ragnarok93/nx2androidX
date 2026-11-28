@@ -44,6 +44,13 @@ enum { LSFG_MAX_GENERATIONS = 3, LSFG_GENERATION_SLOTS = LSFG_MAX_GENERATIONS * 
 typedef struct lsfg_chain lsfg_chain;
 // The chain for frames of extent ext (RGBA8 UNORM inputs); flow_scale 0.25..1 is the optical flow's resolution. outs[g] are the images generation g writes (storage, RGBA8)
 lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_scale, VkImage outs[LSFG_MAX_GENERATIONS], VkImageView out_views[LSFG_MAX_GENERATIONS]);
+// Build a private graph without submitting or waiting. External outputs
+// must outlive all graph consumers. byte_limit covers private VkDeviceMemory.
+lsfg_chain *lsfg_chain_build(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit);
+uint64_t lsfg_chain_bytes(const lsfg_chain *c);
+// Record exactly once per successful initialization submission, before use.
+void lsfg_chain_record_init(const lsfg_chain *c,VkCommandBuffer cb);
 void lsfg_chain_free(lsfg_chain *c);   // the GPU must be done with it
 VkImage lsfg_chain_input(lsfg_chain *c, uint64_t count);   // the image game frame count is copied into (GENERAL layout)
 void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count);
