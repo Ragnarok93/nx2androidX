@@ -408,10 +408,11 @@ void lsfg_chain_free(lsfg_chain *c) {
 VkImage lsfg_chain_input(lsfg_chain *c, uint64_t count) { return c->frames[count % 2]->img; }
 
 // LsfgChain::DispatchShared: mipmaps of the new frame, the 4 alpha stages at every level, beta
-void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count) {
+void lsfg_chain_shared_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, VkQueryPool queries, uint32_t mip_end) {
     barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     run(cb, &c->mip_pass, c->mip_sets[count % 2], groups(c->flow_ext.width, 6), groups(c->flow_ext.height, 6));
+    if (queries) vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,queries,mip_end);
     for (int s = 0; s < ALPHA_STAGES; s++) {
         cbar(cb);
         vk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c->alpha_pass[s].pipe);
@@ -428,8 +429,12 @@ void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count) {
     cbar(cb); run(cb, &c->beta_pass[4], c->beta_sets[3], groups(e.width, 5), groups(e.height, 5));
 }
 
+void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count) {
+    lsfg_chain_shared_timed(c,cb,count,VK_NULL_HANDLE,0);
+}
+
 // LsfgChain::DispatchGeneration: gamma at each level (delta at the finest three) for the generation's slot, then generate into its output
-void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen) {
+void lsfg_chain_generate_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen, VkQueryPool queries, uint32_t refine_end) {
     size_t slot = gen_slot(ngen, gen); int h = (int)(count % HIST);
     for (int i = 0; i < MIPS; i++) {
         __typeof__(c->gamma[0]) *g = &c->gamma[i];
@@ -444,6 +449,11 @@ void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size
         for (int k = 6; k < DELTA_STAGES; k++) { cbar(cb); run(cb, &c->delta_pass[k], d->g[slot].sets[k - 2], gx, gy); }
     }
     cbar(cb);
+    if (queries) vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,queries,refine_end);
     run(cb, &c->gen_pass, c->gen_sets[slot][gen][count % 2], groups(c->out_ext.width, 4), groups(c->out_ext.height, 4));
+}
+
+void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen) {
+    lsfg_chain_generate_timed(c,cb,count,ngen,gen,VK_NULL_HANDLE,0);
 }
 #endif

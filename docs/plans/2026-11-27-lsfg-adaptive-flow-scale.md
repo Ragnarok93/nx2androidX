@@ -71,3 +71,5 @@
 ## Progress log
 
 - Roadmap created from verified remote baseline. No implementation or validation claimed by this planning commit.
+
+- Task 1 checkpoint: added pure timing decoder and submitted slot instrumentation for copy/mipmaps/shared/refine/output. Local decoder harness: absent-behavior stub red (assertion, exit 1), identical test green with implementation (1 test); this is not a pre-fix full repository run. Query reads use only the existing retired slot and omit WAIT; publish after successful submit, discard on epoch change. `DM_LSFG_TIMING_TRACE=1` logs every retired sample; otherwise periodic log. Actual accepted presentation correlation/capture columns and integration verification are still open. Auto policy unchanged.

@@ -6,6 +6,7 @@
 // and the status vocabulary stay Banana's.
 #include "dm_framegen.h"
 #include "gfx_vk_fg_flow.h"
+#include "gfx_vk_fg_timing.h"
 #include "vka.h"
 #include <math.h>
 #include <stdio.h>
@@ -77,7 +78,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     return fg_skip(atomic_load(&g_on)>0?"not compiled":"disabled");
 }
 #else
-enum { NFG = 3 };
+enum { NFG = 3, FG_QUERY_STRIDE = 10 };
 typedef struct { VkCommandBuffer cb; VkFence fence; int pending; } fg_slot;
 static struct {
     int state;                         // 0 not tried, 1 ready (modules loaded), -1 unavailable
@@ -87,6 +88,12 @@ static struct {
     VkImage out[LSFG_MAX_GENERATIONS]; VkImageView out_view[LSFG_MAX_GENERATIONS]; VkDeviceMemory out_mem[LSFG_MAX_GENERATIONS];
     VkCommandPool pool;
     fg_slot fr[NFG];
+    VkQueryPool timing_queries;
+    unsigned timing_tried,timing_bits;
+    double timestamp_ns,timing_period;
+    int timing_mult,timing_target;
+    uint64_t timing_epoch,timing_serial;
+    dm_fg_timing timing_pending[NFG],timing_latest;
     double command_retry_at;
     unsigned fi;
     lsfg_pacer pacer; uint64_t count; uint32_t warm_streak;
@@ -125,7 +132,59 @@ static int load(void) {
     return 1;
 }
 
+// Timing state is present-thread owned, with process-lifetime query pool like
+// the existing FG command pool. Old epoch queries are retired but ignored.
+static void fg_timing_invalidate(void) {
+    ++F.timing_epoch;
+    F.timing_latest.valid=0;
+}
+
+static void fg_timing_init(void) {
+    if (F.timing_tried++) { F.timing_tried=1; return; }
+    if (!vkCreateQueryPool || !vkCmdResetQueryPool || !vkCmdWriteTimestamp ||
+        !vkGetQueryPoolResults || !vkGetPhysicalDeviceQueueFamilyProperties ||
+        !vkGetPhysicalDeviceProperties) return;
+    uint32_t n=0;
+    vkGetPhysicalDeviceQueueFamilyProperties(V.pd,&n,NULL);
+    if (V.qf>=n) return;
+    VkQueueFamilyProperties *q=calloc(n,sizeof *q);
+    if (!q) return;
+    vkGetPhysicalDeviceQueueFamilyProperties(V.pd,&n,q);
+    if (V.qf<n) F.timing_bits=q[V.qf].timestampValidBits;
+    free(q);
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(V.pd,&props);
+    F.timestamp_ns=props.limits.timestampPeriod;
+    if (!F.timing_bits || F.timing_bits>64 || !(F.timestamp_ns>0) || !isfinite(F.timestamp_ns)) return;
+    VkQueryPoolCreateInfo ci={VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,NULL,0,
+        VK_QUERY_TYPE_TIMESTAMP,NFG*FG_QUERY_STRIDE};
+    if (vkCreateQueryPool(V.dev,&ci,NULL,&F.timing_queries)!=VK_SUCCESS)
+        F.timing_queries=VK_NULL_HANDLE;
+}
+static void fg_timing_read(unsigned slot) {
+    dm_fg_timing s=F.timing_pending[slot];
+    F.timing_pending[slot].serial=0;
+    F.timing_latest.valid=0; // unavailable is not a fresh sample
+    if (!F.timing_queries || !s.serial || s.epoch!=F.timing_epoch) return;
+    uint64_t stamp[FG_QUERY_STRIDE];
+    unsigned n=4+2*s.generated;
+    if (vkGetQueryPoolResults(V.dev,F.timing_queries,slot*FG_QUERY_STRIDE,n,
+            n*sizeof stamp[0],stamp,sizeof stamp[0],VK_QUERY_RESULT_64_BIT)!=VK_SUCCESS) return;
+    if (!dm_fg_timing_decode(&s,stamp,n,F.timing_bits,F.timestamp_ns)) return;
+    F.timing_latest=s;
+    const char *trace=getenv("DM_LSFG_TIMING_TRACE");
+    if ((trace && atoi(trace)) || s.serial%120==1) {
+        VLOG("LSFG_TIMING serial=%llu epoch=%llu scale=%u input=%ux%u generated=%u copy_ms=%.3f mip_ms=%.3f shared_ms=%.3f refine_ms=%.3f output_ms=%.3f total_ms=%.3f",
+            (unsigned long long)s.serial,(unsigned long long)s.epoch,s.scale,s.width,s.height,s.generated,
+            s.copy_ms,s.mip_ms,s.shared_ms,s.refine_ms,s.output_ms,s.total_ms);
+    }
+}
+static void fg_timing_stamp(VkCommandBuffer cb,uint32_t index) {
+    if (F.timing_queries) vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,F.timing_queries,index);
+}
+
 static void teardown(void) {
+    fg_timing_invalidate();
     if (!F.chain && !F.out[0]) return;
     pthread_mutex_lock(V.qmu); vk.vkQueueWaitIdle(V.q); pthread_mutex_unlock(V.qmu);
     lsfg_chain_free(F.chain); F.chain = NULL;
@@ -248,6 +307,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         return fg_skip("uncapped source");
     }
     if (!im || !im->img || im->layout != VK_IMAGE_LAYOUT_GENERAL) {
+        fg_timing_invalidate();
         F.count = F.warm_streak = 0;
         return fg_skip(!im?"no reconstructed resolve":!im->img?"no source image":"source layout not general");
     }
@@ -294,10 +354,16 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         F.rebuild_retry_at = 0;
     }
     if (source_reset || encoding != F.encoding) {
+        fg_timing_invalidate();
         F.encoding = encoding;
         F.count = F.warm_streak = 0;
         if (source_reset) VLOG("frame generation: real-source discontinuity %#x", source_reset);
     }
+    if (F.timing_period!=period || F.timing_mult!=mult || F.timing_target!=target) {
+        fg_timing_invalidate();
+        F.timing_period=period; F.timing_mult=mult; F.timing_target=target;
+    }
+    fg_timing_init();
     // The floor for the game's own rate (DM_LSFG_MIN_FPS, default 30): the generation's work must not push the game under it
     F.pacer.min_base = 30.0f;
     { const char *e = getenv("DM_LSFG_MIN_FPS"); if (e && atoi(e) > 0) F.pacer.min_base = (float)atoi(e); }
@@ -333,19 +399,33 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         if (ng > fit) { ng = fit; capped = 1; F.pacer.issued = ng; }
     }
 
-    fg_slot *slot = &F.fr[F.fi++ % NFG];
+    unsigned slot_index=F.fi++%NFG;
+    fg_slot *slot = &F.fr[slot_index];
     VkResult result = begin_slot(slot);
     if (result) goto command_error;
     VkCommandBuffer cb = slot->cb;
+    fg_timing_read(slot_index); // existing begin_slot fence already retired
+    uint32_t qb=slot_index*FG_QUERY_STRIDE;
+    if (F.timing_queries) vkCmdResetQueryPool(cb,F.timing_queries,qb,FG_QUERY_STRIDE);
     full_barrier(cb);
+    fg_timing_stamp(cb,qb);
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {cw, ch, 1}}};
     if (flip_y) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up, the chain sees it upright
     vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(F.chain, count), VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
-    if (warm) lsfg_chain_shared(F.chain, cb, count);
-    for (size_t g = 0; g < ng; g++) lsfg_chain_generate(F.chain, cb, count, ng, g);
+    fg_timing_stamp(cb,qb+1);
+    if (warm) lsfg_chain_shared_timed(F.chain,cb,count,F.timing_queries,qb+2);
+    else fg_timing_stamp(cb,qb+2);
+    fg_timing_stamp(cb,qb+3);
+    for (size_t g = 0; g < ng; g++) {
+        lsfg_chain_generate_timed(F.chain,cb,count,ng,g,F.timing_queries,qb+4+2*g);
+        fg_timing_stamp(cb,qb+5+2*g);
+    }
     full_barrier(cb);   // the outputs for the presents after this
     result = submit_slot(slot);
     if (result) goto command_error;
+    if (F.timing_queries) F.timing_pending[slot_index]=(dm_fg_timing){
+        .serial=++F.timing_serial,.epoch=F.timing_epoch,.scale=(unsigned)flow,
+        .width=e.width,.height=e.height,.generated=(unsigned)ng};
     *consumer = slot->fence;
     for (size_t g = 0; g < ng; g++) gen[g] = F.out[g];
     double interval = F.pacer.smoothed_interval > 0 ? F.pacer.smoothed_interval : period;
@@ -375,6 +455,7 @@ report:;
     return (int)ng;
 
 command_error:
+    fg_timing_invalidate();
     F.count = F.warm_streak = F.pacer.issued = 0;
     *out_period = 0;
     VRED("frame generation command failed: %d", result);

@@ -46,6 +46,8 @@ typedef struct lsfg_chain lsfg_chain;
 lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_scale, VkImage outs[LSFG_MAX_GENERATIONS], VkImageView out_views[LSFG_MAX_GENERATIONS]);
 void lsfg_chain_free(lsfg_chain *c);   // the GPU must be done with it
 VkImage lsfg_chain_input(lsfg_chain *c, uint64_t count);   // the image game frame count is copied into (GENERAL layout)
-void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count);                            // after the copy: mipmaps, alpha, beta of frame count
+void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count);
+void lsfg_chain_shared_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, VkQueryPool queries, uint32_t mip_end);
+void lsfg_chain_generate_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen, VkQueryPool queries, uint32_t refine_end);                            // after the copy: mipmaps, alpha, beta of frame count
 void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen);  // generation gen of ngen between frames count - 1 and count, into outs[gen]
 #endif
