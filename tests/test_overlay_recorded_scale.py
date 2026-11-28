@@ -10,6 +10,7 @@ class RecordedScale(unittest.TestCase):
 int dm_menu_audio_available(void){return 1;}
 static int live=1;
 int dm_menu_rs_live(void){return live;}
+int dm_menu_fg_flow(void){return 0;}
 int main(void){
     assert(OVM_TAB_NAMES[2][0]=='G');
     for(live=0;live<=1;live++){

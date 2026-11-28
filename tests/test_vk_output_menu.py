@@ -12,6 +12,7 @@ class OutputMenu(unittest.TestCase):
 '''+code[start:end]+r'''
 int dm_menu_audio_available(void){return 1;}
 int dm_menu_rs_live(void){return 1;}
+int dm_menu_fg_flow(void){return 0;}
 int main(void){
     assert(OVM_ROWS<=15);
     assert(!strcmp(OVM_TAB_NAMES[2],"Graphics"));
@@ -61,6 +62,7 @@ int main(void){
 '''+table+r'''
 int dm_menu_audio_available(void){return 1;}
 int dm_menu_rs_live(void){return 1;}
+int dm_menu_fg_flow(void){return 0;}
 static _Atomic int g_diag_flags_page,g_menu_hi,g_set_output_height,g_menu_cfg_ver;
 static int saves;
 static void settings_save(void){saves++;}

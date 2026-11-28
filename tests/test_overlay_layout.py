@@ -23,6 +23,7 @@ static int custom_faces, custom_a, custom_x, hidden_ctl = -1, audio_available;
 int dm_menu_audio_available(void) { return audio_available; }
 static int renderer_scaling;
 int dm_menu_rs_live(void) { return renderer_scaling; }
+int dm_menu_fg_flow(void){return 0;}
 float dm_overlay_scale(void) { return 1; }
 int dm_overlay_off(int l, int c) { return l == 1 && c == hidden_ctl; }
 int dm_overlay_custom(int layout, int ctl, float *x, float *y, float *s) {
