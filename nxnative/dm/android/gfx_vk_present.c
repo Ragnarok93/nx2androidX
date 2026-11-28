@@ -1572,6 +1572,20 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     // Both consumers use the display-oriented resolve when it exists.
     // A failed resolve preserves the offscreen real result and skips FG.
     vkimg_t *fg_source = needs_fg_resolve && reconstructed && !resolved ? NULL : source;
+    // Coordinate before FG recording, not after presentation: a pending
+    // graph must not activate with evidence from a previous workload.
+    unsigned recorded_scale=dm_menu_rs_recorded();
+    uint64_t fg_workload=((uint64_t)target.width<<32)|target.height;
+    fg_workload=fg_workload*131u+(unsigned)spatial_active;
+    fg_workload=fg_workload*131u+(unsigned)docked;
+    fg_workload=fg_workload*131u+replay_flags;
+    fg_workload=fg_workload*131u+(unsigned)dm_spatial_mode();
+    fg_workload=fg_workload*131u+(recorded_scale>>7?recorded_scale&127:100);
+    fg_workload=fg_workload*131u+g_spatial.report_input.width;
+    fg_workload=fg_workload*131u+g_spatial.report_input.height;
+    fg_workload=fg_workload*131u+(unsigned)g_spatial.report_physical;
+    int temporal_fallback=dm_spatial_mode()==SP_SGSR2 && spatial_active!=SP_SGSR2 && !(replay_flags&SP_REPLAY_TEMPORAL);
+    dm_fg_prepare_workload(fg_workload,source_ns,source_reset||g_spatial.flow_pressure||temporal_fallback);
     int ng = dm_fg_frame(fg_source, rect, flip_y, encoding, source_reset, period, gen, &hold, &out_period, &fg_fence);
     if (real_image && fg_fence) real_image->last_use = fg_fence;
     atomic_store(&g_fg_out_ns, out_period > 0 ? (uint64_t)(out_period * 1e9) : 0);
@@ -1646,9 +1660,6 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             g_spatial.measured_output.width==target.width && g_spatial.measured_output.height==target.height ?
             g_spatial.gpu_ms : -1;
     }
-    uint64_t fg_workload=((uint64_t)target.width<<32)|target.height;
-    fg_workload=fg_workload*131u+(unsigned)spatial_active;
-    fg_workload=fg_workload*131u+(unsigned)docked;
     dm_fg_shadow_present(accepted_real,accepted_generated,vk_gpu_ms_recent(),fg_recon_ms,fg_workload);
     if (dm_recon_menu_publish(&g_menu_recon,accepted_real,spatial_active,
             reconstructed!=NULL,replay_flags,

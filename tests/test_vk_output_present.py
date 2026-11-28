@@ -61,6 +61,8 @@ int dm_spatial_mode(void){return mode;}
 int dm_fsr_sharpness(void){return 50;}
 int dm_perf_rate_fps(void){return 30;}
 static int dm_fg_wants_input(void){return fg_on;}
+static unsigned dm_menu_rs_recorded(void){return 0;}
+static void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked){(void)key;(void)ns;(void)blocked;}
 double vk_gpu_ms_recent(void){return 8.0;}
 static void dm_fg_shadow_present(int real,int generated,double replay,double recon,uint64_t workload){(void)real;(void)generated;(void)replay;(void)recon;(void)workload;}
 typedef struct {const char *reason;double period_ms,measured_ms;uint64_t refresh_ns;unsigned planned,warm_streak;

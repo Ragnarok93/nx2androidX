@@ -9,6 +9,7 @@
 #include "gfx_vk_fg_timing.h"
 #include "gfx_vk_fg_governor.h"
 #include "gfx_vk_fg_warmup.h"
+#include "gfx_vk_fg_coordination.h"
 #include "vka.h"
 #include <math.h>
 #include <stdio.h>
@@ -71,6 +72,7 @@ int dm_fg_status(char *buf, int n) {
 }
 
 #ifndef NX_LSFG
+void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked){(void)key;(void)ns;(void)blocked;}
 void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
     (void)real;(void)generated;(void)replay_ms;(void)recon_ms;(void)workload;
 }
@@ -107,6 +109,8 @@ static struct {
     dm_fg_timing timing_pending[NFG],timing_latest;
     dm_fg_governor shadow;
     uint64_t shadow_workload;
+    dm_fg_coordination coordination;
+    uint64_t coordination_ns;
     struct {uint64_t serial,workload; double budget,elapsed;int accepted;} shadow_rows[8];
     double command_retry_at;
     unsigned fi;
@@ -160,6 +164,17 @@ static void fg_timing_invalidate(void) {
     ++F.timing_epoch;
     F.timing_latest.valid=0;
     fg_cancel_request();
+}
+
+void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked) {
+    if(!fg_live_enabled())return;
+    F.coordination_ns=ns;
+    if(dm_fg_coordination_update(&F.coordination,key,ns,blocked))fg_timing_invalidate();
+    // An upward graph must not commit when competing work is recovering
+    // or the source is already stressed. Downward relief remains eligible.
+    if(F.graph.phase==LSFG_GRAPH_BUILDING || F.graph.phase==LSFG_GRAPH_WARMING)
+        if(F.graph.scale>(unsigned)F.flow &&
+            !dm_fg_coordination_recover(&F.coordination,ns))fg_cancel_request();
 }
 
 static void fg_timing_init(void) {
@@ -243,7 +258,7 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     // Pending and retiring graphs cannot launch a third graph. Do not let
     // transition-only workload contaminate profitability or dwell evidence.
     if(live && F.graph.phase!=LSFG_GRAPH_EMPTY)return;
-    uint64_t recovery_cap=live?vk_fg_transition_cap(1):0;
+    uint64_t recovery_cap=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)?vk_fg_transition_cap(1):0;
     dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
         F.shadow_rows[j].elapsed,F.shadow_rows[j].accepted==(int)s.generated && generated>0,recovery_cap!=0);
     if (req.reason!=FG_FLOW_HOLD) {
@@ -252,7 +267,7 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
             s.total_ms,F.shadow_rows[j].budget);
         if(live) {
             int up=req.pct>(unsigned)F.flow;
-            uint64_t cap=vk_fg_transition_cap(up);
+            uint64_t cap=up?recovery_cap:vk_fg_transition_cap(0);
             int seed=dm_fg_seed_policy(&s,req.pct,F.shadow_rows[j].budget,!up);
             if(cap && seed && lsfg_graph_owner_start(&F.graph,&F.mods,F.ext,req.pct,F.out_view,cap,F.timing_epoch)) {
                 F.seed_policy=seed;F.graph_deadline=mono_s()+10.0;
