@@ -18,24 +18,33 @@ typedef struct {
     uint64_t byte_limit,epoch;
     VkImageView outputs[LSFG_MAX_GENERATIONS];
     lsfg_chain *result;
+    lsfg_chain *retire; // optional fully retired graph, ownership transferred on successful start
 } lsfg_graph_job;
 static inline void *lsfg_graph_job_main(void *arg) {
     lsfg_graph_job *j=arg;
+    // A cold replacement releases the old private allocations before any
+    // allocation for the new graph. Outputs and modules remain borrowed.
+    lsfg_chain_free(j->retire);j->retire=NULL;
     j->result=lsfg_chain_build_cancelable(j->mods,j->extent,j->scale,j->outputs,j->byte_limit,&j->cancelled);
     atomic_store_explicit(&j->done,1,memory_order_release);
     return NULL;
 }
-static inline int lsfg_graph_job_start(lsfg_graph_job *j,const lsfg_modules *mods,
-        VkExtent2D extent,float scale,const VkImageView *outputs,uint64_t cap,uint64_t epoch) {
+static inline int lsfg_graph_job_start_replace(lsfg_graph_job *j,const lsfg_modules *mods,
+        VkExtent2D extent,float scale,const VkImageView *outputs,uint64_t cap,uint64_t epoch,
+        lsfg_chain *retire) {
     if(j->running || !mods || !outputs || !cap || !extent.width || !extent.height ||
         !(scale>=.25f && scale<=1.0f)) return 0;
     for(unsigned i=0;i<LSFG_MAX_GENERATIONS;i++) if(!outputs[i]) return 0;
     j->mods=mods;j->extent=extent;j->scale=scale;j->byte_limit=cap;j->epoch=epoch;
     for(unsigned i=0;i<LSFG_MAX_GENERATIONS;i++)j->outputs[i]=outputs[i];
-    j->result=NULL;atomic_store_explicit(&j->cancelled,0,memory_order_relaxed);
+    j->result=NULL;j->retire=retire;atomic_store_explicit(&j->cancelled,0,memory_order_relaxed);
     atomic_store_explicit(&j->done,0,memory_order_relaxed);
-    if(pthread_create(&j->thread,NULL,lsfg_graph_job_main,j)) return 0;
+    if(pthread_create(&j->thread,NULL,lsfg_graph_job_main,j)) { j->retire=NULL;return 0; }
     j->running=1;return 1;
+}
+static inline int lsfg_graph_job_start(lsfg_graph_job *j,const lsfg_modules *mods,
+        VkExtent2D extent,float scale,const VkImageView *outputs,uint64_t cap,uint64_t epoch) {
+    return lsfg_graph_job_start_replace(j,mods,extent,scale,outputs,cap,epoch,NULL);
 }
 // Cancellation does not wait. A stale result is never returned to the owner.
 static inline void lsfg_graph_job_cancel(lsfg_graph_job *j) {
