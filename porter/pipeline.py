@@ -1842,6 +1842,10 @@ class Port:
         shared_env, shared_files = self.shared_font()
         font_env, font_files = font_env + shared_env, {**font_files, **shared_files}
         dst = self.data_dir()
+        direct = getattr(self, 'direct_romfs_pack', None)
+        if direct is not None and (dst != direct or getattr(self.ap, 'romfs_zstd', False)):
+            raise BuildError('direct companion staging no longer matches the final export; '
+                             'the extracted RomFS has been preserved')
         files = {**self.fps_files, **font_files}
         host = icon = None; drivers = []
         romfs, romfs_at, zenv = self.game / 'RomFS', None, []
