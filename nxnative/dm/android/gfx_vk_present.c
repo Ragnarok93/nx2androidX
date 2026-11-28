@@ -1537,6 +1537,10 @@ static int reconstruction_pressure(dm_flow_cadence cadence, uint64_t ticket) {
     unsigned queued = dm_flow_waiting_sources(occupied, occupied &&
         g_pq[g_pq_tail % PQ_N].n == ticket);
     pthread_mutex_unlock(&g_pq_mu);
+    if (dm_spatial_mode()==SP_SGSR2) {
+        dm_fg_pressure_report pressure=vk_fg_pressure_snapshot();
+        if (dm_recon_pressure_critical(&pressure)) return 1;
+    }
     return dm_flow_frame_stressed(cadence.period_us, atomic_load(&g_recon_work_us),
                                   0, queued, missed);
 }
