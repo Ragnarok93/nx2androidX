@@ -26,6 +26,7 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #include "gfx_vk_source_continuity.h"
 #include "gfx_vk_menu_recon.h"
 static dm_recon_menu_status g_menu_recon;
+static dm_fg_menu_status g_menu_fg;
 static dm_recon_continuity g_recon_source;
 
 __attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
@@ -688,9 +689,10 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
             float trailing=action?m3_text_w(">",small_scale)+rh*0.16f:0;
-            if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT) {
+            if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT || (it==OVM_FG_FLOW && !dm_menu_fg_flow())) {
                 char last[80];
-                dm_recon_menu_label(&g_menu_recon,it==OVM_OUTPUT_HEIGHT,last,sizeof last);
+                if(it==OVM_FG_FLOW)dm_fg_menu_label(&g_menu_fg,last,sizeof last);
+                else dm_recon_menu_label(&g_menu_recon,it==OVM_OUTPUT_HEIGHT,last,sizeof last);
                 m3_bounded_text(cv,x1-trailing,cy-rh*0.17f,value,small_scale,x1-control_left-trailing,1,M3_PRIMARY);
                 m3_bounded_text(cv,x1-trailing,cy+rh*0.19f,last,small_scale*0.78f,x1-control_left-trailing,1,M3_VARIANT);
             } else m3_bounded_text(cv,x1-trailing,cy,value,small_scale,x1-control_left-trailing,1,action?M3_PRIMARY:M3_VARIANT);
@@ -1661,6 +1663,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             g_spatial.gpu_ms : -1;
     }
     dm_fg_shadow_present(accepted_real,accepted_generated,vk_gpu_ms_recent(),fg_recon_ms,fg_workload);
+    if(dm_fg_menu_publish(&g_menu_fg,accepted_real,dm_fg_last_decision().active_flow))g_ov.panel=-1;
     if (dm_recon_menu_publish(&g_menu_recon,accepted_real,spatial_active,
             reconstructed!=NULL,replay_flags,
             reconstructed?reconstructed->texture.w:(unsigned)raw[2],

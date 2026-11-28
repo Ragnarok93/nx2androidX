@@ -29,3 +29,16 @@ static inline void dm_recon_menu_label(const dm_recon_menu_status *s,int extent,
         snprintf(out,n,"Last pass: %s",s->reconstructed?spatial_mode_name(s->output_pass):"None");
     }
 }
+
+ // Last graph observed on an accepted real present; not a claim that any
+ // generated image reached the display. Zero means no usable graph.
+typedef struct {unsigned scale;} dm_fg_menu_status;
+static inline int dm_fg_menu_publish(dm_fg_menu_status *s,int real,int scale) {
+    if(!real)return 0;
+    unsigned next=scale>=25&&scale<=100?(unsigned)scale:0;
+    int changed=s->scale!=next;s->scale=next;return changed;
+}
+static inline void dm_fg_menu_label(const dm_fg_menu_status *s,char *out,size_t n) {
+    if(s->scale)snprintf(out,n,"Last graph: %u%%",s->scale);
+    else snprintf(out,n,"Last: waiting");
+}

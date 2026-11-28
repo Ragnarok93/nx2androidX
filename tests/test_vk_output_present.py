@@ -20,6 +20,7 @@ class OutputPresent(unittest.TestCase):
 #include "spatial_upscaler.h"
 #include "gfx_vk_menu_recon.h"
 static dm_recon_menu_status g_menu_recon;
+static dm_fg_menu_status g_menu_fg;
 static struct {int panel;} g_ov;
 typedef struct {uint32_t width,height;} VkExtent2D;
 typedef int VkFormat,VkFence,VkImage;
@@ -69,7 +70,8 @@ typedef struct {const char *reason;double period_ms,measured_ms;uint64_t refresh
     int requested_flow,active_flow;uint64_t submission_serial;dm_fg_timing timing;
     unsigned graph_phase,pending_flow,seed_policy,seed_count;
     uint64_t active_bytes,extra_bytes,build_limit;} dm_fg_decision;
-static dm_fg_decision dm_fg_last_decision(void){return (dm_fg_decision){.reason=fg_on?"test fg":"disabled",.period_ms=33.333,.planned=fg_on?1:0};}
+static int test_flow=50;
+static dm_fg_decision dm_fg_last_decision(void){return (dm_fg_decision){.reason=fg_on?"test fg":"disabled",.period_ms=33.333,.planned=fg_on?1:0,.active_flow=fg_on?test_flow:0};}
 static spatial_image *spatial_display_resolved(uint64_t ticket){return resolved_ticket==ticket?&resolve:NULL;}
 static int reconstruction_pressure(dm_flow_cadence cadence,uint64_t ticket){assert(cadence.period_us && ticket);return 0;}
 void vk_guest_flow_feedback(uint64_t ticket,uint32_t cadence,int stressed){assert(ticket&&cadence&&!stressed);}
@@ -122,6 +124,7 @@ int main(void){
     assert(g_menu_recon.valid&&g_menu_recon.output_pass==SP_SGSR2&&g_menu_recon.w==3840&&g_menu_recon.h==2160&&g_ov.panel==-1);
     char status[80];dm_recon_menu_label(&g_menu_recon,1,status,sizeof status);
     assert(!strcmp(status,"Last: 3840x2160"));
+    dm_fg_menu_label(&g_menu_fg,status,sizeof status);assert(!strcmp(status,"Last graph: 50%"));
     assert(cap.fg_reason && !strcmp(cap.fg_reason,"test fg") && cap.fg_planned==1);
     // A paused setting change must not generate or reconstruct the old ticket.
     configured=1440;present_calls=0;
@@ -133,15 +136,17 @@ int main(void){
     g_spatial.retry_after=122;g_spatial.rcas_retry_after=122;
     real(3,1);assert(!reset_flags&&g_spatial.retry_after==122&&g_spatial.rcas_retry_after==122);
     // An allocation failure keeps native presentation alive, with native FG input.
-    force_fail=1;real(4,1);assert(fg_image==11&&fg_input.width==1920&&fg_input.height==1080&&observed[1].image==11&&observed[1].flip);
+    test_flow=40;force_fail=1;real(4,1);assert(fg_image==11&&fg_input.width==1920&&fg_input.height==1080&&observed[1].image==11&&observed[1].flip);
     assert(!cap.reconstruction_submitted&&!cap.actual_w&&!cap.actual_h&&cap.final_source_w==1920);
     assert(!cap.present_accepted&&cap.generated_accepted==1);
     assert(g_menu_recon.w==2560&&g_menu_recon.h==1440); // failed real present cannot publish
+    assert(g_menu_fg.scale==50);
     force_fail=0;configured=1080;real(5,1);assert(rec_target.width==1920&&observed[1].image==11);
     // Handheld 720p input still reconstructs to explicit 1440p; LSFG disabled.
     src.w=1280;src.h=720;configured=1440;fg_on=0;real(6,0);
     assert(rec_target.width==2560&&rec_target.height==1440&&present_calls==1&&observed[0].w==2560&&observed[0].display.width==1920);
     assert(reset_flags&(DM_RECON_SOURCE_MODE|DM_RECON_SOURCE_GEOMETRY));
+    assert(!g_menu_fg.scale);dm_fg_menu_label(&g_menu_fg,status,sizeof status);assert(!strcmp(status,"Last: waiting"));
     // Off ignores the selected target, and Auto follows the actual surface.
     mode=SP_NATIVE;configured=2160;real(7,0);assert(rec_target.width==1920&&observed[0].image==11);
     mode=SP_FSR1;configured=0;display=(VkExtent2D){2560,1440};real(8,0);assert(rec_target.width==2560&&observed[0].w==2560&&observed[0].display.width==2560);
