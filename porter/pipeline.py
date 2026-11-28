@@ -7,7 +7,7 @@ import errno, hashlib, importlib.util, json, mmap, os, re, shutil, socket, struc
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from porter import config, datapack, dumps, fpslocker, install, paths, product_cache, profiles, resources, romfs_pack, signing, toolchain
+from porter import config, datapack, direct_romfs, dumps, fpslocker, install, paths, product_cache, profiles, resources, romfs_pack, signing, toolchain
 from porter.revision import PLAYER_API_REVISION
 from porter.adb import NO_ADB, Adb, AdbError
 from porter.paths import DM, NXNATIVE
@@ -456,6 +456,13 @@ class Port:
                     say(f'[RED] porter stopped on an error it does not expect; the traceback is in {work / "logs" / "crash.log"} (add it to a bug report)')
                 except OSError: pass
             raise
+        finally:
+            pack = getattr(self, 'direct_romfs_pack', None)
+            if pack is not None:
+                try:
+                    direct_romfs.discard_pending(pack, self.direct_romfs_identity)
+                except OSError as e:
+                    say(f'[RED] could not remove incomplete RomFS extraction: {e}')
 
     def _run(self):
         o = self.o
@@ -598,6 +605,7 @@ class Port:
                 say(f'game APK and data must be exported to public storage: {safe_out}')
                 o.out = safe_out
         self.previous_companion = self.find_previous_companion()
+        self.prepare_direct_romfs()
         self.check_space()
         self.aw = self.work / 'android'; self.logs = self.work / 'logs'
         for d in (self.aw, self.logs, self.work / 'tmp'): d.mkdir(parents=True, exist_ok=True)
@@ -680,6 +688,8 @@ class Port:
                 seen.add(str(path))
                 if path.is_symlink() or not path.is_dir(): continue
                 man = datapack.read_manifest(path)
+                if man is None and resources.is_android():
+                    man = direct_romfs.ready_receipt(path)
                 if not isinstance(man, dict): continue
                 if (man.get('title_id') != self.g.id or
                         man.get('package') != self.package or
@@ -698,6 +708,40 @@ class Port:
         say(f'no reusable companion data found for {self.g.id} {self.pkg_ver}; '
             f'searched: {", ".join(str(x) for x in roots)}')
         return None
+
+    def prepare_direct_romfs(self):
+        """Extract raw RomFS once, directly into an unpublished companion.
+
+        The Android builder now discards completed private workspaces. Emulated
+        shared storage cannot hard-link private files even on the same userdata
+        volume. Keep the generated game bytes where the final pack needs them.
+        """
+        o = self.o
+        if (not resources.is_android() or o.app or o.self_contained or o.game_update
+                or o.allow_damaged_media or getattr(self.ap, 'romfs_zstd', False)
+                or not self.g.get('romfs_marker')
+                or not (self.g.get('ipa') or o.app_name)
+                or not shares_disk_budget(o.out, self.work)):
+            return
+        stem = app_stem(self.g, o.app_name or self.g.get('name', ''))
+        dst = o.out / f'{stem}-data'
+        # The packer already discards this uncommitted directory. Do it before
+        # extraction, not after the expensive compilation, to reclaim space.
+        partial = dst.with_name(dst.name + '.partial')
+        if partial.is_dir() and not partial.is_symlink():
+            shutil.rmtree(partial)
+            say(f'removed abandoned companion staging: {partial}')
+        if self.previous_companion is not None:
+            return
+        extracted = self.work / 'extract' / self.pkg_ver
+        if ((extracted / 'ExeFS/main').is_file() and
+                (extracted / 'RomFS' / self.g.get('romfs_marker')).is_file()):
+            return
+        identity = dict(title_id=self.g.id, package=self.package, version=self.pkg_ver)
+        if direct_romfs.begin(dst, identity) is not None:
+            self.direct_romfs_pack = dst
+            self.direct_romfs_identity = identity
+            say(f'direct companion RomFS staging: {dst / "RomFS"} (no second game-sized copy)')
 
     def restore_companion_romfs(self, nx, ex, version, base, update):
         """Recover ExeFS only; preserve and reference the existing verified RomFS."""
@@ -766,7 +810,8 @@ class Port:
         where = self.work
         while not where.exists() and where.parent != where: where = where.parent
         margin = 2**30
-        copies = 1 if self.o.app else 2   # non-standalone exports retain their separate data pack
+        copies = 1 if self.o.app or getattr(self, 'direct_romfs_pack', None) is not None else 2
+        # Direct split extraction and app mode store the final RomFS only once.
         pack = None
         if self.o.app:
             getter = getattr(self, 'pack_dir_root', None)   # the space check runs before the profile is known
@@ -876,7 +921,20 @@ class Port:
             for ver in self.versions:
                 if ver == self.pkg_ver and not fresh(ver):
                     self.restore_companion_romfs(nx, ex, ver, *picks[ver])
-        self.dirs = {ver: nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g, allow_damaged_media=o.allow_damaged_media) for ver in self.versions}
+        self.dirs = {}
+        for ver in self.versions:
+            direct = getattr(self, 'direct_romfs_pack', None) if ver == self.pkg_ver else None
+            options = dict(allow_damaged_media=o.allow_damaged_media)
+            if direct is not None:
+                options['romfs_output'] = direct / 'RomFS'
+            extracted = nsp.extract(nx, o.keys, ex, ver, *picks[ver], None, self.logs, g, **options)
+            if direct is not None:
+                if (not (extracted / 'RomFS' / g.get('romfs_marker')).is_file() or
+                        not (extracted / 'RomFS').samefile(direct / 'RomFS')):
+                    raise BuildError('direct companion RomFS extraction did not produce the expected tree')
+                direct_romfs.finish(direct, self.direct_romfs_identity)
+                say(f'RomFS extracted in its final companion location: {direct / "RomFS"}')
+            self.dirs[ver] = extracted
         for d in self.dirs.values(): nsp.require_64bit(d / 'ExeFS', f'{g.get("name", g.id)} ({g.id})')
         bad = [] if self.derived else [f'{v}: {x}' for v in self.versions for x in nsp.build_mismatch(self.dirs[v], v, g)]
         if bad and self.o.game_update:
