@@ -2089,11 +2089,35 @@ VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size
             p.ws, p.wt, p.wr, p.minf, p.magf, p.lod_min, p.lod_max, p.lod_bias, p.aniso,
             p.cmp_mode, p.cmp_func, p.reduction, p.border[0], p.border[1], p.border[2], p.border[3]);
     }
-    if (linear) *linear = s && q && !nearest && q->magf == 1 &&
-        (q->minf == 1 || q->minf == 3 || q->minf == 5) &&
-        wrap(q->ws) == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
-        wrap(q->wt) == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
-        q->aniso < 2 && !q->cmp_mode && !q->reduction;
+    if (linear) {
+        // Keep the certificate unchanged. Report the actual sampler resolved
+        // at the bind's sequence while still holding the registration lock.
+        unsigned refusal=(!s?1u:0u)|(!q?2u:0u)|(nearest?4u:0u);
+        if(q) {
+            if(q->magf!=1)refusal|=8u;
+            if(q->minf!=1&&q->minf!=3&&q->minf!=5)refusal|=16u;
+            if(wrap(q->ws)!=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE ||
+               wrap(q->wt)!=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)refusal|=32u;
+            if(!(q->aniso<2))refusal|=64u;
+            if(q->cmp_mode)refusal|=128u;
+            if(q->reduction)refusal|=256u;
+        }
+        *linear=refusal==0;
+        if(refusal) {
+            static unsigned logged;
+            static struct {int sid,nearest;unsigned refusal;uint64_t seq;} seen[16];
+            unsigned i;
+            for(i=0;i<logged;i++)
+                if(seen[i].sid==sid&&seen[i].nearest==nearest&&seen[i].refusal==refusal&&seen[i].seq==seq)break;
+            if(i==logged&&logged<16) {
+                seen[logged++]=(typeof(seen[0])){sid,nearest,refusal,seq};
+                if(q) VKLOG("[upscale] guest sampler refusal %#x: id %d seq %llu nearest %d wrap %d/%d/%d min %d mag %d lod %.3f..%.3f bias %.3f aniso %.3f compare %d reduction %d",
+                    refusal,sid,(unsigned long long)seq,nearest,q->ws,q->wt,q->wr,q->minf,q->magf,
+                    q->lod_min,q->lod_max,q->lod_bias,q->aniso,q->cmp_mode,q->reduction);
+                else VKLOG("[upscale] guest sampler refusal %#x: id %d seq %llu has no registration",refusal,sid,(unsigned long long)seq);
+            }
+        }
+    }
     if (!s && description) snprintf(description, size, "dummy");
     pthread_mutex_unlock(&g_rmu);
     return s;

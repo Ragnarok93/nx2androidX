@@ -37,3 +37,7 @@ Transfer only retired full-image readbacks to a single background writer. No ful
 ## Checkpoint 6 — pause accounting
 
 Sample Android host wall and pause-adjusted active clocks together under the existing guest freeze-reason lock. Long-frame and adaptive-scale CPU work use the active interval; trace retains wall duration and excluded pause time. The deterministic guest clock, presentation pacing, and other platform paths are unchanged. Regression exercises overlapping freeze reasons and an unpaused 100 ms stall. Mark asynchronous capture helpers inline for extracted test translation units.
+
+## Checkpoint 7 — snapshot timeline and docked admission evidence
+
+Initial asynchronous writer native link passed; isolated capture-column test failed on unused helper warnings (addressed by inline helpers in checkpoint 6). Preserve timeline rows while the asynchronous writer runs and initialize its crash stack. Both earlier archives omit sampler descriptor rows for certified fragment 7d05eef41136554f. Log the exact sampler state under its registration lock with a bounded refusal bitmask: 1 missing Vulkan sampler, 2 missing registration, 4 forced nearest, 8 mag filter, 16 min filter, 32 wrap, 64 anisotropy, 128 comparison, 256 reduction. Admission is unchanged. Need this state or an equivalent proven contract to resolve docked replay safely.

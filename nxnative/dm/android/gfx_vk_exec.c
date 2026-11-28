@@ -1275,6 +1275,8 @@ typedef struct {
     pdump_t images[PD_MAX];
 } pass_dump_write_batch;
 static void *pass_dump_write_main(void *arg) {
+    extern void crash_thread_init(void);
+    crash_thread_init();
     pass_dump_write_batch *b=arg;
     int ok=pass_dump_write_images(b->root,b->images,b->count,b->raw,b->float_depth);
     free(b);
@@ -1307,7 +1309,7 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
     g_pd_frame_has_scene = 0;
     int recording = atomic_load(&g_pd_user_pending) == CAPTURE_SNAPSHOTS;
     // The worker owns this slot and its readbacks. Do not retire or reuse it.
-    if (g_capture_writing) return;
+    if (g_capture_rolling_dump && !recording && g_capture_writing) return;
     if (g_capture_rolling_dump && !recording) {
         pass_dump_retire_stopped(done_fence, &capture_fence);
         return;
@@ -1318,6 +1320,7 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
                 (unsigned long long)g_tex_frame, (unsigned long long)g_set_epoch,
                 (unsigned long long)g_vkst.draws, (unsigned long long)g_vkst.passes,
                 (unsigned long long)g_vkst.dispatches, had_scene);
+    if (g_capture_writing) return; // keep timeline coverage while the writer runs
     const char *e = getenv("DM_VK_PASSDUMP");
     if (g_pd_state == 0 && !recording && e && atoi(e) > 1) {
         char n[16];
