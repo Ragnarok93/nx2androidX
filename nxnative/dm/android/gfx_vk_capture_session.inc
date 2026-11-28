@@ -161,7 +161,8 @@ static const char *vk_pass_dump_root(void) {
     return root ? root : ".";
 }
 
-int vk_pass_dump_user_begin(int delay, int full) {
+int vk_pass_dump_user_begin_level(int delay,int level) {
+    if(!capture_level_valid(level) || delay<0 || delay>120) return 0;
     pthread_mutex_lock(&g_capture_lock);
     if (g_capture_exporting || g_capture_rolling_dump || atomic_load(&g_pd_user_pending)) {
         pthread_mutex_unlock(&g_capture_lock);
@@ -185,16 +186,21 @@ int vk_pass_dump_user_begin(int delay, int full) {
     unlink(path);
     snprintf(path, sizeof path, "%s/capture_timeline.tsv", root);
     unlink(path);
-    g_capture_timeline = full ? fopen(path, "w") : NULL;
+    g_capture_timeline = capture_level_timeline(level) ? fopen(path, "w") : NULL;
     if (g_capture_timeline)
         fputs("present\tsubmission\tdraws_total\tpasses_total\tdispatches_total\tgeometry\n", g_capture_timeline);
     g_capture_delay = delay + 1; // let the pause overlay leave the screen
     g_capture_next_slot = 0;
     g_capture_next_present = 0;
     g_pd_scene_waited = 0;
-    atomic_store(&g_pd_user_pending, full ? CAPTURE_SNAPSHOTS : CAPTURE_SCALING);
+    atomic_store(&g_pd_user_pending,level);
     pthread_mutex_unlock(&g_capture_lock);
     return 1;
+}
+
+// Compatibility for existing developer callers and fixtures.
+int vk_pass_dump_user_begin(int delay,int full) {
+    return vk_pass_dump_user_begin_level(delay,full?CAPTURE_SNAPSHOTS:CAPTURE_SCALING);
 }
 
 static void capture_stop_locked(void) {

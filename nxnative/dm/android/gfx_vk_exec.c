@@ -1308,7 +1308,8 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
     static uint64_t capture_fence;
     int had_scene = g_pd_frame_has_scene;
     g_pd_frame_has_scene = 0;
-    int recording = atomic_load(&g_pd_user_pending) == CAPTURE_SNAPSHOTS;
+    int level=atomic_load(&g_pd_user_pending);
+    int recording=level==CAPTURE_SNAPSHOTS;
     // The worker owns this slot and its readbacks. Do not retire or reuse it.
     if (g_capture_rolling_dump && !recording && g_capture_writing) return;
     if (g_capture_rolling_dump && !recording) {
@@ -1316,7 +1317,7 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
         return;
     }
     if (g_capture_exporting) return;
-    if (recording && g_capture_timeline)
+    if (capture_level_timeline(level) && g_capture_timeline)
         fprintf(g_capture_timeline, "%llu\t%llu\t%llu\t%llu\t%llu\t%d\n",
                 (unsigned long long)g_tex_frame, (unsigned long long)g_set_epoch,
                 (unsigned long long)g_vkst.draws, (unsigned long long)g_vkst.passes,
@@ -1529,7 +1530,7 @@ static void guest_store_clear(void) {
 void vk_end_pass(void) {
     if (g_x_listpasses && S.pass_open == 1) { Dl_info di; void *ra = __builtin_return_address(0); uintptr_t base = dladdr((void *)vk_end_pass, &di) ? (uintptr_t)di.dli_fbase : 0; VKLOG("    ended from %#llx (%llu draws)", (unsigned long long)((uintptr_t)ra - base), (unsigned long long)g_pass_draws); list_reads("it"); }   // (DM_VK_TRACE_PASS=-2: who ends each pass)
     if (S.pass_open == 1 && g_pass_draws >= 8 && P_ri.pDepthAttachment &&
-        atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed) == CAPTURE_SNAPSHOTS)
+        capture_level_timeline(atomic_load_explicit(&g_pd_user_pending, memory_order_relaxed)))
         g_pd_frame_has_scene = 1;
     if (S.pass_open == 2 && P_cleared) (void)pass_commit();   // only clears: the pass still runs, for its load ops
     if (S.pass_open == 1) { if (S.rp_pass) vkCmdEndRenderPass(vk_cmd()); else vkCmdEndRendering(vk_cmd()); if (g_input_pending) input_capture_end_pass(); bc_draw_back(); void vk_pass_ts(int end, uint32_t w, uint32_t h, uint32_t fmt, uint32_t draws); vk_pass_ts(1, S.pass_w, S.pass_h, (uint32_t)S.cfmt[0], (uint32_t)g_pass_draws | (g_pass_draws ? (uint32_t)((g_pass_bb[2] - g_pass_bb[0]) & 0xffff) << 16 : 0));  pass_dump(); if (g_x_tracepass >= 0 && g_sub_pass - 1 == g_x_tracepass) { setenv("DM_VK_TRACE_PASS", "-1", 1); g_x_tracepass = -1; } }

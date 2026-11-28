@@ -675,6 +675,7 @@ static _Atomic int g_sv_st, g_sv_n;                   // Export save: its outcom
 // Diagnostics have no per-frame overhead until the player arms a one-shot scene
 // capture. The switch arms all capture instrumentation for the next gameplay frame.
 static _Atomic int g_diag_status, g_diag_ver, g_diag_flags_page;
+static _Atomic int g_diag_level=CAPTURE_SCALING,g_diag_delay;
 static _Atomic unsigned g_radv_pending, g_radv_applied;
 const char *dm_vk_driver_status(void);
 enum { DIAG_IDLE, DIAG_ARMED, DIAG_EXPORTING, DIAG_EXPORTED, DIAG_FAILED, DIAG_STOPPED };
@@ -705,12 +706,27 @@ void dm_menu_radv_note(int index, char *out, int cap) {
         active ? "Test active" : "Use defaults";
     snprintf(out, (size_t)cap, "%s", value);
 }
+static int diag_controls_locked(void) {
+    return vk_pass_dump_user_active() || atomic_load(&g_diag_status)==DIAG_EXPORTING;
+}
+void dm_menu_diag_option(int delay,char *out,int cap) {
+    if(cap<=0)return;
+    if(delay)snprintf(out,(size_t)cap,"%s",atomic_load(&g_diag_delay)?"120 frames":"None");
+    else snprintf(out,(size_t)cap,"%s%s",capture_level_name(atomic_load(&g_diag_level)),
+        diag_controls_locked()?" (locked)":"");
+}
+static void diag_option_step(int delay,int direction) {
+    if(diag_controls_locked())return;
+    if(delay)atomic_store(&g_diag_delay,atomic_load(&g_diag_delay)?0:120);
+    else atomic_store(&g_diag_level,capture_level_step(atomic_load(&g_diag_level),direction));
+    diag_changed();
+}
 void dm_menu_diag_note(char *out, int cap) {
     if (cap <= 0) return;
     int status = atomic_load(&g_diag_status);
     int mode = vk_pass_dump_user_active();
     const char *name = status == DIAG_ARMED ? (mode == CAPTURE_SNAPSHOTS ? "Recording GPU snapshots" :
-                       mode == CAPTURE_SCALING ? "Recording scaling" : "Capture stopped") :
+                       mode == CAPTURE_DETAILED ? "Recording detailed" : mode == CAPTURE_SCALING ? "Recording performance" : "Capture stopped") :
                        status == DIAG_EXPORTING ? "Export in progress" :
                        status == DIAG_EXPORTED ? "ZIP saved" :
                        status == DIAG_STOPPED ? "Capture stopped" :
@@ -903,8 +919,9 @@ int vk_pass_dump_user_begin(int delay, int full);
 void vk_pass_dump_user_stop(void);
 int vk_pass_dump_export_begin(void);
 void vk_pass_dump_export_end(void);
-static int diag_capture_arm(int delay, int full) {
-    if (atomic_load(&g_diag_status) == DIAG_EXPORTING || !vk_pass_dump_user_begin(delay, full)) return 0;
+static int diag_capture_arm(int delay,int level) {
+    if (diag_controls_locked() || !vk_pass_dump_user_begin_level(delay,level)) return 0;
+    int full=level==CAPTURE_SNAPSHOTS;
     static const char *const settings[][2] = {
         {"DM_VK_PASSDUMP_FULL", "1"}, {"DM_VK_PASSDUMP_EFFECTS", "0"},
         {"DM_VK_PASSDUMP_DEPTH_STATE", "1"}, {"DM_VK_PASSDUMP_INPUTS", "1"},
@@ -934,8 +951,9 @@ static int diag_capture_arm(int delay, int full) {
         const char *driver = dm_vk_driver_status();
         fprintf(f, "capture=player-armed\npresent_at_arm=%llu\nmode=%s\n"
                    "vulkan_driver=%s\nframe_generation_at_arm=%d\ncapture_delay_presents=%d\n",
-                (unsigned long long)frame, full ? "continuous-rolling" : "scaling-metadata",
+                (unsigned long long)frame, full ? "continuous-rolling" : level==CAPTURE_DETAILED?"detailed-metadata":"scaling-metadata",
                 driver ? driver : "(unknown)", atomic_load(&g_set_fg), delay);
+        fprintf(f,"debug_level=%s\n",capture_level_name(level));
         radv_test_report(f);
         if (full) {
             fputs("snapshot_interval_presents=30\nsnapshot_slots=3\nsurface_tile=16x16\n"
@@ -950,7 +968,7 @@ static int diag_capture_arm(int delay, int full) {
         fclose(f);
     }
     atomic_store(&g_diag_status, DIAG_ARMED);
-    LOG("[diagnostics] %s capture started", full ? "GPU snapshot" : "scaling");
+    LOG("[diagnostics] %s capture started",capture_level_name(level));
     diag_changed();
     return 1;
 }
@@ -1037,8 +1055,11 @@ static void menu_do(int item) {
     else if (item == OVM_DRIVER) { jni_save_document_picker("chooseVulkanDriver"); return; } // persisted for next process only
     else if (item == OVM_DIAG_OPEN) { atomic_store(&g_diag_flags_page, 1); atomic_store(&g_menu_hi, -1); }
     else if (item == OVM_DIAG_BACK) { atomic_store(&g_diag_flags_page, 0); atomic_store(&g_menu_hi, -1); }
-    else if (item == OVM_DIAG_CAPTURE || item == OVM_DIAG_SNAPSHOT || item == OVM_DIAG_DELAY) {
-        if (diag_capture_arm(item == OVM_DIAG_DELAY ? 120 : 0, item != OVM_DIAG_CAPTURE)) { dm_haptics_android_tap(); menu_close(); }
+    else if (item == OVM_DIAG_SNAPSHOT || item == OVM_DIAG_DELAY) { diag_option_step(item==OVM_DIAG_DELAY,1); }
+    else if (item == OVM_DIAG_CAPTURE) {
+        int level=atomic_load(&g_diag_level);
+        // Delay applies to snapshot readbacks; metadata starts immediately.
+        if (diag_capture_arm(level==CAPTURE_SNAPSHOTS?atomic_load(&g_diag_delay):0,level)) { dm_haptics_android_tap(); menu_close(); }
         return;
     } else if (item == OVM_DIAG_FLAGS || item == OVM_FLAGS_BACK) {
         atomic_store(&g_diag_flags_page, item == OVM_DIAG_FLAGS ? 2 : 1);
@@ -1154,6 +1175,7 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
     else if ((bit==DM_BTN_LEFT || bit==DM_BTN_RIGHT) && item==OVM_DRS && dm_menu_rs_live()) menu_rs_mode_step(bit==DM_BTN_LEFT?-1:1);
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_RATE) { menu_rate_step(bit == DM_BTN_LEFT ? -1 : 1); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_MULT) { fg_mult_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && (item==OVM_DIAG_SNAPSHOT || item==OVM_DIAG_DELAY)) { diag_option_step(item==OVM_DIAG_DELAY,bit==DM_BTN_LEFT?-1:1); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_FLOW) { fg_flow_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(atomic_load(&g_menu_tab) + (bit == DM_BTN_LEFT ? -1 : 1));
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {

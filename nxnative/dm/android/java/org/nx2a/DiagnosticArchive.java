@@ -162,12 +162,12 @@ final class DiagnosticArchive {
                     "gpu_draw_inputs.tsv contains completed GPU buffer copies taken after read-only passes.\n" +
                     "Index and vertex rows are binding prefixes. Rasterization requires separate evidence.\n" +
                     "CPU/shadow indirect diagnostics are explicitly non-authoritative.\n" +
-                    "Capture graphics records scaling and reconstruction metadata without GPU readbacks.\n" +
+                    "Performance debug level records scaling, reconstruction and LSFG metadata without GPU readbacks. Detailed also records capture_timeline.tsv without GPU readbacks.\n" +
                     "scaling_frames.tsv retains up to 4096 NVN source-frame tickets and snapshots the trace when export begins.\n" +
                     "Scaled dimensions are from the largest recorded scaled pass. Presentation shows the evaluated input, fitted output and active filter.\n" +
                     "A physical candidate may be bypassed. When the active filter is None, ordinary presentation handles the frame.\n" +
                     "Replay GPU time is the most recent available sample (-1 if missing). Reconstruction time has its own timing ticket (0 if missing).\n" +
-                    "GPU snapshots adds full attachment readbacks and capture_timeline.tsv. Snapshot frames can affect scaling and timing.\n" +
+                    "GPU snapshots adds full attachment readbacks to Detailed. Snapshot frames can affect scaling and timing.\n" +
                     "history contains up to three completed full-frame snapshots with present numbers in their manifests.\n" +
                     "surface_usage.tsv lists attachment, shader image, transfer and presentation bindings.\n" +
                     "Alias rows pair the sampled view with a candidate producer's base subresource.\n" +

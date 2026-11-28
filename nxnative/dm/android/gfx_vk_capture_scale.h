@@ -2,7 +2,23 @@
 #include <stdint.h>
 #include "gfx_vk_fg_timing.h"
 
-enum { CAPTURE_OFF, CAPTURE_SCALING, CAPTURE_SNAPSHOTS };
+// Preserve existing mode values for internal/legacy callers.
+enum { CAPTURE_OFF, CAPTURE_SCALING, CAPTURE_SNAPSHOTS, CAPTURE_DETAILED };
+static inline int capture_level_valid(int level) {
+    return level==CAPTURE_SCALING || level==CAPTURE_DETAILED || level==CAPTURE_SNAPSHOTS;
+}
+static inline int capture_level_timeline(int level) {
+    return level==CAPTURE_DETAILED || level==CAPTURE_SNAPSHOTS;
+}
+static inline const char *capture_level_name(int level) {
+    return level==CAPTURE_SNAPSHOTS?"GPU snapshots":level==CAPTURE_DETAILED?"Detailed":"Performance";
+}
+static inline int capture_level_step(int level,int direction) {
+    const int levels[]={CAPTURE_SCALING,CAPTURE_DETAILED,CAPTURE_SNAPSHOTS};
+    unsigned i=0;while(i<2 && levels[i]!=level)i++;
+    return levels[(i+(direction<0?2:1))%3];
+}
+int vk_pass_dump_user_begin_level(int delay,int level);
 
 typedef struct {
     unsigned mode, min, max, target, passes;

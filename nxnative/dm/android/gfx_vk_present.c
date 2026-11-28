@@ -528,10 +528,10 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_VIVID]="HDR", [OVM_FSR]="Upscaler", [OVM_FSR_SHARP]="Sharpness", [OVM_RATE]="Frame rate",
     [OVM_DRS]="Dynamic resolution", [OVM_DRS_MIN]="Minimum Scale",
     [OVM_DRS_NOW]="Actual scale", [OVM_DRS_HOOK]="Internal scaling", [OVM_RS_MAX]="Maximum Scale",
-    [OVM_DIAG_OPEN]="Diagnostics", [OVM_DIAG_CAPTURE]="Capture graphics",
+    [OVM_DIAG_OPEN]="Diagnostics", [OVM_DIAG_CAPTURE]="Start capture",
     [OVM_DIAG_EXPORT]="Export diagnostics", [OVM_DIAG_STATUS]="Capture status",
     [OVM_DIAG_STOP]="Stop capture",
-    [OVM_DIAG_SNAPSHOT]="GPU snapshots", [OVM_DIAG_DELAY]="Delayed GPU snapshots", [OVM_DIAG_FLAGS]="RADV test flags",
+    [OVM_DIAG_SNAPSHOT]="Debug level", [OVM_DIAG_DELAY]="Snapshot delay", [OVM_DIAG_FLAGS]="RADV test flags",
     [OVM_DIAG_BACK]="Back", [OVM_FLAG_DLC]="Shader cache coherency",
     [OVM_FLAG_DCC]="Color compression off", [OVM_FLAG_BC]="CPU BC decode",
     [OVM_FLAG_HIZ]="Depth compression off", [OVM_FLAGS_BACK]="Back",
@@ -539,8 +539,8 @@ static const char *const OVM_LABELS[OVM_N] = {
 };
 static const char *const OVM_BUTTONS[OVM_N] = {
     [OVM_EDIT]="Edit", [OVM_EXPORT]="Export", [OVM_IMPORT]="Import", [OVM_AUDIO]="Select",
-    [OVM_DIAG_OPEN]="Open", [OVM_DIAG_CAPTURE]="Capture", [OVM_DIAG_EXPORT]="Save ZIP", [OVM_DIAG_STOP]="Stop",
-    [OVM_DIAG_SNAPSHOT]="Capture", [OVM_DIAG_DELAY]="120 frames", [OVM_DIAG_FLAGS]="Open",
+    [OVM_DIAG_OPEN]="Open", [OVM_DIAG_CAPTURE]="Start", [OVM_DIAG_EXPORT]="Save ZIP", [OVM_DIAG_STOP]="Stop",
+    [OVM_DIAG_FLAGS]="Open",
     [OVM_DIAG_BACK]="Back", [OVM_FLAGS_BACK]="Back"
 };
 static const char *const OVM_MODES[2] = {"Handheld", "Docked"};
@@ -565,6 +565,7 @@ __attribute__((weak)) int dm_fsr_sharpness(void) { return 50; }
 __attribute__((weak)) int dm_recon_output_height(void) { return 0; }
 int dm_menu_fg_has_dll(void);
 const char *dm_vk_driver_status(void);   // a controller's face buttons (front_android.c pad_labels)
+__attribute__((weak)) void dm_menu_diag_option(int delay,char *out,int cap) { if(cap>0)snprintf(out,(size_t)cap,"%s",delay?"None":"Performance"); }
 __attribute__((weak)) void dm_menu_diag_note(char *out, int cap) { if (cap > 0) snprintf(out, (size_t)cap, "Logs only"); }
 __attribute__((weak)) void dm_menu_radv_note(int index, char *out, int cap) {
     (void)index;
@@ -651,7 +652,7 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             m3_text(cv,x1-m3_text_w(status,is),cy,status,is,M3_PRIMARY);
         } else if (it==OVM_OUTPUT_BACK) {
             m3_text(cv,x1-m3_text_w(">",is),cy,">",is,M3_PRIMARY);
-        } else if ((it==OVM_DRS && dm_menu_rs_live()) || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || ov_flag_item(it)) {
+        } else if ((it==OVM_DRS && dm_menu_rs_live()) || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY || ov_flag_item(it)) {
             char value[128];
             if (it==OVM_DRS) {
                 int mode=dm_menu_rs_mode();
@@ -685,9 +686,10 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             } else if (it == OVM_DRS_HOOK) {
                 snprintf(value, sizeof value, "%s", dm_menu_rs_live()?"Vulkan renderer":"Unavailable");
             } else if (it == OVM_DIAG_STATUS) dm_menu_diag_note(value, sizeof value);
+            else if(it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY)dm_menu_diag_option(it==OVM_DIAG_DELAY,value,sizeof value);
             else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
-            const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
+            const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY || ov_flag_item(it);
             float trailing=action?m3_text_w(">",small_scale)+rh*0.16f:0;
             if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT || (it==OVM_FG_FLOW && !dm_menu_fg_flow())) {
                 char last[80];

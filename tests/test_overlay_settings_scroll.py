@@ -22,6 +22,11 @@ int main(void){
 #ifdef OV_SETTINGS_VIEW_ROWS
     assert(OV_SETTINGS_VIEW_ROWS==6);
     assert(ov_settings_count(2)==7 && ov_settings_count(0)==5);
+    assert(ov_menu_item(OVM_DIAG_TAB,1)==OVM_DIAG_SNAPSHOT);
+    assert(ov_menu_item(OVM_DIAG_TAB,2)==OVM_DIAG_DELAY);
+    assert(ov_menu_item(OVM_DIAG_TAB,3)==OVM_DIAG_CAPTURE);
+    assert(ov_menu_item(OVM_DIAG_TAB,5)==OVM_DIAG_STOP);
+    assert(ov_menu_item(OVM_DIAG_TAB,6)==OVM_DIAG_EXPORT);
     assert(ov_settings_max(0)==0 && ov_settings_max(2)==OV_SETTINGS_UNIT);
     const float screens[][2]={{1536,720},{720,1536},{640,360},{360,640},{2560,1440}};
     for(unsigned k=0;k<sizeof screens/sizeof screens[0];k++){

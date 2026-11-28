@@ -54,6 +54,19 @@ static int complete(const char *root, unsigned slot) {
 
 int main(int argc, char **argv) {
     assert(argc == 2 && setenv("DM_ROOT", argv[1], 1) == 0);
+    assert(!vk_pass_dump_user_begin_level(0,CAPTURE_OFF));
+    assert(!vk_pass_dump_user_begin_level(121,CAPTURE_SNAPSHOTS));
+    assert(capture_level_step(CAPTURE_SCALING,1)==CAPTURE_DETAILED);
+    assert(capture_level_step(CAPTURE_DETAILED,1)==CAPTURE_SNAPSHOTS);
+    assert(capture_level_step(CAPTURE_SNAPSHOTS,1)==CAPTURE_SCALING);
+    assert(capture_level_step(CAPTURE_SCALING,-1)==CAPTURE_SNAPSHOTS);
+    assert(vk_pass_dump_user_begin_level(0,CAPTURE_DETAILED));
+    assert(vk_pass_dump_user_active()==CAPTURE_DETAILED && g_capture_timeline);
+    assert(!vk_pass_dump_user_begin_level(0,CAPTURE_SCALING));
+    assert(!capture_begin_write());
+    fputs("100\t1\t2\t3\t4\t1\n",g_capture_timeline);
+    vk_pass_dump_user_stop();
+    assert(!g_capture_timeline&&!vk_pass_dump_user_active());
     assert(vk_pass_dump_user_begin(120, 1) && g_capture_delay == 121);
     assert(!vk_pass_dump_user_begin(0, 1));
     assert(capture_start_slot() && !complete(argv[1], 0));
