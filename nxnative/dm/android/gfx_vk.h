@@ -73,6 +73,7 @@ uint32_t vk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryProperty
 int vk_quality_recovery_try(unsigned hold_ms);
 void vk_quality_recovery_hold(unsigned hold_ms);
 dm_fg_pressure_report vk_fg_pressure_snapshot(void);
+dm_fg_heap_snapshot vk_fg_heap_snapshot(void);
 uint64_t vk_fg_transition_cap(int upward); // fresh pressure snapshot; zero vetoes allocation
 void vk_init(void);   // once, from mtl_init or the first use
 

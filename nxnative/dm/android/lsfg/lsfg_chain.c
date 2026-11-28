@@ -90,7 +90,7 @@ static int graph_memory_allocate(lsfg_chain *c, const VkMemoryAllocateInfo *ai,
     uint32_t type=ai->memoryTypeIndex;
     uint32_t heap=type<V.mem.memoryTypeCount?V.mem.memoryTypes[type].heapIndex:UINT32_MAX;
     *out=VK_NULL_HANDLE;
-    if (heap==UINT32_MAX) {
+    if (heap>=LSFG_GRAPH_MAX_HEAPS) {
         VRED("LSFG_ALLOC_REJECT origin=memory_type kind=%s type=%u heap=%u bytes=%llu",kind,type,heap,
              (unsigned long long)ai->allocationSize);
         return 0;
@@ -108,7 +108,7 @@ static int graph_memory_allocate(lsfg_chain *c, const VkMemoryAllocateInfo *ai,
              kind,type,heap,(unsigned long long)ai->allocationSize,r);
         return 0;
     }
-    lsfg_graph_charge(&c->budget,ai->allocationSize);
+    lsfg_graph_charge_heap(&c->budget,heap,ai->allocationSize);
     return 1;
 }
 static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
@@ -419,6 +419,9 @@ lsfg_chain *lsfg_chain_build(const lsfg_modules *mods,VkExtent2D ext,float flow_
 }
 
 uint64_t lsfg_chain_bytes(const lsfg_chain *c) { return c?c->budget.used:0; }
+uint64_t lsfg_chain_heap_bytes(const lsfg_chain *c,unsigned heap) {
+    return c && heap<LSFG_GRAPH_MAX_HEAPS ? c->budget.heap_used[heap] : 0;
+}
 
 // Record only privately owned images. Shared external output images are
 // already GENERAL during an adaptive handoff and must not be discarded.

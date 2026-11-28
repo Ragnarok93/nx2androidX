@@ -573,6 +573,15 @@ void vk_quality_recovery_hold(unsigned hold_ms) {
 }
 static pthread_mutex_t fg_pressure_mu=PTHREAD_MUTEX_INITIALIZER;
 static dm_fg_pressure fg_pressure;
+static dm_fg_heap_snapshot fg_heaps;
+dm_fg_heap_snapshot vk_fg_heap_snapshot(void) {
+    dm_fg_heap_snapshot s={.thermal=-1};
+    if(!pthread_mutex_trylock(&fg_pressure_mu)) {
+        s=fg_heaps;
+        pthread_mutex_unlock(&fg_pressure_mu);
+    }
+    return s;
+}
 dm_fg_pressure_report vk_fg_pressure_snapshot(void) {
     dm_fg_pressure s={.thermal=-1};
     if(!pthread_mutex_trylock(&fg_pressure_mu)){
@@ -585,11 +594,16 @@ uint64_t vk_fg_transition_cap(int upward) {
     dm_fg_pressure_report r=vk_fg_pressure_snapshot();
     return upward?r.up_cap:r.down_cap;
 }
-static uint64_t fg_heap_available(void) {
+static uint64_t fg_heap_available(dm_fg_heap_snapshot *s) {
     if(!V.has_memory_budget)return 0;
     VkPhysicalDeviceMemoryBudgetPropertiesEXT budget={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
     VkPhysicalDeviceMemoryProperties2 p={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,.pNext=&budget};
     vkGetPhysicalDeviceMemoryProperties2(V.pd,&p);
+    if(p.memoryProperties.memoryHeapCount>DM_FG_MAX_HEAPS)return 0;
+    s->count=p.memoryProperties.memoryHeapCount;
+    for(unsigned i=0;i<s->count;i++) {
+        s->budget[i]=budget.heapBudget[i];s->usage[i]=budget.heapUsage[i];
+    }
     // LSFG selects device-local images and coherent host-visible uniforms.
     // Use the smallest headroom of any eligible heap, rather than summing
     // heaps which may describe the same physical RAM on a mobile GPU.
@@ -599,8 +613,8 @@ static uint64_t fg_heap_available(void) {
         VkMemoryPropertyFlags host=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         if(!(t.propertyFlags&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (t.propertyFlags&host)!=host)continue;
         if(t.heapIndex>=p.memoryProperties.memoryHeapCount)return 0;
-        uint64_t b=budget.heapBudget[t.heapIndex],u=budget.heapUsage[t.heapIndex];
-        uint64_t head=b>u?b-u:0;
+        s->eligible|=1u<<t.heapIndex;
+        uint64_t head=dm_fg_heap_headroom(s,t.heapIndex);
         if(head<free_bytes)free_bytes=head;
         found=1;
     }
@@ -628,10 +642,13 @@ static void fg_pressure_publish(uint64_t available_kb) {
     extern int dm_fg_adaptive_auto_selected(void);
     extern int vk_pass_dump_user_active(void);
     if(!dm_fg_adaptive_auto_selected()&&!vk_pass_dump_user_active()&&dm_spatial_mode()!=SP_SGSR2)return;
-    dm_fg_pressure s={.sampled_ns=mem_diag_ns(),
+    dm_fg_heap_snapshot heaps={.sampled_ns=mem_diag_ns(),
         .os_available=available_kb<=UINT64_MAX/1024?available_kb*1024:0,
-        .heap_available=fg_heap_available(),.thermal=fg_thermal_status()};
-    pthread_mutex_lock(&fg_pressure_mu);fg_pressure=s;pthread_mutex_unlock(&fg_pressure_mu);
+        .thermal=fg_thermal_status()};
+    uint64_t available=fg_heap_available(&heaps);
+    dm_fg_pressure s={.sampled_ns=heaps.sampled_ns,.os_available=heaps.os_available,
+        .heap_available=available,.thermal=heaps.thermal};
+    pthread_mutex_lock(&fg_pressure_mu);fg_pressure=s;fg_heaps=heaps;pthread_mutex_unlock(&fg_pressure_mu);
 }
 static void *zcf_pressure_main(void *unused) {
     int trim=(int)(uintptr_t)unused; crash_thread_init();

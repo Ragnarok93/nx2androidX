@@ -1,6 +1,19 @@
 #pragma once
 #include <stdint.h>
 #define FG_MIB UINT64_C(1048576)
+#define DM_FG_MAX_HEAPS 16u
+// Raw per-heap budget/usage from one physical-device query. Keep this separate
+// from the compact per-frame report; the capture ring does not copy 16 heaps.
+typedef struct {
+    uint64_t sampled_ns,os_available;
+    int thermal;
+    unsigned count,eligible;
+    uint64_t budget[DM_FG_MAX_HEAPS],usage[DM_FG_MAX_HEAPS];
+} dm_fg_heap_snapshot;
+static inline uint64_t dm_fg_heap_headroom(const dm_fg_heap_snapshot *s,unsigned heap) {
+    return heap<s->count && heap<DM_FG_MAX_HEAPS && (s->eligible&(1u<<heap)) &&
+        s->budget[heap]>s->usage[heap] ? s->budget[heap]-s->usage[heap] : 0;
+}
 typedef struct {
     uint64_t sampled_ns,os_available,heap_available;
     int thermal; // Android thermal status, -1 unknown

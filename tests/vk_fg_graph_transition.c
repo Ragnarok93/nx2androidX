@@ -90,7 +90,7 @@ static void setup(void){
     CHECK(vkCreateDevice(V.pd,&di,NULL,&V.dev));
     vkGetDeviceQueue(V.dev,V.qf,0,&V.q);V.qmu=&queue_mu;V.null_desc=1;
     VkPhysicalDeviceProperties props;vkGetPhysicalDeviceProperties(V.pd,&props);V.ub_align=props.limits.minUniformBufferOffsetAlignment;
-    vkGetPhysicalDeviceMemoryProperties(V.pd,&memory_props);
+    vkGetPhysicalDeviceMemoryProperties(V.pd,&memory_props); V.mem=memory_props;
     VkCommandPoolCreateInfo pi={.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,.queueFamilyIndex=V.qf};
     CHECK(vkCreateCommandPool(V.dev,&pi,NULL,&pool));
     for(unsigned i=0;i<3;i++){
@@ -175,6 +175,9 @@ int main(void){
     atomic_int cancelled=1;
     assert(!lsfg_chain_build_cancelable(&modules,extent,.5f,views,UINT64_MAX,&cancelled));
     active=lsfg_chain_build(&modules,extent,.5f,views,UINT64_MAX);assert(active&&lsfg_chain_bytes(active));
+    uint64_t private_sum=0;
+    for(unsigned heap=0;heap<memory_props.memoryHeapCount;heap++)private_sum+=lsfg_chain_heap_bytes(active,heap);
+    assert(private_sum==lsfg_chain_bytes(active));
     begin(0);lsfg_chain_record_init(active,slots[0].cb);
     for(unsigned i=0;i<3;i++)vka_img_barrier(slots[0].cb,outputs[i],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL);
     for(unsigned i=0;i<3;i++){source(slots[0].cb,active,i,++ticket);lsfg_chain_seed(active,slots[0].cb,i);}

@@ -36,7 +36,7 @@ typedef struct {
 vka_vk_t *vka_vk(void);
 #define vk (*vka_vk())
 
-typedef struct { VkDevice dev; VkPhysicalDevice pd; uint32_t qf; VkQueue q; pthread_mutex_t *qmu; VkDeviceSize ub_align; int null_desc; } vka_V_t;
+typedef struct { VkDevice dev; VkPhysicalDevice pd; uint32_t qf; VkQueue q; pthread_mutex_t *qmu; VkDeviceSize ub_align; int null_desc; VkPhysicalDeviceMemoryProperties mem; } vka_V_t;
 vka_V_t *vka_V(void);
 #define V (*vka_V())
 

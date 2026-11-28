@@ -345,6 +345,13 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
             // may use this path. Its allocation cap is the retired graph's
             // actual private bytes, not an increase to the extra-memory cap.
             uint64_t old_bytes=lsfg_chain_bytes(F.chain);
+            dm_fg_heap_snapshot heaps=vk_fg_heap_snapshot();
+            for(unsigned i=0;i<heaps.count && i<DM_FG_MAX_HEAPS;i++) {
+                if(!(heaps.eligible&(1u<<i)))continue;
+                VLOG("LSFG_HEAP_PRESSURE sampled_ns=%llu heap=%u budget=%llu usage=%llu active_private=%llu",
+                    (unsigned long long)heaps.sampled_ns,i,(unsigned long long)heaps.budget[i],
+                    (unsigned long long)heaps.usage[i],(unsigned long long)lsfg_chain_heap_bytes(F.chain,i));
+            }
             if (!up && req.reason==FG_FLOW_DOWN && cap && old_bytes &&
                 F.graph.phase==LSFG_GRAPH_EMPTY && (!seed || cap<old_bytes)) {
                 F.cold.phase=FG_COLD_DRAIN;F.cold.scale=req.pct;

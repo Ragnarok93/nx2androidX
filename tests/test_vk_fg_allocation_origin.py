@@ -78,6 +78,13 @@ int main(void){
     assert(strstr(message,"origin=driver_allocate")&&strstr(message,"result=-2"));
     c=(lsfg_chain){.budget={16*1048576,0}};fail=0;
     assert(img_new(&c,e,37)&&allocs==2&&c.budget.used==req_bytes);
+    assert(c.budget.heap_used[0]==0&&c.budget.heap_used[1]==req_bytes);
+    // Two successful allocations on different heaps do not share credit.
+    assert(lsfg_graph_charge_heap(&c.budget,0,1024));
+    assert(c.budget.heap_used[0]==1024&&c.budget.heap_used[1]==req_bytes);
+    assert(!lsfg_graph_charge_heap(&c.budget,16,1));
+    assert(!lsfg_graph_charge_heap(&c.budget,1,UINT64_MAX));
+    assert(c.budget.used==req_bytes+1024);
 }
 '''
         with tempfile.TemporaryDirectory() as d:

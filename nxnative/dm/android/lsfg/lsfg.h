@@ -58,6 +58,7 @@ lsfg_chain *lsfg_chain_build(const lsfg_modules *mods,VkExtent2D ext,float flow_
 lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
         const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit,const atomic_int *cancel);
 uint64_t lsfg_chain_bytes(const lsfg_chain *c);
+uint64_t lsfg_chain_heap_bytes(const lsfg_chain *c,unsigned heap);
 // Record exactly once per successful initialization submission, before use.
 void lsfg_chain_record_init(const lsfg_chain *c,VkCommandBuffer cb);
 void lsfg_chain_free(lsfg_chain *c);   // the GPU must be done with it

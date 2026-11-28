@@ -210,3 +210,9 @@ RED/GREEN extracted actual fg_cold_advance with deterministic mock worker bounda
 ### M4c CI fixture correction
 
 Runs 46138607616 and 46138734468 passed resolution host/SPIR-V and software Vulkan validation, but the APK test step failed at the two Game Mode hint fixture cases (914 tests, 2 failures, 9 skipped in the latter). Extract the actual frame-start/work-snapshot declarations and frame reporting block instead of injecting obsolete fields; keep prior load-hint assertions and use the actual acquire API. No production change. Exact-head CI pending.
+
+## M5c: selected-heap ledger and paired pressure snapshot
+
+Parent `9dea2fff7db7e22722c24328de07517457f3471e`. Correct the native vka device shim and real-Vulkan harness to expose memory properties (M5a's heap logging referenced a member absent from the shim). Each successful private image/UBO memory allocation is charged to its actual selected heap as well as the existing total budget. Publish raw per-heap budget/usage, eligible mask and common timestamp/OS/thermal observation under the existing monitor mutex; do not copy arrays into every capture row. Log each eligible heap's budget/usage and active private bytes when an adaptive scale request is evaluated. Preserve original conservative aggregate cap, no upward policy or reserve changes yet. No cross-heap reclaim credit.
+
+Local focused test used the extracted M5a production allocator in /tmp/ffr-m5c and actual graph budget header: `python -m unittest discover -s tests -p test_vk_fg_allocation_origin.py -v`. RED exit 1 (0.060 s), successful allocation has no selected-heap ledger; GREEN exit 0 (0.050 s), one test passed. Remote test also adds overflow/invalid heap assertions; run exact extended fixture before claiming it passes. Real software Vulkan integration now asserts sum of heap charges equals total. Full preflight and reservation enforcement still pending. Native build/CI not yet confirmed. 

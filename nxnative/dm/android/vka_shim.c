@@ -30,7 +30,7 @@ static void bring_up(void) {
     A2(vkDestroyDescriptorPool) A2(vkDestroyCommandPool)
 #undef A2
     t_V.dev = V.dev; t_V.pd = V.pd; t_V.qf = V.qf; t_V.q = V.q; t_V.qmu = &g_vk_queue_mu;
-    t_V.ub_align = V.props.limits.minUniformBufferOffsetAlignment; t_V.null_desc = V.has_robust2;
+    t_V.ub_align = V.props.limits.minUniformBufferOffsetAlignment; t_V.null_desc = V.has_robust2; t_V.mem = V.mem;
 }
 
 vka_vk_t *vka_vk(void) { bring_up(); return &t_vk; }
