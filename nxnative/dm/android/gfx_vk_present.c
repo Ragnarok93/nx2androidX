@@ -28,9 +28,14 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #include "gfx_vk_menu_recon.h"
 #include "gfx_vk_fg_flow.h"
 #include "gfx_vk_present_admission.h"
+#include "gfx_vk_source_budget.h"
 static dm_recon_menu_status g_menu_recon;
 static dm_fg_menu_status g_menu_fg;
 static dm_recon_continuity g_recon_source;
+static dm_source_budget g_source_budget;
+double vk_source_budget_ms(uint64_t ticket,uint64_t workload) {
+    return dm_source_budget_residual(&g_source_budget,ticket,workload,vk_replay_source_ms(ticket));
+}
 extern uint64_t dm_front_lifecycle_epoch(void);
 
 __attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
@@ -1672,6 +1677,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             picture.width, picture.height, output_height, &target.width, &target.height);
 
     unsigned source_reset = 0;
+    dm_flow_cadence cadence={0};
     spatial_image *reconstructed = NULL;
     int needs_fg_resolve = 0;
     if (redraw) {
@@ -1686,6 +1692,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             .flip_y=flip_y, .docked=docked};
         if (!dm_recon_source_accept(&g_recon_source, &frame, &source_reset)) return;
         if (source_reset) {
+            dm_source_budget_clear(&g_source_budget);
             if (source_reset & DM_RECON_SOURCE_PAUSE) {
                 // Resume the cadence, not the old future deadline or HUD span.
                 g_pace_target = g_pace_ideal = 0;
@@ -1703,7 +1710,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         }
         // Match LSFG's source-rate cap. This is not measured GPU headroom.
         extern int dm_perf_rate_fps(void);
-        dm_flow_cadence cadence = dm_flow_cadence_estimate(period, dm_perf_rate_fps());
+        cadence = dm_flow_cadence_estimate(period, dm_perf_rate_fps());
         // Quantize the workload key, not the budget, to avoid tiny period jitter.
         g_spatial.flow_cadence_us = ((cadence.period_us + 500u) / 1000u) * 1000u;
         g_spatial.flow_budget_ms = cadence.budget_ms;
@@ -1753,6 +1760,14 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     fg_workload=fg_workload*131u+g_spatial.report_input.width;
     fg_workload=fg_workload*131u+g_spatial.report_input.height;
     fg_workload=fg_workload*131u+(unsigned)g_spatial.report_physical;
+    fg_workload=fg_workload*131u+g_spatial.flow_cadence_us;
+    fg_workload=fg_workload*131u+encoding;
+    // Associate completed reconstruction only with its original source.
+    // The replay total already includes any replay-integrated temporal pass.
+    dm_source_budget_recon(&g_source_budget,g_spatial.measured_ticket,g_spatial.measured_mode,
+        g_spatial.measured_output.width,g_spatial.measured_output.height,g_spatial.gpu_ms);
+    dm_source_budget_begin(&g_source_budget,ticket,fg_workload,cadence.period_us/1000.0,
+        reconstructed!=NULL,spatial_active,target.width,target.height);
     int temporal_fallback=dm_spatial_mode()==SP_SGSR2 && spatial_active!=SP_SGSR2 && !(replay_flags&SP_REPLAY_TEMPORAL);
     dm_fg_prepare_workload(fg_workload,source_ns,source_reset||g_spatial.flow_pressure||temporal_fallback);
     int ng = dm_fg_frame(fg_source, rect, flip_y, encoding, source_reset, period, gen, &hold, &out_period, &fg_fence);
@@ -1827,17 +1842,9 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     double real_period = dm_present_real_period(period, hold, (unsigned)ng, (unsigned)accepted_generated);
     int accepted_real = present_one(source, source->img, rect, picture, flip_y,
                                     real_period, ticket, 1, 0, NULL, source_dependency);
-    // Shadow decisions use only completed timing and actual accepted batches.
-    // Require a recent matching reconstruction measurement when it ran.
-    extern double vk_gpu_ms_recent(void);
-    double fg_recon_ms=0;
-    if (reconstructed) {
-        fg_recon_ms=g_spatial.measured_ticket && ticket>=g_spatial.measured_ticket &&
-            ticket-g_spatial.measured_ticket<=8 && g_spatial.measured_mode==spatial_active &&
-            g_spatial.measured_output.width==target.width && g_spatial.measured_output.height==target.height ?
-            g_spatial.gpu_ms : -1;
-    }
-    dm_fg_shadow_present(accepted_real,accepted_generated,vk_gpu_ms_recent(),fg_recon_ms,fg_workload);
+    // The governor joins the retired FG serial's own source ticket with
+    // completed replay and separately submitted reconstruction timing.
+    dm_fg_shadow_present(accepted_real,accepted_generated,ticket,fg_workload);
     if(dm_fg_menu_publish(&g_menu_fg,accepted_real,dm_fg_last_decision().active_flow))g_ov.panel=-1;
     if (dm_recon_menu_publish(&g_menu_recon,accepted_real,spatial_active,
             reconstructed!=NULL,spatial_replay_bits(replay_flags),

@@ -41,7 +41,7 @@ dm_fg_decision dm_fg_last_decision(void);
 // Present-thread workload check before any FG recording.
 void dm_fg_prepare_workload(uint64_t workload,uint64_t source_ns,int recovery_blocked);
 // Called after real/generated presentation attempts. Shadow unless explicit adaptive opt-in.
-void dm_fg_shadow_present(int accepted_real,int accepted_generated,double replay_ms,double recon_ms,uint64_t workload);
+void dm_fg_shadow_present(int accepted_real,int accepted_generated,uint64_t ticket,uint64_t workload);
 
 // The drawer's live switch and status line (the reason string follows the state int, Banana's "<state> <reason>")
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);

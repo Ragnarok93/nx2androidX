@@ -18,6 +18,7 @@ class OutputPresent(unittest.TestCase):
 #include "gfx_vk_flow_budget.h"
 #include "gfx_vk_capture_scale.h"
 #include "gfx_vk_present_admission.h"
+#include "gfx_vk_source_budget.h"
 #include "spatial_upscaler.h"
 #include "gfx_vk_menu_recon.h"
 static dm_recon_menu_status g_menu_recon;
@@ -30,6 +31,7 @@ typedef struct {uint32_t w,h;VkFormat fmt;VkImage img;} vkimg_t;
 typedef struct {vkimg_t texture;VkFence last_use;} spatial_image;
 typedef struct {int backing;} vk_reconstruction_input;
 static dm_recon_continuity g_recon_source;
+static dm_source_budget g_source_budget;
 static struct {uint64_t ticket,last_real_ticket;dm_flow_budget policy;} g_flow;
 #define SP_OUTPUT 0
 static struct {
@@ -67,8 +69,7 @@ int dm_perf_rate_fps(void){return 30;}
 static int dm_fg_wants_input(void){return fg_on;}
 static unsigned dm_menu_rs_recorded(void){return 0;}
 static void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked){(void)key;(void)ns;(void)blocked;}
-double vk_gpu_ms_recent(void){return 8.0;}
-static void dm_fg_shadow_present(int real,int generated,double replay,double recon,uint64_t workload){(void)real;(void)generated;(void)replay;(void)recon;(void)workload;}
+static void dm_fg_shadow_present(int real,int generated,uint64_t ticket,uint64_t workload){(void)real;(void)generated;(void)ticket;(void)workload;}
 typedef struct {const char *reason;double period_ms,measured_ms;uint64_t refresh_ns;unsigned planned,warm_streak;
     int requested_flow,active_flow;uint64_t submission_serial;dm_fg_timing timing;dm_fg_governor_report governor;
     unsigned graph_phase,pending_flow,seed_policy,seed_count;

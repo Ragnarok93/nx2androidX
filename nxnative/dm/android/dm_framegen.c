@@ -92,8 +92,8 @@ int dm_fg_status(char *buf, int n) {
 
 #ifndef NX_LSFG
 void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked){(void)key;(void)ns;(void)blocked;}
-void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
-    (void)real;(void)generated;(void)replay_ms;(void)recon_ms;
+void dm_fg_shadow_present(int real,int generated,uint64_t ticket,uint64_t workload) {
+    (void)real;(void)generated;(void)ticket;
     fg_decision.governor=(dm_fg_governor_report){.status="not compiled",.workload=workload};
 }
 int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, unsigned source_reset,
@@ -145,7 +145,7 @@ static struct {
     dm_fg_coordination coordination;
     uint64_t coordination_ns, source_ns;
     int fixed_base;
-    struct {uint64_t serial,workload; double budget,elapsed;int accepted;} shadow_rows[8];
+    struct {uint64_t serial,workload,ticket; double elapsed;int accepted;} shadow_rows[8];
     double command_retry_at;
     unsigned fi;
     lsfg_pacer pacer; uint64_t count; uint32_t warm_streak;
@@ -348,7 +348,7 @@ static void fg_upward_poll(double now) {
 // Shadow or explicit experimental Auto. Decisions never rebuild the active chain.
 // The available budget is an estimate from recent completed replay and
 // reconstruction measurements, not a measured free GPU interval.
-void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
+void dm_fg_shadow_present(int real,int generated,uint64_t ticket,uint64_t workload) {
     const char *enabled=getenv("DM_LSFG_FLOW_SHADOW");
     int live=fg_live_enabled();
     dm_fg_governor_report *report=&fg_decision.governor;
@@ -386,19 +386,22 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     unsigned i=d.submission_serial%8;
     F.shadow_rows[i].serial=d.submission_serial;
     F.shadow_rows[i].workload=workload;
-    F.shadow_rows[i].budget=replay_ms>0 && recon_ms>=0 && d.period_ms>0 &&
-        isfinite(replay_ms) && isfinite(recon_ms) && isfinite(d.period_ms) ?
-        d.period_ms-replay_ms-recon_ms-1.0 : NAN;
+    F.shadow_rows[i].ticket=ticket;
     F.shadow_rows[i].elapsed=d.measured_ms/1000.0;
     F.shadow_rows[i].accepted=real?generated:0;
     dm_fg_timing s=d.timing;
     if (!s.valid) {dm_fg_governor_gap(&F.shadow);return;}
     unsigned j=s.serial%8;
-    int matched=F.shadow_rows[j].serial==s.serial && F.shadow_rows[j].workload==workload;
+    int matched=F.shadow_rows[j].serial==s.serial && F.shadow_rows[j].workload==workload &&
+        F.shadow_rows[j].ticket && ticket>=F.shadow_rows[j].ticket && ticket-F.shadow_rows[j].ticket<=8;
     if (!matched) {report->status="unmatched timing";dm_fg_governor_gap(&F.shadow);return;}
     report->matched=1;report->matched_serial=s.serial;
-    double matched_budget=F.shadow_rows[j].budget;
+    double matched_budget=vk_source_budget_ms(F.shadow_rows[j].ticket,workload);
     report->budget_ms=isfinite(matched_budget)?matched_budget:0;
+    if(!isfinite(matched_budget)) {
+        report->status="awaiting same-source GPU timing";
+        dm_fg_governor_gap(&F.shadow);return;
+    }
     // Pending and retiring graphs cannot launch a third graph. Do not let
     // transition-only workload contaminate profitability or dwell evidence.
     if(live && F.graph.phase!=LSFG_GRAPH_EMPTY){report->status="graph transition in flight";return;}
@@ -407,18 +410,18 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     report->recovery_allowed=recover;
     int accepted=F.shadow_rows[j].accepted==(int)s.generated && s.generated;
     report->status=!accepted?"generated batch not accepted":!isfinite(matched_budget)?"budget unavailable":matched_budget<=0?"GPU budget exhausted":"hold";
-    dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
+    dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,matched_budget,
         F.shadow_rows[j].elapsed,accepted,recover);
     report->requested_pct=req.pct;report->reason=req.reason;
     if (req.reason!=FG_FLOW_HOLD) {
         report->status=live?"request evaluated":"shadow recommendation";
         VLOG("LSFG_FLOW_SHADOW serial=%llu epoch=%llu active=%d suggested=%u reason=%u gpu_ms=%.3f estimated_budget_ms=%.3f",
             (unsigned long long)s.serial,(unsigned long long)s.epoch,d.active_flow,req.pct,req.reason,
-            s.total_ms,F.shadow_rows[j].budget);
+            s.total_ms,matched_budget);
         if(live) {
             int up=req.pct>(unsigned)F.flow;
             uint64_t cap=up?recovery_cap:report->pressure.down_cap;
-            int seed=dm_fg_seed_policy(&s,req.pct,F.shadow_rows[j].budget,!up);
+            int seed=dm_fg_seed_policy(&s,req.pct,matched_budget,!up);
             report->allocation_cap=cap;
             // A lower flow can replace the old graph without keeping two
             // copies resident or charging a second seed to an overloaded
