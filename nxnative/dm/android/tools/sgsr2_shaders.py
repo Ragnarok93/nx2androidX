@@ -104,20 +104,25 @@ void main()""",
                     "vec3 HistoryColor = textureLod(PrevOutput, PrevUV, 0.0).xyz;": (
                         "highp vec2 unclamped = Hruv + Motion * vec2(-0.5, 0.5);\n"
                         "    bool rejectHistory = params.reset >= 1.0 || depthfactor >= 1.0 || "
-                        "any(lessThan(unclamped, vec2(0))) || any(greaterThan(unclamped, vec2(1)));"),
+                        "any(lessThan(unclamped, vec2(0))) || any(greaterThan(unclamped, vec2(1)));\n"
+                        "    vec4 live = flowColor(InputPos);\n"
+                        "    float pixelReject = 0.0;\n"
+                        "    if (!rejectHistory) {\n"
+                        "        vec3 prior = textureLod(PreviousColor, PrevUV, 0.0).rgb;\n"
+                        "        vec3 error = abs(prior - live.rgb) / (vec3(0.15) + max(prior, live.rgb));\n"
+                        "        float mismatch = max(max(error.r, error.g), error.b);\n"
+                        "        pixelReject = smoothstep(0.08, 0.18, mismatch);\n"
+                        "        rejectHistory = pixelReject >= 1.0;\n"
+                        "    }"),
                     "vec3 centerMid = flowColor(InputPos + ivec2(0, 0)).xyz;": (
-                        "vec4 live = flowColor(InputPos);\n    vec3 centerMid = live.rgb;"),
+                        "vec3 centerMid = live.rgb;"),
                     "Upsampledcw.xyz / Upsampledcw.w": (
                         "(abs(Upsampledcw.w) > 1e-5 ? Upsampledcw.xyz / Upsampledcw.w : live.rgb)"),
                     "Upsampledcw.xyz = mix(HistoryColor, Upsampledcw.xyz, alpha);": """
-    // Reject per-pixel mismatches even when the tile matched. This protects
-    // moving edges, newly revealed pixels, and UI baked into the game frame.
-    if (alpha < 1.0) {
-        vec3 prior = textureLod(PreviousColor, PrevUV, 0.0).rgb;
-        vec3 error = abs(prior - live.rgb) / (vec3(0.15) + max(prior, live.rgb));
-        float mismatch = max(max(error.r, error.g), error.b);
-        alpha = mix(alpha, 1.0, smoothstep(0.08, 0.18, mismatch));
-    }
+    // Partial mismatch keeps the original blend; fully rejected pixels
+    // have already taken the current-only path before the history fetch.
+    if (alpha < 1.0)
+        alpha = mix(alpha, 1.0, pixelReject);
     Upsampledcw.xyz = mix(HistoryColor, Upsampledcw.xyz, alpha);""",
                     "Output = vec4(Upsampledcw.xyz, 0.0);": "Output = vec4(Upsampledcw.xyz, live.a);",
                 }
@@ -130,7 +135,7 @@ void main()""",
                     flow = flow.replace(old, new)
                 # The current-frame reconstruction still uses all five
                 # Lanczos taps and the same min/max clamp. For a rejected
-                # history tile, the variance box, history fetch and blend
+                # history tile or fully rejected pixel, the variance box, history fetch and blend
                 # cannot contribute; avoid them, including all exponential
                 # weights. Keep the accepted-history arithmetic unchanged.
                 flow, weights = re.subn(
