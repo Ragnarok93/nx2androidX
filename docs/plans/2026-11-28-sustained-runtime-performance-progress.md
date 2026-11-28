@@ -96,3 +96,11 @@ Previous five non-timeout cases also passed 10 consecutive runs (50 cases).
 Local source was manually copied from the GitHub revision and transformed identically for the exercised queue and recorder sections. Actual Vulkan wrapper signatures, startup integration, Android link, full host suite, hardware and overhead benchmarks are unverified; do not claim full milestone acceptance. Remaining risk: additional seq_cst load/check per record, Android libc clock support, unrelated external synchronization and device wait behavior. No changes to game data or shader bundle.
 
 Next: finish M0 correlated runtime instrumentation and trace replay when available, run full host and native build on this M1 checkpoint, then implement M2 target-aware scheduling. Preserve chronological interpolation and existing two-graph memory limits.
+
+## M1b: automated test discovery and CI handoff
+
+Prior M1a commit: `84b473583c27a1ef063fe915b113f745e9f7993a`. Verified remote extracted queue and recorder sections match local tested sections by length and FNV-1a hash after trimming trailing whitespace (5390/c8384091 and 915/f21d13b7), and harness Git blob matches local file. Added tests/test_vk_dq_drain.py to the standard unittest discovery used by Android CI; Linux-only because this production queue uses pthread_spinlock_t. Local test against the extracted production fixture: python3 -m unittest discover -s tests -p 'test_vk_dq_drain.py' -v, 1/1 passed (six gated scenarios, including true timeout), 2.085 s. No further production changes.
+
+Baseline Actions run 46131889107 was independently confirmed successful at 906f30b4e6df87b1068c31878c4857e4896254d1. The M1a push triggered Android app run 46136471470; resolution validation was in progress when checked. A subsequent push touching tests triggers another run; inspect the exact checkpoint's run rather than using the older artifact. Full Android and device acceptance remains open. No tag or release change.
+
+M0 and M1 remain partial. Resume at the latest verified branch head, finish the correlated instrumentation, retrieve/replay the original archive, inspect CI for native link and full suite, then proceed with M2. Do not require repeated gameplay captures for the already reproduced drain defect.
