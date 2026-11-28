@@ -943,6 +943,7 @@ static void fg_fixed_set(int value) {
     atomic_store(&g_set_fg_fixed,n);
     atomic_fetch_add(&g_menu_cfg_ver,1);
     dm_fg_set(atomic_load(&g_set_fg),atomic_load(&g_set_fg_mult),0,n);
+    dm_overlay_redraw();
 }
 int vk_pass_dump_user_begin(int delay, int full);
 void vk_pass_dump_user_stop(void);

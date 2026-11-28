@@ -345,12 +345,18 @@ warmup. Pause-menu redraw uses the last completed real image. Vivid applies disp
 
 ### Adaptive LSFG flow scale
 
-Flow Scale offers fixed resolution-tier Auto (0), opt-in Adaptive Auto (-1),
-and explicit 25–100% manual settings. The legacy environment opt-in
-`DM_LSFG_ADAPTIVE_AUTO=1` still enables live behavior for Auto. Both Auto
-choices display the last graph scale on an accepted real frame. Older
-runtimes interpret -1 as fixed Auto. Manual flow and default fixed Auto
-do not run live adaptive graph requests.
+Flow Scale has three directly selectable modes: Fixed (25–100% slider),
+Adaptive (Quality 70–100%, Balanced 55–80%, Low 25–55%, or Auto 25–100%),
+and Auto (fixed resolution tiers, no extra row). The Fixed and Adaptive
+submenus appear only in their respective modes. Adaptive presets use
+five-point transitions and seed the initial scale within their bounds.
+The selector remembers the last Fixed percentage and Adaptive preset
+independently. Existing fg_flow positive values, zero and -1 retain their
+meanings; -2/-3/-4 encode Quality/Balanced/Low. The legacy environment
+opt-in `DM_LSFG_ADAPTIVE_AUTO=1` still enables live behavior for top-level
+Auto. Both non-Fixed modes display the last graph scale on an accepted real
+frame. Older runtimes may interpret the negative codes as fixed Auto.
+Manual flow and default fixed Auto do not run live adaptive requests.
 
 The controller observes retired per-slot timestamp queries correlated to
 actual accepted real/generated presentations, estimates remaining GPU
