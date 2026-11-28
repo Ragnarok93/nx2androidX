@@ -8,6 +8,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <errno.h>
 #include "overlay_layout.h"
 #include "pixel_font.h"
 #include "overlay_vert.spv.h"
@@ -1572,10 +1573,23 @@ static struct {
     vk_reconstruction_input physical;
 } g_pq[PQ_N];
 static uint64_t g_pq_head, g_pq_tail, g_pq_done;   // queued [tail, head), presents up to ticket g_pq_done are blitted
-static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pq_cv = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pq_cv;
+static pthread_once_t g_pq_cv_once = PTHREAD_ONCE_INIT;
+static void present_queue_cv_init(void) {
+    pthread_condattr_t attr;
+    if (pthread_condattr_init(&attr)) die("[vk] presentation condition attributes");
+    int rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    if (!rc) rc = pthread_cond_init(&g_pq_cv, &attr);
+    pthread_condattr_destroy(&attr);
+    if (rc) die("[vk] monotonic presentation condition initialization");
+}
+static void present_queue_cv_ready(void) {
+    if (pthread_once(&g_pq_cv_once, present_queue_cv_init)) die("[vk] presentation condition initialization");
+}
 // While the game is held (the pause menu) no frame comes: dm_overlay_redraw presents the last one again with what the overlay now shows.
 static _Atomic int g_redraw;
-void dm_overlay_redraw(void) { atomic_store(&g_redraw, 1); pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }
+void dm_overlay_redraw(void) { present_queue_cv_ready(); atomic_store(&g_redraw, 1); pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }
 static _Atomic uint32_t g_recon_work_us;
 
 void vk_fg_fence_retired(VkFence fence) {
@@ -1845,18 +1859,19 @@ static void *present_thread(void *arg) {
     }
     return NULL;
 }
-static int g_present_thread_started; // published by pthread_once
+static _Atomic int g_present_thread_started; // published by the worker startup
 static void present_thread_start(void) {
     pthread_t t;
     int error=pthread_create(&t,NULL,present_thread,NULL);
     if(error){ VKLOG("[RED] presentation worker could not start (%d); using synchronous presentation",error); return; }
-    g_present_thread_started=1;
+    atomic_store(&g_present_thread_started,1);
     pthread_detach(t);
 }
 static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, double period,
                                 unsigned replay_flags, const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
     // Snapshot before queue backpressure, on the source submission thread.
     // Operation mode is a notification snapshot, not shader/scene certification.
+    present_queue_cv_ready();
     extern int dm_opmode(void);
     uint64_t source_ns = mono_ns();
     dm_present_queue_trace trace = {0};
@@ -1869,7 +1884,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     if (sync < 0) sync = getenv("DM_VK_SYNC_PRESENT") != NULL;
     int front=dm_front_window()!=NULL;
     if (!sync && front) pthread_once(&once,present_thread_start);
-    if (sync || !front || !g_present_thread_started) {
+    if (sync || !atomic_load(&g_present_thread_started)) {
         // A failed worker startup must not enqueue into an undrained FIFO.
         if (trace.source_ns) trace.synchronous = 1;
         if ((sync || front) && im) {
@@ -1884,6 +1899,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
         if (g_pq_tail == g_pq_head) {
             g_pq_done = n;
             if (trace.source_ns) trace.retire_ns = mono_ns();
+            pthread_cond_broadcast(&g_pq_cv);
         }
         pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
         if (trace.source_ns) vk_capture_scale_queue(n, trace);
@@ -1891,7 +1907,9 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     }
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_head - g_pq_tail >= PQ_N) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // never more than PQ_N frames behind
-    typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = im; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
+    // With an existing worker, even a detached/no-image ticket must
+    // retire in FIFO order behind the previous source's consumers.
+    typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = front ? im : NULL; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
     e->source_ns = source_ns; e->docked = docked; e->flip_y = flip_y;
     e->replay_flags = replay_flags;
     if (trace.source_ns) {
@@ -2051,9 +2069,19 @@ uint64_t vk_present_vkimg(vkimg_t *im, double period) {
 }
 void mtl_present_wait(uint64_t tk) {   // NVN acquire: the window texture's last present has been blitted (the game may draw into it again)
     if (!tk) return;
+    present_queue_cv_ready();
     pthread_mutex_lock(&g_pq_mu);
-    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 1;
-    while (g_pq_done < tk && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &dl) == 0) {}
+    struct timespec dl; clock_gettime(CLOCK_MONOTONIC, &dl); dl.tv_sec += 1;
+    while (g_pq_done < tk) {
+        int rc = pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &dl);
+        if (rc == ETIMEDOUT) {
+            if (g_pq_done >= tk) break;
+            VKLOG("[perf] presentation retirement wait: target=%llu completed=%llu occupancy=%llu",
+                (unsigned long long)tk, (unsigned long long)g_pq_done,
+                (unsigned long long)(g_pq_head-g_pq_tail));
+            clock_gettime(CLOCK_MONOTONIC, &dl); ++dl.tv_sec;
+        } else if (rc) die("[vk] presentation retirement wait failed");
+    }
     pthread_mutex_unlock(&g_pq_mu);
 }
 double mtl_presented_time(uint64_t n) { return present_time_get(n); }
