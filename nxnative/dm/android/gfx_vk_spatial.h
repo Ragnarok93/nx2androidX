@@ -1034,16 +1034,18 @@ select_backend:;
         spatial_draw(cb, SP_RCAS, g_spatial.set[SP_INTERMEDIATE], output->view, 0, 0, w, h, params);
         barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     }
-    if (g_spatial.queries) {
-        if (flow) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 9);
-        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 1);
-    }
     if (resolve) {
         const int full[4] = {0, 0, (int)w, (int)h};
         barrier(cb, resolve->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         spatial_blit(cb, output->texture.img, resolve->texture.img, full,
                      resolve->texture.w, resolve->texture.h, 0, VK_FILTER_LINEAR);
         barrier(cb, resolve->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    // A display-sized resolve is part of reconstruction work. Include it
+    // in both the total and the temporal output-stage budget.
+    if (g_spatial.queries) {
+        if (flow) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 9);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_spatial.queries, SP_QUERY_STRIDE * slot + 1);
     }
     if (vkEndCommandBuffer(cb)) goto submit_error;
     g_spatial.report_recorded = 1;
