@@ -21,3 +21,9 @@ Preserve GSR 2 measured overload cooldown across pause/gap discontinuities while
 ## Checkpoint 3
 
 Initial CI failed in native link (missing GPU pending declaration) and two extracted-code harnesses (missing decision/skip test boundaries). Update declaration and harnesses without changing production behavior; register pool recovery regression in focused runner. Re-run CI before claiming validation.
+
+## Checkpoint 4 — workload reduction
+
+Previous corrected reconstruction CI passed (run 46096506583). The 1440p archive's slot-0 surface usage records submission 16391 pass 134 writing 1728x972 image 765046cc00, then pass 135 fragment 7d05eef41136554f sampling that image at slot 1 into 1920x1080. The preceding 1384x780 scene surfaces are not directly the final composition input. The existing replay certificate admits the source but the sampler predicate rejects it; no exact sampler state is captured, so do not relax that guard speculatively.
+
+LSFG Auto previously mapped 0 to full-resolution optical flow (1920x1080, 152 images in the capture). Resolve Auto to a stable resolution-derived tier targeting at most a 720p flow pixel budget where possible; 1080p uses 50%, 720p uses 100%, explicit settings unchanged. This is an initial policy, not dynamic GPU feedback. GSR 2 motion search stops fetching a candidate's remaining taps when the nonnegative partial error already exceeds its comparison limit. Search, reverse and ambiguity decisions retain their original thresholds. Add host regressions and retain GPU readback validation. Device timings and LSFG generation still need measurement.

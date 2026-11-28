@@ -18,10 +18,15 @@ float luma(sampler2D image, vec2 pixel, vec2 invSize) {
     return sqrt(max(0.0, dot(rgb, vec3(0.2126, 0.7152, 0.0722))));
 }
 
-float errorAt(sampler2D image, vec2 center, vec2 invSize, float reference[5]) {
+// All tap errors are nonnegative. Once the partial mean exceeds a caller's
+// limit, the complete mean cannot change that decision. Return early only
+// on strict greater-than so equality and the ambiguity test stay intact.
+float errorAt(sampler2D image, vec2 center, vec2 invSize, float reference[5], float limit) {
     float error = 0.0;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 5; ++i) {
         error += abs(reference[i] - luma(image, center + taps[i], invSize));
+        if (error * 0.2 > limit) return error * 0.2;
+    }
     return error * 0.2;
 }
 
@@ -43,7 +48,7 @@ void main() {
     if (brightest - darkest < 0.025) return;
 
     vec2 best = vec2(0);
-    float cost = errorAt(PreviousColor, center, invSize, samples);
+    float cost = errorAt(PreviousColor, center, invSize, samples, 3.402823e38);
     // Coarse-to-fine search. Preserve stationary content on ties.
     // Errors are nonnegative and an improvement must exceed 0.001.
     // Once this floor is reached no subsequent candidate can win.
@@ -53,7 +58,7 @@ void main() {
             vec2 delta = origin + directions[j] * stepSize;
             vec2 p = center + delta;
             if (any(lessThan(p, vec2(2.5))) || any(greaterThan(p, size - 2.5))) continue;
-            float tested = errorAt(PreviousColor, p, invSize, samples);
+            float tested = errorAt(PreviousColor, p, invSize, samples, cost);
             if (tested + 0.001 < cost) {
                 cost = tested;
                 best = delta;
@@ -74,11 +79,11 @@ void main() {
     for (int j = 1; j < 9; ++j) {
         vec2 p = center + directions[j] * 2.0;
         if (reverseNeeded) {
-            if (errorAt(CurrentColor, p, invSize, reverseSamples) + 0.005 < cost) return;
+            if (errorAt(CurrentColor, p, invSize, reverseSamples, cost) + 0.005 < cost) return;
         }
         p += best;
         if (any(lessThan(p, vec2(2.5))) || any(greaterThan(p, size - 2.5))) continue;
-        if (errorAt(PreviousColor, p, invSize, samples) <= cost + 0.006) return;
+        if (errorAt(PreviousColor, p, invSize, samples, cost + 0.006) <= cost + 0.006) return;
     }
 
     // The Qualcomm accumulation pass expects current minus previous NDC,

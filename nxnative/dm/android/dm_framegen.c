@@ -5,6 +5,7 @@
 // (same queue, same order); the generated frames are plain images the present thread blits itself. GPL headers
 // and the status vocabulary stay Banana's.
 #include "dm_framegen.h"
+#include "gfx_vk_fg_flow.h"
 #include "vka.h"
 #include <math.h>
 #include <stdio.h>
@@ -167,10 +168,10 @@ static int rebuild(VkExtent2D e, int flow) {
     VkImage imgs[LSFG_MAX_GENERATIONS];
     for (int i = 0; i < LSFG_MAX_GENERATIONS; i++) { if (!out_new(e, i, &F.out_view[i])) { teardown(); return 0; } imgs[i] = F.out[i]; }
     double t0 = mono_s();
-    F.chain = lsfg_chain_new(&F.mods, e, flow ? flow / 100.0f : 1.0f, imgs, F.out_view);
+    F.chain = lsfg_chain_new(&F.mods, e, flow / 100.0f, imgs, F.out_view);
     if (!F.chain) { teardown(); return 0; }
     F.ext = e; F.flow = flow;
-    VLOG("frame generation: chain for %ux%u made in %.1f ms", e.width, e.height, (mono_s() - t0) * 1e3);
+    VLOG("frame generation: chain for %ux%u (effective flow %d%%) made in %.1f ms", e.width, e.height, flow, (mono_s() - t0) * 1e3);
     return 1;
 }
 
@@ -276,6 +277,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         F.warm_streak = 0; atomic_store(&g_state, 2); return fg_skip("source format or crop unsupported");
     }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
+    flow=dm_fg_effective_flow(flow,e.width,e.height);
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
         // A larger source can exhaust allocations without making the loaded
         // LSFG shaders unavailable. Retry a different geometry immediately;
