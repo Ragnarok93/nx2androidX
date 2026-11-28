@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <math.h>
+#include "gfx_vk_fg_pressure.h"
 // One retired LSFG submission. Times are disjoint GPU intervals, not CPU waits.
 typedef struct {
     uint64_t serial,epoch;
@@ -33,4 +34,5 @@ typedef struct {
     double budget_ms;
     unsigned requested_pct,reason;
     int live,recovery_allowed,matched;
+    dm_fg_pressure_report pressure;
 } dm_fg_governor_report;

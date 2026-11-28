@@ -569,11 +569,17 @@ void vk_quality_recovery_hold(unsigned hold_ms) {
 }
 static pthread_mutex_t fg_pressure_mu=PTHREAD_MUTEX_INITIALIZER;
 static dm_fg_pressure fg_pressure;
+dm_fg_pressure_report vk_fg_pressure_snapshot(void) {
+    dm_fg_pressure s={.thermal=-1};
+    if(!pthread_mutex_trylock(&fg_pressure_mu)){
+        s=fg_pressure;
+        pthread_mutex_unlock(&fg_pressure_mu);
+    }
+    return dm_fg_pressure_describe(&s,mem_diag_ns());
+}
 uint64_t vk_fg_transition_cap(int upward) {
-    if(pthread_mutex_trylock(&fg_pressure_mu))return 0;
-    dm_fg_pressure s=fg_pressure;
-    pthread_mutex_unlock(&fg_pressure_mu);
-    return dm_fg_pressure_cap(&s,mem_diag_ns(),upward);
+    dm_fg_pressure_report r=vk_fg_pressure_snapshot();
+    return upward?r.up_cap:r.down_cap;
 }
 static uint64_t fg_heap_available(void) {
     if(!V.has_memory_budget)return 0;
@@ -616,14 +622,15 @@ static int fg_thermal_status(void) {
 }
 static void fg_pressure_publish(uint64_t available_kb) {
     extern int dm_fg_adaptive_auto_selected(void);
-    if(!dm_fg_adaptive_auto_selected())return;
+    extern int vk_pass_dump_user_active(void);
+    if(!dm_fg_adaptive_auto_selected()&&!vk_pass_dump_user_active())return;
     dm_fg_pressure s={.sampled_ns=mem_diag_ns(),
         .os_available=available_kb<=UINT64_MAX/1024?available_kb*1024:0,
         .heap_available=fg_heap_available(),.thermal=fg_thermal_status()};
     pthread_mutex_lock(&fg_pressure_mu);fg_pressure=s;pthread_mutex_unlock(&fg_pressure_mu);
 }
 static void *zcf_pressure_main(void *unused) {
-    (void)unused; crash_thread_init();
+    int trim=(int)(uintptr_t)unused; crash_thread_init();
     vk_pool_recovery recovery={0};
     for (;;) {
         sleep(2);
@@ -637,7 +644,7 @@ static void *zcf_pressure_main(void *unused) {
         }
         fclose(f);
         fg_pressure_publish(total?available:0);
-        if (!total || !available) continue;  // incomplete /proc data is not pressure
+        if (!trim || !total || !available) continue;  // incomplete /proc data is not pressure
         uint64_t budget = vk_pool_reuse_budget_update(&recovery,
             atomic_load_explicit(&g_zcf_budget,memory_order_relaxed),available,total);
         uint64_t prior = atomic_exchange_explicit(&g_zcf_budget, budget, memory_order_relaxed);
@@ -650,9 +657,10 @@ static void *zcf_pressure_main(void *unused) {
 }
 static void zcf_pressure_start(void) {
     const char *e = getenv("DM_VK_POOL_PRESSURE_TRIM");
-    if (e && !atoi(e)) { VKLOG("[mem] Vulkan pool pressure trim explicitly disabled"); return; }
+    int trim=!(e&&!atoi(e));
+    if(!trim)VKLOG("[mem] Vulkan pool pressure trim explicitly disabled (adaptive pressure sampling remains available)");
     pthread_t t;
-    if (pthread_create(&t, NULL, zcf_pressure_main, NULL))
+    if (pthread_create(&t, NULL, zcf_pressure_main, (void *)(uintptr_t)trim))
         VKLOG("[RED] Vulkan pool pressure monitor could not start");
     else pthread_detach(t);
 }

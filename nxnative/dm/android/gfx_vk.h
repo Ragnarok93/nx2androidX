@@ -16,6 +16,7 @@
 #include "nvn_mtl.h"
 #include "gfx_vk_resolution_draw.h"
 #include "gfx_vk_resolution_view.h"
+#include "gfx_vk_fg_pressure.h"
 
 #define VKLOG(...) LOG("[vk] " __VA_ARGS__)
 #define VKRED_ONCE(id, ...) do { static int once_##id; if (!once_##id++) LOG("[RED] [vk] " __VA_ARGS__); } while (0)
@@ -71,6 +72,7 @@ uint32_t *spv_one_lane(const uint32_t *w, uint32_t nw, uint32_t ops, uint32_t *o
 uint32_t vk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid);
 int vk_quality_recovery_try(unsigned hold_ms);
 void vk_quality_recovery_hold(unsigned hold_ms);
+dm_fg_pressure_report vk_fg_pressure_snapshot(void);
 uint64_t vk_fg_transition_cap(int upward); // fresh pressure snapshot; zero vetoes allocation
 void vk_init(void);   // once, from mtl_init or the first use
 

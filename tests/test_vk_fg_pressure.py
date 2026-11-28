@@ -11,6 +11,12 @@ int main(void){
     uint64_t now=UINT64_C(10000000000);
     dm_fg_pressure s={now,2048*FG_MIB,2048*FG_MIB,0};
     assert(dm_fg_pressure_cap(&s,now,1)==128*FG_MIB);
+    dm_fg_pressure_report r=dm_fg_pressure_describe(&s,now+100);
+    assert(r.fresh&&r.age_ns==100&&r.down_cap==128*FG_MIB&&r.up_cap==128*FG_MIB&&r.thermal==0);
+    r=dm_fg_pressure_describe(&s,now+UINT64_C(5000000001));
+    assert(!r.fresh&&!r.down_cap&&!r.up_cap&&r.os_available==2048*FG_MIB);
+    r=dm_fg_pressure_describe(&(dm_fg_pressure){0},now);
+    assert(!r.fresh&&r.thermal==-1&&r.age_ns==UINT64_MAX);
     s.heap_available=500*FG_MIB;
     assert(dm_fg_pressure_cap(&s,now,0)==50*FG_MIB);
     s.heap_available=0;assert(!dm_fg_pressure_cap(&s,now,0));

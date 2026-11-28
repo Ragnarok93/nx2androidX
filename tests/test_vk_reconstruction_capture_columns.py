@@ -60,7 +60,8 @@ int main(int argc, char **argv) {
         .fg_graph_phase=2,.fg_pending_flow=40,.fg_seed_policy=2,.fg_seed_count=1,
         .fg_active_bytes=123456,.fg_extra_bytes=65432,.fg_build_limit=0,
         .fg_governor={.status="build requested",.workload=123,.matched_serial=10,.allocation_cap=456,.budget_ms=5.25,
-            .requested_pct=40,.reason=1,.live=1,.recovery_allowed=0,.matched=1},
+            .requested_pct=40,.reason=1,.live=1,.recovery_allowed=0,.matched=1,
+            .pressure={.sampled_ns=1000,.age_ns=100,.fresh=1,.os_available=1000000000,.heap_available=500000000,.thermal=2,.down_cap=50000000,.up_cap=0}},
         .fg_timing={.valid=1,.serial=10,.epoch=2,.scale=50,.width=1920,.height=1080,.generated=1,
             .copy_ms=.25,.mip_ms=.5,.shared_ms=1,.refine_ms=2,.output_ms=.75,.total_ms=4.5},
         .reason="image-driven motion"});
@@ -159,6 +160,16 @@ int main(int argc, char **argv) {
             self.assertEqual(a['fg_governor_live'],'1')
             self.assertEqual(a['fg_governor_recovery_allowed'],'0')
             self.assertEqual(a['fg_governor_matched'],'1')
+            self.assertEqual(a['fg_pressure_sample_ns'],'1000')
+            self.assertEqual(a['fg_pressure_age_ns'],'100')
+            self.assertEqual(a['fg_pressure_fresh'],'1')
+            self.assertEqual(a['fg_os_available_bytes'],'1000000000')
+            self.assertEqual(a['fg_heap_available_bytes'],'500000000')
+            self.assertEqual(a['fg_thermal_status'],'2')
+            self.assertEqual(a['fg_down_cap_bytes'],'50000000')
+            self.assertEqual(a['fg_up_cap_bytes'],'0')
+            self.assertEqual(b['fg_pressure_fresh'],'0')
+            self.assertEqual(b['fg_thermal_status'],'-1')
             self.assertEqual(b['fg_governor_status'],'-')
             self.assertEqual(b['fg_timing_serial'],'0')
             self.assertEqual(b['fg_graph_phase'],'0')

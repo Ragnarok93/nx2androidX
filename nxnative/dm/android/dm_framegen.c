@@ -247,6 +247,7 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     // Capture automatically runs the non-mutating shadow policy, not live
     // transitions. No second debug switch or verbose log mode is needed.
     if (!live && (!enabled || !atoi(enabled)) && !vk_pass_dump_user_active()) return;
+    report->pressure=vk_fg_pressure_snapshot();
     dm_fg_decision d=fg_decision;
     report->status=d.requested_flow>0?"manual flow":!d.active_flow?"no graph":!d.submission_serial?"no submission":!real?"real present rejected":"awaiting timing";
     if (d.requested_flow>0 || d.requested_flow!=atomic_load(&g_flow) || !d.active_flow || !d.submission_serial || !real) {
@@ -278,7 +279,7 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     // Pending and retiring graphs cannot launch a third graph. Do not let
     // transition-only workload contaminate profitability or dwell evidence.
     if(live && F.graph.phase!=LSFG_GRAPH_EMPTY){report->status="graph transition in flight";return;}
-    uint64_t recovery_cap=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)?vk_fg_transition_cap(1):0;
+    uint64_t recovery_cap=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)?report->pressure.up_cap:0;
     report->recovery_allowed=recovery_cap!=0;
     int accepted=F.shadow_rows[j].accepted==(int)s.generated && generated>0 && s.generated;
     report->status=!accepted?"generated batch not accepted":!(report->budget_ms>0)?"budget unavailable":"hold";
@@ -292,7 +293,7 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
             s.total_ms,F.shadow_rows[j].budget);
         if(live) {
             int up=req.pct>(unsigned)F.flow;
-            uint64_t cap=up?recovery_cap:vk_fg_transition_cap(0);
+            uint64_t cap=up?recovery_cap:report->pressure.down_cap;
             int seed=dm_fg_seed_policy(&s,req.pct,F.shadow_rows[j].budget,!up);
             report->allocation_cap=cap;
             int admitted=cap && seed && (!up || vk_quality_recovery_try(12000));
