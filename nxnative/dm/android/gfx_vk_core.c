@@ -13,6 +13,7 @@
 #include "nvn_dirty.h"
 #include "gfx_vk_pool_pressure.h"
 #include "gfx_vk_pool_restore.h"
+#include "gfx_vk_retire_queue.h"
 #include "gfx_vk_fg_pressure.h"
 #include "gfx_vk_quality_recovery.h"
 #include <android/hardware_buffer.h>
@@ -495,7 +496,7 @@ static void pool_cache_sync(vkpool_t *p, int invalidate, uint64_t lo, uint64_t h
 // Freed zero-copy pools' buffers, kept for the next pool of the same size (DM_VK_POOL_REUSE=0 turns it off): a pool made from one skips the hardware buffer's
 // allocation (a binder call to the allocator service) and the driver's import, which took Pokémon Scarlet's three loading threads ~130 + ~100 ms each while a thrown
 // ball's capture assets load (they drop old pools as they make new ones; the game waits on them, frames of 100-220 ms), and a pool dropped from a game thread no longer
-// waits for the GPU (df_add outside a submission waits for every submission so far). An entry is taken only once the GPU has passed the submission open or next when
+// waits for the GPU. An entry is taken only once the GPU has passed the submission open or next when
 // it was kept; the oldest the GPU is done with make room
 typedef struct { AHardwareBuffer *ahb; VkBuffer buf; VkDeviceMemory mem; uint64_t size, fence; } zcfree_t;
 enum { ZCF_N = 128 };
@@ -1297,7 +1298,6 @@ enum { CQ = 64 };
 static VkQueryPool g_cq;
 #define SCRATCH_BLOCK (8u << 20)
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize size, used; } scratch_blk;
-typedef struct { int kind; void *a; void *b; } dfree_t;   // 0 buffer+memory, 1 image+memory, 2 view
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; int q; } post_op;   // q: a timestamp counter's query in g_cq, or -1
 struct vksub {
     VkCommandPool pool; VkCommandBuffer up, main; int up_used;
@@ -1308,13 +1308,14 @@ struct vksub {
     scratch_blk *blk; int nblk, capblk;
     VkDescriptorPool *dp; int ndp, capdp, dp_cur;
     uint32_t dp_used[9], dp_sets; int dp_counted; int no_ts;   // what pool dp_cur has given out (vk_alloc_set)
-    dfree_t *df; int ndf, capdf;
     post_op *post; int npost, cappost;
     struct { uint64_t lo, hi; } gw[64]; int ngw, readback_ranges;   // GPU writes into pool memory in this submission (sub_gpu_wrote), for pools_copy_back: nearby ones merged, and once full each joins the nearest
 };
 enum { GW_SUB = 64 };
 static vksub_t g_slot[NSLOT]; static int g_cur = -1; uint64_t g_cmd_gen;   // g_cmd_gen: main command buffers begun (gfx_vk_exec.c bind cache)
-static pthread_mutex_t g_df_mu = PTHREAD_MUTEX_INITIALIZER;   // the slots' deferred-free lists (df, ndf, capdf): df_add says why
+static pthread_mutex_t g_df_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_df_cv = PTHREAD_COND_INITIALIZER;
+static vk_retire_queue g_df;
 static uint64_t pool_merge_back(vkpool_t *p, uint64_t lo, uint64_t hi) {
     int diag = mem_diag_on(); uint64_t t = diag ? mem_diag_ns() : 0;
     uint64_t bytes = 0;
@@ -1404,7 +1405,7 @@ void vk_pass_report(void) {   // the most expensive passes since the last report
 }
 // one submission at a time: the game's (hle_nvn.c holds its own lock around them) and the backend's own (texel readback, present)
 static pthread_mutex_t g_sub_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_fence;   // fence of the last commit
+static _Atomic uint64_t g_fence;   // fence of the last commit
 static VkSemaphore g_timeline;   // submission f signals the value f (V.has_timeline), else g_fring[f % NFRING]
 #define NFRING 16   // more than the submissions in flight (NSLOT: mtl_sub_begin's slot_recycle waits for the slot's last one)
 static VkFence g_fring[NFRING];
@@ -1446,17 +1447,6 @@ static int g_prereset = -1;
 static void slot_recycle(vksub_t *s) {   // the GPU has passed this slot's last submission: free what it held, rewind its allocators
     if (g_prereset < 0) { const char *e = getenv("DM_VK_X_NOPRERESET"); g_prereset = !(e && atoi(e)); }
     if (g_prereset) mtl_wait(s->fence, ~0ull); else wait_fence(s->fence);
-    pthread_mutex_lock(&g_df_mu); dfree_t *df = s->df; int ndf = s->ndf; s->df = NULL; s->ndf = s->capdf = 0; pthread_mutex_unlock(&g_df_mu);   // the list taken whole: a game thread may add to it meanwhile
-    for (int i = 0; i < ndf; i++) {
-        dfree_t *d = &df[i];
-        if (d->kind == 0) { vkDestroyBuffer(V.dev, (VkBuffer)d->a, NULL); if (d->b) vkFreeMemory(V.dev, (VkDeviceMemory)d->b, NULL); }
-        else if (d->kind == 1) { vkDestroyImage(V.dev, (VkImage)d->a, NULL); if (d->b) vkFreeMemory(V.dev, (VkDeviceMemory)d->b, NULL); }
-        else if (d->kind == 4) { void img_sub_free_(void *); vkDestroyImage(V.dev, (VkImage)d->a, NULL); img_sub_free_(d->b); }
-        else if (d->kind == 2) vkDestroyImageView(V.dev, (VkImageView)d->a, NULL);
-        else if (d->kind == 3) vkDestroyBufferView(V.dev, (VkBufferView)d->a, NULL);
-        else if (d->kind == 5) vk_rs_variant_destroy((vk_rs_variant *)d->a);
-    }
-    free(df);
     for (int i = 0; i < s->nblk; i++) s->blk[i].used = 0;
     for (int i = 0; i < s->ndp; i++) vkResetDescriptorPool(V.dev, s->dp[i], 0);
     s->dp_cur = 0; s->dp_counted = -1;
@@ -1527,26 +1517,47 @@ void *vk_scratch(VkDeviceSize n, VkDeviceSize align, VkBuffer *buf, VkDeviceSize
     void *m; VKCHK(vkMapMemory(V.dev, b->m, 0, VK_WHOLE_SIZE, 0, &m)); b->p = m;
     b->used = n; *buf = b->b; *off = 0; return b->p;
 }
-// The deferred frees have a lock of their own: the replay thread adds to its slot's list while it records (holding g_sub_lock for the whole submission), and a game
-// thread that finalizes a pool (nvnMemoryPoolFinalize → mtl_pool_del) adds to the same list without g_sub_lock. Unlocked, two first adds to a recycled slot crashed
-// Animal Crossing: New Horizons' release build (SIGSEGV in df_add: one thread had set capdf, the other wrote through the df still NULL). g_df_mu is above slot_recycle
+// Deferred GPU object destruction never waits on a game/replay thread.
+// All frees share one ordered queue, so dependent views remain ordered
+// before backing objects. A submission reserves its retirement fence
+// before recording; idle frees use the most recently reserved fence.
+static void df_destroy(vk_retire_entry *d) {
+    if (d->kind == 0) { vkDestroyBuffer(V.dev, (VkBuffer)d->a, NULL); if (d->b) vkFreeMemory(V.dev, (VkDeviceMemory)d->b, NULL); }
+    else if (d->kind == 1) { vkDestroyImage(V.dev, (VkImage)d->a, NULL); if (d->b) vkFreeMemory(V.dev, (VkDeviceMemory)d->b, NULL); }
+    else if (d->kind == 4) { void img_sub_free_(void *); vkDestroyImage(V.dev, (VkImage)d->a, NULL); img_sub_free_(d->b); }
+    else if (d->kind == 2) vkDestroyImageView(V.dev, (VkImageView)d->a, NULL);
+    else if (d->kind == 3) vkDestroyBufferView(V.dev, (VkBufferView)d->a, NULL);
+    else if (d->kind == 5) vk_rs_variant_destroy((vk_rs_variant *)d->a);
+}
+static void *df_main(void *unused) {
+    (void)unused; pthread_setname_np(pthread_self(), "dm-vk-retire"); crash_thread_init();
+    for (;;) {
+        pthread_mutex_lock(&g_df_mu);
+        while (!g_df.head) pthread_cond_wait(&g_df_cv, &g_df_mu);
+        uint64_t fence = g_df.head->fence;
+        pthread_mutex_unlock(&g_df_mu);
+        // Only this worker waits. Completion publishes CPU-visible work
+        // before the fence is considered retired on either Vulkan path.
+        if (!mtl_wait(fence, UINT64_MAX)) continue;
+        for (;;) {
+            pthread_mutex_lock(&g_df_mu);
+            vk_retire_entry *d = vk_retire_pop(&g_df, vk_fence_done());
+            pthread_mutex_unlock(&g_df_mu);
+            if (!d) break;
+            df_destroy(d);
+            free(d);
+        }
+    }
+    return NULL;
+}
 static void df_add(int kind, void *a, void *b) {
+    vk_retire_entry *d = malloc(sizeof *d);
+    if (!d) die("[RED] [vk] deferred resource retirement allocation failed");
+    *d = (vk_retire_entry){.kind=kind, .a=a, .b=b};
     pthread_mutex_lock(&g_df_mu);
-    if (g_cur >= 0) {
-        vksub_t *s = &g_slot[g_cur]; if (s->ndf == s->capdf) { s->capdf = s->capdf ? 2 * s->capdf : 64; s->df = realloc(s->df, s->capdf * sizeof *s->df); }
-        s->df[s->ndf++] = (dfree_t){kind, a, b};
-        pthread_mutex_unlock(&g_df_mu); return;
-    }
+    vk_retire_push(&g_df,d);
+    pthread_cond_signal(&g_df_cv);
     pthread_mutex_unlock(&g_df_mu);
-    {   // outside a submission (a pool finalized between frames): after everything submitted so far
-        wait_fence(g_fence);
-        if (kind == 0) { vkDestroyBuffer(V.dev, (VkBuffer)a, NULL); if (b) vkFreeMemory(V.dev, (VkDeviceMemory)b, NULL); }
-        else if (kind == 1) { vkDestroyImage(V.dev, (VkImage)a, NULL); if (b) vkFreeMemory(V.dev, (VkDeviceMemory)b, NULL); }
-        else if (kind == 4) { void img_sub_free_(void *); vkDestroyImage(V.dev, (VkImage)a, NULL); img_sub_free_(b); }
-        else if (kind == 2) vkDestroyImageView(V.dev, (VkImageView)a, NULL);
-        else if (kind == 5) vk_rs_variant_destroy((vk_rs_variant *)a);
-        else vkDestroyBufferView(V.dev, (VkBufferView)a, NULL);
-    }
 }
 // Image memory. Small images share blocks: each allocation the driver makes is a mapping of the process (Adreno maps them all), and a game with thousands of textures
 // ran towards the kernel's per-process mapping limit (Xenoblade Chronicles 3: about 9,400 driver mappings in its first area, 2,216 of them 172 KB). Images up to
@@ -1657,8 +1668,14 @@ static void begin_segment(int continuing) {
     pthread_mutex_lock(&g_sub_lock);
     // the next slot of the ring (g_cur is -1 between submissions, so it cannot say where the ring is: every submission took slot 0 and waited in slot_recycle
     // for the one before to finish on the GPU, which kept the replay of a frame from overlapping the GPU work of the last)
-    static int next; g_cur = next; next = (next + 1) % NSLOT; vksub_t *s = &g_slot[g_cur];
+    static int next; int slot = next; next = (next + 1) % NSLOT; vksub_t *s = &g_slot[slot];
     slot_recycle(s);
+    // Do not publish a recycled slot (or its future fence) until the old
+    // submission and command-buffer/descriptor reset have completed.
+    pthread_mutex_lock(&g_df_mu);
+    vk_retire_begin(&g_df, g_fence + 1);
+    g_cur = slot;
+    pthread_mutex_unlock(&g_df_mu);
     s->npost = 0; s->up_used = 0; s->ngw = 0;
     { const char *e = getenv("DM_VK_POOL_READBACK_RANGES"); s->readback_ranges = e && atoi(e); }
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
@@ -1967,7 +1984,13 @@ static void *completion_main(void *a) {
     }
     return NULL;
 }
-static void completion_start(void) { pthread_t t; if (pthread_create(&t, NULL, completion_main, NULL)) die("[vk] completion thread"); pthread_detach(t); }
+static void completion_start(void) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, completion_main, NULL)) die("[vk] completion thread");
+    pthread_detach(t);
+    if (pthread_create(&t, NULL, df_main, NULL)) die("[vk] resource retirement thread");
+    pthread_detach(t);
+}
 
 // DM_VK_MEMLOG=<s>: every s seconds a line with the process's memory (/proc/self/status: resident anonymous / file / shared, swapped), the system's (/proc/meminfo, memory pressure
 // from /proc/pressure/memory) and the pools made zero-copy (hardware buffers: never swapped) or copied. Android's low-memory killer ends a game with SIGKILL and nothing in its log;
