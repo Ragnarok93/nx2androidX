@@ -7,6 +7,7 @@
 // Producers: the replay thread and the present thread (its blits into its own pool) at once: each record is written under a spinlock
 #include "gfx_vk.h"
 #include <sched.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -24,32 +25,86 @@ DQ_CMDS(DQ_REAL) DQ_SYNC(DQ_REAL)
 #define DQ_OP(f) OP_##f,
 enum { OP_WRAP, DQ_CMDS(DQ_OP) OP_N };
 
-// ---- the queue: one producer, one consumer; positions count bytes since the start (the ring index is position % RING), records 16-byte aligned ----
+// ---- the queue: two serialized producers, one consumer; positions count bytes since the start (the ring index is position % RING), records 16-byte aligned ----
 enum { RING = 32 << 20 };
 typedef struct { uint32_t op, size; VkCommandBuffer cb; } rec_hdr;   // size: the whole record, header included
 static uint8_t *g_ring; static uint64_t g_w;   // the producer's write position
 static _Atomic uint64_t g_pub, g_rd;           // published end, the recorder's read position
-static _Atomic int g_sleeping, g_draining;
+static _Atomic int g_sleeping;
+// Earliest armed completion target. A broadcast disarms all targets; each
+// still-incomplete waiter rearms under g_mu before sleeping again.
+static _Atomic uint64_t g_drain_target = UINT64_MAX;
+static uint64_t g_drain_waiter_id, g_drain_notify_seq;
+static unsigned g_drain_waiters;
 static pthread_spinlock_t g_pl;   // the producers' lock, from rec_begin to rec_end
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER, g_dcv = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER, g_dcv;
 static int g_on;
-uint64_t g_dq_recs, g_dq_drains, g_dq_direct;   // records queued, drains, calls made directly (unknown arguments)
+_Atomic uint64_t g_dq_recs, g_dq_drains, g_dq_direct;   // records queued, drains, calls made directly (unknown arguments)
 
 static void wake(void) { if (atomic_load(&g_sleeping)) { pthread_mutex_lock(&g_mu); pthread_cond_signal(&g_cv); pthread_mutex_unlock(&g_mu); } }
+static int dq_drain_cv_init(void) {
+    pthread_condattr_t attr;
+    int rc = pthread_condattr_init(&attr);
+    if (rc) return rc;
+    rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    if (!rc) rc = pthread_cond_init(&g_dcv, &attr);
+    pthread_condattr_destroy(&attr);
+    return rc;
+}
+// The recorder publishes completion before checking the armed target. The
+// waiter arms before rechecking completion. Both pairs are seq_cst, so at
+// least one observes the other; the mutex closes the check-to-sleep window.
+static void drain_notify(uint64_t completed) {
+    if (completed < atomic_load(&g_drain_target)) return;
+    pthread_mutex_lock(&g_mu);
+    if (completed >= atomic_load(&g_drain_target)) {
+        atomic_store(&g_drain_target, UINT64_MAX);
+        ++g_drain_notify_seq;
+        pthread_cond_broadcast(&g_dcv);
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+static struct timespec drain_deadline(void) {
+    struct timespec dl;
+    clock_gettime(CLOCK_MONOTONIC, &dl);
+    ++dl.tv_sec;
+    return dl;
+}
 void vk_dq_drain(void) {
     if (!g_on) return;
-    pthread_spin_lock(&g_pl); uint64_t w = g_w; pthread_spin_unlock(&g_pl);   // the records queued so far (another producer may add more meanwhile)
+    pthread_spin_lock(&g_pl); uint64_t w = g_w; pthread_spin_unlock(&g_pl);
     if (atomic_load_explicit(&g_rd, memory_order_acquire) >= w) return;
-    g_dq_drains++; wake();
-    for (int i = 0; i < 2000 && atomic_load_explicit(&g_rd, memory_order_acquire) < w; i++) sched_yield();   // the recorder is usually a few calls behind
+    atomic_fetch_add_explicit(&g_dq_drains, 1, memory_order_relaxed);
+    wake();
+    for (int i = 0; i < 2000 && atomic_load_explicit(&g_rd, memory_order_acquire) < w; i++) sched_yield();
     if (atomic_load_explicit(&g_rd, memory_order_acquire) >= w) return;
-    pthread_mutex_lock(&g_mu); atomic_store(&g_draining, 1);
-    while (atomic_load_explicit(&g_rd, memory_order_acquire) < w) { pthread_cond_signal(&g_cv);
-        struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 1;
-        if (pthread_cond_timedwait(&g_dcv, &g_mu, &dl)) { uint64_t rd = atomic_load(&g_rd); const rec_hdr *h = (const rec_hdr *)(g_ring + rd % RING); static int n;
-            if (n++ < 20) VKLOG("[RED] two-stage replay: a drain waits over 1 s: written %llu, published %llu, read %llu; the record there: op %u size %u",
-                (unsigned long long)w, (unsigned long long)atomic_load(&g_pub), (unsigned long long)rd, h->op, h->size); } }
-    atomic_store(&g_draining, 0); pthread_mutex_unlock(&g_mu);
+    pthread_mutex_lock(&g_mu);
+    uint64_t waiter = ++g_drain_waiter_id;
+    ++g_drain_waiters;
+    struct timespec dl = drain_deadline();
+    while (atomic_load(&g_rd) < w) {
+        if (w < atomic_load(&g_drain_target)) atomic_store(&g_drain_target, w);
+        if (atomic_load(&g_rd) >= w) break;
+        uint64_t seq = g_drain_notify_seq;
+        pthread_cond_signal(&g_cv);
+        int rc = pthread_cond_timedwait(&g_dcv, &g_mu, &dl);
+        if (rc == ETIMEDOUT) {
+            uint64_t rd = atomic_load(&g_rd); static unsigned n;
+            // Never inspect the current ring header: at this cursor it may
+            // already have been freed/reused, even when the target retired.
+            if (n < 20) { ++n;
+                VKLOG("[perf] two-stage replay drain timeout: %s waiter %llu target %llu published %llu completed %llu notifications %llu->%llu waiters %u",
+                    rd >= w ? "target already retired" : "recording incomplete",
+                    (unsigned long long)waiter, (unsigned long long)w,
+                    (unsigned long long)atomic_load(&g_pub), (unsigned long long)rd,
+                    (unsigned long long)seq, (unsigned long long)g_drain_notify_seq, g_drain_waiters);
+            }
+            dl = drain_deadline();
+        } else if (rc) die("[vk] recorder drain condition wait");
+    }
+    if (!--g_drain_waiters) atomic_store(&g_drain_target, UINT64_MAX);
+    pthread_mutex_unlock(&g_mu);
 }
 static void *rec_begin(uint32_t op, VkCommandBuffer cb, size_t n) {   // room for a record with n bytes after its header
     size_t need = (sizeof(rec_hdr) + n + 15) & ~(size_t)15;   // 16-byte records: the ring's end always has room for a whole header
@@ -58,14 +113,14 @@ static void *rec_begin(uint32_t op, VkCommandBuffer cb, size_t n) {   // room fo
     size_t off = (size_t)(g_w % RING);
     if (off + need > RING) {   // the rest of the ring is skipped
         while (g_w + (RING - off) - atomic_load_explicit(&g_rd, memory_order_acquire) > RING) { wake(); sched_yield(); }
-        rec_hdr *h = (rec_hdr *)(g_ring + off); h->op = OP_WRAP; h->size = (uint32_t)(RING - off); g_w += RING - off; atomic_store_explicit(&g_pub, g_w, memory_order_release); off = 0;
+        rec_hdr *h = (rec_hdr *)(g_ring + off); h->op = OP_WRAP; h->size = (uint32_t)(RING - off); g_w += RING - off; atomic_store(&g_pub, g_w); off = 0;
     }
     while (g_w + need - atomic_load_explicit(&g_rd, memory_order_acquire) > RING) { wake(); sched_yield(); }
     rec_hdr *h = (rec_hdr *)(g_ring + off); h->op = op; h->size = (uint32_t)need; h->cb = cb;
     return h + 1;
 }
 static void rec_end(void *payload) {
-    rec_hdr *h = (rec_hdr *)payload - 1; g_w += h->size; g_dq_recs++;
+    rec_hdr *h = (rec_hdr *)payload - 1; g_w += h->size; atomic_fetch_add_explicit(&g_dq_recs, 1, memory_order_relaxed);
     atomic_store(&g_pub, g_w);   // (seq_cst, against the recorder's sleep flag: either it sees this record or this sees it asleep)
     pthread_spin_unlock(&g_pl);
     wake();
@@ -165,27 +220,30 @@ static void run(const rec_hdr *h) {
     }
 }
 static void *recorder_main(void *arg) {
-    (void)arg; pthread_setname_np(pthread_self(), "vk record"); uint64_t r = 0;
+    (void)arg; pthread_setname_np(pthread_self(), "vk record"); uint64_t r = atomic_load(&g_rd);
     for (;;) {
         uint64_t pub = atomic_load(&g_pub);
         if (r == pub) {
             for (int i = 0; i < 200 && (pub = atomic_load(&g_pub)) == r; i++) sched_yield();   // the producer usually queues the next call within microseconds
             if (pub == r) {
                 pthread_mutex_lock(&g_mu);
-                if (atomic_load(&g_draining)) pthread_cond_broadcast(&g_dcv);
                 atomic_store(&g_sleeping, 1);
                 while ((pub = atomic_load(&g_pub)) == r) pthread_cond_wait(&g_cv, &g_mu);
                 atomic_store(&g_sleeping, 0); pthread_mutex_unlock(&g_mu);
             }
         }
-        while (r != pub) { const rec_hdr *h = (const rec_hdr *)(g_ring + r % RING); run(h); r += h->size; atomic_store_explicit(&g_rd, r, memory_order_release); }
-        if (atomic_load(&g_draining)) { pthread_mutex_lock(&g_mu); pthread_cond_broadcast(&g_dcv); pthread_mutex_unlock(&g_mu); }
+        while (r != pub) {
+            const rec_hdr *h = (const rec_hdr *)(g_ring + r % RING);
+            run(h); r += h->size;
+            atomic_store(&g_rd, r);
+            drain_notify(r);
+        }
     }
     return NULL;
 }
 
 // ---- the wrappers (the producer) ----
-#define DIRECT(f, ...) do { vk_dq_drain(); g_dq_direct++; r_##f(__VA_ARGS__); } while (0)
+#define DIRECT(f, ...) do { vk_dq_drain(); atomic_fetch_add_explicit(&g_dq_direct, 1, memory_order_relaxed); r_##f(__VA_ARGS__); } while (0)
 #define BEGIN(op, T, extra) uint8_t *base_ = rec_begin(op, cb, sizeof(T) + (extra)); if (!base_) goto direct; T *a = (T *)base_; uint8_t *at_ = base_ + sizeof(T)
 static VKAPI_ATTR void VKAPI_CALL w_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags src, VkPipelineStageFlags dst, VkDependencyFlags dep, uint32_t nm, const VkMemoryBarrier *m,
                                                          uint32_t nb, const VkBufferMemoryBarrier *b, uint32_t ni, const VkImageMemoryBarrier *im) {
@@ -317,8 +375,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL w_vkDeviceWaitIdle(VkDevice d) { vk_dq_dra
 
 void vk_dq_init(void) {   // vk_init, after the device's entry points are loaded
     const char *e = getenv("DM_VK_MT_REPLAY"); if (!(e && atoi(e) > 0)) return;
-    pthread_spin_init(&g_pl, PTHREAD_PROCESS_PRIVATE);
-    if (!(g_ring = malloc(RING))) { VKLOG("[RED] DM_VK_MT_REPLAY: no memory for the queue; recording on the replay thread"); return; }
+    if (pthread_spin_init(&g_pl, PTHREAD_PROCESS_PRIVATE)) { VKLOG("[RED] DM_VK_MT_REPLAY: producer lock initialization failed"); return; }
+    if (!(g_ring = malloc(RING))) { pthread_spin_destroy(&g_pl); VKLOG("[RED] DM_VK_MT_REPLAY: no memory for the queue; recording on the replay thread"); return; }
+    int rc = dq_drain_cv_init();
+    if (rc) {
+        free(g_ring); g_ring = NULL; pthread_spin_destroy(&g_pl);
+        VKLOG("[RED] DM_VK_MT_REPLAY: monotonic drain condition initialization failed (%d)", rc);
+        return;
+    }
 #define DQ_SWAP(f) r_##f = f; if (r_##f) f = w_##f;
     DQ_CMDS(DQ_SWAP) DQ_SYNC(DQ_SWAP)
     g_on = 1;

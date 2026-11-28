@@ -9,7 +9,7 @@ Primary target: FFR 1.0.1, S25 FE, Xclipse 940 RADV cc87fdf712, 8 GB, internal s
 | Milestone | State |
 | --- | --- |
 | M0 | Partial: focused recorder regression reproduced; full correlated instrumentation and trace replay outstanding |
-| M1 | Not started: production unchanged |
+| M1 | Partial: recorder synchronization fix, focused host RED/GREEN and stress cases; full native/CI validation outstanding |
 | M2 | Not started |
 | M3 | Not started |
 | M4 | Not started |
@@ -76,3 +76,23 @@ Additional corroborating source observations at the audited runtime:
 - gfx_vk_source_continuity.h:39-40 treats a gap greater than 250 ms as a pause, rather than an explicit lifecycle event.
 
 M0 remains partial: no runtime instrumentation landed and no capture was replayed. No M1-M8 production fix or full host/device/build acceptance is claimed. Next action remains correlated instrumentation, then recorder synchronization fix. Preserve the two independent red reproducers and keep a separate trace for genuine WSI backpressure.
+
+## M1a: scoped multi-waiter recorder repair
+
+Previous checkpoint: `c70a7ca5bd40c700e97c6d1cf4d58be4016f58ce`. Ordering decision: M0's focused drain regression is established, so fix that independently verified defect now, before completing the broader M0 cross-stage instrumentation. No other runtime behavior changes. M0 remains open; do not mark M1 complete without full native and integration verification.
+
+Changed gfx_vk_dq.c and extended the existing host reproducer. Earliest armed 64-bit target replaces the shared Boolean. Recorder publishes completion and checks armed target with seq_cst atomics; a reached target broadcasts under g_mu and disarms, then incomplete waiters rearm under that mutex. Each waiter rechecks its own predicate after arming and before sleep. No unconditional per-record mutex acquisition. Keep ordered producers and existing Vulkan wrappers. Wrap-marker publication uses the same seq_cst sleep handshake as normal records. Monotonic condition-variable initialization occurs before enabling MT replay; error paths leave the existing single-thread fallback only for initialization failure. Counters are atomic and timeout diagnostics report waiter, target, publication/completion and notification sequence without dereferencing potentially recycled ring memory.
+
+RED: same harness default against copied audited queue/recorder source: exit 1, completed 32, first_timeouts 0, second_timeouts 1.
+GREEN: python3 devtools/reproduce_dq_drain.py --source /tmp/ffr-fixed/nxnative/dm/android/gfx_vk_dq.c --stress, exit 0. Six scenarios:
+- staggered: completed 32, both timeouts 0;
+- equal targets with injected spurious broadcast: completed 16, both timeouts 0;
+- wrap: completed 5402263600, both timeouts 0;
+- saturation: completed 41943040, timeouts 0;
+- suspended publication: completed 16, timeouts 0;
+- intentional blocked recording: one true timeout, target 16, published 16, completed 0, notifications 0->0, then prompt retirement after release.
+Previous five non-timeout cases also passed 10 consecutive runs (50 cases).
+
+Local source was manually copied from the GitHub revision and transformed identically for the exercised queue and recorder sections. Actual Vulkan wrapper signatures, startup integration, Android link, full host suite, hardware and overhead benchmarks are unverified; do not claim full milestone acceptance. Remaining risk: additional seq_cst load/check per record, Android libc clock support, unrelated external synchronization and device wait behavior. No changes to game data or shader bundle.
+
+Next: finish M0 correlated runtime instrumentation and trace replay when available, run full host and native build on this M1 checkpoint, then implement M2 target-aware scheduling. Preserve chronological interpolation and existing two-graph memory limits.
