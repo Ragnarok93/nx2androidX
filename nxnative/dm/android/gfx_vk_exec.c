@@ -704,7 +704,7 @@ static int pass_dump_limit(void) {
 #include "gfx_vk_input_capture.inc"
 static int g_input_collect_descriptors;
 // Replay-local and scoped to descriptor collection for one draw.
-static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_ok, g_guest_uniform_ok;
+static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_caps, g_guest_uniform_ok;
 static int g_guest_filter_bound, g_guest_sharpness_bound;
 static uint64_t g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
 static uint64_t g_guest_rejected_submit, g_guest_clear_revision = 1;
@@ -2463,7 +2463,7 @@ static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest
     case RS_UBO: sid = (int)(mem_handle(ubo_word(st, b->samp_arg & 0xff, b->samp_arg >> 8) & ~0xfffffull) >> 20); break;
     default: break;
     }
-    VkSampler vk_samp_by_id_nearest(int sid), vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size, int *linear); uint64_t mtl_samp_seq(void);
+    VkSampler vk_samp_by_id_nearest(int sid), vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size, int *guest_caps); uint64_t mtl_samp_seq(void);
     if (!g_samp_snap || seq >= mtl_samp_seq()) seq = 0;   // no registration since the bind: the newest (the cached lookups)
     VkSampler s;
     int guest = st == 1 && b->binding == 1 && !element && g_guest_filter_check;
@@ -2471,7 +2471,7 @@ static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest
     if (collect || guest) {
         char description[240];
         s = vk_samp_at(sid, seq, nearest, collect ? description : NULL, sizeof description,
-                       guest ? &g_guest_sampler_ok : NULL);
+                       guest ? &g_guest_sampler_caps : NULL);
         if (collect) input_capture_descriptor("graphics-sampler", st, b->binding, element,
                                  (VkDescriptorBufferInfo){0}, description);
     } else s = !sid ? VK_NULL_HANDLE : seq ? vk_samp_at(sid, seq, nearest, NULL, 0, NULL)
@@ -3648,7 +3648,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     VkDescriptorSet sets[5] = {0};
     uint32_t dofs[5][96], ndofs = 0, dall[3 * 96];
     uint64_t t1d = tick();
-    g_guest_source_ok = g_guest_sampler_ok = g_guest_uniform_ok = 0;
+    g_guest_source_ok = g_guest_sampler_caps = g_guest_uniform_ok = 0;
     g_guest_scene.image = VK_NULL_HANDLE;
     int guest_mode = S.sh[1] && S.sh[1]->guest_filter_certified ? dm_spatial_mode() : SP_NATIVE;
     g_guest_filter_check = guest_mode != SP_NATIVE && spatial_mode_valid(guest_mode) &&
@@ -3666,13 +3666,19 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
         if (g_rs_replay && !sets[S.sh[st]->set]) { g_input_collect_descriptors = g_guest_filter_check = 0; g_vkst.skip_rt++; return 0; } }
     const char *guest_rejection = NULL;
     const int trace_guest = S.sh[1] && (g_x_logfs == S.sh[1]->key || S.sh[1]->guest_filter_certified);
-    int guest_admitted = g_guest_filter_check && g_guest_source_ok && g_guest_sampler_ok && g_guest_uniform_ok;
-    if (trace_guest && !guest_admitted) {
+    int guest_proven = g_guest_filter_check && g_guest_source_ok && g_guest_uniform_ok;
+    int guest_temporal = guest_proven && guest_mode==SP_SGSR2 &&
+        (g_guest_sampler_caps&SP_GUEST_COLOR_SAMPLE) && g_guest_scene.image &&
+        defer_pass && S.pass_open==2 && P_ri.layerCount==1 &&
+        P_ca[0].storeOp==VK_ATTACHMENT_STORE_OP_STORE;
+    int guest_admitted = guest_proven &&
+        (g_guest_sampler_caps&SP_GUEST_LINEAR_CLAMP);
+    if (trace_guest && !guest_admitted && !guest_temporal) {
         if (!S.sh[1]->guest_filter_certified) guest_rejection = "fragment certificate";
         else if (guest_mode != SP_NATIVE) {
             if (!g_guest_filter_check) guest_rejection = "pipeline or attachment state";
             else if (!g_guest_source_ok) guest_rejection = "current source proof or view";
-            else if (!g_guest_sampler_ok) guest_rejection = "linear clamp sampler";
+            else if (!(g_guest_sampler_caps&SP_GUEST_LINEAR_CLAMP)) guest_rejection = "linear clamp sampler";
             else if (!g_guest_uniform_ok) guest_rejection = "fragment uniform binding";
         }
     }
@@ -3682,14 +3688,14 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
         if (g_pass_wmem || shader_wmem(S.sh[0]) || shader_wmem(fs) || shader_wmem(S.sh[2]) || order_feedback(3)) {
             // Descriptors were proven against the old pass. A harmless
             // order-only barrier can keep them; a pass split must fall back.
-            if (guest_admitted) guest_rejection = "attachment ordering split the pass";
-            guest_admitted = 0;
+            if (guest_admitted || guest_temporal) guest_rejection = "attachment ordering split the pass";
+            guest_admitted = guest_temporal = 0;
             g_order_ended++; vk_end_pass(); vk_img_barrier_all(vk_cmd());
             if (!begin_draw_pass()) { g_vkst.skip_rt++; return 0; }
             cb = vk_cmd();
         } else g_order_kept++;
     }
-    if (guest_admitted) k.guest_filter = guest_mode == SP_SGSR2 ? SP_SGSR1 : guest_mode;
+    if (guest_admitted) k.guest_filter = spatial_guest_replay_mode(guest_mode,g_guest_sampler_caps,0);
     uint64_t tdesc = tick() - t1d; g_vkst.ns_desc += tdesc; if (g_prof_on) g_prof_ns[5] += tdesc;
     if (g_tracing) {
         VKLOG("  pipeline: topology %u restart %u discard %u cull %u front %u mode %u clamp %u bias %u; depth test %u write %u func %u stencil %u; attributes %u bindings %u; colour %u (format %u) samples %u a2c %u; blend enable %#x logic %u/%u; fragment depth variant %u (depth written by a shader at present %llu, now %llu)",
@@ -3705,13 +3711,17 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     VkDescriptorSet temporal_set = VK_NULL_HANDLE;
     VkPipelineLayout guest_layout = VK_NULL_HANDLE;
     VkPipeline p = VK_NULL_HANDLE;
-    if (defer_pass && S.pass_open == 2 && guest_mode == SP_SGSR2 && k.guest_filter &&
-        g_guest_scene.image && P_ri.layerCount == 1 && P_ca[0].storeOp == VK_ATTACHMENT_STORE_OP_STORE) {
-        k.guest_filter = SP_SGSR2;
+    if (guest_temporal) {
+        k.guest_filter = spatial_guest_replay_mode(guest_mode,g_guest_sampler_caps,1);
         guest_layout = guest_spatial_layout(dsl, 1);
         p = guest_layout ? graphics_pipeline(&k, guest_layout) : VK_NULL_HANDLE;
         if (p) temporal_set = guest_flow_record(cb, k.key[0] ^ k.key[1]);
-        if (!temporal_set) { p = VK_NULL_HANDLE; k.guest_filter = SP_SGSR1; }
+        if (!temporal_set) {
+            p = VK_NULL_HANDLE;
+            k.guest_filter = guest_admitted ?
+                spatial_guest_replay_mode(guest_mode,g_guest_sampler_caps,0) : SP_NATIVE;
+            if (!k.guest_filter) guest_rejection = "temporal unavailable; original sampler requires native fallback";
+        }
     }
     if (!p) {
         guest_layout = k.guest_filter > SP_BILINEAR ? guest_spatial_layout(dsl, 0) : layout;

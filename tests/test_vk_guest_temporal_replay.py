@@ -197,6 +197,29 @@ static void submission_ownership(void) {
     assert(!guest_flow.ctx && guest_flow.epoch == 1 && drops == 1 && query_drops == 1);
 }
 
+static void sampler_contracts(void) {
+    int caps=spatial_guest_sampler_caps(0);
+    assert(caps==(SP_GUEST_COLOR_SAMPLE|SP_GUEST_LINEAR_CLAMP));
+    assert(spatial_guest_replay_mode(SP_SGSR2,caps,1)==SP_SGSR2);
+    assert(spatial_guest_replay_mode(SP_SGSR2,caps,0)==SP_SGSR1);
+    // Valid ordinary color samplers with other filtering/addressing:
+    // independent temporal snapshot allowed, spatial guest taps refused.
+    for(unsigned bit=8;bit<=64;bit*=2) {
+        caps=spatial_guest_sampler_caps(bit);
+        assert(caps==SP_GUEST_COLOR_SAMPLE);
+        assert(spatial_guest_replay_mode(SP_SGSR2,caps,1)==SP_SGSR2);
+        assert(spatial_guest_replay_mode(SP_SGSR2,caps,0)==SP_NATIVE);
+        assert(spatial_guest_replay_mode(SP_FSR1,caps,0)==SP_NATIVE);
+        assert(spatial_guest_replay_mode(SP_SGSR1,caps,0)==SP_NATIVE);
+        assert(spatial_guest_replay_mode(SP_BILINEAR,caps,0)==SP_NATIVE);
+    }
+    const unsigned invalid[]={1,2,4,128,256};
+    for(unsigned i=0;i<sizeof invalid/sizeof *invalid;i++) {
+        caps=spatial_guest_sampler_caps(invalid[i]|32);
+        assert(!caps && spatial_guest_replay_mode(SP_SGSR2,caps,1)==SP_NATIVE);
+    }
+}
+
 static void memo_clear_revision(void) {
     vkshader_t s = {.ndyn = 1};
     uint32_t offsets[1] = {0};
@@ -210,6 +233,7 @@ static void memo_clear_revision(void) {
 
 int main(void) {
     source_proof();
+    sampler_contracts();
     memo_clear_revision();
     submission_ownership();
     return 0;

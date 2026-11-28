@@ -5,6 +5,7 @@
 //   dirty-page tracker saw a write to its pages; any other texture is the GPU's (render targets, images), filled only by GPU work.
 //   Version 1 keeps every image in VK_IMAGE_LAYOUT_GENERAL after its first use, ordered by whole-pipeline barriers.
 #include "gfx_vk.h"
+#include "spatial_upscaler.h"
 #include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_d24_copy.h"
 #include "gfx_vk_resolution_budget.h"
@@ -2078,7 +2079,7 @@ static const samp_par *samp_at(int sid, uint64_t seq) {   // under g_rmu: the ve
     for (int k = 0; k < SREG_OLD; k++) if (o[k].seq && o[k].seq <= seq) return &o[k].p;
     return &g_sreg[sid];   // older than what is kept: the newest
 }
-VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size, int *linear) {   // the sampler a bind made after seq registrations sees (gfx_vk_exec.c samp_for)
+VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size, int *guest_caps) {   // the sampler a bind made after seq registrations sees (gfx_vk_exec.c samp_for)
     pthread_mutex_lock(&g_rmu);
     VkSampler s = VK_NULL_HANDLE; const samp_par *q = samp_at(sid, seq);
     if (q) { samp_par p = *q;
@@ -2089,8 +2090,9 @@ VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size
             p.ws, p.wt, p.wr, p.minf, p.magf, p.lod_min, p.lod_max, p.lod_bias, p.aniso,
             p.cmp_mode, p.cmp_func, p.reduction, p.border[0], p.border[1], p.border[2], p.border[3]);
     }
-    if (linear) {
-        // Keep the certificate unchanged. Report the actual sampler resolved
+    if (guest_caps) {
+        // Distinguish independent temporal input from the stricter spatial
+        // sampler contract. Report the actual sampler resolved
         // at the bind's sequence while still holding the registration lock.
         unsigned refusal=(!s?1u:0u)|(!q?2u:0u)|(nearest?4u:0u);
         if(q) {
@@ -2102,7 +2104,7 @@ VkSampler vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size
             if(q->cmp_mode)refusal|=128u;
             if(q->reduction)refusal|=256u;
         }
-        *linear=refusal==0;
+        *guest_caps=spatial_guest_sampler_caps(refusal);
         if(refusal) {
             static unsigned logged;
             static struct {int sid,nearest;unsigned refusal;uint64_t seq;} seen[16];
