@@ -13,12 +13,13 @@ class PresentPath(unittest.TestCase):
         code=r'''
 #include <assert.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <pthread.h>
 typedef uintptr_t VkImage;
 typedef struct {VkImage img;int fmt;} vkimg_t;
 static int g_sfmt=37;
 static int fail,created,detached,logs;
-static int g_present_thread_started;
+static _Atomic int g_present_thread_started;
 static void *present_thread(void *arg){return arg;}
 static int create(pthread_t *t,const pthread_attr_t *a,void *(*fn)(void *),void *arg){
     (void)t;(void)a;(void)fn;(void)arg;++created;return fail?11:0;

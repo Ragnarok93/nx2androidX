@@ -148,3 +148,7 @@ Prior checkpoint `25fd7feb4cbff1dd218b1cc32756f4a11159e411`. Verified NVN acquir
 RED/GREEN: test_vk_present_retirement.py with actual queue producer and wait functions copied locally, mocked clock/timedwait/worker. Initial harness type error corrected before RED. Expected RED exit 1, 'timeout granted an unretired texture'; same test after fix 1/1 passed in 0.068 s, exit 0. Covers timeout, spurious wake, already-retired ticket, headless no-worker, detach with in-flight ticket. Full worker, condition initialization and device behavior still require integrated CI. A driver hang can still block actual retirement; safe behavior is to keep waiting and log, not hand an in-flight texture to guest. M3a finite acquisition reduces one source of this risk; unbounded real GPU fence/driver submit/present and existing swap recreation require separate audit. M3 incomplete.
 
 Next: per-output dependency-aware display pacing and bounded latency recovery, plus pre-admission before FG GPU submission. M0 actual display and remaining instrumentation incomplete. M4–M8 not implemented. No release/tag or game data changes. Exact-head Android CI required.
+
+### M3b CI fixture follow-up
+
+- Run `46137558011`: host suite ran 72 tests, 71 passed; `test_exact_copy_and_worker_start` failed to compile because its extracted worker fixture lacked `<stdatomic.h>` and declared the startup flag as plain `int`. Align fixture with production atomic flag; no runtime behavior change. Full CI rerun pending. Earlier M1 and M2a runs `46136561472` and `46136854113` completed successfully.
