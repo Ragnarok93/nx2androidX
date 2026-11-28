@@ -15,6 +15,7 @@
 #include "gfx_vk_pool_restore.h"
 #include "gfx_vk_retire_queue.h"
 #include "gfx_vk_fg_pressure.h"
+#include "spatial_upscaler.h"
 #include "gfx_vk_quality_recovery.h"
 #include <android/hardware_buffer.h>
 #include <dlfcn.h>
@@ -625,7 +626,7 @@ static int fg_thermal_status(void) {
 static void fg_pressure_publish(uint64_t available_kb) {
     extern int dm_fg_adaptive_auto_selected(void);
     extern int vk_pass_dump_user_active(void);
-    if(!dm_fg_adaptive_auto_selected()&&!vk_pass_dump_user_active())return;
+    if(!dm_fg_adaptive_auto_selected()&&!vk_pass_dump_user_active()&&dm_spatial_mode()!=SP_SGSR2)return;
     dm_fg_pressure s={.sampled_ns=mem_diag_ns(),
         .os_available=available_kb<=UINT64_MAX/1024?available_kb*1024:0,
         .heap_available=fg_heap_available(),.thermal=fg_thermal_status()};
