@@ -106,8 +106,8 @@ static int dm_fg_frame(vkimg_t *im,const int *rect,int flip,unsigned encoding,un
 int vk_pass_dump_user_active(void){return 1;}
 void vk_capture_scale_present(uint64_t ticket,vk_capture_scale_present_sample sample){assert(ticket);cap=sample;capture_calls++;}
 static int present_one(vkimg_t *im,VkImage src,const int *crop,VkExtent2D picture,int flip,double period,uint64_t ticket,int meta,
-                       uint64_t deadline,const char **reason){
-    (void)im;assert(present_calls<4);unsigned i=present_calls++;
+                       uint64_t deadline,const char **reason,VkFence source_dependency){
+    (void)im;(void)source_dependency;assert(present_calls<4);unsigned i=present_calls++;
     observed[i].image=src;observed[i].w=crop[2];observed[i].h=crop[3];observed[i].meta=meta;observed[i].display=picture;observed[i].flip=flip;observed[i].ticket=ticket;
     observed[i].period=period;observed[i].deadline=deadline;
     if(reason && reject_generated){*reason="generated acquire deadline";return 0;}

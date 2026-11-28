@@ -53,7 +53,7 @@ int main(void){
         start=src.index('static int present_one(')
         body=src[start:src.index('\n}',start)+2]
         self.assertLess(body.index('pace_poll();'),body.index('pthread_mutex_lock(&g_vk_queue_mu)'))
-        self.assertLess(body.index('vkQueueSubmit('),body.index('pace_desired(period)'))
+        self.assertLess(body.index('vkQueueSubmit('),body.index('pace_desired(period, dependencies_retired)'))
         self.assertLess(body.index('vkQueuePresentKHR('),body.index('pthread_mutex_unlock(&g_vk_queue_mu)',body.index('vkQueuePresentKHR(')))
         self.assertIn('if (vkBeginCommandBuffer(cb,&bi) != VK_SUCCESS)',body)
         self.assertIn('if (vkEndCommandBuffer(cb) != VK_SUCCESS)',body)

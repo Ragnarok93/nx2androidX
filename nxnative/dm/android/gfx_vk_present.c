@@ -1169,7 +1169,9 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
 // it cannot go out early. A frame that would not be ready in time moves the cadence to the first vsync it can make (a "resync": one longer frame, and from then on a vsync of
 // slack). The pause menu's redraws carry no time. DM_VK_PACE=0 (live) presents without times
 static _Atomic uint64_t g_refresh_published;
-static uint64_t g_refresh_ns, g_pace_target, g_pace_ideal, g_pace_anchor, g_pace_n, g_pace_resync, g_pace_slip; static uint32_t g_pace_id; static int g_pace_on = 1;
+static uint64_t g_refresh_ns, g_pace_target, g_pace_ideal, g_pace_anchor, g_pace_n, g_pace_resync, g_pace_slip;
+static uint64_t g_pace_horizon, g_pace_ready;
+static VkFence g_pace_last_fence; static uint32_t g_pace_id; static int g_pace_on = 1;
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 // ---- the frame generation's state, for the paths outside the present thread ----
 // The output stream's period (ns; 0 = the frame generation is off): the rate the window asks the system for, so the panel can carry the extra images. Without it the
@@ -1219,7 +1221,7 @@ void dm_present_sample(uint64_t out[5]) {
     out[3] = atomic_load_explicit(&g_hud_span_n, memory_order_relaxed);
     out[4] = vk_refresh_cycle_ns();
 }
-static void pace_reset(void) { g_pace_target = g_pace_ideal = g_pace_anchor = g_refresh_ns = 0; atomic_store(&g_refresh_published,0); }
+static void pace_reset(void) { g_pace_target = g_pace_ideal = g_pace_anchor = g_refresh_ns = 0; g_pace_last_fence = VK_NULL_HANDLE; atomic_store(&g_refresh_published,0); }
 static uint64_t pace_snap(uint64_t t) {   // the first vsync at or after t on the grid through the anchor
     return vk_pace_snap(t,g_refresh_ns,g_pace_anchor);
 }
@@ -1254,16 +1256,23 @@ static void pace_poll(void) {
         }
 }
 // Compute the deadline after queue submission, using the polled display grid.
-static uint64_t pace_desired(double period) {
+static uint64_t pace_desired(double period, int dependencies_retired) {
     if (!V.has_dtiming || !g_swap) return 0;
     g_pace_n++;
     if (g_pace_n % 600 == 0) VKLOG("[perf] display timing: %llu frames, %llu resyncs, %llu shown a vsync or more after their time (cumulative)%s",
                                    (unsigned long long)g_pace_n, (unsigned long long)g_pace_resync, (unsigned long long)g_pace_slip, g_pace_on ? "" : "; off (DM_VK_PACE=0)");
-    if (!g_pace_on || !g_refresh_ns || !g_pace_anchor || period <= 0) { g_pace_target = 0; return 0; }
+    if (g_pace_n % 600 == 0) VKLOG("[perf] display dependency pacing: %llu retired dependency estimates, %llu horizon rebases (cumulative)",
+        (unsigned long long)g_pace_ready, (unsigned long long)g_pace_horizon);
+    if (!g_pace_on || !g_refresh_ns || !g_pace_anchor || !isfinite(period) || period <= 0 || period > 1.0) { g_pace_target = g_pace_ideal = 0; return 0; }
     // The earliest vsync this frame can make: its GPU work (submitted just before), the blit, then the latch a vsync before it is shown. When the cadence's next vsync is
     // earlier, the cadence restarts half a vsync further out than that, so the next frames have room for the jitter: restarting at the earliest itself made 31 long frames
     // in 4,200 (5 shown late), and going on until the target was under a vsync away made 54 in 3,600 go out late
-    double vk_gpu_ms_recent(void); double g = vk_gpu_ms_recent(); uint64_t gpu = (uint64_t)((g > 4 ? g : 4) * 1e6) + 3000000;
+    double vk_gpu_ms_recent(void);
+    double g = dependencies_retired ? 0 : vk_gpu_ms_recent();
+    if (!isfinite(g) || g < 4) g = 4;
+    if (g > 100) g = 100;
+    uint64_t gpu = dependencies_retired ? 3000000 : (uint64_t)(g * 1e6) + 3000000;
+    if (dependencies_retired) g_pace_ready++;
     // The cadence advances unsnapped (g_pace_ideal) and only the frame's vsync is snapped: snapping each target and adding the period to it lost the fraction,
     // so a period that is not a whole number of vsyncs always rounded up (40 fps on a 60 Hz panel: 25 ms came out as 2 vsyncs every frame, 30 fps, on a Retroid Pocket 5)
     uint64_t now = mono_ns(), t = 0;
@@ -1272,6 +1281,13 @@ static uint64_t pace_desired(double period) {
         t = vk_pace_next_grid(g_pace_ideal,g_pace_target,g_refresh_ns,g_pace_anchor);
     }
     if (t < now + gpu + g_refresh_ns) { if (g_pace_target) g_pace_resync++; t = pace_snap(now + gpu + g_refresh_ns * 3 / 2); g_pace_ideal = t; }
+    // Do not add another far-future explicit deadline to a backed-up FIFO.
+    // Zero asks WSI for its earliest legal presentation, not a dropped frame.
+    if (t > now + gpu + 3*g_refresh_ns + (uint64_t)(period*1e9)) {
+        g_pace_horizon++;
+        g_pace_target = g_pace_ideal = 0;
+        return 0;
+    }
     g_pace_target = t;
     return t - g_refresh_ns / 2;
 }
@@ -1304,9 +1320,17 @@ static int present_exact_copy(const vkimg_t *im, VkImage src, int cw, int ch,
     return im && src == im->img && im->fmt == g_sfmt && !flip_y &&
         cw > 0 && ch > 0 && (uint32_t)cw == dw && (uint32_t)ch == dh;
 }
+// A signalled source/FG fence proves that private dependencies preceding it
+// retired. Also require the preceding output fence; unknown is conservative.
+// This is a timing estimate, never a substitute for Vulkan synchronization.
+static int pace_dependencies_retired(VkFence source_dependency) {
+    if (!source_dependency || vkWaitForFences(V.dev,1,&source_dependency,VK_TRUE,0)!=VK_SUCCESS) return 0;
+    return !g_pace_last_fence || g_pace_last_fence==source_dependency ||
+        vkWaitForFences(V.dev,1,&g_pace_last_fence,VK_TRUE,0)==VK_SUCCESS;
+}
 static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D picture,
                         int flip_y, double period, uint64_t ticket, int with_meta,
-                        uint64_t optional_deadline_ns, const char **optional_reason) {
+                        uint64_t optional_deadline_ns, const char **optional_reason, VkFence source_dependency) {
     int optional = optional_reason != NULL;
     if (optional) {
         *optional_reason = "generated present rejected";
@@ -1424,9 +1448,15 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     extern pthread_mutex_t g_vk_queue_mu;
     uint64_t stall_record = mono_ns();
     if (period >= 0) pace_poll();
+    int dependencies_retired = period > 0 && V.has_dtiming && g_pace_on &&
+        pace_dependencies_retired(source_dependency);
     uint64_t stall_poll=mono_ns();
     pthread_mutex_lock(&g_vk_queue_mu);
     uint64_t stall_lock = mono_ns();
+    // A later replay submission may have entered the queue since the source
+    // fence was signalled. Recheck the committed cursor under queue ownership.
+    uint64_t mtl_last_fence(void);
+    if (dependencies_retired && vk_fence_done() < mtl_last_fence()) dependencies_retired = 0;
     if (vkResetFences(V.dev,1,&g_pfence[k]) != VK_SUCCESS) {
         pthread_mutex_unlock(&g_vk_queue_mu);
         g_present_failed=1; VKLOG("[RED] presentation fence reset failed"); return 0;
@@ -1438,13 +1468,14 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
         return 0;
     }
     uint64_t stall_submit = mono_ns();
+    g_pace_last_fence = g_pfence[k];
     if (vivid) g_spatial.image[SP_DISPLAY].last_use = g_pfence[k];
     if (src == g_spatial.image[SP_OUTPUT].texture.img)
         g_spatial.image[SP_OUTPUT].last_use = g_pfence[k];
     if (src == g_spatial.image[SP_RESOLVE].texture.img)
         g_spatial.image[SP_RESOLVE].last_use = g_pfence[k];
     VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &g_done_sem[idx], 1, &g_swap, &idx, NULL};
-    VkPresentTimeGOOGLE ptm = {++g_pace_id, period >= 0 ? pace_desired(period) : 0};
+    VkPresentTimeGOOGLE ptm = {++g_pace_id, period >= 0 ? pace_desired(period, dependencies_retired) : 0};
     VkPresentTimesInfoGOOGLE pti = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, NULL, 1, &ptm};
     if (V.has_dtiming) pi.pNext = &pti;
     uint64_t stall_pace = mono_ns();
@@ -1689,7 +1720,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     const int *rect = reconstructed ? full : raw;
     if (reconstructed) flip_y = 0;
     if (redraw || period < 0) {
-        present_one(source, source->img, rect, picture, flip_y, -1, 0, 1, 0, NULL);
+        present_one(source, source->img, rect, picture, flip_y, -1, 0, 1, 0, NULL, VK_NULL_HANDLE);
         return;
     }
 
@@ -1776,18 +1807,19 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
                          g_spatial.measured_stage_ms[2], g_spatial.measured_stage_ms[3]},
         };
     }
+    VkFence source_dependency = fg_fence ? fg_fence : real_image ? real_image->last_use : VK_NULL_HANDLE;
     int generated_rect[4] = {0, 0, rect[2], rect[3]};
     int accepted_generated = 0;
     const char *optional_reason = NULL;
     uint64_t optional_deadline = dm_present_optional_deadline(source_ns, hold, (unsigned)ng);
     for (int g = 0; g < ng; g++) {
         if (!present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0,
-                         optional_deadline, &optional_reason)) break;
+                         optional_deadline, &optional_reason, source_dependency)) break;
         ++accepted_generated;
     }
     double real_period = dm_present_real_period(period, hold, (unsigned)ng, (unsigned)accepted_generated);
     int accepted_real = present_one(source, source->img, rect, picture, flip_y,
-                                    real_period, ticket, 1, 0, NULL);
+                                    real_period, ticket, 1, 0, NULL, source_dependency);
     // Shadow decisions use only completed timing and actual accepted batches.
     // Require a recent matching reconstruction measurement when it ran.
     extern double vk_gpu_ms_recent(void);

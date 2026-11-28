@@ -33,7 +33,7 @@ class PresentAdmission(unittest.TestCase):
 #define VK_ERROR_SURFACE_LOST_KHR (-1000000000)
 #define VKLOG(...) ((void)0)
 #define VKRED_ONCE(...) ((void)0)
-typedef int VkImage, VkResult, vkimg_t;
+typedef int VkImage, VkResult, vkimg_t, VkFence;
 typedef struct {uint32_t width,height;} VkExtent2D;
 static struct {int dev;} V;
 static int g_present_failed,g_swap=1,g_pfence[8],g_acq[8];
@@ -64,7 +64,7 @@ static int vkAcquireNextImageKHR(int d,int sw,uint64_t timeout,int s,int f,uint3
 static int attempt(int generated,uint64_t deadline,const char **why){
     int crop[4]={0,0,1920,1080};
 #ifdef NEW_ADMISSION
-    return present_one(NULL,1,crop,g_sext,0,1./120.,generated?0:42,!generated,deadline,generated?why:NULL);
+    return present_one(NULL,1,crop,g_sext,0,1./120.,generated?0:42,!generated,deadline,generated?why:NULL,VK_NULL_HANDLE);
 #else
     (void)deadline;(void)why;
     return present_one(NULL,1,crop,g_sext,0,1./120.,generated?0:42,!generated);
