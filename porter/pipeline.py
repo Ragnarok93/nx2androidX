@@ -1359,8 +1359,12 @@ class Port:
             # Reuse the bundle hash just validated by the shader stage. Avoid
             # rereading a large bundle merely to validate the small index.
             source = json.loads(shader_receipt.read_text(encoding='utf-8'))
-            self.shader_product = shader_provenance.describe(self.dmsv, source)
-            bundle_sha256 = self.shader_product['sha256']
+            product = shader_provenance.describe(self.dmsv, source)
+            if 'dmsv_header' not in source:
+                source['dmsv_header'] = product['header']
+                product_cache.write_json(shader_receipt, source)
+            self.shader_product = product
+            bundle_sha256 = product['sha256']
             analyzer = Path(temporal_shader_index.__file__)
             key = nsp.fingerprint(bundle_sha256, ('files', [analyzer, Path(resolution_meta.__file__)]))
             if product_cache.reused(receipt, key, output) is None:

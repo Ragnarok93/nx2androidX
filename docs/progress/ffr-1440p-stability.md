@@ -49,3 +49,7 @@ Prior combined CI and signed APK workflows passed at 42ff776. The Graphics menu 
 ## Checkpoint 9 — shader-product provenance
 
 Carry the validated DMSV product receipt key, recorded SHA-256, header, size and translation completeness into newly generated data manifests. Runtime-only upgrades check the existing bundle header/size against recorded provenance and reject missing or structurally mismatched bundles. No full bundle reread or mandatory translation on a runtime upgrade; legacy manifests continue to use the original structural checks. The receipt key includes translation inputs, not a declared incompatible shader ABI; it is not compared blindly with a newer translator. Recorded digest is identity, not a fresh hash of the upgrade payload. Tests cover valid, legacy, missing and mismatched cases.
+
+## Checkpoint 10 — provenance fast-path repair
+
+APK CI at 81d2f39 failed two existing zero-read shader cache assertions. Persist the validated DMSV header in the same content receipt on first use; subsequent reuse reads only receipt metadata. The metadata-change path still verifies the complete digest before updating stat identity. Preserve original cache tests and assert provenance remains identical on the zero-read path.

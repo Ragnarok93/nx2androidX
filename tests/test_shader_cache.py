@@ -147,12 +147,16 @@ class ShaderCache(unittest.TestCase):
         # Exercise the POSIX metadata path even on a Windows test runner.
         with mock.patch.object(product_cache, 'os', SimpleNamespace(name='posix', fsync=os.fsync, replace=os.replace)):
             self.export()
+            product = self.p.shader_product.copy()
+            receipt = json.loads((self.p.aw / 'shaders.dmsv.key').read_text())
+            self.assertEqual(receipt['dmsv_header'], product['header'])
             original_open = Path.open
             def checked_open(path, *args, **kwargs):
                 if path == self.p.dmsv: self.fail('unchanged bundle was read again')
                 return original_open(path, *args, **kwargs)
             with mock.patch.object(Path, 'open', checked_open): self.export()
             self.assertEqual(self.exports, 1)
+            self.assertEqual(self.p.shader_product, product)
 
     def test_metadata_only_change_verified_once_then_reused(self):
         # Exercise the POSIX metadata path even on a Windows test runner.

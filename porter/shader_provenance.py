@@ -16,8 +16,17 @@ def describe(path, receipt):
         raise ValueError('shader product receipt does not match current file')
     if len(files) != 1 or files[0][:2] != [path.name, state[0]]:
         raise ValueError('shader product receipt has invalid inventory')
-    with path.open('rb') as stream:
-        header = stream.read(12)
+    # The receipt was validated by product_cache.reused/stamp, including
+    # content verification when stat identity changed. Keep the header in
+    # that same receipt so unchanged products need no file reads.
+    cached = receipt.get('dmsv_header')
+    if cached is None:
+        with path.open('rb') as stream:
+            header = stream.read(12)
+    else:
+        if not isinstance(cached, str) or not re.fullmatch(r'[0-9a-f]{24}', cached):
+            raise ValueError('invalid cached shader product header')
+        header = bytes.fromhex(cached)
     record = dict(schema=1, input_key=receipt['key'], sha256=files[0][2],
                   bytes=state[0], header=header.hex(), complete=receipt['complete'])
     validate(record, header, state[0])
