@@ -2531,7 +2531,7 @@ static void drv_segment(int st, int bank, uint8_t *d, int dyn) {
         }
     }
 }
-// Replay-local sampler memo: include the registration generation, historical bind sequence and nearest mode. A 32-slot texture array took the lock
+// vk_samp_by_id without the registry lock: key the replay-local memo by registration generation, historical bind sequence and nearest mode. A 32-slot texture array took the lock
 // per slot, a lock the game thread takes for every texture it registers (DM_NVN_ASYNC). VkSamplers are never destroyed, so a kept handle stays valid
 extern uint64_t g_samp_gen;
 static VkSampler samp_cached(int sid, uint64_t seq, int nearest) {
