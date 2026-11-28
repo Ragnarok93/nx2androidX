@@ -253,7 +253,7 @@ def refresh_in_place(dst, staging, payload, generated_files, manifest, progress=
 
 
 def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, sysdata=None, language='en-US', package=None, env=(), settings=None, files=None, text=None,
-          host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None, require_links=False, temporal_shaders=None):
+          host=None, icon=None, drivers=None, profile_h=None, pack_base=None, romfs_at=None, progress=None, require_links=False, temporal_shaders=None, shader_product=None):
     """Write the pack to dst (replacing it). profile: the AndroidProfile; package: the app's, when not the profile's; env: more env.txt rows, after the profile's; settings: settings.txt values over the profile's;
     files: {name in the pack: source} (the 60 fps memory writes, fpslock.tsv; the button-icon font; subfolders for the app's mode: host/, drivers/, overlay/, icon.png);
     text: {name in the pack: its text} (the launcher's lists: languages.txt, drivers.txt); host/icon/drivers: the app's artifacts, named in the manifest;
@@ -302,6 +302,8 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     if drivers: man['drivers'] = list(drivers)
     if profile_h: man['profile_h'] = profile_h
     if romfs_at: man['romfs_at'] = romfs_at   # the folder the RomFS is read from: the pack does not carry it, so the app checks that folder before the game runs
+    if shaders and shader_product is not None:
+        man['shader_product'] = shader_product
     man['player_api_revision'] = PLAYER_API_REVISION   # the runtime interface the pack was built against: the app rebuilds the runtime when its own revision differs
     if pack_base == '.' and not require_links and dst.is_dir() and progress:
         progress('checking the previous companion data')

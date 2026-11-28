@@ -45,3 +45,7 @@ Initial asynchronous writer native link passed; isolated capture-column test fai
 ## Checkpoint 8 — truthful graphics menu
 
 Prior combined CI and signed APK workflows passed at 42ff776. The Graphics menu now displays the selected upscaler and target separately from the last accepted real frame's output pass and actual reconstruction extent (before display/FG resolve). A replay temporal flag identifies GSR 2 replay separately from the final pass. A paused setting edit, rejected real present, or redraw cannot publish a new last-frame result. No new rows, touch-layout changes, or settings format changes. Host present regression covers status publication and native bypass. Last-frame status does not claim that an untracked guest spatial draw ran.
+
+## Checkpoint 9 — shader-product provenance
+
+Carry the validated DMSV product receipt key, recorded SHA-256, header, size and translation completeness into newly generated data manifests. Runtime-only upgrades check the existing bundle header/size against recorded provenance and reject missing or structurally mismatched bundles. No full bundle reread or mandatory translation on a runtime upgrade; legacy manifests continue to use the original structural checks. The receipt key includes translation inputs, not a declared incompatible shader ABI; it is not compared blindly with a newer translator. Recorded digest is identity, not a fresh hash of the upgrade payload. Tests cover valid, legacy, missing and mismatched cases.

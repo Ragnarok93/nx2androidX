@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from porter import config, host, resources, runtime_update, signing, toolchain
+from porter import config, host, resources, runtime_update, shader_provenance, signing, toolchain
 from porter.upstream import BuildError
 from porter.paths import DM
 from porter.revision import PLAYER_API_REVISION
@@ -135,7 +135,15 @@ def metadata(apk, data, *, runtime=True):
         if revision is not None and (type(revision) is not int or not 1 <= revision <= PLAYER_API_REVISION):
             raise BuildError(f'Unsupported original APK runtime interface revision: {revision}.')
         if shader in names:
-            check_shader_header(*shader_header())
+            header, size = shader_header()
+            check_shader_header(header, size)
+            if 'shader_product' in manifest:
+                try:
+                    shader_provenance.validate(manifest['shader_product'], header, size)
+                except ValueError as exc:
+                    raise BuildError(f'Original shader product compatibility: {exc}.') from exc
+        elif 'shader_product' in manifest:
+            raise BuildError('Original shader product is missing its translated bundle.')
         record = read('mods/build_src.sha256').decode()
         modules = []
         for name in sorted(names):
@@ -268,6 +276,13 @@ def upgrade(apk, output, *, data=None, key=None, jobs=None, no_lsfg=False, debug
     apk, output = Path(apk).resolve(), Path(output).resolve()
     if apk == output: raise BuildError('Choose a separate output APK.')
     manifest, record, modules = metadata(apk, data)
+    if manifest.get('shader_product'):
+        product = manifest['shader_product']
+        print(f"Reusing shader product {product['sha256']}; input key {product['input_key']}; "
+              f"translation {'complete' if product['complete'] else 'partial'} "
+              "(recorded identity; header/size checked, content not rehashed).", flush=True)
+    elif manifest.get('graphics') != 'OpenGL ES':
+        print("Legacy shader product provenance unavailable; existing structural compatibility checks apply.", flush=True)
     title = manifest.get('title_id', '').upper()
     fingerprint = manifest.get('profile_h')
     if not host.TITLE_ID.fullmatch(title) or not fingerprint:

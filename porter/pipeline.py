@@ -1347,6 +1347,9 @@ class Port:
 
     def index_temporal_shaders(self, shader_receipt):
         """Run after either translation or validated DMSV reuse, with an independent receipt."""
+        from porter import shader_provenance
+        self.shader_product = None
+        self.temporal_shaders = None
         import resolution_meta
         import temporal_shader_index
         PROG.set(step='indexing temporal shader bindings')
@@ -1356,9 +1359,8 @@ class Port:
             # Reuse the bundle hash just validated by the shader stage. Avoid
             # rereading a large bundle merely to validate the small index.
             source = json.loads(shader_receipt.read_text(encoding='utf-8'))
-            bundle_sha256 = source['files'][0][2]
-            if source['stat'] != product_cache.file_state(self.dmsv):
-                raise ValueError('shader bundle changed before temporal analysis')
+            self.shader_product = shader_provenance.describe(self.dmsv, source)
+            bundle_sha256 = self.shader_product['sha256']
             analyzer = Path(temporal_shader_index.__file__)
             key = nsp.fingerprint(bundle_sha256, ('files', [analyzer, Path(resolution_meta.__file__)]))
             if product_cache.reused(receipt, key, output) is None:
@@ -1801,6 +1803,7 @@ class Port:
             drivers = sorted({f'drivers/{d.name}' for d in self.drivers() + self.loader_libs()})
         man = datapack.build(dst, profile=self.ap, version=self.pkg_ver, display=self.display, patched=self.patched, romfs=romfs, romfs_at=romfs_at, shaders=self.dmsv,
                              temporal_shaders=getattr(self, 'temporal_shaders', None),
+                             shader_product=getattr(self, 'shader_product', None),
                              aoc=self.aoc, sysdata=self.sysdata, language=self.lang, package=self.package, env=self.fps_env + font_env + zenv + (['DM_VK_MT_REPLAY=1'] if self.o.mt_replay else [])
                              + ([f'DM_VK_DRIVER={driver_lib_name(self.o.vulkan_driver)}'] if self.o.vulkan_driver else []), settings=TOUCH_SETTINGS if self.o.touch else None,
                              files=files, text=self.lists(), host=host, icon=icon, drivers=drivers, profile_h=getattr(self, 'profile_h', None),
