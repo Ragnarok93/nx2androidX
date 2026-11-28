@@ -114,6 +114,7 @@ static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorS
 static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to);
 #include "gfx_vk_reconstruction.h"
 #include "gfx_vk_spatial.h"
+#include "gfx_vk_pace_policy.h"
 static void rot_drop_image(void) {
     if (g_rot.view) vkDestroyImageView(V.dev, g_rot.view, NULL);
     if (g_rot.img) vkDestroyImage(V.dev, g_rot.img, NULL);
@@ -1217,9 +1218,7 @@ void dm_present_sample(uint64_t out[5]) {
 }
 static void pace_reset(void) { g_pace_target = g_pace_ideal = g_pace_anchor = g_refresh_ns = 0; }
 static uint64_t pace_snap(uint64_t t) {   // the first vsync at or after t on the grid through the anchor
-    uint64_t r = g_refresh_ns, a = g_pace_anchor;
-    if (t <= a) return a - (a - t) / r * r;
-    return a + (t - a + r - 1) / r * r;
+    return vk_pace_snap(t,g_refresh_ns,g_pace_anchor);
 }
 static uint64_t pace_desired(double period) {   // the frame's desired present time (0 = none)
     if (!V.has_dtiming || !g_swap) return 0;
@@ -1231,11 +1230,13 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
         if (!poll && polls > 0 && g_pace_n % 30 == 0) { poll = 1; atomic_store(&g_refresh_polls, polls - 1); }
         if (!poll && vk_fg_images() > 1 && g_pace_n % 240 == 0) poll = 1;
         if (poll) {
-            VkRefreshCycleDurationGOOGLE rc; uint64_t was = g_refresh_ns;
-            if (vkGetRefreshCycleDurationGOOGLE(V.dev, g_swap, &rc) == VK_SUCCESS && rc.refreshDuration > 1000000) g_refresh_ns = rc.refreshDuration;
-            // Ignore sub-1% reporting jitter in VK_GOOGLE_display_timing; a genuine panel-rate change still reanchors the cadence.
-            uint64_t dif = g_refresh_ns > was ? g_refresh_ns - was : was - g_refresh_ns;
-            if (g_refresh_ns && g_refresh_ns != was && (!was || dif * 100 >= was)) { VKLOG("[perf] display timing: refresh %.3f ms", g_refresh_ns / 1e6); g_pace_target = 0; }
+            VkRefreshCycleDurationGOOGLE rc;
+            // Ignore sub-1% reporting jitter in the estimate itself, not
+            // merely in the logging/reset decision.
+            if (vkGetRefreshCycleDurationGOOGLE(V.dev, g_swap, &rc) == VK_SUCCESS &&
+                vk_pace_refresh_update(&g_refresh_ns,rc.refreshDuration)) {
+                VKLOG("[perf] display timing: refresh %.3f ms", g_refresh_ns / 1e6); g_pace_target = 0;
+            }
         }
     }
     VkPastPresentationTimingGOOGLE pt[16]; uint32_t np = 16;
@@ -1256,7 +1257,10 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
     // The cadence advances unsnapped (g_pace_ideal) and only the frame's vsync is snapped: snapping each target and adding the period to it lost the fraction,
     // so a period that is not a whole number of vsyncs always rounded up (40 fps on a 60 Hz panel: 25 ms came out as 2 vsyncs every frame, 30 fps, on a Retroid Pocket 5)
     uint64_t now = mono_ns(), t = 0;
-    if (g_pace_target) { g_pace_ideal += (uint64_t)(period * 1e9); t = pace_snap(g_pace_ideal - g_refresh_ns / 2); }
+    if (g_pace_target) {
+        g_pace_ideal += (uint64_t)(period * 1e9);
+        t = vk_pace_next_grid(g_pace_ideal,g_pace_target,g_refresh_ns,g_pace_anchor);
+    }
     if (t < now + gpu + g_refresh_ns) { if (g_pace_target) g_pace_resync++; t = pace_snap(now + gpu + g_refresh_ns * 3 / 2); g_pace_ideal = t; }
     g_pace_target = t;
     return t - g_refresh_ns / 2;
