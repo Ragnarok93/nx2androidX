@@ -733,7 +733,10 @@ static void gsr2_descriptors(vk_gsr2 *ctx, unsigned slot, unsigned pass, const v
 }
 
 static void gsr2_prepare_images(vk_gsr2 *ctx, VkCommandBuffer cb, int reset) {
-    if (ctx->initialized && !reset) return;
+    // The image-driven shaders reject all history on reset. Previously
+    // initialized history needs no clear; the caller's entry barrier still
+    // orders its reuse. Native variants retain their original reset clears.
+    if (ctx->initialized && (!reset || ctx->image_driven)) return;
     VkClearColorValue black = {{0}};
     for (unsigned i = 0; i < G2_IMAGES; i++) {
         VkImage image = ctx->images[i].image;
