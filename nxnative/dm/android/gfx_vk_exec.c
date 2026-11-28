@@ -3556,7 +3556,10 @@ static VkDescriptorSet guest_flow_record(VkCommandBuffer cb, uint64_t stream) {
     unsigned slot = guest_flow_slot(done, ticket, &backlog);
     const int new_feedback = source_ticket && source_ticket != guest_flow.feedback_ticket;
     guest_flow.feedback_ticket = source_ticket;
-    dm_flow_budget_pressure(&guest_flow.policy, ticket, backlog >= 2 || (new_feedback && (feedback & 1)));
+    dm_fg_pressure_report pressure=vk_fg_pressure_snapshot();
+    dm_flow_budget_pressure(&guest_flow.policy, ticket, backlog >= 2 ||
+        dm_recon_pressure_critical(&pressure) || (new_feedback && (feedback & 1)) ||
+        (guest_flow.policy.retry_after && (!source_ticket || !new_feedback)));
     if (slot == VK_GSR2_SLOTS || backlog >= 2 || ticket < guest_flow.retry_after) return VK_NULL_HANDLE;
     if(dm_flow_budget_recovery_due(&guest_flow.policy,ticket) && !vk_quality_recovery_try(4000))
         return VK_NULL_HANDLE;
