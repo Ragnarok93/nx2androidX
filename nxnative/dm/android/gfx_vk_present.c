@@ -1221,8 +1221,10 @@ static void pace_reset(void) { g_pace_target = g_pace_ideal = g_pace_anchor = g_
 static uint64_t pace_snap(uint64_t t) {   // the first vsync at or after t on the grid through the anchor
     return vk_pace_snap(t,g_refresh_ns,g_pace_anchor);
 }
-static uint64_t pace_desired(double period) {   // the frame's desired present time (0 = none)
-    if (!V.has_dtiming || !g_swap) return 0;
+// Swapchain host access is serialized by g_present_mu. These device
+// queries do not access VkQueue; keep them outside the replay submit lock.
+static void pace_poll(void) {
+    if (!V.has_dtiming || !g_swap) return;
     if (g_pace_n % 30 == 0) { const char *e = getenv("DM_VK_PACE"); g_pace_on = !(e && !atoi(e)); }
     {   // The panel's refresh: a window rate change may take a few frames to follow (read it often for a while), and while the frame generation is on the panel may
         // change on its own (LTPO, thermal): a slow poll then, too
@@ -1248,6 +1250,10 @@ static uint64_t pace_desired(double period) {   // the frame's desired present t
             if (pt[i].actualPresentTime > g_pace_anchor) g_pace_anchor = pt[i].actualPresentTime;
             if (pt[i].desiredPresentTime && pt[i].actualPresentTime > pt[i].desiredPresentTime + g_refresh_ns) g_pace_slip++;   // went out a vsync or more after its own
         }
+}
+// Compute the deadline after queue submission, using the polled display grid.
+static uint64_t pace_desired(double period) {
+    if (!V.has_dtiming || !g_swap) return 0;
     g_pace_n++;
     if (g_pace_n % 600 == 0) VKLOG("[perf] display timing: %llu frames, %llu resyncs, %llu shown a vsync or more after their time (cumulative)%s",
                                    (unsigned long long)g_pace_n, (unsigned long long)g_pace_resync, (unsigned long long)g_pace_slip, g_pace_on ? "" : "; off (DM_VK_PACE=0)");
@@ -1289,6 +1295,13 @@ static VkExtent2D picture_extent(int width, int height) {
     return (VkExtent2D){w, h};
 }
 
+// Identity copies preserve encoded pixels; do not apply this to generated
+// images whose format is not identified by the supplied vkimg_t.
+static int present_exact_copy(const vkimg_t *im, VkImage src, int cw, int ch,
+                              uint32_t dw, uint32_t dh, int flip_y) {
+    return im && src == im->img && im->fmt == g_sfmt && !flip_y &&
+        cw > 0 && ch > 0 && (uint32_t)cw == dw && (uint32_t)ch == dh;
+}
 static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D picture,
                         int flip_y, double period, uint64_t ticket, int with_meta) {
     int cx = crop[0], cy = crop[1], cw = crop[2], ch = crop[3];
@@ -1316,7 +1329,12 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     int turned = g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;   // composed into g_rot.img, then copied turned into the swapchain image
     VkImage tgt = turned ? g_rot.img : g_simg[idx]; VkImageView tview = turned ? g_rot.view : g_sview[idx];
     VkCommandBuffer cb = g_pcb[k];
-    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}; vkBeginCommandBuffer(cb, &bi);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    // Acquisition has signaled (or scheduled a signal of) g_acq[k]. Do not
+    // recycle that semaphore after a recording failure without consuming it.
+    if (vkBeginCommandBuffer(cb,&bi) != VK_SUCCESS) {
+        g_present_failed=1; VKLOG("[RED] presentation command begin failed"); return 0;
+    }
     vk_img_barrier_all(cb);   // after everything submitted before on this queue
     spatial_prepare_present_target(cb, tgt, picture, g_sext);
     if (with_meta) vk_pic_set((float)dx / g_sext.width, (float)dy / g_sext.height, (float)dw / g_sext.width, (float)dh / g_sext.height);
@@ -1326,9 +1344,7 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     VkImageLayout lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     int vivid = dm_vivid_enabled() && vivid_record(cb, src, crop, flip_y, tgt, tview, dx, dy, dw, dh);
     if (vivid) lay = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    else if (!flip_y && cw == (int)dw && ch == (int)dh &&
-             (src == g_spatial.image[SP_OUTPUT].texture.img ||
-              src == g_spatial.image[SP_RESOLVE].texture.img) && im && im->fmt == g_sfmt) {
+    else if (present_exact_copy(im,src,cw,ch,dw,dh,flip_y)) {
         VkImageCopy copy = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {cx, cy, 0},
             {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {dx, dy, 0}, {dw, dh, 1}};
         vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, tgt, lay, 1, &copy);
@@ -1369,15 +1385,22 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
         vkCmdEndRendering(cb);
         barrier(cb, g_simg[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     } else barrier(cb, g_simg[idx], lay, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    vkEndCommandBuffer(cb);
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+        g_present_failed=1; VKLOG("[RED] presentation command end failed"); return 0;
+    }
     // A vivid/rotated frame may first access the acquired image as a color attachment.
     VkPipelineStageFlags ws = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 1, &g_acq[k], &ws, 1, &cb, 1, &g_done_sem[idx]};
     extern pthread_mutex_t g_vk_queue_mu;
     uint64_t stall_record = mono_ns();
+    if (period >= 0) pace_poll();
+    uint64_t stall_poll=mono_ns();
     pthread_mutex_lock(&g_vk_queue_mu);
     uint64_t stall_lock = mono_ns();
-    vkResetFences(V.dev, 1, &g_pfence[k]);
+    if (vkResetFences(V.dev,1,&g_pfence[k]) != VK_SUCCESS) {
+        pthread_mutex_unlock(&g_vk_queue_mu);
+        g_present_failed=1; VKLOG("[RED] presentation fence reset failed"); return 0;
+    }
     if (vkQueueSubmit(V.q, 1, &si, g_pfence[k])) {
         pthread_mutex_unlock(&g_vk_queue_mu);
         g_present_failed = 1;
@@ -1402,11 +1425,11 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     // Slow calls are attributed individually; no per-frame log traffic or
     // GPU wait is added for healthy presentation.
     if (stall_present - stall_start >= 50000000ull)
-        VKLOG("[perf] PRESENT_STALL ticket=%llu kind=%s total=%.2f fence=%.2f acquire=%.2f record=%.2f lock=%.2f submit=%.2f pace=%.2f present=%.2f result=%d",
+        VKLOG("[perf] PRESENT_STALL ticket=%llu kind=%s total=%.2f fence=%.2f acquire=%.2f record=%.2f poll=%.2f lock=%.2f submit=%.2f pace=%.2f present=%.2f result=%d",
             (unsigned long long)ticket, period < 0 ? "redraw" : with_meta ? "real" : "generated",
             (stall_present-stall_start)/1e6, (stall_fence-stall_start)/1e6,
             (stall_acquire-stall_fence)/1e6, (stall_record-stall_acquire)/1e6,
-            (stall_lock-stall_record)/1e6, (stall_submit-stall_lock)/1e6,
+            (stall_poll-stall_record)/1e6, (stall_lock-stall_poll)/1e6, (stall_submit-stall_lock)/1e6,
             (stall_pace-stall_submit)/1e6, (stall_present-stall_pace)/1e6, r);
     if (r >= 0) {
         hud_count(with_meta, period, mono_ns());
@@ -1772,7 +1795,14 @@ static void *present_thread(void *arg) {
     }
     return NULL;
 }
-static void present_thread_start(void) { pthread_t t; pthread_create(&t, NULL, present_thread, NULL); pthread_detach(t); }
+static int g_present_thread_started; // published by pthread_once
+static void present_thread_start(void) {
+    pthread_t t;
+    int error=pthread_create(&t,NULL,present_thread,NULL);
+    if(error){ VKLOG("[RED] presentation worker could not start (%d); using synchronous presentation",error); return; }
+    g_present_thread_started=1;
+    pthread_detach(t);
+}
 static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, double period,
                                 unsigned replay_flags, const vk_reconstruction_input *physical) {   // im NULL: nothing to show, the ticket still completes in order
     // Snapshot before queue backpressure, on the source submission thread.
@@ -1782,13 +1812,15 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     int docked = dm_opmode() != 0, flip_y = vk_window_bottom_up();
     static int sync = -1; static pthread_once_t once = PTHREAD_ONCE_INIT;
     if (sync < 0) sync = getenv("DM_VK_SYNC_PRESENT") != NULL;
-    if (sync || !dm_front_window()) {   // headless: nothing to show; or presenting on this thread
-        if (sync && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_flags, physical); pthread_mutex_unlock(&g_present_mu); }
+    int front=dm_front_window()!=NULL;
+    if (!sync && front) pthread_once(&once,present_thread_start);
+    if (sync || !front || !g_present_thread_started) {
+        // A failed worker startup must not enqueue into an undrained FIFO.
+        if ((sync || front) && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_flags, physical); pthread_mutex_unlock(&g_present_mu); }
         if (physical) vk_rs_variant_destroy(physical->backing);
         pthread_mutex_lock(&g_pq_mu); if (g_pq_tail == g_pq_head) g_pq_done = n; pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
         return n;
     }
-    pthread_once(&once, present_thread_start);
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_head - g_pq_tail >= PQ_N) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // never more than PQ_N frames behind
     typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = im; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
