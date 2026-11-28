@@ -51,7 +51,7 @@ typedef struct {
     uint64_t timing_generation, timing_history_epoch;
     int timing_history_reset, sharpness_requested, sharpness_applied;
     double stage_ms[4];
-    uint64_t source_ns, alloc_wait_ns, slot_wait_ns;
+    uint64_t source_ns, alloc_wait_ns, slot_wait_ns, lifecycle_epoch;
     unsigned source_reset, alloc_attempts, allocations, alloc_waits;
     int docked;
     const char *fg_reason; // immutable frame-generation decision

@@ -22,6 +22,9 @@
 #include <sys/ioctl.h>
 #include "dm.h"
 
+// Headless and legacy player fronts retain gap-based continuity.
+__attribute__((weak)) uint64_t dm_front_lifecycle_epoch(void) { return 0; }
+
 typedef struct APerformanceHintManager APerformanceHintManager;
 typedef struct APerformanceHintSession APerformanceHintSession;
 typedef struct AWorkDuration AWorkDuration;

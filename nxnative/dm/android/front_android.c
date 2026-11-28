@@ -15,6 +15,7 @@
 #include "gfx_vk_output_target.h"
 #include "gfx_vk_capture_scale.h"
 #include "gfx_vk_fg_flow.h"
+#include "gfx_vk_source_continuity.h"
 #include "gfx_vk_resolution_live.h"
 #include "saves_android.h"
 #include "jni_android.h"
@@ -218,12 +219,16 @@ __attribute__((weak)) void dm_overlay_redraw(void) {}   // the backend presents 
 // ---- holding the game: in the background and while the pause menu is open. Its clock reads wait (reason 1) and its audio goes to the silent sink ----
 static _Atomic int g_running, g_bg, g_menu;
 static pthread_mutex_t g_hold_mu = PTHREAD_MUTEX_INITIALIZER; static int g_held;
+// Publish a single epoch under the hold mutex, never take a Vulkan lock here.
+static _Atomic uint64_t g_lifecycle_epoch = 2;
+uint64_t dm_front_lifecycle_epoch(void) { return atomic_load(&g_lifecycle_epoch); }
 static _Atomic int g_tx_on;   // text entry open (front_text_input): the game is held as by the menu
 static void hold_sync(void) {
     pthread_mutex_lock(&g_hold_mu);
     int want = atomic_load(&g_bg) || atomic_load(&g_menu) || atomic_load(&g_tx_on);
     if (want != g_held) {
         g_held = want;
+        atomic_store(&g_lifecycle_epoch, dm_lifecycle_next_epoch(atomic_load(&g_lifecycle_epoch), want));
         // the log says why the game is held: "audio suspended" alone reads like the app was sent to the background, and it sent the
         // wrong way once (a game's software keyboard opens: the panel is drawn over the last frame, the game waits for the text)
         if (want) { LOG("[hold] the game is held: %s", atomic_load(&g_bg) ? "the app is in the background" : atomic_load(&g_menu) ? "the pause menu is open" : "a text entry is open");

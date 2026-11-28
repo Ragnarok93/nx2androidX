@@ -26,6 +26,7 @@ class PresentRetirement(unittest.TestCase):
 #include <string.h>
 #include <time.h>
 #include "gfx_vk_present_queue_trace.h"
+#include "gfx_vk_source_continuity.h"
 #define PQ_N 4
 typedef int vkimg_t;
 typedef struct {void *backing;} vk_reconstruction_input;
@@ -33,7 +34,7 @@ static struct {
     vkimg_t *im;
     int crop[4],has_crop,docked,flip_y;
     unsigned replay_flags;
-    uint64_t n,source_ns;
+    uint64_t n,source_ns,lifecycle_epoch;
     double period;
     dm_present_queue_trace trace;
     vk_reconstruction_input physical;
@@ -59,13 +60,14 @@ static int test_wait(pthread_cond_t *cv,pthread_mutex_t *mu,const struct timespe
 #define die(msg) do {fprintf(stderr,"%s\n",msg);abort();}while(0)
 static void present_queue_cv_ready(void){} // isolated wait predicate, init tested by native CI
 static uint64_t mono_ns(void){return 1000000;}
+static uint64_t dm_front_lifecycle_epoch(void){return 2;}
 static int vk_pass_dump_user_active(void){return 1;}
 int dm_opmode(void){return 0;}
 static int vk_window_bottom_up(void){return 0;}
 static void *dm_front_window(void){return NULL;}
 static void present_thread_start(void){atomic_store(&g_present_thread_started,1);}
-static void present_window(vkimg_t *im,const int *crop,double period,uint64_t n,int redraw,uint64_t ns,int docked,int flip,unsigned flags,const vk_reconstruction_input *physical){
-    (void)im;(void)crop;(void)period;(void)n;(void)redraw;(void)ns;(void)docked;(void)flip;(void)flags;(void)physical;
+static void present_window(vkimg_t *im,const int *crop,double period,uint64_t n,int redraw,uint64_t ns,int docked,int flip,unsigned flags,uint64_t lifecycle_epoch,const vk_reconstruction_input *physical){
+    (void)im;(void)crop;(void)period;(void)n;(void)redraw;(void)ns;(void)docked;(void)flip;(void)flags;(void)lifecycle_epoch;(void)physical;
     abort(); // detached source must never call WSI
 }
 static void vk_rs_variant_destroy(void *b){(void)b;}

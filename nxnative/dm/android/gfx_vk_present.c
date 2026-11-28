@@ -31,6 +31,7 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 static dm_recon_menu_status g_menu_recon;
 static dm_fg_menu_status g_menu_fg;
 static dm_recon_continuity g_recon_source;
+extern uint64_t dm_front_lifecycle_epoch(void);
 
 __attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
 __attribute__((weak)) int dm_external_active(void) { return 0; }
@@ -1598,7 +1599,7 @@ static struct {
     vkimg_t *im;
     int crop[4], has_crop, docked, flip_y;
     unsigned replay_flags;
-    uint64_t n, source_ns;
+    uint64_t n, source_ns, lifecycle_epoch;
     double period;
     dm_present_queue_trace trace;
     vk_reconstruction_input physical;
@@ -1646,7 +1647,7 @@ static int reconstruction_pressure(dm_flow_cadence cadence, uint64_t ticket) {
 }
 
 static void present_window(vkimg_t *im, const int *crop, double period, uint64_t ticket, int redraw,
-                           uint64_t source_ns, int docked, int flip_y, unsigned replay_flags,
+                           uint64_t source_ns, int docked, int flip_y, unsigned replay_flags, uint64_t lifecycle_epoch,
                            const vk_reconstruction_input *physical) {
     if (g_spatial.live_sources) spatial_collect_sources();
     if (g_present_failed) return;
@@ -1679,12 +1680,17 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         // A guest crop can carry engine dynamic-resolution information.
         // Keep the existing native image path for anything but the full copy.
         int full = !raw[0] && !raw[1] && raw[2] == (int)im->w && raw[3] == (int)im->h;
-        dm_recon_source frame = {.ticket=ticket, .source_ns=source_ns,
+        dm_recon_source frame = {.ticket=ticket, .source_ns=source_ns, .lifecycle_epoch=lifecycle_epoch,
             .width=im->w, .height=im->h, .output_w=target.width, .output_h=target.height,
             .format=(uint32_t)im->fmt, .crop={raw[0],raw[1],raw[2],raw[3]},
             .flip_y=flip_y, .docked=docked};
         if (!dm_recon_source_accept(&g_recon_source, &frame, &source_reset)) return;
         if (source_reset) {
+            if (source_reset & DM_RECON_SOURCE_PAUSE) {
+                // Resume the cadence, not the old future deadline or HUD span.
+                g_pace_target = g_pace_ideal = 0;
+                atomic_store(&g_hud_last_ns, 0);
+            }
             // A failed oversized target must not suppress a new smaller one.
             if (source_reset & (DM_RECON_SOURCE_GEOMETRY | DM_RECON_SOURCE_MODE |
                                 DM_RECON_SOURCE_SURFACE | DM_RECON_SOURCE_ENCODING)) {
@@ -1798,6 +1804,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
             .sharpness_requested = g_spatial.report_sharpness_requested,
             .sharpness_applied = g_spatial.report_sharpness_applied,
             .source_ns = source_ns, .source_reset = source_reset, .docked = docked,
+            .lifecycle_epoch = lifecycle_epoch,
             .alloc_attempts = g_spatial.report_alloc_attempts, .allocations = g_spatial.report_allocations,
             .alloc_waits = g_spatial.report_alloc_waits, .alloc_wait_ns = g_spatial.report_alloc_wait_ns,
             .slot_wait_ns = g_spatial.report_slot_wait_ns,
@@ -1858,7 +1865,7 @@ static void *present_thread(void *arg) {
             if (last.im) {
                 pthread_mutex_lock(&g_present_mu);
                 present_window(last.im, last.has_crop ? last.crop : NULL, -1, last.n, 1,
-                               last.source_ns, last.docked, last.flip_y, last.replay_flags, NULL);
+                               last.source_ns, last.docked, last.flip_y, last.replay_flags, last.lifecycle_epoch, NULL);
                 pthread_mutex_unlock(&g_present_mu);
             }
             continue;
@@ -1871,13 +1878,18 @@ static void *present_thread(void *arg) {
         }
         pthread_mutex_unlock(&g_pq_mu);
         if (e.im) {
-            last = e;
-            last.physical.backing = NULL;
             pthread_mutex_lock(&g_present_mu);
-            if (e.trace.source_ns) e.trace.work_begin_ns = mono_ns();
-            present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0,
-                           e.source_ns, e.docked, e.flip_y, e.replay_flags, e.physical.backing ? &e.physical : NULL);
-            if (e.trace.source_ns) e.trace.work_end_ns = mono_ns();
+            // Old queued tickets still retire in FIFO order, but cannot seed
+            // a new lifecycle or advance the real/source FPS counters.
+            if (dm_lifecycle_source_current(e.lifecycle_epoch, dm_front_lifecycle_epoch())) {
+                last = e;
+                last.physical.backing = NULL;
+                if (e.trace.source_ns) e.trace.work_begin_ns = mono_ns();
+                present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0,
+                               e.source_ns, e.docked, e.flip_y, e.replay_flags, e.lifecycle_epoch,
+                               e.physical.backing ? &e.physical : NULL);
+                if (e.trace.source_ns) e.trace.work_end_ns = mono_ns();
+            }
             pthread_mutex_unlock(&g_present_mu);
         }
         vk_rs_variant_destroy(e.physical.backing);
@@ -1905,6 +1917,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     // Operation mode is a notification snapshot, not shader/scene certification.
     present_queue_cv_ready();
     extern int dm_opmode(void);
+    uint64_t lifecycle_epoch = dm_front_lifecycle_epoch();
     uint64_t source_ns = mono_ns();
     dm_present_queue_trace trace = {0};
     if (vk_pass_dump_user_active()) {
@@ -1921,9 +1934,11 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
         if (trace.source_ns) trace.synchronous = 1;
         if ((sync || front) && im) {
             pthread_mutex_lock(&g_present_mu);
-            if (trace.source_ns) trace.work_begin_ns = mono_ns();
-            present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_flags, physical);
-            if (trace.source_ns) trace.work_end_ns = mono_ns();
+            if (dm_lifecycle_source_current(lifecycle_epoch, dm_front_lifecycle_epoch())) {
+                if (trace.source_ns) trace.work_begin_ns = mono_ns();
+                present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_flags, lifecycle_epoch, physical);
+                if (trace.source_ns) trace.work_end_ns = mono_ns();
+            }
             pthread_mutex_unlock(&g_present_mu);
         }
         if (physical) vk_rs_variant_destroy(physical->backing);
@@ -1943,6 +1958,7 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     // retire in FIFO order behind the previous source's consumers.
     typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = front ? im : NULL; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
     e->source_ns = source_ns; e->docked = docked; e->flip_y = flip_y;
+    e->lifecycle_epoch = lifecycle_epoch;
     e->replay_flags = replay_flags;
     if (trace.source_ns) {
         unsigned occupied = (unsigned)(g_pq_head - g_pq_tail);

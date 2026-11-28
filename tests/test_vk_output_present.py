@@ -46,7 +46,8 @@ static struct {
 } g_spatial;
 static int g_present_failed,g_want=37,spatial_requested,spatial_active;
 static const char *spatial_reason;
-static _Atomic uint64_t g_fg_out_ns;
+static _Atomic uint64_t g_fg_out_ns,g_hud_last_ns;
+static uint64_t g_pace_target,g_pace_ideal;
 static _Atomic int g_fg_images;
 static int configured=2160,mode=SP_SGSR2,force_fail,fail_resolve,fg_on=1;
 static spatial_image resolve;
@@ -115,7 +116,7 @@ static int present_one(vkimg_t *im,VkImage src,const int *crop,VkExtent2D pictur
 }
 '''+code[start:end]+r'''
 static vkimg_t src={1920,1080,37,11};
-static void real(uint64_t ticket,int docked){present_calls=0;present_window(&src,NULL,1.0/30,ticket,0,ticket*33333333,docked,1,0,NULL);}
+static void real(uint64_t ticket,int docked){present_calls=0;present_window(&src,NULL,1.0/30,ticket,0,ticket*33333333,docked,1,0,0,NULL);}
 int main(void){
     real(1,1);
     assert(rec_target.width==3840&&rec_target.height==2160); // must not inherit drawable limit
@@ -134,7 +135,7 @@ int main(void){
     assert(cap.fg_reason && !strcmp(cap.fg_reason,"test fg") && cap.fg_planned==1);
     // A paused setting change must not generate or reconstruct the old ticket.
     configured=1440;present_calls=0;
-    present_window(&src,NULL,-1,1,1,33333333,1,1,0,NULL);
+    present_window(&src,NULL,-1,1,1,33333333,1,1,0,0,NULL);
     assert(rec_calls==1&&fg_calls==1&&capture_calls==1&&present_calls==1&&observed[0].w==1920&&observed[0].image==55);
     assert(g_menu_recon.w==3840&&g_menu_recon.h==2160); // paused change is not a real frame
     g_spatial.retry_after=121;g_spatial.rcas_retry_after=121;
@@ -181,7 +182,7 @@ int main(void){
     unsigned prior_encoding=fg_encoding;
     present_calls=0;
     present_window(&src,NULL,1.0/30,21,0,21*33333333,1,1,
-        SP_REPLAY_TEMPORAL|SP_REPLAY_SHARPENED,NULL);
+        SP_REPLAY_TEMPORAL|SP_REPLAY_SHARPENED,0,NULL);
     assert(fg_encoding!=prior_encoding);
     dm_recon_menu_label(&g_menu_recon,0,status,sizeof status);
     assert(!strcmp(status,"Last: GSR 2 + Bilinear"));
