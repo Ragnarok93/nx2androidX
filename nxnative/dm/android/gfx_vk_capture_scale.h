@@ -55,6 +55,7 @@ typedef struct {
     unsigned source_reset, alloc_attempts, allocations, alloc_waits;
     int docked;
     const char *fg_reason; // immutable frame-generation decision
+    const char *fg_present_reason; // separate generated WSI admission result
     double fg_period_ms, fg_measured_ms, fg_hold_ms;
     uint64_t fg_refresh_ns;
     unsigned fg_planned, fg_warm_streak;

@@ -17,6 +17,7 @@ class OutputPresent(unittest.TestCase):
 #include "gfx_vk_source_continuity.h"
 #include "gfx_vk_flow_budget.h"
 #include "gfx_vk_capture_scale.h"
+#include "gfx_vk_present_admission.h"
 #include "spatial_upscaler.h"
 #include "gfx_vk_menu_recon.h"
 static dm_recon_menu_status g_menu_recon;
@@ -53,9 +54,10 @@ static uint64_t resolved_ticket;
 static unsigned rec_calls,fg_calls,present_calls,capture_calls,reset_flags;
 static VkExtent2D rec_target,fg_input,display={1920,1080};
 static VkImage fg_image;
+static int reject_generated, gen_count=1;
 static unsigned fg_encoding;
 static VkExtent2D g_sext={1920,1080},g_next={1920,1080};
-static struct {VkImage image;int w,h,meta,flip;VkExtent2D display;uint64_t ticket;} observed[4];
+static struct {VkImage image;int w,h,meta,flip;VkExtent2D display;uint64_t ticket,deadline;double period;} observed[4];
 static vk_capture_scale_present_sample cap;
 int dm_recon_output_height(void){return configured;}
 int dm_spatial_mode(void){return mode;}
@@ -98,13 +100,17 @@ static int dm_fg_frame(vkimg_t *im,const int *rect,int flip,unsigned encoding,un
     fg_image=im?im->img:0;
     fg_calls++;fg_input=(VkExtent2D){(unsigned)rect[2],(unsigned)rect[3]};reset_flags=reset;
     if(!fg_on||!im)return 0;
-    gen[0]=33;*hold=.01;*out_period=.01;*consumer=44;return 1;
+    for(int i=0;i<gen_count;i++)gen[i]=33+i;
+    *hold=.01;*out_period=.01;*consumer=44;return gen_count;
 }
 int vk_pass_dump_user_active(void){return 1;}
 void vk_capture_scale_present(uint64_t ticket,vk_capture_scale_present_sample sample){assert(ticket);cap=sample;capture_calls++;}
-static int present_one(vkimg_t *im,VkImage src,const int *crop,VkExtent2D picture,int flip,double period,uint64_t ticket,int meta){
-    (void)im;(void)period;assert(present_calls<4);unsigned i=present_calls++;
+static int present_one(vkimg_t *im,VkImage src,const int *crop,VkExtent2D picture,int flip,double period,uint64_t ticket,int meta,
+                       uint64_t deadline,const char **reason){
+    (void)im;assert(present_calls<4);unsigned i=present_calls++;
     observed[i].image=src;observed[i].w=crop[2];observed[i].h=crop[3];observed[i].meta=meta;observed[i].display=picture;observed[i].flip=flip;observed[i].ticket=ticket;
+    observed[i].period=period;observed[i].deadline=deadline;
+    if(reason && reject_generated){*reason="generated acquire deadline";return 0;}
     return src != 11;
 }
 '''+code[start:end]+r'''
@@ -179,6 +185,12 @@ int main(void){
     assert(fg_encoding!=prior_encoding);
     dm_recon_menu_label(&g_menu_recon,0,status,sizeof status);
     assert(!strcmp(status,"Last: GSR 2 + Bilinear"));
+    // A rejected first optional output must skip the remaining two and
+    // leave the original real output next, with the whole batch interval.
+    gen_count=3;reject_generated=1;configured=2160;real(22,1);
+    assert(present_calls==2&&observed[0].image==33&&observed[0].deadline);
+    assert(observed[1].meta&&observed[1].ticket==22&&observed[1].period>.0399&&observed[1].period<.0401);
+    assert(!cap.generated_accepted&&cap.present_accepted&&!strcmp(cap.fg_present_reason,"generated acquire deadline"));
     dm_recon_menu_status empty={0};
     dm_recon_menu_label(&empty,0,status,sizeof status);assert(!strcmp(status,"Last: waiting"));
     assert(dm_recon_menu_publish(&empty,1,SP_NATIVE,0,0,1920,1080));

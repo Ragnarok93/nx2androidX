@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
         .stage_ms={0.125,0.5,1.0,0.625},.source_ns=123456789,
         .source_reset=8,.docked=1,.alloc_attempts=3,.allocations=2,
         .alloc_waits=1,.alloc_wait_ns=42,.slot_wait_ns=17,
-        .fg_reason="refresh cap",.fg_period_ms=16.667,.fg_measured_ms=18.5,.fg_hold_ms=8.333,
+        .fg_reason="refresh cap",.fg_period_ms=16.667,.fg_measured_ms=18.5,.fg_hold_ms=8.333,.fg_present_reason="generated acquire deadline",
         .fg_refresh_ns=8333333,.fg_planned=1,.fg_warm_streak=2,
         .fg_requested_flow=0,.fg_active_flow=50,.fg_submission_serial=13,
         .fg_graph_phase=2,.fg_pending_flow=40,.fg_seed_policy=2,.fg_seed_count=1,
@@ -174,6 +174,7 @@ int main(int argc, char **argv) {
             self.assertEqual(a['fg_down_cap_bytes'],'50000000')
             self.assertEqual(a['fg_up_cap_bytes'],'0')
             self.assertEqual(a['fg_hold_ms'],'8.333')
+            self.assertEqual(a['fg_present_reason'],'generated acquire deadline')
             self.assertEqual(a['queue_source_ns'],'123456789')
             self.assertEqual(a['queue_entry_ns'],'123456800')
             self.assertEqual(a['queue_dequeue_ns'],'123456900')

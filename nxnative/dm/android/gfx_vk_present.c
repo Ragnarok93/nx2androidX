@@ -26,6 +26,7 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #include "gfx_vk_source_continuity.h"
 #include "gfx_vk_menu_recon.h"
 #include "gfx_vk_fg_flow.h"
+#include "gfx_vk_present_admission.h"
 static dm_recon_menu_status g_menu_recon;
 static dm_fg_menu_status g_menu_fg;
 static dm_recon_continuity g_recon_source;
@@ -1303,7 +1304,16 @@ static int present_exact_copy(const vkimg_t *im, VkImage src, int cw, int ch,
         cw > 0 && ch > 0 && (uint32_t)cw == dw && (uint32_t)ch == dh;
 }
 static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D picture,
-                        int flip_y, double period, uint64_t ticket, int with_meta) {
+                        int flip_y, double period, uint64_t ticket, int with_meta,
+                        uint64_t optional_deadline_ns, const char **optional_reason) {
+    int optional = optional_reason != NULL;
+    if (optional) {
+        *optional_reason = "generated present rejected";
+        if (!g_swap || !dm_present_optional_wait(mono_ns(), optional_deadline_ns, period)) {
+            *optional_reason = "generated deadline or unavailable swapchain";
+            return 0;
+        }
+    }
     int cx = crop[0], cy = crop[1], cw = crop[2], ch = crop[3];
     uint32_t dw = picture.width, dh = picture.height;
     if (g_present_failed || !dw || !dh || cw <= 0 || ch <= 0 || (!g_swap && !swap_make())) return 0;
@@ -1318,13 +1328,32 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     // queued. The framegen images and paused redraws must not inflate source FPS.
     uint32_t k = g_pi++ % 8;
     uint64_t stall_start = mono_ns();
-    if (vkWaitForFences(V.dev, 1, &g_pfence[k], VK_TRUE, UINT64_MAX)) return 0;
+    if (vkWaitForFences(V.dev, 1, &g_pfence[k], VK_TRUE, optional ? 0 : UINT64_MAX)) {
+        if (optional) *optional_reason = "generated slot busy";
+        return 0;
+    }
     uint64_t stall_fence = mono_ns();
     spatial_forget_fence(g_pfence[k]);
-    uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return 0; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
-    if (r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return 0; }
-    if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return 0; }
+    uint64_t acquire_wait = optional ? dm_present_optional_wait(stall_fence, optional_deadline_ns, period) :
+        dm_present_required_wait(vk_refresh_cycle_ns());
+    if (optional && !acquire_wait) { *optional_reason = "generated deadline"; return 0; }
+    uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, acquire_wait, g_acq[k], VK_NULL_HANDLE, &idx);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        if (optional) { *optional_reason = "generated swapchain out of date"; return 0; }
+        swap_destroy(); if (!swap_make()) return 0;
+        r = vkAcquireNextImageKHR(V.dev, g_swap, acquire_wait, g_acq[k], VK_NULL_HANDLE, &idx);
+    }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) {
+        if (optional) { *optional_reason = "generated surface lost"; return 0; }
+        swap_destroy(); return 0;
+    }
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) {
+        if (optional) *optional_reason = "generated acquire deadline";
+        else VKLOG("[perf] real present acquire unavailable ticket=%llu result=%d", (unsigned long long)ticket, r);
+        return 0;
+    }
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return 0; }
+    // An acquired image must now be consumed even if the deadline expires.
     uint64_t stall_acquire = mono_ns();
     int turned = g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;   // composed into g_rot.img, then copied turned into the swapchain image
     VkImage tgt = turned ? g_rot.img : g_simg[idx]; VkImageView tview = turned ? g_rot.view : g_sview[idx];
@@ -1646,7 +1675,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     const int *rect = reconstructed ? full : raw;
     if (reconstructed) flip_y = 0;
     if (redraw || period < 0) {
-        present_one(source, source->img, rect, picture, flip_y, -1, 0, 1);
+        present_one(source, source->img, rect, picture, flip_y, -1, 0, 1, 0, NULL);
         return;
     }
 
@@ -1735,10 +1764,16 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     }
     int generated_rect[4] = {0, 0, rect[2], rect[3]};
     int accepted_generated = 0;
-    for (int g = 0; g < ng; g++)
-        accepted_generated += present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0);
+    const char *optional_reason = NULL;
+    uint64_t optional_deadline = dm_present_optional_deadline(source_ns, hold, (unsigned)ng);
+    for (int g = 0; g < ng; g++) {
+        if (!present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0,
+                         optional_deadline, &optional_reason)) break;
+        ++accepted_generated;
+    }
+    double real_period = dm_present_real_period(period, hold, (unsigned)ng, (unsigned)accepted_generated);
     int accepted_real = present_one(source, source->img, rect, picture, flip_y,
-                                    ng ? hold : period, ticket, 1);
+                                    real_period, ticket, 1, 0, NULL);
     // Shadow decisions use only completed timing and actual accepted batches.
     // Require a recent matching reconstruction measurement when it ran.
     extern double vk_gpu_ms_recent(void);
@@ -1759,6 +1794,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     if (capture) {
         sample.present_accepted = accepted_real;
         sample.generated_accepted = accepted_generated;
+        sample.fg_present_reason = !ng ? "no generated submission" : accepted_generated==ng ? "all generated accepted" : optional_reason;
         sample.fg_governor=dm_fg_last_decision().governor;
         vk_capture_scale_present(ticket, sample);
     }
