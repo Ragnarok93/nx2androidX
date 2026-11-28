@@ -25,6 +25,12 @@ typedef struct {
     uint64_t sampled_ns,age_ns,os_available,heap_available,down_cap,up_cap;
     int fresh,thermal;
 } dm_fg_pressure_report;
+// Only a fresh, affirmative critical signal suppresses reconstruction.
+// Missing telemetry is not evidence of memory or thermal exhaustion.
+static inline int dm_recon_pressure_critical(const dm_fg_pressure_report *r) {
+    return r->fresh && (r->thermal>=4 ||
+        (r->os_available && r->os_available<=768*FG_MIB));
+}
 static inline dm_fg_pressure_report dm_fg_pressure_describe(const dm_fg_pressure *s,uint64_t now) {
     dm_fg_pressure_report r={.sampled_ns=s->sampled_ns,.os_available=s->os_available,
         .heap_available=s->heap_available,.thermal=s->sampled_ns?s->thermal:-1,
