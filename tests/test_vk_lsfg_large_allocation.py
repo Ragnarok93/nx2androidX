@@ -16,16 +16,17 @@ class LSFGAllocation(unittest.TestCase):
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct { VkDevice dev; VkQueue q; pthread_mutex_t *qmu; uint32_t qf; } V = {.qmu = &mutex};
 static struct { VkCommandPool pool; } F = {.pool = (VkCommandPool)3};
-static int fail, reset, submits, waits, retired;
+static int fail, reset, submits, waits, retired, busy, command_resets;
 static VkResult wait_fence(VkDevice device, uint32_t count, const VkFence *fences,
                            VkBool32 all, uint64_t timeout) {
-    assert(device == V.dev && count == 1 && *fences && all && timeout == UINT64_MAX);
+    assert(device == V.dev && count == 1 && *fences && all && timeout == 0);
     ++waits;
-    return VK_SUCCESS;
+    return busy ? VK_TIMEOUT : VK_SUCCESS;
 }
-static void vk_fg_fence_retired(VkFence fence) { assert(fence && waits == retired + 1); ++retired; }
+static void vk_fg_fence_retired(VkFence fence) { assert(fence && waits > retired); ++retired; }
 static VkResult reset_cb(VkCommandBuffer cb, VkCommandBufferResetFlags flags) {
     assert(cb && !flags);
+    ++command_resets;
     return VK_SUCCESS;
 }
 static VkResult begin(VkCommandBuffer cb, const VkCommandBufferBeginInfo *info) {
@@ -70,7 +71,13 @@ int main(void) {
     fail = 0;
     assert(!begin_slot(&slot) && !waits);
     assert(!submit_slot(&slot) && slot.pending);
-    assert(!begin_slot(&slot) && waits == 1 && retired == 1 && !slot.pending);
+    busy = 1;
+    int before = command_resets;
+    assert(begin_slot(&slot) == VK_TIMEOUT && slot.pending);
+    assert(waits == 1 && !retired && command_resets == before);
+    busy = 0;
+    assert(!begin_slot(&slot) && waits == 2 && retired == 1 && !slot.pending);
+    assert(command_resets == before + 1);
 }
 '''
         headers = ROOT / 'nxnative/dm/third_party/vulkan-headers/include'
