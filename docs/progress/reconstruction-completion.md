@@ -853,3 +853,16 @@ bindings. Docked FFR acceptance remains Awaiting device validation.
   the FFR executable and both native libraries with LSFG compiled in.
   Pacing, sustained memory use, live docked admission and accepted
   generated output on Android remain Awaiting device validation.
+
+- Remote implementation `4b514872fb9f333ba413a377974b67288a48f357`
+  passed [reconstruction validation](https://github.com/Ragnarok93/nx2androidX/actions/runs/46087811111),
+  including software Vulkan and NDK linking. Local repository discovery
+  ran 841 tests with 31 skips. Leak detection was disabled for that local
+  run because the execution environment cannot run LeakSanitizer.
+- The [Android Actions run](https://github.com/Ragnarok93/nx2androidX/actions/runs/46087811079)
+  passed the native smoke test and pinned signing-identity check for the
+  same implementation SHA. The
+  [signed builder artifact](https://github.com/Ragnarok93/nx2androidX/actions/runs/46087811079/artifacts/15239837676)
+  was listed as available and unexpired. This verifies delivery. The
+  Samsung docked draw's live admission, long-stall attribution and
+  reported crash cause remain open.
