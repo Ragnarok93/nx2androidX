@@ -10,6 +10,7 @@
 #include "gfx_vk_reconstruction_limits.h"
 #include "gfx_vk_flow_budget.h"
 #include "gfx_vk_graphics_history.h"
+#include "gfx_vk_pipeline_claim.h"
 #include "gfx_vk_set_cache.h"
 #include "gfx_vk_passdump_plan.h"
 #include "gfx_vk_resolution_plan.h"
@@ -2021,7 +2022,8 @@ static pkey g_last_k; static VkPipeline g_last_p;
 // So a capture's new full-screen targets still build at once (SMO's first frog capture: 33 pipelines, two 300 ms frames, once). So do passes into a linear render target:
 // the CPU reads it (lin_back), and SMO's fog wave solver feeds what it reads into the next step, so one step left out lost the Cap Kingdom fog for the run.
 // DM_VK_ASYNC_PIPE=0 (live): every pipeline is built at once
-#define PIPE_PENDING ((VkPipeline)(uintptr_t)2)
+#define PIPE_PENDING ((VkPipeline)VK_PIPE_PENDING)
+static pthread_cond_t g_pipe_ready = PTHREAD_COND_INITIALIZER;
 enum { APQ = 256 };
 static pkey g_apq[APQ]; static int g_apq_h, g_apq_t, g_apq_on;   // queued keys (a draw left out counts as skipped for no pipeline)
 static pthread_mutex_t g_apq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_apq_cv = PTHREAD_COND_INITIALIZER;
@@ -2037,26 +2039,47 @@ static void *async_pipe_thread(void *arg) {
             uint64_t t0 = tick(); p = build_pipeline(&k, vk_pipeline_layout(dsl, nsets), stg);
             { static int n; if (n++ < 6) VKLOG("pipeline built in the background in %.1f ms (shaders %016llx %016llx)", (tick() - t0) / 1e6, (unsigned long long)k.key[0], (unsigned long long)k.key[1]); } }
         pthread_mutex_lock(&g_pipe_mu);
-        VkPipeline had = nvn_hm_get(&g_pipes, &k);
-        if (had && had != PIPE_PENDING) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); }   // a prewarm thread made it meanwhile (as graphics_pipeline does: the one in the table may be bound already, the new one goes)
-        else { nvn_hm_put(&g_pipes, &k, p); if (p != (void *)1) pipe_record(&k); }
+        if (vk_pipe_finish_locked(&g_pipes,&k,&g_pipe_ready,VK_PIPE_PENDING,p,0)) {
+            if (p && p != (void *)1) pipe_record(&k);
+        } else if (p && p != (void *)1) vkDestroyPipeline(V.dev,p,NULL);
         pthread_mutex_unlock(&g_pipe_mu);
     }
     return NULL;
 }
-static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); under nothing (takes g_pipe_mu)
+static int async_pipe_allowed(const pkey *k) {
     if (!g_async_pipe || k->guest_filter || k->raster_discard || (S.sh[0] && S.sh[0]->xfb) || (S.sh[2] && S.sh[2]->xfb)) return 0;
     for (int i = 0; i < S.ncol && i < 8; i++) if (S.rt_has_col[i] && (S.rt_col[i].d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) return 0;   // (the CPU reads it: lin_back)
     int natt = 0; for (int i = 0; i < 9; i++) { const vkimg_t *a = P_att[i].im; if (!a) continue; natt++; if (a->rt_frames < 3) {
             if (g_prof_on) { static int n; if (n++ < 300) VKLOG("pipeline built here: attachment %d %ux%u nvn format %#x drawn in %llu presents in a row (shaders %016llx %016llx)", i, a->w, a->h, a->nvn_format, (unsigned long long)a->rt_frames, (unsigned long long)k->key[0], (unsigned long long)k->key[1]); }
             return 0; } }   // (counted in this present too)
-    if (!natt) return 0;
+    return natt != 0;
+}
+static int async_pipe(const pkey *k) {
+    if (!async_pipe_allowed(k)) return 0;
+    pthread_mutex_lock(&g_pipe_mu);
     pthread_mutex_lock(&g_apq_mu);
-    if (!g_apq_on) { g_apq_on = 1; for (int i = 0; i < 2; i++) { pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, async_pipe_thread, NULL); pthread_attr_destroy(&a); } }
-    int ok = g_apq_h - g_apq_t < APQ; if (ok) { g_apq[g_apq_h % APQ] = *k; g_apq_h++; pthread_cond_signal(&g_apq_cv); }
+    if (!g_apq_on) {
+        for (int i=0;i<2;i++) {
+            pthread_t t; pthread_attr_t a; pthread_attr_init(&a);
+            pthread_attr_setdetachstate(&a,PTHREAD_CREATE_DETACHED);
+            if (!pthread_create(&t,&a,async_pipe_thread,NULL)) ++g_apq_on;
+            pthread_attr_destroy(&a);
+        }
+    }
+    int ok = g_apq_on && g_apq_h-g_apq_t<APQ &&
+        vk_pipe_reserve_locked(&g_pipes,k,VK_PIPE_PENDING);
+    if(ok){g_apq[g_apq_h%APQ]=*k;g_apq_h++;pthread_cond_signal(&g_apq_cv);}
     pthread_mutex_unlock(&g_apq_mu);
-    if (ok) { pthread_mutex_lock(&g_pipe_mu); if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, PIPE_PENDING); pthread_mutex_unlock(&g_pipe_mu); }
+    pthread_mutex_unlock(&g_pipe_mu);
     return ok;
+}
+static VkPipeline graphics_lookup_locked(const pkey *k) {
+    // A queued background compile may skip only a draw that still satisfies
+    // the asynchronous eligibility contract. Persistent targets must wait.
+    VkPipeline p=nvn_hm_get(&g_pipes,k);
+    if(p==(VkPipeline)VK_PIPE_BUILDING || p==PIPE_PENDING)
+        p=vk_pipe_wait_locked(&g_pipes,k,&g_pipe_mu,&g_pipe_ready,async_pipe_allowed(k));
+    return p;
 }
 uint64_t g_graphics_demand_builds, g_graphics_demand_ns;
 static _Atomic uint64_t g_demand_builds, g_demand_build_ns;
@@ -2077,10 +2100,18 @@ void mtl_create_ns(uint64_t *libs, uint64_t *pipelines) {
 }
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     if (g_last_p && !memcmp(k, &g_last_k, sizeof *k)) return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p;
-    pthread_mutex_lock(&g_pipe_mu); VkPipeline p = nvn_hm_get(&g_pipes, k); pthread_mutex_unlock(&g_pipe_mu);
+    pthread_mutex_lock(&g_pipe_mu); VkPipeline p=graphics_lookup_locked(k); pthread_mutex_unlock(&g_pipe_mu);
     if (p == PIPE_PENDING) return VK_NULL_HANDLE;
     if (p) { g_last_k = *k; g_last_p = p; return p == (void *)1 ? VK_NULL_HANDLE : p; }
     if (async_pipe(k)) return VK_NULL_HANDLE;
+    // Recheck after the queue attempt: a prewarm worker may have reserved
+    // this key since the first lookup.
+    pthread_mutex_lock(&g_pipe_mu);
+    p=graphics_lookup_locked(k);
+    if (!p) vk_pipe_reserve_locked(&g_pipes,k,VK_PIPE_BUILDING);
+    pthread_mutex_unlock(&g_pipe_mu);
+    if (p == PIPE_PENDING) return VK_NULL_HANDLE;
+    if (p) { g_last_k=*k; g_last_p=p; return p==(void *)1?VK_NULL_HANDLE:p; }
     vkshader_t *stg[3] = {S.sh[0], S.sh[1], S.sh[2]};
     uint64_t start = tick();
     p = build_pipeline(k, layout, stg);
@@ -2097,9 +2128,9 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
                   (unsigned long long)k->key[1], (unsigned long long)k->key[2], elapsed / 1e6);
     }
     pthread_mutex_lock(&g_pipe_mu);
-    VkPipeline had = nvn_hm_get(&g_pipes, k);
-    if (had) { if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL); p = had; }   // a prewarm thread made it meanwhile
-    else { nvn_hm_put(&g_pipes, k, p); if (p != (void *)1) pipe_record(k); }
+    if (vk_pipe_finish_locked(&g_pipes,k,&g_pipe_ready,VK_PIPE_BUILDING,p,0)) {
+        if (p && p != (void *)1) pipe_record(k);
+    }
     pthread_mutex_unlock(&g_pipe_mu);
     return p == (void *)1 ? VK_NULL_HANDLE : p;
 }
@@ -2154,13 +2185,15 @@ static void *prewarm_thread(void *arg) {
         if (!ok || !stg[0]) continue;
         VkDescriptorSetLayout dsl[5] = {0}; int nsets = 0;
         for (int s = 0; s < 3; s++) if (stg[s]) { dsl[stg[s]->set] = stg[s]->dsl; if (stg[s]->set + 1 > nsets) nsets = stg[s]->set + 1; }
+        pthread_mutex_lock(&g_pipe_mu);
+        int reserved=vk_pipe_reserve_locked(&g_pipes,k,VK_PIPE_BUILDING);
+        pthread_mutex_unlock(&g_pipe_mu);
+        if (!reserved) continue;
         VkPipeline p = build_pipeline(k, vk_pipeline_layout(dsl, nsets), stg);
         pthread_mutex_lock(&g_pipe_mu);
-        // A failed speculative compile must not poison the demand lookup.
-        if (p != (void *)1 && p) {
-            if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, p);
-            else vkDestroyPipeline(V.dev, p, NULL);
-        }
+        // A failed speculative compile releases ownership for demand retry.
+        if (!vk_pipe_finish_locked(&g_pipes,k,&g_pipe_ready,VK_PIPE_BUILDING,p,1) &&
+            p && p!=(void *)1) vkDestroyPipeline(V.dev,p,NULL);
         pthread_mutex_unlock(&g_pipe_mu);
         size_t d = __atomic_add_fetch(&g_pw_done, 1, __ATOMIC_RELAXED);
         if (d == g_pw_n || d % 500 == 0) VKLOG("prewarm: %zu of %zu pipelines", d, g_pw_n);
