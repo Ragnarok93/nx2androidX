@@ -21,7 +21,7 @@ def function(source, signature):
 def harness():
     source = (DM / 'android/gfx_vk_exec.c').read_text()
     core = (DM / 'android/gfx_vk_core.c').read_text()
-    cache = next(line for line in source.splitlines() if 'g_drvc[DRVC];' in line)
+    cache = source[source.index('static struct { uint64_t h, epoch; VkBuffer b;'):source.index('uint64_t g_set_key_bypass;')]
     scratch_type = next(line for line in core.splitlines() if line.endswith('} scratch_blk;'))
     scratch_size = next(line for line in core.splitlines() if line.startswith('#define SCRATCH_BLOCK '))
     hash_fn = function(source, 'static inline uint64_t fnv(').replace('fnv(', 'production_fnv(', 1)
@@ -37,7 +37,7 @@ typedef struct { int stage, index; uint64_t addr, size; } p_bind_buf;
 static struct { p_bind_buf ssbo[6][16], ubo[6][16]; uint64_t tex[6][256], img[6][8], samp[6][128]; } S;
 static uint32_t g_dispatch[3], g_draw_binst;
 static uint64_t g_set_epoch = 1;
-static int g_x_nodrvc;
+static int g_x_nodrvc, g_x_setverify;
 enum { DRVC = 1024 };
 ''' + cache + '\n' + scratch_type + '\n' + scratch_size + r'''
 /* Only the slot fields vk_scratch uses; mapped bytes are owned by mocked Vulkan. */
@@ -111,6 +111,8 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 #undef memcmp
 static void clean(void) {
     memset(g_drvc, 0, sizeof g_drvc);
+    memset(g_c2_memo, 0, sizeof g_c2_memo);
+    memset(g_bind_gen, 0, sizeof g_bind_gen); g_x_setverify = 0;
     for (size_t i = 0; i < nbuffer; i++) { free(buffers[i]->memory); free(buffers[i]); }
     free(slot.blk); memset(&slot, 0, sizeof slot); nbuffer = metadata_size = 0;
     memset(&S, 0, sizeof S); memset(g_dispatch, 0, sizeof g_dispatch); g_draw_binst = 0;
@@ -136,6 +138,7 @@ static void changed(unsigned which) {
     if (!bank && st != 5) word32(before, 0x610, 0x44ffe000); /* 2047.0f */
     memcpy(after, before, sizeof after);
     ref first = get(st, bank, dyn); assert(!memcmp(bytes(first), before, sizeof before));
+    if(bank&&!dyn) for(int off=0x20;off<0x968;off+=8){uint64_t v; memcpy(&v,bytes(first)+off,8); assert(v==c2_handle(st,off));}
     VkDeviceSize allocated = used(); ref equal = get(st, bank, dyn);
     assert(same(first, equal) && used() == allocated);
     switch (which) {
@@ -159,12 +162,15 @@ static void changed(unsigned which) {
     case 17: S.tex[0][255] = 17; word32(after, 0x560, 127); break;
     default: abort();
     }
+    // The fixture writes S directly; production bind_handles_rec advances this revision.
+    if (bank) ++g_bind_gen[st];
     ref second = get(st, bank, dyn);
     assert(!same(first, second));
     assert(used() == allocated + 0x1000 && !memcmp(bytes(second), after, sizeof after));
     assert(!memcmp(bytes(first), before, sizeof before)); /* replacement cannot overwrite an earlier draw's copy */
     assert(same(second, get(st, bank, dyn)) && used() == allocated + 0x1000);
     memset(&S, 0, sizeof S); memset(g_dispatch, 0, sizeof g_dispatch); g_draw_binst = 0;
+    if (bank) ++g_bind_gen[st];
     ref third = get(st, bank, dyn); assert(!same(third, second) && !same(third, first));
     assert(!memcmp(bytes(third), before, sizeof before) && !memcmp(bytes(second), after, sizeof after));
     assert(same(third, get(st, bank, dyn)) && used() == allocated + 0x2000);
@@ -178,9 +184,9 @@ static void banks(void) {
     assert(!memcmp(bytes(c2), expected, sizeof expected));
     /* The short bank cannot ignore a cached long bank's nonzero tail. */
     ref c0 = get(5, 0, 0); assert(!same(c2, c0));
-    S.samp[5][127] = 0;
+    S.samp[5][127] = 0; ++g_bind_gen[5];
     assert(same(c0, get(5, 2, 0))); // identical zero contents can share across banks
-    S.samp[5][127] = 3u << 20; c2 = get(5, 2, 0);
+    S.samp[5][127] = 3u << 20; ++g_bind_gen[5]; c2 = get(5, 2, 0);
     /* Different stages can share when their actual bytes match. */
     S.samp[1][127] = 3u << 20; VkDeviceSize n = used();
     assert(same(c2, get(1, 2, 0)) && used() == n);
@@ -225,7 +231,8 @@ static void live_range(void) {
     for (int bank=0;bank<=2;bank+=2) {
         clean(); ref first = get(5,bank,0); VkDeviceSize n=used();
         expected_compare=bank ? 0x968 : 0x648;
-        assert(same(first,get(5,bank,0)) && used()==n && comparisons==1);
+        assert(same(first,get(5,bank,0)) && used()==n && comparisons==(bank?0u:1u));
+        if(bank){ g_x_setverify=1; assert(same(first,get(5,bank,0)) && used()==n && comparisons==1); }
     }
 }
 static void ordinary(void) {
