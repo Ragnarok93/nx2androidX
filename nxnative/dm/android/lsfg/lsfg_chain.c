@@ -56,15 +56,17 @@ struct lsfg_chain {
 // Entry points the replay's table (vka.h) does not carry
 #define LSFG_FNS(X) X(vkDestroyPipeline) X(vkDestroyPipelineLayout) X(vkDestroyDescriptorSetLayout) X(vkDestroyDescriptorPool) X(vkDestroyCommandPool)
 static struct { LSFG_FNS(VKA_DECL) } lk;
-static int lk_load(void) {
-    static int state;
-    if (!state) {
-        state = 1;
-#define LK_LOAD(f) lk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f); if (!lk.f) { VRED("lsfg: no %s", #f); state = -1; }
-        LSFG_FNS(LK_LOAD)
+static pthread_once_t lk_once=PTHREAD_ONCE_INIT;
+static int lk_state;
+static void lk_init(void) {
+    lk_state=1;
+#define LK_LOAD(f) lk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f); if (!lk.f) { VRED("lsfg: no %s", #f); lk_state = -1; }
+    LSFG_FNS(LK_LOAD)
 #undef LK_LOAD
-    }
-    return state > 0;
+}
+static int lk_load(void) {
+    pthread_once(&lk_once,lk_init);
+    return lk_state>0;
 }
 
 static size_t gen_slot(size_t count, size_t gen) { return (count - 1) * count / 2 + gen; }
