@@ -15,6 +15,7 @@
 #include "gfx_vk_pool_restore.h"
 #include "gfx_vk_retire_queue.h"
 #include "gfx_vk_frame_timing.h"
+#include "gfx_vk_replay_work.h"
 #include "gfx_vk_fg_pressure.h"
 #include "spatial_upscaler.h"
 #include "gfx_vk_quality_recovery.h"
@@ -1949,13 +1950,16 @@ int vk_ubd_shadow(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off) {
 void mtl_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }
 
 // completion: a queue of committed submissions, each with its CPU-visible effects
-typedef struct cpend { uint64_t fence, frame; post_op *ops; int n; int slot, rslot; int npass; pass_meta pmeta[PASSQ]; struct cpend *next; } cpend;
+typedef struct cpend { uint64_t fence, frame, source_ticket; int source_timing_valid; post_op *ops; int n; int slot, rslot; int npass; pass_meta pmeta[PASSQ]; struct cpend *next; } cpend;
 static cpend *g_ch, *g_ct; static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ccv = PTHREAD_COND_INITIALIZER;
 uint64_t guest_ns(void);
 static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); g = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; } return g * 12 / 625; }
 // GPU time per NVN frame (the sum of its submissions' timestamp spans), for the timing line's GPU column: the frame a submission belongs to is the one being replayed
 static uint64_t g_cur_frame;
 static vk_frame_timing g_frame_timing=VK_FRAME_TIMING_INIT;
+static vk_replay_work g_replay_work=VK_REPLAY_WORK_INIT;
+void vk_replay_work_boundary(uint64_t ticket,int replay) { vk_replay_work_close(&g_replay_work,ticket,replay); }
+double vk_replay_source_ms(uint64_t ticket) { return vk_replay_work_ms(&g_replay_work,ticket); }
 void mtl_set_frame(uint64_t f) { __atomic_store_n(&g_cur_frame, f, __ATOMIC_RELAXED); }
 double mtl_gpu_ms(uint64_t f) { return vk_frame_timing_ms(&g_frame_timing,f); }
 double vk_gpu_ms_recent(void) {   // the latest finished frame's GPU time among the last 8 (-1: none known)
@@ -1988,9 +1992,12 @@ static void *completion_main(void *a) {
         cpend *c = g_ch; pthread_mutex_unlock(&g_cmu);
         if (V.has_timeline) wait_fence(c->fence); else { VkResult r = vkWaitForFences(V.dev, 1, &g_fring[c->fence % NFRING], VK_TRUE, UINT64_MAX); if (r != VK_SUCCESS) die("[vk] GPU fence wait did not complete: %d", r); }
         if (g_shadow_pools && c->rslot >= 0) pools_copy_back(&g_slot[c->rslot]);
+        uint64_t replay_ns=0;int replay_timed=0;
         if (g_tsq && c->slot >= 0) { uint64_t t[2]; if (vkGetQueryPoolResults(V.dev, g_tsq, 2 * (uint32_t)c->slot, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
             { uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * V.props.limits.timestampPeriod); __atomic_fetch_add(&g_gpu_ns,ns,__ATOMIC_RELAXED);
-              vk_frame_timing_add(&g_frame_timing,c->frame,ns); } }
+              vk_frame_timing_add(&g_frame_timing,c->frame,ns);
+              replay_ns=ns;replay_timed=1; } }
+        vk_replay_work_complete(&g_replay_work,c->source_ticket,replay_ns,replay_timed&&c->source_timing_valid);
         if (g_pq && pass_times_on() && c->slot >= 0) {   // this submission's passes
             int np = c->npass; uint64_t t[PASSQ * 2];
             if (c->frame != g_sf_frame) { pass_spike_flush(); g_sf_frame = c->frame; }
@@ -2113,6 +2120,11 @@ uint64_t mtl_sub_commit(void) {
     vk_guest_flow_submitted(er >= 0, f);
     s->fence = f;
     cpend *c = calloc(1, sizeof *c); c->fence = f; c->frame = __atomic_load_n(&g_cur_frame, __ATOMIC_RELAXED); c->n = s->npost; c->rslot = g_cur; c->slot = s->no_ts ? -1 : g_cur; s->no_ts = 0;
+    // The actual present boundary, not the guest's diagnostics counter,
+    // closes this batch. Partial/main-spanning and dropped submits cannot
+    // be trusted as independent replay costs.
+    c->source_ticket=vk_replay_work_submit(&g_replay_work);
+    c->source_timing_valid=er>=0 && !s->nmain_sent;
     c->npass = g_npass[g_cur]; memcpy(c->pmeta, g_pmeta[g_cur], sizeof(pass_meta) * (size_t)c->npass);
     if (s->npost) { c->ops = malloc(s->npost * sizeof *c->ops); memcpy(c->ops, s->post, s->npost * sizeof *c->ops); }
     pthread_mutex_lock(&g_cmu); if (g_ct) g_ct->next = c; else g_ch = c; g_ct = c; pthread_cond_signal(&g_ccv); pthread_mutex_unlock(&g_cmu);

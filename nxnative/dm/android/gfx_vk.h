@@ -76,6 +76,8 @@ dm_fg_pressure_report vk_fg_pressure_snapshot(void);
 dm_fg_heap_snapshot vk_fg_heap_snapshot(void);
 dm_fg_heap_snapshot vk_fg_heap_refresh(void); // background construction only
 uint64_t vk_fg_transition_cap(int upward); // fresh pressure snapshot; zero vetoes allocation
+void vk_replay_work_boundary(uint64_t ticket,int replay);
+double vk_replay_source_ms(uint64_t ticket); // closed, timed main spans or -1
 void vk_init(void);   // once, from mtl_init or the first use
 
 // ---- memory pools (gfx_vk_core.c): the guest's pool memory is GPU memory (AHardwareBuffer mapped over it) ----

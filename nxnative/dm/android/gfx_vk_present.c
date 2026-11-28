@@ -2075,6 +2075,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         physical = take_physical_offer(im && im->layout == VK_IMAGE_LAYOUT_GENERAL ? im : NULL, n);
         if (physical.backing) input = &physical;
     }
+    vk_replay_work_boundary(n,1);
     if (!im) { no_img++; return present_enqueue(NULL, NULL, n, period, 0, NULL); }
     if (im->layout != VK_IMAGE_LAYOUT_GENERAL) { undrawn++; return present_enqueue(NULL, NULL, n, period, 0, NULL); }   // never drawn into: nothing to show yet
     shown++;
@@ -2115,6 +2116,7 @@ uint64_t vk_present_vkimg(vkimg_t *im, double period) {
     uint64_t n = ++g_presents;
     { int disp = V.has_dtiming && dm_front_window() && (n <= 240 || g_pres_recorded); struct timespec ts; if (!disp) clock_gettime(CLOCK_MONOTONIC, &ts);
       present_time_begin(n, disp ? 0 : (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
+    vk_replay_work_boundary(n,0); // external GL has no NVN replay timing
     if (shot_wanted(n) && im->layout == VK_IMAGE_LAYOUT_GENERAL) shot(im, n);
     return present_enqueue(im, NULL, n, period, 0, NULL);
 }
