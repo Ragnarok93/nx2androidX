@@ -299,8 +299,9 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     unsigned i=d.submission_serial%8;
     F.shadow_rows[i].serial=d.submission_serial;
     F.shadow_rows[i].workload=workload;
-    F.shadow_rows[i].budget=replay_ms>0 && recon_ms>=0 ?
-        d.period_ms-replay_ms-recon_ms-1.0 : 0;
+    F.shadow_rows[i].budget=replay_ms>0 && recon_ms>=0 && d.period_ms>0 &&
+        isfinite(replay_ms) && isfinite(recon_ms) && isfinite(d.period_ms) ?
+        d.period_ms-replay_ms-recon_ms-1.0 : NAN;
     F.shadow_rows[i].elapsed=d.measured_ms/1000.0;
     F.shadow_rows[i].accepted=real?generated:0;
     dm_fg_timing s=d.timing;
@@ -308,14 +309,16 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     unsigned j=s.serial%8;
     int matched=F.shadow_rows[j].serial==s.serial && F.shadow_rows[j].workload==workload;
     if (!matched) {report->status="unmatched timing";dm_fg_governor_gap(&F.shadow);return;}
-    report->matched=1;report->matched_serial=s.serial;report->budget_ms=F.shadow_rows[j].budget;
+    report->matched=1;report->matched_serial=s.serial;
+    double matched_budget=F.shadow_rows[j].budget;
+    report->budget_ms=isfinite(matched_budget)?matched_budget:0;
     // Pending and retiring graphs cannot launch a third graph. Do not let
     // transition-only workload contaminate profitability or dwell evidence.
     if(live && F.graph.phase!=LSFG_GRAPH_EMPTY){report->status="graph transition in flight";return;}
     uint64_t recovery_cap=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)?report->pressure.up_cap:0;
     report->recovery_allowed=recovery_cap!=0;
     int accepted=F.shadow_rows[j].accepted==(int)s.generated && s.generated;
-    report->status=!accepted?"generated batch not accepted":!(report->budget_ms>0)?"budget unavailable":"hold";
+    report->status=!accepted?"generated batch not accepted":!isfinite(matched_budget)?"budget unavailable":matched_budget<=0?"GPU budget exhausted":"hold";
     dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
         F.shadow_rows[j].elapsed,accepted,recovery_cap!=0);
     report->requested_pct=req.pct;report->reason=req.reason;
