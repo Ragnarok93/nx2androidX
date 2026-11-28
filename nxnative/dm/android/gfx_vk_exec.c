@@ -2531,14 +2531,22 @@ static void drv_segment(int st, int bank, uint8_t *d, int dyn) {
         }
     }
 }
-// vk_samp_by_id without the registry lock while no sampler ID was registered with other parameters (g_samp_gen): a 32-slot texture array took the lock
+// Replay-local sampler memo: include the registration generation, historical bind sequence and nearest mode. A 32-slot texture array took the lock
 // per slot, a lock the game thread takes for every texture it registers (DM_NVN_ASYNC). VkSamplers are never destroyed, so a kept handle stays valid
 extern uint64_t g_samp_gen;
-static VkSampler samp_cached(int sid) {
-    enum { SC = 1024 }; static struct { uint64_t gen; int sid; VkSampler s; } c[SC]; unsigned k = (unsigned)sid % SC;
-    uint64_t g = __atomic_load_n(&g_samp_gen, __ATOMIC_ACQUIRE);   // read before the lookup: a registration racing it leaves the entry outdated, never wrong and current
-    if (c[k].gen == g && c[k].sid == sid) return c[k].s;
-    VkSampler s = vk_samp_by_id(sid); c[k].gen = g; c[k].sid = sid; c[k].s = s; return s;
+static VkSampler samp_cached(int sid, uint64_t seq, int nearest) {
+    if (sid <= 0) return VK_NULL_HANDLE;
+    VkSampler vk_samp_by_id_nearest(int sid), vk_samp_at(int sid, uint64_t seq, int nearest, char *description, size_t size, int *guest_caps);
+    enum { SC = 1024 };
+    static struct { uint64_t gen, seq; int sid; VkSampler s; } c[2][SC];
+    unsigned k = ((unsigned)sid * 2654435761u ^ (unsigned)seq ^ (unsigned)(seq >> 32)) % SC;
+    typeof(c[0][0]) *e = &c[!!nearest][k];
+    uint64_t g = __atomic_load_n(&g_samp_gen, __ATOMIC_ACQUIRE);
+    if (e->gen == g && e->sid == sid && e->seq == seq && e->s) return e->s;
+    VkSampler s = seq ? vk_samp_at(sid, seq, nearest, NULL, 0, NULL) :
+                        nearest ? vk_samp_by_id_nearest(sid) : vk_samp_by_id(sid);
+    if (s) *e = (typeof(*e)){g, seq, sid, s};
+    return s;
 }
 static uint64_t g_tex_sseq;   // stage_set: the bind count of the texture slot being collected (0 for handles read from memory)
 static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest, unsigned element) {   // nearest: its unfiltered twin (integer views)
@@ -2561,8 +2569,7 @@ static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest
                        guest ? &g_guest_sampler_caps : NULL);
         if (collect) input_capture_descriptor("graphics-sampler", st, b->binding, element,
                                  (VkDescriptorBufferInfo){0}, description);
-    } else s = !sid ? VK_NULL_HANDLE : seq ? vk_samp_at(sid, seq, nearest, NULL, 0, NULL)
-                                         : nearest ? vk_samp_by_id_nearest(sid) : samp_cached(sid);
+    } else s = samp_cached(sid, seq, nearest);
     static int nsl; if (g_tracing || (g_x_logfs && S.sh[1] && S.sh[1]->key == g_x_logfs && nsl++ < 60)) { char d[256]; void vk_samp_describe_at(int sid, uint64_t seq, char *out, size_t n); vk_samp_describe_at(sid, seq, d, sizeof d); VKLOG("  %sbinding %d: %s (texture handle %#llx, present %llu, pass %d, thread %d)", g_tracing ? "" : "logfs ", b->binding, d, (unsigned long long)texh, (unsigned long long)g_tex_frame, g_sub_pass - 1, (int)gettid()); }
     return s ? s : vk_dummy_sampler();
 }
@@ -2772,7 +2779,7 @@ static uint64_t g_bind_gen[6];
 // Keep a fast path per stage and encoding, scoped to immutable scratch in
 // the current submission. C0 (including indirect compute) stays unchanged.
 static struct { uint64_t epoch, bind; VkBuffer b; VkDeviceSize o; } g_c2_memo[6][2];
-uint64_t g_set_key_bypass;   // cacheable misses left uncached because the per-submission key arena is full
+uint64_t g_set_key_bypass;   // cacheable misses left uncached because their bucket or the per-submission key arena is full
 uint64_t g_set_hits, g_set_new, g_ns_set_build, g_ns_set_hash, g_ns_set_new;   // descriptor sets: reused, new; time collecting their descriptors, hashing them, allocating and writing new ones
 // content hash of descriptor sets and driver segments: 8 bytes a step (a set with 32-slot texture arrays is several KB, which byte-wise FNV took milliseconds a frame over)
 static inline uint64_t fnv(uint64_t h, const void *p, size_t n) {
