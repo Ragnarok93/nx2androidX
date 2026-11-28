@@ -41,3 +41,7 @@ Sample Android host wall and pause-adjusted active clocks together under the exi
 ## Checkpoint 7 — snapshot timeline and docked admission evidence
 
 Initial asynchronous writer native link passed; isolated capture-column test failed on unused helper warnings (addressed by inline helpers in checkpoint 6). Preserve timeline rows while the asynchronous writer runs and initialize its crash stack. Both earlier archives omit sampler descriptor rows for certified fragment 7d05eef41136554f. Log the exact sampler state under its registration lock with a bounded refusal bitmask: 1 missing Vulkan sampler, 2 missing registration, 4 forced nearest, 8 mag filter, 16 min filter, 32 wrap, 64 anisotropy, 128 comparison, 256 reduction. Admission is unchanged. Need this state or an equivalent proven contract to resolve docked replay safely.
+
+## Checkpoint 8 — truthful graphics menu
+
+Prior combined CI and signed APK workflows passed at 42ff776. The Graphics menu now displays the selected upscaler and target separately from the last accepted real frame's output pass and actual reconstruction extent (before display/FG resolve). A replay temporal flag identifies GSR 2 replay separately from the final pass. A paused setting edit, rejected real present, or redraw cannot publish a new last-frame result. No new rows, touch-layout changes, or settings format changes. Host present regression covers status publication and native bypass. Last-frame status does not claim that an untracked guest spatial draw ran.

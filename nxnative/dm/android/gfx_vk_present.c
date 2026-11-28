@@ -24,6 +24,8 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #include "gfx_vk_output_target.h"
 #include "gfx_vk_capture_scale.h"
 #include "gfx_vk_source_continuity.h"
+#include "gfx_vk_menu_recon.h"
+static dm_recon_menu_status g_menu_recon;
 static dm_recon_continuity g_recon_source;
 
 __attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
@@ -686,7 +688,12 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || ov_flag_item(it);
             float trailing=action?m3_text_w(">",small_scale)+rh*0.16f:0;
-            m3_bounded_text(cv,x1-trailing,cy,value,small_scale,x1-control_left-trailing,1,action?M3_PRIMARY:M3_VARIANT);
+            if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT) {
+                char last[80];
+                dm_recon_menu_label(&g_menu_recon,it==OVM_OUTPUT_HEIGHT,last,sizeof last);
+                m3_bounded_text(cv,x1-trailing,cy-rh*0.17f,value,small_scale,x1-control_left-trailing,1,M3_PRIMARY);
+                m3_bounded_text(cv,x1-trailing,cy+rh*0.19f,last,small_scale*0.78f,x1-control_left-trailing,1,M3_VARIANT);
+            } else m3_bounded_text(cv,x1-trailing,cy,value,small_scale,x1-control_left-trailing,1,action?M3_PRIMARY:M3_VARIANT);
             if(action)m3_text(cv,x1-m3_text_w(">",small_scale),cy,">",small_scale,M3_VARIANT);
         } else if (OVM_BUTTONS[it]) {   // a button
             float bw=fminf(x1-control_left,rh*2.45f), b[4]={x1-bw,cy-rh*0.31f,bw,rh*0.62f};
@@ -1624,6 +1631,11 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         accepted_generated += present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0);
     int accepted_real = present_one(source, source->img, rect, picture, flip_y,
                                     ng ? hold : period, ticket, 1);
+    if (dm_recon_menu_publish(&g_menu_recon,accepted_real,spatial_active,
+            reconstructed!=NULL,replay_flags,
+            reconstructed?reconstructed->texture.w:(unsigned)raw[2],
+            reconstructed?reconstructed->texture.h:(unsigned)raw[3]))
+        g_ov.panel=-1; // re-rasterize even when the settings bits did not change
     if (capture) {
         sample.present_accepted = accepted_real;
         sample.generated_accepted = accepted_generated;

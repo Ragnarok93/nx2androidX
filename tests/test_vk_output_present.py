@@ -18,6 +18,9 @@ class OutputPresent(unittest.TestCase):
 #include "gfx_vk_flow_budget.h"
 #include "gfx_vk_capture_scale.h"
 #include "spatial_upscaler.h"
+#include "gfx_vk_menu_recon.h"
+static dm_recon_menu_status g_menu_recon;
+static struct {int panel;} g_ov;
 typedef struct {uint32_t width,height;} VkExtent2D;
 typedef int VkFormat,VkFence,VkImage;
 #define VK_NULL_HANDLE 0
@@ -109,11 +112,15 @@ int main(void){
     assert(cap.reconstruction_submitted&&cap.actual_w==3840&&cap.actual_h==2160);
     assert(cap.final_source_w==1920&&cap.final_source_h==1080);
     assert(cap.present_accepted==1&&cap.generated_accepted==1);
+    assert(g_menu_recon.valid&&g_menu_recon.output_pass==SP_SGSR2&&g_menu_recon.w==3840&&g_menu_recon.h==2160&&g_ov.panel==-1);
+    char status[80];dm_recon_menu_label(&g_menu_recon,1,status,sizeof status);
+    assert(!strcmp(status,"Last: 3840x2160"));
     assert(cap.fg_reason && !strcmp(cap.fg_reason,"test fg") && cap.fg_planned==1);
     // A paused setting change must not generate or reconstruct the old ticket.
     configured=1440;present_calls=0;
     present_window(&src,NULL,-1,1,1,33333333,1,1,0,NULL);
     assert(rec_calls==1&&fg_calls==1&&capture_calls==1&&present_calls==1&&observed[0].w==1920&&observed[0].image==55);
+    assert(g_menu_recon.w==3840&&g_menu_recon.h==2160); // paused change is not a real frame
     g_spatial.retry_after=121;g_spatial.rcas_retry_after=121;
     real(2,1);assert(!g_spatial.retry_after&&!g_spatial.rcas_retry_after);assert(rec_target.width==2560&&rec_target.height==1440&&reset_flags==DM_RECON_SOURCE_GEOMETRY);
     g_spatial.retry_after=122;g_spatial.rcas_retry_after=122;
@@ -122,6 +129,7 @@ int main(void){
     force_fail=1;real(4,1);assert(fg_image==11&&fg_input.width==1920&&fg_input.height==1080&&observed[1].image==11&&observed[1].flip);
     assert(!cap.reconstruction_submitted&&!cap.actual_w&&!cap.actual_h&&cap.final_source_w==1920);
     assert(!cap.present_accepted&&cap.generated_accepted==1);
+    assert(g_menu_recon.w==2560&&g_menu_recon.h==1440); // failed real present cannot publish
     force_fail=0;configured=1080;real(5,1);assert(rec_target.width==1920&&observed[1].image==11);
     // Handheld 720p input still reconstructs to explicit 1440p; LSFG disabled.
     src.w=1280;src.h=720;configured=1440;fg_on=0;real(6,0);
@@ -157,6 +165,13 @@ int main(void){
     present_window(&src,NULL,1.0/30,21,0,21*33333333,1,1,
         SP_REPLAY_TEMPORAL|SP_REPLAY_SHARPENED,NULL);
     assert(fg_encoding!=prior_encoding);
+    dm_recon_menu_label(&g_menu_recon,0,status,sizeof status);
+    assert(!strcmp(status,"Last: GSR 2 + Bilinear"));
+    dm_recon_menu_status empty={0};
+    dm_recon_menu_label(&empty,0,status,sizeof status);assert(!strcmp(status,"Last: waiting"));
+    assert(dm_recon_menu_publish(&empty,1,SP_NATIVE,0,0,1920,1080));
+    dm_recon_menu_label(&empty,1,status,sizeof status);assert(!strcmp(status,"Last: 1920x1080 native"));
+    assert(!dm_recon_menu_publish(&empty,1,SP_NATIVE,0,0,1920,1080));
     return 0;
 }
 '''
