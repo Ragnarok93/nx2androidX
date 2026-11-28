@@ -72,6 +72,9 @@ static VkSurfaceKHR g_surf; static VkSwapchainKHR g_swap; static VkImage g_simg[
 // decodes and encodes them again. UNORM games keep the UNORM swapchain. The overlay drawn after the blit is encoded too in an sRGB swapchain, so it shows a little lighter there
 static VkFormat g_want = VK_FORMAT_R8G8B8A8_UNORM;
 static int g_present_failed;
+// Acquire semaphores belong to submission slots. Present wait semaphores
+// belong to swapchain images: reacquisition proves the old present wait
+// has completed, while the graphics submission fence alone does not.
 static VkSemaphore g_acq[8], g_done_sem[8]; static VkFence g_pfence[8]; static VkCommandPool g_ppool; static VkCommandBuffer g_pcb[8]; static uint32_t g_pi;
 static ANativeWindow *g_win;
 static VkImageView g_sview[8];
@@ -131,8 +134,15 @@ static void swap_destroy(void) {
     vk_guest_flow_surface_reset();
     g_spatial.ticket = 0; // a redraw must not reuse pre-rebuild output geometry
     present_time_reset();
-    if (g_swap) { present_wait_idle(); ov_fb_drop(); for (uint32_t i = 0; i < g_nsimg; i++) if (g_sview[i]) { vkDestroyImageView(V.dev, g_sview[i], NULL); g_sview[i] = VK_NULL_HANDLE; }
-                  vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE; }
+    if (g_swap) {
+        present_wait_idle(); ov_fb_drop();
+        for (uint32_t i = 0; i < g_nsimg; i++) {
+            if (g_sview[i]) vkDestroyImageView(V.dev, g_sview[i], NULL);
+            if (g_done_sem[i]) vkDestroySemaphore(V.dev, g_done_sem[i], NULL);
+            g_sview[i] = VK_NULL_HANDLE; g_done_sem[i] = VK_NULL_HANDLE;
+        }
+        vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE;
+    }
     g_nsimg = 0;
     rot_drop_image();
     g_pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
@@ -240,12 +250,18 @@ static int swap_make(void) {
         VkImageView view;
         r = vkCreateImageView(V.dev, &vi, NULL, &view);
         if (r != VK_SUCCESS) goto surface_unavailable;
-        g_sview[i] = view; }
+        g_sview[i] = view;
+        VkSemaphoreCreateInfo sem = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        VkSemaphore done = VK_NULL_HANDLE;
+        r = vkCreateSemaphore(V.dev, &sem, NULL, &done);
+        if (r != VK_SUCCESS) goto surface_unavailable;
+        g_done_sem[i] = done;
+    }
     if (!g_ppool) {
         VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, V.qf}; VKCHK(vkCreateCommandPool(V.dev, &pci, NULL, &g_ppool));
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, g_ppool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 8}; VKCHK(vkAllocateCommandBuffers(V.dev, &ai, g_pcb));
         for (int i = 0; i < 8; i++) {
-            VkSemaphoreCreateInfo s = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VKCHK(vkCreateSemaphore(V.dev, &s, NULL, &g_acq[i])); VKCHK(vkCreateSemaphore(V.dev, &s, NULL, &g_done_sem[i]));
+            VkSemaphoreCreateInfo s = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VKCHK(vkCreateSemaphore(V.dev, &s, NULL, &g_acq[i]));
             VkFenceCreateInfo f = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, VK_FENCE_CREATE_SIGNALED_BIT}; VKCHK(vkCreateFence(V.dev, &f, NULL, &g_pfence[i]));
         }
     }
@@ -1345,8 +1361,9 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
         barrier(cb, g_simg[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     } else barrier(cb, g_simg[idx], lay, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     vkEndCommandBuffer(cb);
-    VkPipelineStageFlags ws = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 1, &g_acq[k], &ws, 1, &cb, 1, &g_done_sem[k]};
+    // A vivid/rotated frame may first access the acquired image as a color attachment.
+    VkPipelineStageFlags ws = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 1, &g_acq[k], &ws, 1, &cb, 1, &g_done_sem[idx]};
     extern pthread_mutex_t g_vk_queue_mu;
     pthread_mutex_lock(&g_vk_queue_mu);
     vkResetFences(V.dev, 1, &g_pfence[k]);
@@ -1361,7 +1378,7 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
         g_spatial.image[SP_OUTPUT].last_use = g_pfence[k];
     if (src == g_spatial.image[SP_RESOLVE].texture.img)
         g_spatial.image[SP_RESOLVE].last_use = g_pfence[k];
-    VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &g_done_sem[k], 1, &g_swap, &idx, NULL};
+    VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &g_done_sem[idx], 1, &g_swap, &idx, NULL};
     VkPresentTimeGOOGLE ptm = {++g_pace_id, period >= 0 ? pace_desired(period) : 0};
     VkPresentTimesInfoGOOGLE pti = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, NULL, 1, &ptm};
     if (V.has_dtiming) pi.pNext = &pti;
@@ -1376,7 +1393,13 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
         if (period >= 0)
             atomic_fetch_add_explicit(&g_fps_frames, 1, memory_order_relaxed);
     }
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) swap_destroy();
+    if (r < 0) {
+        // The failed present may not have consumed its wait semaphore.
+        // Recreate image-owned semaphores instead of signaling one again.
+        VKRED_ONCE(92, "vkQueuePresentKHR: %d", r);
+        if (r == VK_ERROR_DEVICE_LOST) g_present_failed = 1;
+        swap_destroy();
+    }
     else if (r == VK_SUBOPTIMAL_KHR && g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {   // the device turned over (ROTATE_90 <-> ROTATE_270): a swapchain for the new turn
         VkSurfaceCapabilitiesKHR c; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &c);
         if ((c.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) != (VkSurfaceTransformFlagsKHR)g_pre) swap_destroy();
