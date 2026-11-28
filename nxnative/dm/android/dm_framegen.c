@@ -110,7 +110,7 @@ static struct {
     lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
     lsfg_graph_owner graph;
     uint64_t graph_ticket;
-    int auto_applied;
+    int auto_applied,requested_flow;
     int seed_policy;
     double graph_deadline;
     VkExtent2D failed_extent; int failed_flow; double rebuild_retry_at;
@@ -280,6 +280,7 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
         F.shadow_workload!=workload) {
         if(live)fg_cancel_request();
         dm_fg_governor_reset(&F.shadow,(unsigned)d.active_flow,F.timing_epoch);
+        dm_fg_governor_preset(&F.shadow,d.requested_flow);
         F.shadow_workload=workload;
         memset(F.shadow_rows,0,sizeof F.shadow_rows);
     }
@@ -447,6 +448,9 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     fg_decision.requested_flow=flow;
     uint64_t graph_ticket=++F.graph_ticket;
     fg_collect_retired();
+    if(F.requested_flow!=flow){
+        fg_timing_invalidate();F.auto_applied=0;F.requested_flow=flow;
+    }
     if (flow>0 || !fg_live_enabled()) { F.auto_applied=0; fg_cancel_request(); }
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;

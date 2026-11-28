@@ -7,7 +7,7 @@
 // texture read safe — the game cannot redraw the texture before NVN's acquire, which waits for the present's
 // ticket), so no extra semaphore wait is needed. Off by default; the user's own Lossless.dll (the app finds it
 // and passes DM_LSFG_DLL) is read once. Without NX_LSFG every call reports "not in this build".
-// Settings: DM_LSFG=1, DM_LSFG_MULT=2..4, DM_LSFG_TARGET=0|fps, DM_LSFG_FLOW=0 (fixed auto), -1 (adaptive auto), or 25..100 (%), changed
+// Settings: DM_LSFG=1, DM_LSFG_MULT=2..4, DM_LSFG_TARGET=0|fps, DM_LSFG_FLOW=0 (fixed auto), -1 (adaptive Auto), -2 (Quality), -3 (Balanced), -4 (Low), or 25..100 (%), changed
 // while running by dm_fg_set (the drawer, live over DM_CTL) or the env rows at the start.
 #ifndef DM_FRAMEGEN_H
 #define DM_FRAMEGEN_H

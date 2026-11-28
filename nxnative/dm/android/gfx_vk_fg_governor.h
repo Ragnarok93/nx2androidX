@@ -1,5 +1,6 @@
 #pragma once
 #include "gfx_vk_fg_timing.h"
+#include "gfx_vk_fg_flow.h"
 
 // Pure policy. The backend owns resources and must acknowledge every request.
 // All elapsed intervals are seconds of eligible real-frame cadence, not pauses.
@@ -7,12 +8,16 @@ enum { FG_FLOW_HOLD, FG_FLOW_DOWN, FG_FLOW_UP, FG_FLOW_ROLLBACK };
 typedef struct { unsigned pct,reason; } dm_fg_flow_request;
 typedef struct {
     uint64_t epoch,last;
-    unsigned applied,pending,prior,pending_reason,probe_count;
+    unsigned applied,pending,prior,pending_reason,probe_count,min,max,step;
     double down,up,backoff,baseline,base_budget,probe_time,probe_sum;
     int probe;
 } dm_fg_governor;
 static inline void dm_fg_governor_reset(dm_fg_governor *g,unsigned initial,uint64_t epoch) {
-    *g=(dm_fg_governor){.epoch=epoch,.applied=initial<25?25:initial>100?100:initial};
+    *g=(dm_fg_governor){.epoch=epoch,.applied=initial<25?25:initial>100?100:initial,.min=25,.max=100,.step=10};
+}
+static inline void dm_fg_governor_preset(dm_fg_governor *g,int requested) {
+    dm_fg_flow_range r=dm_fg_flow_bounds(requested);
+    g->min=r.min;g->max=r.max;g->step=requested<0?5:10;
 }
 static inline void dm_fg_governor_gap(dm_fg_governor *g) {
     g->down=g->up=0;
@@ -66,8 +71,8 @@ static inline dm_fg_flow_request dm_fg_governor_observe(dm_fg_governor *g,const 
             return dm_fg_governor_request(g,g->prior,FG_FLOW_ROLLBACK);
         dm_fg_governor_gap(g);return hold;
     }
-    unsigned lower=g->applied>35?g->applied-10:25;
-    unsigned upper=g->applied<90?g->applied+10:100;
+    unsigned lower=g->applied>g->min+g->step?g->applied-g->step:g->min;
+    unsigned upper=g->applied+g->step<g->max?g->applied+g->step:g->max;
     if (lower<g->applied && s->total_ms>=.90*budget &&
         s->total_ms-dm_fg_predicted_ms(s,lower)>=.25) {
         g->up=0;g->down+=elapsed;

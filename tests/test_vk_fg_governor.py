@@ -53,6 +53,20 @@ int main(void) {
     assert(tick(&g,2,1,1).reason==FG_FLOW_HOLD);
     for(int i=0;i<20;i++)assert(dm_fg_governor_observe(&g,&s,2,.1,1,1).reason==FG_FLOW_HOLD);
     ++s.serial;assert(dm_fg_governor_observe(&g,&s,2,20,1,1).reason==FG_FLOW_HOLD);
+    dm_fg_governor_reset(&g,75,6);dm_fg_governor_preset(&g,DM_FG_FLOW_QUALITY);
+    s.epoch=6;s.scale=75;s.total_ms=9;s.generated=1;s.valid=1;
+    for(int i=0;i<3;i++)assert(tick(&g,5,1,0).reason==FG_FLOW_HOLD);
+    r=tick(&g,5,1,0);assert(r.reason==FG_FLOW_DOWN&&r.pct==70);
+    dm_fg_governor_reset(&g,70,7);dm_fg_governor_preset(&g,DM_FG_FLOW_QUALITY);
+    s.epoch=7;s.scale=70;
+    for(int i=0;i<20;i++)assert(tick(&g,5,1,0).reason==FG_FLOW_HOLD);
+    dm_fg_governor_reset(&g,75,8);dm_fg_governor_preset(&g,DM_FG_FLOW_BALANCED);
+    s.epoch=8;s.scale=75;
+    for(int i=0;i<39;i++)assert(tick(&g,20,1,1).reason==FG_FLOW_HOLD);
+    r=tick(&g,20,1,1);assert(r.reason==FG_FLOW_UP&&r.pct==80);
+    dm_fg_governor_reset(&g,80,9);dm_fg_governor_preset(&g,DM_FG_FLOW_BALANCED);
+    s.epoch=9;s.scale=80;
+    for(int i=0;i<60;i++)assert(tick(&g,20,1,1).reason==FG_FLOW_HOLD);
     return 0;
 }'''
         with tempfile.TemporaryDirectory() as tmp:

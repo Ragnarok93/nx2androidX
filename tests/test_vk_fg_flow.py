@@ -11,7 +11,20 @@ class FGFlow(unittest.TestCase):
 #include "gfx_vk_fg_flow.h"
 int main(void){
     assert(dm_fg_flow_normalize(-1)==DM_FG_FLOW_ADAPTIVE);
-    assert(dm_fg_flow_normalize(-2)==DM_FG_FLOW_AUTO);
+    assert(dm_fg_flow_normalize(-2)==DM_FG_FLOW_QUALITY);
+    assert(dm_fg_flow_normalize(-5)==DM_FG_FLOW_AUTO);
+    assert(dm_fg_flow_mode(75)==DM_FG_MODE_FIXED && dm_fg_flow_mode(-3)==DM_FG_MODE_ADAPTIVE);
+    assert(dm_fg_flow_select(DM_FG_MODE_FIXED,65,-3)==65);
+    assert(dm_fg_flow_select(DM_FG_MODE_ADAPTIVE,65,-3)==-3);
+    assert(dm_fg_flow_select(DM_FG_MODE_AUTO,65,-3)==0);
+    assert(dm_fg_flow_preset_step(-2,1)==-3 && dm_fg_flow_preset_step(-3,1)==-4);
+    assert(dm_fg_flow_preset_step(-4,1)==-1 && dm_fg_flow_preset_step(-1,1)==-2);
+    assert(dm_fg_flow_preset_step(-2,-1)==-1);
+    assert(dm_fg_effective_flow(-2,1920,1080)==70 && dm_fg_flow_is_adaptive(-2,0));
+    assert(dm_fg_effective_flow(-3,1920,1080)==55);
+    assert(dm_fg_effective_flow(-3,1280,720)==80);
+    assert(dm_fg_effective_flow(-4,1280,720)==55);
+    assert(dm_fg_effective_flow(-4,3840,2160)==25);
     assert(dm_fg_flow_is_adaptive(-1,0)&&!dm_fg_flow_is_adaptive(0,0));
     assert(dm_fg_flow_is_adaptive(0,1)&&!dm_fg_flow_is_adaptive(50,1));
     assert(dm_fg_flow_step(0,1)==-1 && dm_fg_flow_step(-1,1)==25);
