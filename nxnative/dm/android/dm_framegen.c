@@ -8,6 +8,7 @@
 #include "gfx_vk_fg_flow.h"
 #include "gfx_vk_fg_timing.h"
 #include "gfx_vk_fg_governor.h"
+#include "gfx_vk_fg_warmup.h"
 #include "vka.h"
 #include <math.h>
 #include <stdio.h>
@@ -92,6 +93,8 @@ static struct {
     lsfg_graph_owner graph;
     uint64_t graph_ticket;
     int auto_applied;
+    int seed_policy;
+    double graph_deadline;
     VkExtent2D failed_extent; int failed_flow; double rebuild_retry_at;
     VkImage out[LSFG_MAX_GENERATIONS]; VkImageView out_view[LSFG_MAX_GENERATIONS]; VkDeviceMemory out_mem[LSFG_MAX_GENERATIONS];
     VkCommandPool pool;
@@ -145,10 +148,18 @@ static int load(void) {
 
 // Timing state is present-thread owned, with process-lifetime query pool like
 // the existing FG command pool. Old epoch queries are retired but ignored.
+static int fg_live_enabled(void) {
+    const char *e=getenv("DM_LSFG_ADAPTIVE_AUTO");return e&&atoi(e);
+}
+static void fg_cancel_request(void) {
+    lsfg_graph_owner_cancel(&F.graph);
+    if(F.shadow.pending) dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);
+    F.seed_policy=FG_SEED_DEFER;
+}
 static void fg_timing_invalidate(void) {
     ++F.timing_epoch;
     F.timing_latest.valid=0;
-    lsfg_graph_owner_cancel(&F.graph);
+    fg_cancel_request();
 }
 
 static void fg_timing_init(void) {
@@ -196,18 +207,21 @@ static void fg_timing_stamp(VkCommandBuffer cb,uint32_t index) {
     if (F.timing_queries) vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,F.timing_queries,index);
 }
 
-// Shadow only: this cannot call rebuild or modify F.flow, pacing or history.
+// Shadow or explicit experimental Auto. Decisions never rebuild the active chain.
 // The available budget is an estimate from recent completed replay and
 // reconstruction measurements, not a measured free GPU interval.
 void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
     const char *enabled=getenv("DM_LSFG_FLOW_SHADOW");
-    if (!enabled || !atoi(enabled)) return;
+    int live=fg_live_enabled();
+    if (!live && (!enabled || !atoi(enabled))) return;
     dm_fg_decision d=fg_decision;
-    if (d.requested_flow || !d.active_flow || !d.submission_serial) {
+    if (d.requested_flow || !d.active_flow || !d.submission_serial || !real) {
+        if(live)fg_cancel_request();
         dm_fg_governor_gap(&F.shadow);return;
     }
     if (F.shadow.epoch!=F.timing_epoch || F.shadow.applied!=(unsigned)d.active_flow ||
         F.shadow_workload!=workload) {
+        if(live)fg_cancel_request();
         dm_fg_governor_reset(&F.shadow,(unsigned)d.active_flow,F.timing_epoch);
         F.shadow_workload=workload;
         memset(F.shadow_rows,0,sizeof F.shadow_rows);
@@ -220,21 +234,34 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     F.shadow_rows[i].budget=replay_ms>0 && recon_ms>=0 ?
         d.period_ms-replay_ms-recon_ms-1.0 : 0;
     F.shadow_rows[i].elapsed=d.measured_ms/1000.0;
-    F.shadow_rows[i].accepted=real && generated>0;
+    F.shadow_rows[i].accepted=real?generated:0;
     dm_fg_timing s=d.timing;
     if (!s.valid) {dm_fg_governor_gap(&F.shadow);return;}
     unsigned j=s.serial%8;
     int matched=F.shadow_rows[j].serial==s.serial && F.shadow_rows[j].workload==workload;
     if (!matched) {dm_fg_governor_gap(&F.shadow);return;}
-    // Recovery is deliberately vetoed until fresh memory/thermal evidence
-    // is available; pure controller tests cover the recovery path.
+    // Pending and retiring graphs cannot launch a third graph. Do not let
+    // transition-only workload contaminate profitability or dwell evidence.
+    if(live && F.graph.phase!=LSFG_GRAPH_EMPTY)return;
+    uint64_t recovery_cap=live?vk_fg_transition_cap(1):0;
     dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
-        F.shadow_rows[j].elapsed,F.shadow_rows[j].accepted && real && generated>0,0);
+        F.shadow_rows[j].elapsed,F.shadow_rows[j].accepted==(int)s.generated && generated>0,recovery_cap!=0);
     if (req.reason!=FG_FLOW_HOLD) {
         VLOG("LSFG_FLOW_SHADOW serial=%llu epoch=%llu active=%d suggested=%u reason=%u gpu_ms=%.3f estimated_budget_ms=%.3f",
             (unsigned long long)s.serial,(unsigned long long)s.epoch,d.active_flow,req.pct,req.reason,
             s.total_ms,F.shadow_rows[j].budget);
-        dm_fg_governor_ack(&F.shadow,0,F.timing_epoch); // no actual transition; bound repeat reports
+        if(live) {
+            int up=req.pct>(unsigned)F.flow;
+            uint64_t cap=vk_fg_transition_cap(up);
+            int seed=dm_fg_seed_policy(&s,req.pct,F.shadow_rows[j].budget,!up);
+            if(cap && seed && lsfg_graph_owner_start(&F.graph,&F.mods,F.ext,req.pct,F.out_view,cap,F.timing_epoch)) {
+                F.seed_policy=seed;F.graph_deadline=mono_s()+10.0;
+                VLOG("LSFG_FLOW_GRAPH request %u%%, cap %llu, warmup %d",req.pct,(unsigned long long)cap,seed);
+                return; // wait for publication or cancellation to acknowledge
+            }
+            VLOG("LSFG_FLOW_GRAPH request refused (cap %llu, warmup %d)",(unsigned long long)cap,seed);
+        }
+        dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);
     }
 }
 
@@ -351,7 +378,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     fg_decision.requested_flow=flow;
     uint64_t graph_ticket=++F.graph_ticket;
-    if (flow) { F.auto_applied=0; lsfg_graph_owner_cancel(&F.graph); }
+    if (flow || !fg_live_enabled()) { F.auto_applied=0; fg_cancel_request(); }
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;
         if (F.chain) { teardown(); VLOG("frame generation off"); }
@@ -394,7 +421,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     VkFormatProperties fp = {0}; vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->fmt, &fp);
     if (!im->img || !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || cw <= 0 || ch <= 0) {
         VKRED_ONCE(96, "frame generation: the window texture (format %d) cannot be copied into the chain: not generating", im->fmt);
-        lsfg_graph_owner_cancel(&F.graph);
+        fg_cancel_request();
         F.warm_streak = 0; atomic_store(&g_state, 2); return fg_skip("source format or crop unsupported");
     }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
@@ -428,8 +455,15 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         F.timing_period=period; F.timing_mult=mult; F.timing_target=target;
     }
     fg_timing_init();
+    if (F.graph.phase==LSFG_GRAPH_BUILDING || F.graph.phase==LSFG_GRAPH_WARMING) {
+        if (!fg_live_enabled() || tnow>F.graph_deadline ||
+            !vk_fg_transition_cap(F.graph.scale>(unsigned)F.flow))fg_cancel_request();
+    }
     int graph_poll=lsfg_graph_owner_poll(&F.graph,F.timing_epoch);
-    if (graph_poll<0) VLOG("LSFG_FLOW_GRAPH build cancelled or failed");
+    if (graph_poll<0) {
+        fg_cancel_request();
+        VLOG("LSFG_FLOW_GRAPH build cancelled or failed");
+    } else if(graph_poll>0) F.graph_deadline=tnow+1.0;
     // The floor for the game's own rate (DM_LSFG_MIN_FPS, default 30): the generation's work must not push the game under it
     F.pacer.min_base = 30.0f;
     { const char *e = getenv("DM_LSFG_MIN_FPS"); if (e && atoi(e) > 0) F.pacer.min_base = (float)atoi(e); }
@@ -444,6 +478,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     if (ng > LSFG_MAX_GENERATIONS) ng = LSFG_MAX_GENERATIONS;
     // Generated frames only as many as the refreshes in the game's own period leave room for (the panel shows one image a refresh; more would hold
     // the FIFO present, and the game with it, to a fraction of its rate — Banana's Honor phone note). DM_VK_FG_REFRESH_CAP=0: no cap
+    int seed_only_generation=0;
     uint64_t rns = getenv("DM_VK_FG_REFRESH_CAP") && !atoi(getenv("DM_VK_FG_REFRESH_CAP")) ? 0 : vk_refresh_cycle_ns(); int capped = 0;
     fg_decision.measured_ms=F.pacer.smoothed_interval*1000.0;
     fg_decision.planned=(unsigned)plan.generations;
@@ -457,7 +492,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         if (!fit) {
             // Keep the display vote and pacing observations, but do not copy
             // a source frame the panel cannot use for generation.
-            lsfg_graph_owner_cancel(&F.graph);
+            fg_cancel_request();
             F.count = F.warm_streak = F.pacer.issued = 0;
             ng = 0;
             capped = 1;
@@ -475,9 +510,11 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // Only switch on a real generation opportunity with contiguous history.
     int switching=ng && !fg_decision.requested_flow &&
         lsfg_graph_owner_ready(&F.graph,F.timing_epoch,graph_ticket);
-    int seeded=!switching && warm && !fg_decision.requested_flow &&
+    int seeded=!switching && warm && ng && !fg_decision.requested_flow && F.seed_policy &&
         F.graph.phase==LSFG_GRAPH_WARMING &&
         lsfg_graph_history_can_seed(&F.graph.history,F.timing_epoch,graph_ticket);
+    seed_only_generation=seeded && F.seed_policy==FG_SEED_INSTEAD_OF_GENERATION;
+    if(seed_only_generation)ng=0; // reserve optional generation budget for pending history
     lsfg_chain *record_chain=switching?F.graph.extra:F.chain;
     uint64_t record_count=switching?F.graph.history.next_index:count;
     fg_timing_read(slot_index); // existing begin_slot fence already retired
@@ -518,8 +555,12 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         if (!published) abort(); // internal ownership invariant
         F.flow=(int)new_flow;flow=F.flow;F.auto_applied=1;
         F.count=record_count+1;
-        fg_timing_invalidate();
-        fg_decision.timing.valid=0;
+        ++F.timing_epoch;
+        F.timing_latest.valid=0;
+        dm_fg_governor_ack(&F.shadow,1,F.timing_epoch);
+        memset(F.shadow_rows,0,sizeof F.shadow_rows);
+        F.seed_policy=FG_SEED_DEFER;
+        fg_decision.timing=(dm_fg_timing){0};
         fg_decision.active_flow=F.flow;
         VLOG("LSFG_FLOW_GRAPH activated %d%%, private bytes %llu",F.flow,(unsigned long long)lsfg_chain_bytes(F.chain));
     } else lsfg_graph_owner_submit(&F.graph,slot_index,1,1,seeded,F.timing_epoch,graph_ticket);
@@ -554,7 +595,7 @@ report:;
         reason("%s", st2 == 1 ? "generating" : capped ? why : met ? "on, the target rate is met: no frame to add" : "on, waiting for a steady frame rate");
         static int ncap; if (st2 == 2 && capped && ncap++ < 4) VLOG("frame generation: not generating, %s (game frame period %.1f ms)", why + 4, period * 1e3);
     }
-    fg_decision.reason=ng?"generated":capped?"refresh cap":met?"target met":
+    fg_decision.reason=ng?"generated":seed_only_generation?"adaptive flow warmup":capped?"refresh cap":met?"target met":
         !plan.warm?"pacer not warm or floor cooldown":!warm||F.warm_streak<2?"history warmup":"pacer issued zero";
     was_capped = st2 == 2 && capped;
     was_met = st2 == 2 && met;
