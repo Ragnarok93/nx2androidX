@@ -1859,8 +1859,8 @@ static void *present_thread(void *arg) {
     for (;;) {
         pthread_mutex_lock(&g_pq_mu);
         while (g_pq_tail == g_pq_head && !atomic_load(&g_redraw)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
-        atomic_store(&g_redraw, 0);
         if (g_pq_tail == g_pq_head) {   // a redraw, no new frame
+            atomic_store(&g_redraw, 0);
             pthread_mutex_unlock(&g_pq_mu);
             if (last.im) {
                 pthread_mutex_lock(&g_present_mu);
@@ -1882,6 +1882,9 @@ static void *present_thread(void *arg) {
             // Old queued tickets still retire in FIFO order, but cannot seed
             // a new lifecycle or advance the real/source FPS counters.
             if (dm_lifecycle_source_current(e.lifecycle_epoch, dm_front_lifecycle_epoch())) {
+                // Only a real output can consume the redraw request. A
+                // dropped pre-hold ticket must leave it for the idle worker.
+                atomic_exchange(&g_redraw, 0);
                 last = e;
                 last.physical.backing = NULL;
                 if (e.trace.source_ns) e.trace.work_begin_ns = mono_ns();

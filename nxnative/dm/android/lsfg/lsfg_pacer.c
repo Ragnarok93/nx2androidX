@@ -42,6 +42,28 @@ static size_t zmin(size_t a, size_t b) { return a < b ? a : b; }
 static float fmin_(float a, float b) { return a < b ? a : b; }
 
 void lsfg_pacer_reset(lsfg_pacer *p) { memset(p, 0, sizeof *p); }
+// Intentional hold is not an active cadence sample. Keep the remaining
+// cooldown and prior unloaded-rate evidence, but discard interval/probe credit.
+void lsfg_pacer_resume(lsfg_pacer *p, double now) {
+    if (!p->last_frame) return;
+    double previous = p->last_frame;
+    double delay = now > previous ? now - previous : 0;
+    if (p->next_probe > previous) p->next_probe += delay;
+    else p->next_probe = 0;
+    if (p->stable_until > previous) p->stable_until += delay;
+    else p->stable_until = 0;
+    if (p->probe_until) {
+        p->limit = p->probe_previous_limit;
+        p->probe_until = 0;
+        if (p->next_probe < now + PROBE_STEP_DELAY) p->next_probe = now + PROBE_STEP_DELAY;
+    }
+    p->last_frame = 0;
+    p->smoothed_interval = p->output_credit = 0;
+    p->issued = 0;
+    p->deficit_since = p->below_since = 0;
+    p->base_deficit_since = p->base_healthy_since = 0;
+}
+
 
 static void stabilize(lsfg_pacer *p, double now) {
     p->stable_until = now + STABILIZATION_DURATION; p->probe_until = 0; p->deficit_since = 0;

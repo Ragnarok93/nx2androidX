@@ -12,6 +12,7 @@
 #include "gfx_vk_fg_governor.h"
 #include "gfx_vk_fg_warmup.h"
 #include "gfx_vk_fg_coordination.h"
+#include "gfx_vk_source_continuity.h"
 #include "gfx_vk_capture_scale.h"
 #include "vka.h"
 #include <math.h>
@@ -564,6 +565,12 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     fg_decision.requested_flow=flow;
     uint64_t graph_ticket=++F.graph_ticket;
+    if (source_reset & DM_RECON_SOURCE_PAUSE) {
+        // Do this even if a cold transition or allocation retry defers work.
+        lsfg_pacer_resume(&F.pacer, (double)F.source_ns / 1e9);
+        F.count = F.warm_streak = 0;
+        F.longer_since = 0;
+    }
     fg_collect_retired();
     if(F.requested_flow!=flow){
         if (F.cold.phase) teardown();
@@ -659,7 +666,26 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     }
     fg_decision.active_flow=F.flow;
     if (source_reset || encoding != F.encoding) {
-        fg_timing_invalidate();
+        // A same-workload lifecycle break invalidates history and timing
+        // serials, not known allocation failures or applied flow scale.
+        unsigned lifecycle_only = DM_RECON_SOURCE_PAUSE | DM_RECON_SOURCE_GAP;
+        int preserve = (source_reset & DM_RECON_SOURCE_PAUSE) &&
+            !(source_reset & ~lifecycle_only) && encoding == F.encoding &&
+            F.shadow.epoch == F.timing_epoch && F.shadow.applied == (unsigned)F.flow &&
+            F.timing_period == period && F.timing_mult == mult && F.timing_target == target;
+        if (preserve) {
+            ++F.timing_epoch;
+            F.timing_latest.valid=0;
+            lsfg_graph_owner_cancel(&F.graph);
+            F.seed_policy=FG_SEED_DEFER;
+            F.shadow.pending=F.shadow.pending_reason=0;
+            F.shadow.probe=0;
+            F.shadow.epoch=F.timing_epoch;
+            F.shadow.last=0;
+            dm_fg_governor_gap(&F.shadow);
+            memset(F.shadow_rows,0,sizeof F.shadow_rows);
+            fg_collect_retired();
+        } else fg_timing_invalidate();
         F.encoding = encoding;
         F.count = F.warm_streak = 0;
         if (source_reset) VLOG("frame generation: real-source discontinuity %#x", source_reset);

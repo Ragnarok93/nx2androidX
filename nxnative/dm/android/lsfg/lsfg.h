@@ -41,6 +41,7 @@ typedef struct { size_t generations; int warm; } lsfg_plan;
 // multiplier 2..4 (images per game frame with target_rate 0), target_rate 0 or the output rate to hold (the multiplier then follows it)
 lsfg_plan lsfg_pacer_plan(lsfg_pacer *p, size_t capacity, int multiplier, int target_rate, double now);
 void lsfg_pacer_reset(lsfg_pacer *p);
+void lsfg_pacer_resume(lsfg_pacer *p, double now);
 
 // ---------- The chain (lsfg_chain.c), Vulkan; needs the replay's device (vka.h) ----------
 #ifdef VK_VERSION_1_0
