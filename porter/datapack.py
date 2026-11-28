@@ -317,6 +317,11 @@ def build(dst, *, profile, version, display, patched, romfs, shaders, aoc=None, 
     if not require_links and refresh_in_place(dst, tmp, payload, set(files or {}), man, progress):
         shutil.rmtree(tmp)
         return man
+    if romfs is not None and (dst / ROMFS).is_dir() and Path(romfs).samefile(dst / ROMFS):
+        # The source is already the destination (verified previous companion or
+        # direct extraction). Never fall back to copying it into another tree.
+        shutil.rmtree(tmp)
+        raise OSError(f'cannot publish companion RomFS in place: {dst}; existing data preserved')
     for name, src in payload.items():
         if name in (files or {}):
             dest = tmp / name
