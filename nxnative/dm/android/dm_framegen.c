@@ -103,12 +103,16 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
 }
 #else
 enum { NFG = 3, FG_QUERY_STRIDE = 10 };
+enum { FG_COLD_DRAIN=4, FG_COLD_BUILD, FG_COLD_RETRY };
 typedef struct { VkCommandBuffer cb; VkFence fence; int pending; } fg_slot;
 static struct {
     int state;                         // 0 not tried, 1 ready (modules loaded), -1 unavailable
     lsfg_modules mods;
     lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
     lsfg_graph_owner graph;
+    lsfg_graph_job cold_job;
+    struct { unsigned phase, scale, failures; uint64_t limit, epoch; double retry_at; } cold;
+    int cold_init;
     uint64_t graph_ticket;
     int auto_applied,requested_flow;
     int seed_policy;
@@ -270,6 +274,12 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     // transitions. No second debug switch or verbose log mode is needed.
     if (!live && (!enabled || !atoi(enabled)) && !vk_pass_dump_user_active()) return;
     report->pressure=vk_fg_pressure_snapshot();
+    if (F.cold.phase) {
+        report->status=F.cold.phase==FG_COLD_DRAIN?"cold graph drain":F.cold.phase==FG_COLD_BUILD?"cold graph build":"cold graph retry";
+        report->requested_pct=F.cold.scale;
+        report->allocation_cap=F.cold.limit;
+        return;
+    }
     dm_fg_decision d=fg_decision;
     report->status=d.requested_flow>0?"manual flow":!d.active_flow?"no graph":!d.submission_serial?"no submission":!real?"real present rejected":"awaiting timing";
     if (d.requested_flow>0 || d.requested_flow!=atomic_load(&g_flow) || !d.active_flow || !d.submission_serial || !real) {
@@ -304,7 +314,7 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     if(live && F.graph.phase!=LSFG_GRAPH_EMPTY){report->status="graph transition in flight";return;}
     uint64_t recovery_cap=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)?report->pressure.up_cap:0;
     report->recovery_allowed=recovery_cap!=0;
-    int accepted=F.shadow_rows[j].accepted==(int)s.generated && generated>0 && s.generated;
+    int accepted=F.shadow_rows[j].accepted==(int)s.generated && s.generated;
     report->status=!accepted?"generated batch not accepted":!(report->budget_ms>0)?"budget unavailable":"hold";
     dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
         F.shadow_rows[j].elapsed,accepted,recovery_cap!=0);
@@ -319,6 +329,23 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
             uint64_t cap=up?recovery_cap:report->pressure.down_cap;
             int seed=dm_fg_seed_policy(&s,req.pct,F.shadow_rows[j].budget,!up);
             report->allocation_cap=cap;
+            // A lower flow can replace the old graph without keeping two
+            // copies resident or charging a second seed to an overloaded
+            // frame. Only live downward requests with fresh safe pressure
+            // may use this path. Its allocation cap is the retired graph's
+            // actual private bytes, not an increase to the extra-memory cap.
+            uint64_t old_bytes=lsfg_chain_bytes(F.chain);
+            if (!up && req.reason==FG_FLOW_DOWN && cap && old_bytes &&
+                F.graph.phase==LSFG_GRAPH_EMPTY && (!seed || cap<old_bytes)) {
+                F.cold.phase=FG_COLD_DRAIN;F.cold.scale=req.pct;
+                F.cold.limit=old_bytes;F.cold.epoch=F.timing_epoch;
+                report->status="cold graph requested";
+                report->allocation_cap=old_bytes;
+                vk_quality_recovery_hold(12000);
+                VLOG("LSFG_FLOW_GRAPH cold request %u%%, retiring %llu bytes, extra cap %llu",
+                    req.pct,(unsigned long long)old_bytes,(unsigned long long)cap);
+                return;
+            }
             int admitted=cap && seed && (!up || vk_quality_recovery_try(12000));
             if(admitted && lsfg_graph_owner_start(&F.graph,&F.mods,F.ext,req.pct,F.out_view,cap,F.timing_epoch)) {
                 if(!up)vk_quality_recovery_hold(12000);
@@ -336,6 +363,9 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
 
 static void teardown(void) {
     fg_timing_invalidate();
+    lsfg_graph_job_drain(&F.cold_job);
+    memset(&F.cold,0,sizeof F.cold);
+    F.cold_init=0;
     if (!F.chain && !F.out[0]) return;
     pthread_mutex_lock(V.qmu); vk.vkQueueWaitIdle(V.q); pthread_mutex_unlock(V.qmu);
     lsfg_graph_owner_clear_idle(&F.graph); // private GPU users and shared outputs retired
@@ -384,6 +414,83 @@ static int rebuild(VkExtent2D e, int flow) {
     if (!F.chain) { teardown(); return 0; }
     F.ext = e; F.flow = flow;
     VLOG("frame generation: chain for %ux%u (effective flow %d%%) made in %.1f ms", e.width, e.height, flow, (mono_s() - t0) * 1e3);
+    return 1;
+}
+
+// Same-extent downward replacement: the present thread stops submitting
+// LSFG work, polls only private graph users, then hands old ownership to a
+// worker. Shared generated output images remain alive for presentation.
+// No queue-wide idle, overlapping private graphs, or unbounded allocation.
+static int fg_cold_advance(double now) {
+    if (!F.cold.phase) return 1;
+    uint64_t extra_cap=vk_fg_transition_cap(0);
+    if (F.cold.phase==FG_COLD_DRAIN) {
+        // A discontinuity or newly unsafe pressure before ownership transfer
+        // leaves the original graph available; no resources were discarded.
+        if (F.cold.epoch!=F.timing_epoch || !extra_cap) {
+            memset(&F.cold,0,sizeof F.cold);
+            fg_cancel_request();
+            F.count=F.warm_streak=0;
+            return 1;
+        }
+        for (unsigned i=0;i<NFG;i++) {
+            if (!(F.graph.active_slots&(1u<<i))) continue;
+            fg_slot *slot=&F.fr[i];
+            if (slot->pending) {
+                if (vk.vkWaitForFences(V.dev,1,&slot->fence,VK_TRUE,0)!=VK_SUCCESS) continue;
+                vk_fg_fence_retired(slot->fence);
+                slot->pending=0;
+            }
+            lsfg_graph_owner_retire_slot(&F.graph,i);
+        }
+        if (F.graph.active_slots) return 0;
+        if (!lsfg_graph_job_start_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
+                F.out_view,F.cold.limit,F.cold.epoch,F.chain)) {
+            memset(&F.cold,0,sizeof F.cold);
+            fg_cancel_request();
+            F.count=F.warm_streak=0;
+            return 1;
+        }
+        // Worker owns the fully retired chain, and frees it before build.
+        F.chain=NULL;
+        F.cold.phase=FG_COLD_BUILD;
+        return 0;
+    }
+    if (F.cold.phase==FG_COLD_RETRY) {
+        if (!extra_cap || now<F.cold.retry_at) return 0;
+        if (!lsfg_graph_job_start(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
+                F.out_view,F.cold.limit,F.cold.epoch)) {
+            F.cold.retry_at=now+2.0;
+            return 0;
+        }
+        F.cold.phase=FG_COLD_BUILD;
+        return 0;
+    }
+    if (!extra_cap) lsfg_graph_job_cancel(&F.cold_job);
+    lsfg_chain *replacement=NULL;
+    if (!lsfg_graph_job_take(&F.cold_job,F.cold.epoch,&replacement)) return 0;
+    if (!replacement) {
+        unsigned shift=F.cold.failures<4?F.cold.failures++:4;
+        F.cold.retry_at=now+(double)(2u<<shift);
+        F.cold.phase=FG_COLD_RETRY;
+        VLOG("LSFG_FLOW_GRAPH cold build deferred; real frames continue");
+        return 0;
+    }
+    F.chain=replacement;
+    F.flow=(int)F.cold.scale;
+    F.auto_applied=1;
+    F.cold_init=1;
+    F.count=F.warm_streak=F.pacer.issued=0;
+    ++F.timing_epoch;
+    F.timing_latest.valid=0;
+    memset(F.shadow_rows,0,sizeof F.shadow_rows);
+    // No warm history or comparable overlapped probe survives this gap.
+    dm_fg_governor_reset(&F.shadow,(unsigned)F.flow,F.timing_epoch);
+    dm_fg_governor_preset(&F.shadow,F.requested_flow);
+    F.shadow.backoff=2.0;
+    memset(&F.cold,0,sizeof F.cold);
+    VLOG("LSFG_FLOW_GRAPH cold activated %d%%, private bytes %llu",F.flow,
+        (unsigned long long)lsfg_chain_bytes(F.chain));
     return 1;
 }
 
@@ -449,19 +556,20 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     uint64_t graph_ticket=++F.graph_ticket;
     fg_collect_retired();
     if(F.requested_flow!=flow){
+        if (F.cold.phase) teardown();
         fg_timing_invalidate();F.auto_applied=0;F.requested_flow=flow;
     }
     if (flow>0 || !fg_live_enabled()) { F.auto_applied=0; fg_cancel_request(); }
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;
-        if (F.chain) { teardown(); VLOG("frame generation off"); }
+        if (F.chain || F.cold.phase || F.out[0]) { teardown(); VLOG("frame generation off"); }
         if (F.state >= 0) { atomic_store(&g_state, 0); reason("%s", "off"); }
         return fg_skip("disabled");
     }
     // Unlocked source has no fixed cadence; do not invent an LSFG hold or
     // let generated images impose a hidden rate limit. Resume on fixed mode.
     if (period == 0 && dm_perf_rate_fps() == 0) {
-        if (F.chain) teardown();
+        if (F.chain || F.cold.phase || F.out[0]) teardown();
         atomic_store(&g_state, 2);
         reason("%s", "uncapped source rate; select a fixed FPS mode for frame generation");
         return fg_skip("uncapped source");
@@ -499,6 +607,21 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
     flow=dm_fg_effective_flow(flow,e.width,e.height);
+    if (F.cold.phase && (!fg_live_enabled() || F.ext.width!=e.width || F.ext.height!=e.height)) {
+        teardown();
+        *out_period=want;
+    }
+    if (F.cold.phase && !fg_cold_advance(tnow)) {
+        F.count=F.warm_streak=F.pacer.issued=0;
+        fg_decision.active_flow=F.chain?F.flow:0;
+        fg_decision.graph_phase=F.cold.phase;
+        fg_decision.pending_flow=F.cold.scale;
+        fg_decision.active_bytes=lsfg_chain_bytes(F.chain);
+        fg_decision.build_limit=F.cold.limit;
+        atomic_store(&g_state,2);
+        reason("%s","adaptive graph replacement; real frames only");
+        return fg_skip("adaptive cold graph replacement");
+    }
     if (fg_decision.requested_flow<=0 && F.auto_applied && F.chain &&
         F.ext.width==e.width && F.ext.height==e.height) flow=F.flow;
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
@@ -597,6 +720,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     uint32_t qb=slot_index*FG_QUERY_STRIDE;
     if (F.timing_queries) vkCmdResetQueryPool(cb,F.timing_queries,qb,FG_QUERY_STRIDE);
     full_barrier(cb);
+    if (F.cold_init) lsfg_chain_record_init(F.chain,cb);
     fg_timing_stamp(cb,qb);
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {cw, ch, 1}}};
     if (flip_y) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up, the chain sees it upright
@@ -627,6 +751,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     full_barrier(cb);   // the outputs for the presents after this
     result = submit_slot(slot);
     if (result) goto command_error;
+    F.cold_init=0;
     if (switching) {
         unsigned new_flow=F.graph.scale;
         // All conditions were checked before recording; only this thread
