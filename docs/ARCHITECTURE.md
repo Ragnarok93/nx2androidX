@@ -147,9 +147,14 @@ a pass needs physical fragment-coordinate or texture-coordinate scaling.
 A native final composition follows the existing presentation path, including
 reconstruction eligibility before LSFG.
 
-The standalone Capture graphics action records scaling and reconstruction
-metadata in memory with no added GPU readbacks. The rolling buffer retains
-4096 source-frame tickets. Stop capture and Export diagnostics both stop
+The standalone Diagnostics page has one Start capture action and a debug
+level selector. Performance (default) records scaling, reconstruction, and
+LSFG telemetry in memory with no added GPU readbacks. Detailed adds the
+per-source replay timeline without GPU readbacks. GPU snapshots adds bounded
+rolling attachment/input/surface readbacks, with an independent optional
+120-source snapshot delay; metadata collection starts immediately. Level and
+delay cannot be changed during recording or export. The rolling metadata
+buffer retains 4096 source-frame tickets. Stop capture and Export diagnostics both stop
 recording and preserve the finalized reports. Export opens Android's document
 picker, and a canceled or failed save leaves the reports available for retry.
 An unfinished GPU snapshot is retired after its fence and omitted from the
@@ -161,11 +166,14 @@ scope rejection at the largest rejected extent per frame, the charged
 resolution-backing bytes at the source frame, and their highest published
 value during that frame. These counters cover the resolution-backing budgets,
 including fence-retired variants, and exclude unrelated native Vulkan
-allocations. Compare Off, Fixed and Adaptive in the same capture, with GPU
-snapshots disabled for scaling admission. A frame with no certified scaled passes can
+allocations. Compare Off, Fixed and Adaptive in the same Performance capture for scaling
+admission. The same trace includes requested/effective LSFG flow, submitted
+and accepted generation counts, retired stage timings, pending graph phase,
+allocation bytes, governor decisions, memory and thermal evidence. Debugging
+never changes fixed Auto to live Adaptive Auto. A frame with no certified scaled passes can
 still have a smaller presentation source from the game itself.
 
-The separate GPU snapshots action includes bounded full images for one
+The GPU snapshots debug level includes bounded full images for one
 geometry depth/stencil pass, one MRT pass, subsequent effect outputs and the
 source before Android composition. Small effect passes have a separate limit
 so a run of fog passes leaves room for the scene-resolution outputs. The source
@@ -334,6 +342,45 @@ drawable, reconstruction produces a display-sized resolve in the same
 submission. LSFG and the real presenter read that resolved image in queue
 order. A missing resolve preserves the offscreen real frame and resets LSFG
 warmup. Pause-menu redraw uses the last completed real image. Vivid applies display-referred SDR contrast and saturation after LSFG, followed by the runtime overlay. sRGB images use compatible UNORM views for the spatial shaders so they filter display-encoded values, then present and composite with their sRGB encoding intact.
+
+### Adaptive LSFG flow scale
+
+Flow Scale offers fixed resolution-tier Auto (0), opt-in Adaptive Auto (-1),
+and explicit 25–100% manual settings. The legacy environment opt-in
+`DM_LSFG_ADAPTIVE_AUTO=1` still enables live behavior for Auto. Both Auto
+choices display the last graph scale on an accepted real frame. Older
+runtimes interpret -1 as fixed Auto. Manual flow and default fixed Auto
+do not run live adaptive graph requests.
+
+The controller observes retired per-slot timestamp queries correlated to
+actual accepted real/generated presentations, estimates remaining GPU
+budget, and requests a bounded new graph. Only successful generation
+submission acknowledges a new applied scale. It preserves the existing
+floor and refresh caps. Three consecutive warm real-source alpha entries
+are required before beta/generation; suppressed frames seed only when warm.
+
+A single background job builds a queue-free private graph within the
+additional memory cap, retaining the shared generated-output views. A
+pending graph seeds three chronological real sources in existing FG
+submissions; budget-substituted warmup may replace optional generation.
+Publication transfers the old graph to retiring ownership, tracked by
+submission-slot fences. No third graph is admitted. Cancellation is
+cooperative between driver work units; a single driver call may still
+block. Signalled retirement is collected without waiting even when
+generation is suppressed. Geometry/manual teardown retains its legacy
+queue-idle/drain contract.
+
+The existing background monitor reports OS and Vulkan heap headroom and
+Android thermal status. Unknown or stale memory vetoes new graph
+allocation; upward quality recovery also requires known low thermal
+pressure and sufficient OS headroom. A shared time-bounded recovery
+reservation coordinates LSFG, GSR 2 cooldown recovery and adaptive internal
+resolution increases, while immediate safety reductions remain independent.
+The trace records decision evidence in `scaling_frames.tsv` at every debug
+level; shadow evaluation may run during captures without activating live
+transitions. Software Vulkan tests use synthetic modules and are not proof
+of proprietary LSFG interpolation quality. Live Adaptive Auto remains
+explicitly opt-in until mobile hardware acceptance.
 
 Standalone exports from new porter installations derive a reproducible private signing key and certificate from the base Switch title ID and a private porter seed. The versioned derivation is independent of runtime code, game updates and output paths. The seed survives porter updates and tool resets. A missing derived key can be regenerated from its seed and verified against the recorded certificate fingerprint. Game updates, build options and export formats share that key. The version-code floor is stored per Android package, and a recompile uses the same application ID when built for the same package. Installations with a legacy signing key keep using it for titles without a dedicated key because older exports may have no local title record. Signing files live in the porter's private state, outside the build workspace and exported APK. Moving upgrade work to another installation requires the original key or the original seed. Keep the package version records when moving full recompiles.
 

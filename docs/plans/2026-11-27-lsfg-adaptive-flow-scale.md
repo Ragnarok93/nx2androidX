@@ -128,3 +128,18 @@
 - Final audit checkpoint D: background cancellation now publishes an atomic stop token observed by the actual queue-free constructor at private image, pipeline, descriptor and sampler work boundaries, with final cancellation check and no retained token on a published graph. Teardown requests cancellation before joining, and a late driver success is still discarded by owner. This does not interrupt an individual Vulkan driver call or provide a strict wall-time bound on teardown. Extended fault-injected allocator, blocked worker and real Vulkan pre-cancel tests. CI pending, no separate observed red. This is intended to reduce wasted allocations and teardown stalls on 8 GB devices, not a measured mobile performance result.
 
 - Final audit checkpoint E: 9ad5dc0 reconstruction 46111948377 passed (explicit menu selection), 3c5f689 reconstruction jobs in 46112026783 passed (pressure evidence). Add nonblocking retirement for cancelled/old graphs even if generation cannot reuse its normal command slots (refresh cap, missing source). Poll only private graph user fence status, notify existing reconstruction consumer owner, never reset or wait. Collect completed cancelled builds on subsequent real frame or cancellation. Delayed retirement while app is fully paused still waits for the next real frame/teardown; no background access to present-thread owner. Added extracted production polling regression. CI pending, no separate red observed.
+
+## Pre-device acceptance checkpoint
+
+Use the implementation commits and Actions receipts above as evidence; the original task checkboxes retain their complete acceptance criteria (including not-yet-observed red cycles and hardware gates). The following condensed checklist describes implementation status rather than declaring the full feature proven.
+
+- [x] Timing telemetry, shadow policy, graph byte accounting, background allocation, three-source history, fence-safe handoff and recovery admission implemented; reconstruction CI passed through 8603add.
+- [x] Unified debug levels, Stop and existing Save ZIP; governor and pressure evidence integrated in the same trace. Reconstruction 46112026783 passed.
+- [x] Explicit in-game Adaptive Auto selection, safe fixed Auto/manual rollback; reconstruction 46111948377 passed.
+- [x] Active alpha startup/recovery defect corrected, observed local source-block red/green, reconstruction 46111900322 passed.
+- [x] Cooperative worker cancellation implemented; reconstruction 46112085829 passed.
+- [ ] Nonblocking retirement after suppression: implemented at 705e1b8, reconstruction 46112162682 and APK 46112162695 pending at inspection.
+- [ ] Exact latest combined signed APK receipt and final native/host validation. Last fully verified combined checkpoint: 041fdca (46110447182 / 46110447214).
+- [ ] Hardware acceptance (deferred until combined build passes): compare fixed Auto and Adaptive Auto with Performance capture, use Detailed only when replay timeline is needed, GPU snapshots only for visual defects. Keep captures bounded to relevant 4096 source tickets. Inspect pressure freshness, admitted caps, pending/active scale, accepted frames, stage GPU time and graph lifecycle; do not count an unaccepted proposal as a transition. Use device matrix/gates in Task 5. No default activation before hardware acceptance.
+
+No guest shader recompilation is required by these runtime-only changes. No release or tag was created. Latest code checkpoint is 705e1b8; documentation-only changes do not alter the tested binary inputs.
