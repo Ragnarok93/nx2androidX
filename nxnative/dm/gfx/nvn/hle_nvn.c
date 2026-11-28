@@ -710,8 +710,27 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 }
 
 // ---------- Sync / events ----------
-NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
-NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
+#include "nvn_sync_registry.h"
+static nx_sync_registry g_sync_registry = NX_SYNC_REGISTRY_INIT;
+static uint64_t sync_token(const NVNsync *s) {
+    const sync_t *o = (const sync_t *)s;
+    return o && o->magic == MAGIC('S', 'Y', 'N', 'C') ? o->token : 0;
+}
+int sync_replay_fence(uint64_t token, uint64_t fence) {
+    return nx_sync_publish(&g_sync_registry, token, 1, fence);
+}
+NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) {
+    (void)d;
+    uint64_t token = nx_sync_create(&g_sync_registry);
+    if (!token) return 0;
+    *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, token};
+    return 1;
+}
+NVN(nvnSyncFinalize, void, NVNsync *s) {
+    uint64_t token = sync_token(s);
+    nx_sync_destroy(&g_sync_registry, token);
+    *(sync_t *)s = (sync_t){0};
+}
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
 static uint64_t nvn_fence_now(void); static int nvn_fence_wait(uint64_t f, uint64_t timeout_ns);
@@ -720,22 +739,40 @@ static uint64_t g_frame;
 // (how Xenoblade Chronicles 3's render thread was found waiting in SyncWait on the acquire sync for its whole frame's GPU work)
 static int seq_on(void) { static uint64_t until; const char *e = getenv("DM_NVN_SEQ"); if (e && atoi(e)) { until = g_frame + (uint64_t)atoi(e); setenv("DM_NVN_SEQ", "0", 1); } return g_frame < until; }
 #define SEQ(...) do { if (seq_on()) { char sb_[256]; snprintf(sb_, sizeof sb_, __VA_ARGS__); LOG("[seq] f%llu t%lx %.3f %s", (unsigned long long)g_frame, (unsigned long)(uintptr_t)pthread_self(), now_ns() / 1e6, sb_); } } while (0)
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = nvn_fence_now(); SEQ("queue fence queue=%p sync=%p fence=%llu", (void *)q, (void *)s, (unsigned long long)((const sync_t *)s)->fence); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) {
+    (void)q; (void)c; (void)f;
+    uint64_t fence = nvn_fence_now();
+    nx_sync_publish(&g_sync_registry, sync_token(s), 1, fence);
+    SEQ("queue fence queue=%p sync=%p fence=%llu", (void *)q, (void *)s, (unsigned long long)fence);
+}
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
-NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
+NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) {
+    (void)q; static int once; uint64_t fence;
+    if (!nx_sync_snapshot(&g_sync_registry, sync_token(s), &fence) && !once++)
+        LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait");
+    return 1;
+}
 // ZCull data: the host does no ZCull, so there is nothing to save / restore
 NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
-    const sync_t *o = (const sync_t *)s;
+    uint64_t token = sync_token(s), fence;
+    unsigned kind = nx_sync_snapshot(&g_sync_registry, token, &fence);
     // Under asynchronous replay a sync is fenced while the replay thread records the command buffer the game just submitted, so an immediate
     // TIMEOUT for the not-yet-fenced object made Final Fantasy Resonance abort through nn::diag at start-up: wait for the queued jobs first.
-    if (!o->fenced && nvn_async()) nvn_jobs_wait_queued(timeout);
-    if (!o->fenced) { SEQ("syncwait %p unfenced", (void *)s); return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
-    if (nvn_fence_wait(o->fence, 0)) { SEQ("syncwait %p kind %u already", (void *)s, o->fenced); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
-    uint64_t t0 = now_ns(); int r = nvn_fence_wait(o->fence, timeout);
-    SEQ("syncwait %p kind %u timeout %llu waited %.2f ms -> %d", (void *)s, o->fenced, (unsigned long long)timeout, (now_ns() - t0) / 1e6, r);
+    // Use the same lifetime throughout the wait and never hold the registry lock across a GPU or replay wait.
+    if (!kind && token && nvn_async()) {
+        uint64_t start = now_ns();
+        nvn_jobs_wait_queued(timeout);
+        uint64_t used = now_ns() - start;
+        if (timeout != ~0ull) timeout = timeout > used ? timeout - used : 0;
+        kind = nx_sync_snapshot(&g_sync_registry, token, &fence);
+    }
+    if (!kind) { SEQ("syncwait %p unfenced", (void *)s); return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
+    if (nvn_fence_wait(fence, 0)) { SEQ("syncwait %p kind %u already", (void *)s, kind); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; }
+    uint64_t t0 = now_ns(); int r = nvn_fence_wait(fence, timeout);
+    SEQ("syncwait %p kind %u timeout %llu waited %.2f ms -> %d", (void *)s, kind, (unsigned long long)timeout, (now_ns() - t0) / 1e6, r);
     return r ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
@@ -960,7 +997,8 @@ NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, N
 // A fence recorded in a command buffer: the replay fences the sync with the submission that reaches this point (OP_FENCE_SYNC). Unreal Engine's NVN RHI fences its command buffers this way (Octopath Traveler 0); Pokémon Legends: Z-A fences once a frame this way and waits on it
 NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *c, NVNsync *s, NVNsyncCondition cond, int flags) {
     (void)cond; (void)flags;
-    uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_FENCE_SYNC, 16); memcpy(p + 8, &s, 8);
+    uint64_t token = sync_token(s);
+    uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_FENCE_SYNC, 16); memcpy(p + 8, &token, 8);
     SEQ("record command fence cmd=%p handle=%p sync=%p condition=%u flags=%#x",
         (void *)c, (void *)CB(c)->begin, (void *)s, (unsigned)cond, (unsigned)flags);
 }
@@ -1719,7 +1757,8 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // the wait was at its next submission instead (2 of 6 recordings) or absent (2 of 8 with the versioned texture table, about half without), none in 20 with it
     // here; its work between presenting and acquiring (~13 ms a frame) still overlaps the replay. DM_NVN_ACQ_REPLAYED=0: no wait
     { static int w = -1; if (w < 0) { const char *ar = getenv("DM_NVN_ACQ_REPLAYED"); w = !(ar && !atoi(ar)); } if (w && nvn_async()) job_wait(g_job_enq, ~0ull); }
-    if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = acq_now || *idx >= 4 ? nvn_fence_now() : o->done[*idx]; }
+    if (s) nx_sync_publish(&g_sync_registry, sync_token(s), 2,
+                           acq_now || *idx >= 4 ? nvn_fence_now() : o->done[*idx]);
     SEQ("acquire %d sync %p", *idx, (void *)s);   // The swapchain texture becomes available once the commits before this point have completed
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_pq = pq_ns; dm_perf_frame_start(pace_ns, pq_ns); }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
@@ -3091,8 +3130,6 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
 }
 // work the host finished on the CPU: the sync object counts as signalled at once (fence 0 is always complete)
 int nvn_host_signal_sync(void *nvnsync) {
-    sync_t *o = nvnsync;
-    if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C')) return -1;
-    o->fence = 0; o->fenced = 1; return 0;
+    return nx_sync_publish(&g_sync_registry, sync_token((const NVNsync *)nvnsync), 1, 0) ? 0 : -1;
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush

@@ -5229,8 +5229,8 @@ static void exec_ops(const uint8_t *p) {
                 !vk_rs_preflight_buffer(ad,16)) resolution_restore_before_recording();
             if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2); if (g_x_tracepass == -2) VKLOG("--- report counter type %#llx to %#llx", (unsigned long long)t, (unsigned long long)ad); mtl_sub_counter(ad, (uint32_t)t); break; }
         case OP_RESET_COUNTER: break;
-        case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8);
-            if (!sync_replay_fence(s, mtl_last_fence() + 1)) { static int n; if (n++ < 4) VKLOG("fence on sync %p skipped: the game has finalized or freed it (nvn_obj.h sync_replay_fence)", (void *)s); }
+        case OP_FENCE_SYNC: { uint64_t token; memcpy(&token, a, 8);
+            if (!sync_replay_fence(token, mtl_last_fence() + 1)) { static int n; if (n++ < 4) VKLOG("fence on retired sync token %llu skipped", (unsigned long long)token); }
             break; }
         // (DM_VK_TRACE_PASS=-2 lists the buffer writes too: copies, clears and uniform updates, by address)
         case OP_COPY_B2B: { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8);
