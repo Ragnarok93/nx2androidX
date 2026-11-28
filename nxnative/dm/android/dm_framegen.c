@@ -38,7 +38,7 @@ static void settings_init(void) {
     const char *e;
     if ((e = getenv("DM_LSFG_MULT"))) atomic_store(&g_mult, atoi(e));
     if ((e = getenv("DM_LSFG_TARGET"))) atomic_store(&g_target, atoi(e));
-    if ((e = getenv("DM_LSFG_FLOW"))) atomic_store(&g_flow, atoi(e));
+    if ((e = getenv("DM_LSFG_FLOW"))) atomic_store(&g_flow, dm_fg_flow_normalize(atoi(e)));
     e = getenv("DM_LSFG");
     atomic_compare_exchange_strong(&g_on, &exp, e && atoi(e) ? 1 : 0);
 }
@@ -50,7 +50,7 @@ void dm_fg_retry(void) { atomic_store(&g_reprobe, 1); }
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct) {
     atomic_store(&g_mult, multiplier < 2 ? 2 : multiplier > 4 ? 4 : multiplier);
     atomic_store(&g_target, target_rate < 0 ? 0 : target_rate);
-    atomic_store(&g_flow, flow_pct <= 0 ? 0 : flow_pct < 25 ? 25 : flow_pct > 100 ? 100 : flow_pct);
+    atomic_store(&g_flow,dm_fg_flow_normalize(flow_pct));
     atomic_store(&g_on, on ? 1 : 0);
     VLOG("frame generation: %s, x%d, target %d fps, flow %d%%", on ? "on" : "off", atomic_load(&g_mult), atomic_load(&g_target), atomic_load(&g_flow));
 }
@@ -67,13 +67,16 @@ int dm_fg_wants_input(void) {
 
 // Read-only cross-thread opt-in check; no settings initialization or graph
 // access from replay. Fixed/manual/disabled operation preserves old policy.
-int dm_fg_adaptive_auto_active(void) {
+int dm_fg_adaptive_auto_selected(void) {
 #ifdef NX_LSFG
     const char *e=getenv("DM_LSFG_ADAPTIVE_AUTO");
-    return e&&atoi(e)&&atomic_load(&g_on)>0&&!atomic_load(&g_flow)&&atomic_load(&g_state)>0;
+    return atomic_load(&g_on)>0 && dm_fg_flow_is_adaptive(atomic_load(&g_flow),e&&atoi(e));
 #else
     return 0;
 #endif
+}
+int dm_fg_adaptive_auto_active(void) {
+    return dm_fg_adaptive_auto_selected() && atomic_load(&g_state)>0;
 }
 
 int dm_fg_status(char *buf, int n) {
@@ -165,9 +168,7 @@ static int load(void) {
 
 // Timing state is present-thread owned, with process-lifetime query pool like
 // the existing FG command pool. Old epoch queries are retired but ignored.
-static int fg_live_enabled(void) {
-    const char *e=getenv("DM_LSFG_ADAPTIVE_AUTO");return e&&atoi(e);
-}
+static int fg_live_enabled(void) { return dm_fg_adaptive_auto_selected(); }
 static void fg_cancel_request(void) {
     lsfg_graph_owner_cancel(&F.graph);
     if(F.shadow.pending) dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);
@@ -247,8 +248,8 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     // transitions. No second debug switch or verbose log mode is needed.
     if (!live && (!enabled || !atoi(enabled)) && !vk_pass_dump_user_active()) return;
     dm_fg_decision d=fg_decision;
-    report->status=d.requested_flow?"manual flow":!d.active_flow?"no graph":!d.submission_serial?"no submission":!real?"real present rejected":"awaiting timing";
-    if (d.requested_flow || !d.active_flow || !d.submission_serial || !real) {
+    report->status=d.requested_flow>0?"manual flow":!d.active_flow?"no graph":!d.submission_serial?"no submission":!real?"real present rejected":"awaiting timing";
+    if (d.requested_flow>0 || d.requested_flow!=atomic_load(&g_flow) || !d.active_flow || !d.submission_serial || !real) {
         if(live)fg_cancel_request();
         dm_fg_governor_gap(&F.shadow);return;
     }
@@ -422,7 +423,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     fg_decision.requested_flow=flow;
     uint64_t graph_ticket=++F.graph_ticket;
-    if (flow || !fg_live_enabled()) { F.auto_applied=0; fg_cancel_request(); }
+    if (flow>0 || !fg_live_enabled()) { F.auto_applied=0; fg_cancel_request(); }
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;
         if (F.chain) { teardown(); VLOG("frame generation off"); }
@@ -470,7 +471,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
     flow=dm_fg_effective_flow(flow,e.width,e.height);
-    if (!fg_decision.requested_flow && F.auto_applied && F.chain &&
+    if (fg_decision.requested_flow<=0 && F.auto_applied && F.chain &&
         F.ext.width==e.width && F.ext.height==e.height) flow=F.flow;
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
         // A larger source can exhaust allocations without making the loaded
@@ -554,9 +555,9 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     VkCommandBuffer cb = slot->cb;
     lsfg_graph_owner_retire_slot(&F.graph,slot_index);
     // Only switch on a real generation opportunity with contiguous history.
-    int switching=ng && !fg_decision.requested_flow &&
+    int switching=ng && fg_decision.requested_flow<=0 && fg_live_enabled() &&
         lsfg_graph_owner_ready(&F.graph,F.timing_epoch,graph_ticket);
-    int seeded=!switching && warm && ng && !fg_decision.requested_flow && F.seed_policy &&
+    int seeded=!switching && warm && ng && fg_decision.requested_flow<=0 && fg_live_enabled() && F.seed_policy &&
         F.graph.phase==LSFG_GRAPH_WARMING &&
         lsfg_graph_history_can_seed(&F.graph.history,F.timing_epoch,graph_ticket);
     seed_only_generation=seeded && F.seed_policy==FG_SEED_INSTEAD_OF_GENERATION;

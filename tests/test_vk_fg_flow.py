@@ -10,6 +10,14 @@ class FGFlow(unittest.TestCase):
 #include <assert.h>
 #include "gfx_vk_fg_flow.h"
 int main(void){
+    assert(dm_fg_flow_normalize(-1)==DM_FG_FLOW_ADAPTIVE);
+    assert(dm_fg_flow_normalize(-2)==DM_FG_FLOW_AUTO);
+    assert(dm_fg_flow_is_adaptive(-1,0)&&!dm_fg_flow_is_adaptive(0,0));
+    assert(dm_fg_flow_is_adaptive(0,1)&&!dm_fg_flow_is_adaptive(50,1));
+    assert(dm_fg_flow_step(0,1)==-1 && dm_fg_flow_step(-1,1)==25);
+    assert(dm_fg_flow_step(25,-1)==-1 && dm_fg_flow_step(-1,-1)==0);
+    assert(dm_fg_flow_step(100,1)==0 && dm_fg_flow_step(0,-1)==100);
+    assert(dm_fg_effective_flow(-1,1920,1080)==dm_fg_effective_flow(0,1920,1080));
     assert(dm_fg_effective_flow(0,1280,720)==100);
     assert(dm_fg_effective_flow(0,1920,1080)==50);
     assert(dm_fg_effective_flow(0,1080,1920)==50);

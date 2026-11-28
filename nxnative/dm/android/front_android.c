@@ -14,6 +14,7 @@
 #include "spatial_upscaler.h"
 #include "gfx_vk_output_target.h"
 #include "gfx_vk_capture_scale.h"
+#include "gfx_vk_fg_flow.h"
 #include "gfx_vk_resolution_live.h"
 #include "saves_android.h"
 #include "jni_android.h"
@@ -118,7 +119,7 @@ static void settings_load(void) {
         int n = atoi(fg_env); atomic_store(&g_set_fg_mult, n < 2 ? 2 : n > 4 ? 4 : n);
     }
     if ((fg_env = getenv("DM_LSFG_FLOW"))) {
-        int n = atoi(fg_env); atomic_store(&g_set_fg_flow, n <= 0 ? 0 : n < 25 ? 25 : n > 100 ? 100 : n);
+        int n = atoi(fg_env); atomic_store(&g_set_fg_flow,dm_fg_flow_normalize(n));
     }
     if ((fg_env = getenv("DM_VIVID"))) atomic_store(&g_set_vivid, atoi(fg_env) != 0);
     if ((fg_env = getenv("DM_FSR"))) atomic_store(&g_set_upscaler, atoi(fg_env) ? SP_FSR1 : SP_NATIVE);
@@ -148,7 +149,7 @@ static void settings_load(void) {
         else if (sscanf(line, "grid=%d", &v) == 1) atomic_store(&g_set_grid, v != 0);
         else if (sscanf(line, "fg=%d", &v) == 1) atomic_store(&g_set_fg, v != 0);
         else if (sscanf(line, "fg_mult=%d", &v) == 1) atomic_store(&g_set_fg_mult, v < 2 ? 2 : v > 4 ? 4 : v);
-        else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow, v <= 0 ? 0 : v < 25 ? 25 : v > 100 ? 100 : v);
+        else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow,dm_fg_flow_normalize(v));
         else if (sscanf(line, "vivid=%d", &v) == 1) atomic_store(&g_set_vivid, v != 0);
         else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_upscaler, v ? SP_FSR1 : SP_NATIVE);
         else if (sscanf(line, "upscaler=%d", &v) == 1) {
@@ -909,8 +910,7 @@ static void fg_mult_step(int direction) {
 }
 static void fg_flow_step(int direction) {
     int n = atomic_load(&g_set_fg_flow);
-    n = direction < 0 ? (n == 0 ? 100 : n <= 25 ? 0 : n - 5)
-                      : (n == 0 ? 25 : n >= 100 ? 0 : n + 5);
+    n=dm_fg_flow_step(n,direction);
     atomic_store(&g_set_fg_flow, n);
     atomic_fetch_add(&g_menu_cfg_ver, 1);
     fg_apply();

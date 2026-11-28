@@ -669,7 +669,8 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             } else if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
             else if (it == OVM_FG_FLOW) {
                 int scale = dm_menu_fg_flow();
-                if (!scale) snprintf(value, sizeof value, "Auto");
+                if (scale<0) snprintf(value,sizeof value,"Adaptive Auto");
+                else if (!scale) snprintf(value, sizeof value, "Auto");
                 else snprintf(value, sizeof value, "%d%%", scale);
             } else if (it == OVM_RATE) {
                 if (!dm_menu_rate_supported()) snprintf(value, sizeof value, "Unavailable");
@@ -691,7 +692,7 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
             const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY || ov_flag_item(it);
             float trailing=action?m3_text_w(">",small_scale)+rh*0.16f:0;
-            if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT || (it==OVM_FG_FLOW && !dm_menu_fg_flow())) {
+            if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT || (it==OVM_FG_FLOW && dm_menu_fg_flow()<=0)) {
                 char last[80];
                 if(it==OVM_FG_FLOW)dm_fg_menu_label(&g_menu_fg,last,sizeof last);
                 else dm_recon_menu_label(&g_menu_recon,it==OVM_OUTPUT_HEIGHT,last,sizeof last);

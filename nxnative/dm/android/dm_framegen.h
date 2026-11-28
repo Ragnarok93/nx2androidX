@@ -7,7 +7,7 @@
 // texture read safe — the game cannot redraw the texture before NVN's acquire, which waits for the present's
 // ticket), so no extra semaphore wait is needed. Off by default; the user's own Lossless.dll (the app finds it
 // and passes DM_LSFG_DLL) is read once. Without NX_LSFG every call reports "not in this build".
-// Settings: DM_LSFG=1, DM_LSFG_MULT=2..4, DM_LSFG_TARGET=0|fps, DM_LSFG_FLOW=0 (auto) or 25..100 (%), changed
+// Settings: DM_LSFG=1, DM_LSFG_MULT=2..4, DM_LSFG_TARGET=0|fps, DM_LSFG_FLOW=0 (fixed auto), -1 (adaptive auto), or 25..100 (%), changed
 // while running by dm_fg_set (the drawer, live over DM_CTL) or the env rows at the start.
 #ifndef DM_FRAMEGEN_H
 #define DM_FRAMEGEN_H
@@ -47,6 +47,8 @@ void dm_fg_shadow_present(int accepted_real,int accepted_generated,double replay
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 int dm_fg_status(char *buf, int n);
 int dm_fg_wants_input(void);
+int dm_fg_adaptive_auto_selected(void); // read-only cross-thread setting
+int dm_fg_adaptive_auto_active(void);
 void vk_fg_fence_retired(VkFence fence);
 
 // The refresh the display timing last saw (ns; 0 without VK_GOOGLE_display_timing): the refresh cap's input

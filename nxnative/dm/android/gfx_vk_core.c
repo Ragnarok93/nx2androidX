@@ -615,8 +615,8 @@ static int fg_thermal_status(void) {
     int s=status(manager);return s>=0&&s<=6?s:-1;
 }
 static void fg_pressure_publish(uint64_t available_kb) {
-    const char *enabled=getenv("DM_LSFG_ADAPTIVE_AUTO");
-    if(!enabled||!atoi(enabled))return;
+    extern int dm_fg_adaptive_auto_selected(void);
+    if(!dm_fg_adaptive_auto_selected())return;
     dm_fg_pressure s={.sampled_ns=mem_diag_ns(),
         .os_available=available_kb<=UINT64_MAX/1024?available_kb*1024:0,
         .heap_available=fg_heap_available(),.thermal=fg_thermal_status()};
