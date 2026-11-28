@@ -14,6 +14,45 @@ static inline uint64_t dm_fg_heap_headroom(const dm_fg_heap_snapshot *s,unsigned
     return heap<s->count && heap<DM_FG_MAX_HEAPS && (s->eligible&(1u<<heap)) &&
         s->budget[heap]>s->usage[heap] ? s->budget[heap]-s->usage[heap] : 0;
 }
+
+enum { DM_FG_HEAP_OK, DM_FG_HEAP_STALE, DM_FG_HEAP_PRESSURE, DM_FG_HEAP_UNKNOWN,
+       DM_FG_HEAP_RECLAIM, DM_FG_HEAP_CAP };
+typedef struct { unsigned reason; uint64_t total,growth; } dm_fg_heap_admission;
+// Reclaim only the active graph's proven bytes on the same heap. A snapshot
+// preceding graph publication cannot prove those bytes were in heapUsage.
+static inline dm_fg_heap_admission dm_fg_heap_admit(const dm_fg_heap_snapshot *s,uint64_t now,
+        const uint64_t *required,const uint64_t *reclaim,uint64_t published_ns,int upward) {
+    dm_fg_heap_admission p={.reason=DM_FG_HEAP_STALE};
+    if(!s->sampled_ns||now<s->sampled_ns||now-s->sampled_ns>UINT64_C(5000000000))return p;
+    uint64_t reserve=(upward?1024:768)*FG_MIB;
+    p.reason=DM_FG_HEAP_PRESSURE;
+    if(s->os_available<=reserve||s->thermal>=4||(upward&&(s->thermal<0||s->thermal>=2)))return p;
+    p.reason=DM_FG_HEAP_UNKNOWN;
+    if(!required||!s->count||s->count>DM_FG_MAX_HEAPS)return p;
+    uint64_t cap=128*FG_MIB;
+    if(cap>s->os_available-reserve)cap=s->os_available-reserve;
+    for(unsigned i=0;i<DM_FG_MAX_HEAPS;i++) {
+        uint64_t need=required[i],credit=reclaim?reclaim[i]:0;
+        if(!need&&!credit)continue;
+        p.reason=DM_FG_HEAP_UNKNOWN;
+        if(i>=s->count||!(s->eligible&(1u<<i))||!s->budget[i]||s->usage[i]>s->budget[i])return p;
+        p.reason=DM_FG_HEAP_RECLAIM;
+        if(credit&&(!published_ns||published_ns>s->sampled_ns||credit>s->usage[i]))return p;
+        p.reason=DM_FG_HEAP_CAP;
+        if(need>UINT64_MAX-p.total)return p;
+        p.total+=need;
+        uint64_t growth=need>credit?need-credit:0;
+        if(growth) {
+            uint64_t local=dm_fg_heap_headroom(s,i)/10;
+            if(local<cap)cap=local;
+            if(growth>UINT64_MAX-p.growth)return p;
+            p.growth+=growth;
+        }
+    }
+    // Do not add independent heap headrooms on mobile GPUs: they can alias.
+    p.reason=p.total&&p.growth<=cap?DM_FG_HEAP_OK:DM_FG_HEAP_CAP;
+    return p;
+}
 typedef struct {
     uint64_t sampled_ns,os_available,heap_available;
     int thermal; // Android thermal status, -1 unknown
