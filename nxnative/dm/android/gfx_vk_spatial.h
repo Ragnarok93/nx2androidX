@@ -691,7 +691,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
     int sharpness_pct = dm_fsr_sharpness();
     float sharpness = dm_recon_sharpness(sharpness_pct);
     g_spatial.report_sharpness_requested = (int)(sharpness * 100.0f + 0.5f);
-    g_spatial.report_sharpness_applied = 0;
+    g_spatial.report_sharpness_applied = (int)spatial_replay_sharpness(g_spatial.replay_flags);
     // A frame that submitted replay GSR 2 already has pre-composition
     // history. Any additional output resize stays spatial.
     int replay_temporal = requested == SP_SGSR2 && (g_spatial.replay_flags & SP_REPLAY_TEMPORAL);
@@ -1088,9 +1088,11 @@ select_backend:;
     if (resolve) resolve->last_use = fence;
     // Effective processing is part of LSFG's source contract, including GSR1's
     // built-in sharpening. A changed slider resets LSFG once on the next real frame.
-    g_spatial.report_sharpness_applied = (rcas || post || mode == SP_SGSR1) ?
-        (int)(sharpness * 100.0f + 0.5f) : 0;
-    g_spatial.encoding = (unsigned)mode * 128u + (unsigned)g_spatial.report_sharpness_applied;
+    unsigned output_sharpness = (rcas || post || mode == SP_SGSR1) ?
+        (unsigned)(sharpness * 100.0f + 0.5f) : 0;
+    if (!(g_spatial.replay_flags & SP_REPLAY_SHARPENED))
+        g_spatial.report_sharpness_applied = (int)output_sharpness;
+    g_spatial.encoding = (unsigned)mode * 128u + output_sharpness;
     g_spatial.ticket = ticket;
     g_spatial.slot++;
     g_spatial.query_ticket[slot] = ticket;
