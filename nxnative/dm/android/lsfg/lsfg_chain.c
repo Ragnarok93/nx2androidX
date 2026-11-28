@@ -14,13 +14,14 @@
 #include "../vka.h"
 #include "lsfg.h"
 #include "lsfg_graph_budget.h"
+#include "lsfg_graph_history.h"
 #include <stdlib.h>
 #include <string.h>
 
 #define LSFG_FORMAT VK_FORMAT_R8G8B8A8_UNORM
 #define LSFG_FLOW_FORMAT VK_FORMAT_R8_UNORM
 #define LSFG_MOTION_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
-enum { HIST = 3, MIPS = 7, ALPHA_STAGES = 4, BETA_STAGES = 5, BETA_OUTPUTS = 6, GAMMA_STAGES = 5, DELTA_STAGES = 10, DELTA_N = 3, FIRST_DELTA_LEVEL = 4,
+enum { HIST = LSFG_GRAPH_HISTORY_COUNT, MIPS = 7, ALPHA_STAGES = 4, BETA_STAGES = 5, BETA_OUTPUTS = 6, GAMMA_STAGES = 5, DELTA_STAGES = 10, DELTA_N = 3, FIRST_DELTA_LEVEL = 4,
        MAX_IMAGES = 192, MAX_UBO = 48, DESCRIPTORS_PER_TYPE = 4096, FIXED_SETS = 64, SETS_PER_SLOT = 112 };
 
 typedef struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkExtent2D ext; VkFormat fmt; } limg;
@@ -451,8 +452,10 @@ void lsfg_chain_free(lsfg_chain *c) {
 
 VkImage lsfg_chain_input(lsfg_chain *c, uint64_t count) { return c->frames[count % 2]->img; }
 
-// LsfgChain::DispatchShared: mipmaps of the new frame, the 4 alpha stages at every level, beta
-void lsfg_chain_shared_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, VkQueryPool queries, uint32_t mip_end) {
+// Mipmaps and alpha use only the supplied real source. Pending history
+// must run this part for three consecutive real frames before beta reads
+// all three alpha slots. No external output image is touched.
+static void lsfg_chain_seed_timed(lsfg_chain *c,VkCommandBuffer cb,uint64_t count,VkQueryPool queries,uint32_t mip_end) {
     barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     run(cb, &c->mip_pass, c->mip_sets[count % 2], groups(c->flow_ext.width, 6), groups(c->flow_ext.height, 6));
@@ -467,6 +470,14 @@ void lsfg_chain_shared_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, 
             vk.vkCmdDispatch(cb, groups(e.width, 3), groups(e.height, 3), 1);
         }
     }
+}
+void lsfg_chain_seed(lsfg_chain *c,VkCommandBuffer cb,uint64_t count) {
+    lsfg_chain_seed_timed(c,cb,count,VK_NULL_HANDLE,0);
+}
+
+// LsfgChain::DispatchShared: mipmaps, alpha, then beta.
+void lsfg_chain_shared_timed(lsfg_chain *c,VkCommandBuffer cb,uint64_t count,VkQueryPool queries,uint32_t mip_end) {
+    lsfg_chain_seed_timed(c,cb,count,queries,mip_end);
     VkExtent2D e = c->beta_t1[0]->ext; uint32_t gx = groups(e.width, 3), gy = groups(e.height, 3);
     cbar(cb); run(cb, &c->beta_pass[0], c->beta_first[count % HIST], gx, gy);
     for (int s = 1; s < BETA_STAGES - 1; s++) { cbar(cb); run(cb, &c->beta_pass[s], c->beta_sets[s - 1], gx, gy); }

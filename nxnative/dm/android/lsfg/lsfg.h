@@ -53,6 +53,8 @@ uint64_t lsfg_chain_bytes(const lsfg_chain *c);
 void lsfg_chain_record_init(const lsfg_chain *c,VkCommandBuffer cb);
 void lsfg_chain_free(lsfg_chain *c);   // the GPU must be done with it
 VkImage lsfg_chain_input(lsfg_chain *c, uint64_t count);   // the image game frame count is copied into (GENERAL layout)
+// Seed one real input's mip/alpha history, without beta/generation or output writes.
+void lsfg_chain_seed(lsfg_chain *c,VkCommandBuffer cb,uint64_t count);
 void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count);
 void lsfg_chain_shared_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, VkQueryPool queries, uint32_t mip_end);
 void lsfg_chain_generate_timed(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen, VkQueryPool queries, uint32_t refine_end);                            // after the copy: mipmaps, alpha, beta of frame count
