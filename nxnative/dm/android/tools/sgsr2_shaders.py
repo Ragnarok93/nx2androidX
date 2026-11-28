@@ -98,17 +98,21 @@ void main()""",
                         "layout(std140, set = 0, binding = 0)"),
                     "textureLod(MotionDepthClipAlphaBuffer, Jitteruv, 0.0).xyz": (
                         "texelFetch(MotionDepthClipAlphaBuffer, InputPos / 8, 0).xyz"),
+                    "highp ivec2 InputPos = ivec2(Jitteruv * params.renderSize);": (
+                        "highp ivec2 InputPos = clamp(ivec2(Jitteruv * params.renderSize), "
+                        "ivec2(0), textureSize(InputColor, 0) - 1);"),
+                    "vec3 HistoryColor = textureLod(PrevOutput, PrevUV, 0.0).xyz;": (
+                        "highp vec2 unclamped = Hruv + Motion * vec2(-0.5, 0.5);\n"
+                        "    bool rejectHistory = params.reset >= 1.0 || depthfactor >= 1.0 || "
+                        "any(lessThan(unclamped, vec2(0))) || any(greaterThan(unclamped, vec2(1)));"),
+                    "vec3 centerMid = flowColor(InputPos + ivec2(0, 0)).xyz;": (
+                        "vec4 live = flowColor(InputPos);\n    vec3 centerMid = live.rgb;"),
                     "Upsampledcw.xyz / Upsampledcw.w": (
-                        "(abs(Upsampledcw.w) > 1e-5 ? Upsampledcw.xyz / Upsampledcw.w : flowColor(InputPos).rgb)"),
+                        "(abs(Upsampledcw.w) > 1e-5 ? Upsampledcw.xyz / Upsampledcw.w : live.rgb)"),
                     "Upsampledcw.xyz = mix(HistoryColor, Upsampledcw.xyz, alpha);": """
     // Reject per-pixel mismatches even when the tile matched. This protects
     // moving edges, newly revealed pixels, and UI baked into the game frame.
-    vec2 unclamped = Hruv + Motion * vec2(-0.5, 0.5);
-    vec4 live = flowColor(InputPos);
-    if (depthfactor >= 1.0 || any(lessThan(unclamped, vec2(0))) ||
-        any(greaterThan(unclamped, vec2(1)))) {
-        alpha = 1.0;
-    } else if (alpha < 1.0) {
+    if (alpha < 1.0) {
         vec3 prior = textureLod(PreviousColor, PrevUV, 0.0).rgb;
         vec3 error = abs(prior - live.rgb) / (vec3(0.15) + max(prior, live.rgb));
         float mismatch = max(max(error.r, error.g), error.b);
@@ -124,6 +128,45 @@ void main()""",
                     if flow.count(old) != 1:
                         raise ValueError(f"{source}: unexpected image-driven upscale layout")
                     flow = flow.replace(old, new)
+                # The current-frame reconstruction still uses all five
+                # Lanczos taps and the same min/max clamp. For a rejected
+                # history tile, the variance box, history fetch and blend
+                # cannot contribute; avoid them, including all exponential
+                # weights. Keep the accepted-history arithmetic unchanged.
+                flow, weights = re.subn(
+                    r"float boxweight = exp\(baseoffset_dot \* curvebias\);\n", "", flow)
+                if weights != 9:
+                    raise ValueError(f"{source}: unexpected history weight count")
+                flow, moments = re.subn(
+                    r"vec3 wsample = samplecolor \* boxweight;\s*"
+                    r"rectboxcenter \+= wsample;\s*"
+                    r"rectboxvar \+= \(samplecolor \* wsample\);\s*"
+                    r"rectboxweight \+= boxweight;",
+                    "if (!rejectHistory) {\n"
+                    "            float boxweight = exp(baseoffset_dot * curvebias);\n"
+                    "            vec3 wsample = samplecolor * boxweight;\n"
+                    "            rectboxcenter += wsample;\n"
+                    "            rectboxvar += (samplecolor * wsample);\n"
+                    "            rectboxweight += boxweight;\n        }", flow)
+                if moments != 9:
+                    raise ValueError(f"{source}: unexpected history moment count")
+                # Move the current-frame clamp ahead of the history-only
+                # normalization. This expression does not depend on moments.
+                clamp_line = next((line for line in flow.splitlines()
+                                   if "Upsampledcw.xyz =  clamp(" in line), None)
+                if clamp_line is None or flow.count(clamp_line) != 1:
+                    raise ValueError(f"{source}: unexpected current-frame clamp")
+                flow = flow.replace(clamp_line, "", 1)
+                anchor = "    rectboxweight = 1.0 / rectboxweight;"
+                if flow.count(anchor) != 1:
+                    raise ValueError(f"{source}: unexpected variance normalization")
+                flow = flow.replace(anchor, clamp_line + """
+    if (rejectHistory) {
+        Output = vec4(Upsampledcw.xyz, live.a);
+        return;
+    }
+    vec3 HistoryColor = textureLod(PrevOutput, PrevUV, 0.0).xyz;
+""" + anchor, 1)
                 path = generated / "sgsr2_flow_upscale.frag"
                 if not path.exists() or path.read_text(encoding="utf-8") != flow:
                     path.write_text(flow, encoding="utf-8", newline="\n")

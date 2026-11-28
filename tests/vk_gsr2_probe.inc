@@ -418,26 +418,37 @@ static void check_image_temporal(void) {
         assert(mapped[i + 3] == 173);
     }
 
+    // A fully rejected tile and a reset must return the same current-only
+    // reconstruction, including alpha, without reading history.
+    uint8_t rejected[OUT * OUT * 4];
+    memcpy(rejected, mapped, sizeof rejected);
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 112, NULL) == output);
+    assert(g_flow.ctx->pending_plan.reset);
+    begin();
+    vkCmdCopyImageToBuffer(test_cb, output->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &copy);
+    complete();
+    assert(!memcmp(rejected, mapped, sizeof rejected));
+
     // Duplicates cannot advance history. An over-budget frame uses spatial.
-    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 102, NULL) == output);
-    assert(g_flow.ctx->history.ticket == 102);
-    g_flow.retry_after = 104;
-    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 103, NULL) == output);
-    assert(spatial_active == SP_SGSR1 && g_flow.ctx->history.ticket == 102);
-    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 104, NULL) == output);
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 112, NULL) == output);
+    assert(g_flow.ctx->history.ticket == 112);
+    g_flow.retry_after = 114;
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 113, NULL) == output);
+    assert(spatial_active == SP_SGSR1 && g_flow.ctx->history.ticket == 112);
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 114, NULL) == output);
     assert(spatial_active == SP_SGSR2 && g_flow.ctx->pending_plan.reset);
     CHECK(vkQueueWaitIdle(V.q));
     flow_frame(&src, 0, 0);
     // Compare reset frames so temporal accumulation cannot explain the difference.
     sharpness = 0;
-    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 110, NULL) == output);
+    assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, 120, NULL) == output);
     CHECK(vkQueueWaitIdle(V.q));
     begin();
     vkCmdCopyImageToBuffer(test_cb, output->texture.img, VK_IMAGE_LAYOUT_GENERAL, pixels, 1, &copy);
     complete();
     uint8_t base[OUT * OUT * 4];
     memcpy(base, mapped, sizeof base);
-    uint64_t previous = 0, quarter = 0, ticket = 110;
+    uint64_t previous = 0, quarter = 0, ticket = 120;
     for (sharpness = 25; sharpness <= 100; sharpness += 25) {
         ticket += 10;
         assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, ticket, NULL) == output);

@@ -53,3 +53,7 @@ Carry the validated DMSV product receipt key, recorded SHA-256, header, size and
 ## Checkpoint 10 — provenance fast-path repair
 
 APK CI at 81d2f39 failed two existing zero-read shader cache assertions. Persist the validated DMSV header in the same content receipt on first use; subsequent reuse reads only receipt metadata. The metadata-change path still verifies the complete digest before updating stat identity. Preserve original cache tests and assert provenance remains identical on the zero-read path.
+
+## Checkpoint 11 — skip rejected GSR 2 history work
+
+Optimize only the image-driven fragment variant (generated from the unchanged vendor import). For reset, fully rejected tile or out-of-bounds reprojection, preserve the five current-color Lanczos taps and min/max clamp, but omit variance exponential weights, history sample, normalization and blend. Reuse the center RGBA tap and bound source coordinates before the flow tile fetch. Valid-history and per-pixel rejection paths retain existing arithmetic. Extend real Vulkan readback fixture to compare a rejected scene with a reset of the same scene, including alpha. No change to output history format, budget or vendor authoritative-depth variants. Hardware GPU timing still required.
