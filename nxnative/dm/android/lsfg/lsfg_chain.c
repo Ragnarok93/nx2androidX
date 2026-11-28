@@ -31,6 +31,7 @@ typedef struct { struct { float ts; int fi, fis; } key; VkDeviceSize off; } lubo
 struct lsfg_chain {
     int bad;
     lsfg_graph_budget budget;
+    const atomic_int *cancel;
     VkDescriptorPool pool; VkCommandPool cpool;
     VkSampler samp, samp_border, samp_edge;
     VkBuffer ubuf; VkDeviceMemory umem; uint8_t *umap; VkDeviceSize ustride; lubo ubo[MAX_UBO]; int nubo;
@@ -78,8 +79,12 @@ static float slot_timestamp(size_t slot) {
 static uint32_t groups(uint32_t size, uint32_t shift) { return (size + (1u << shift) - 1) >> shift; }
 
 // ---------- Resources ----------
+static int chain_stopped(lsfg_chain *c) {
+    if(c->cancel && atomic_load_explicit(c->cancel,memory_order_acquire))c->bad=1;
+    return c->bad;
+}
 static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
-    if (c->bad) return NULL;
+    if (chain_stopped(c)) return NULL;
     if (c->nimg >= MAX_IMAGES) { VRED("lsfg: more than %d images", MAX_IMAGES); c->bad = 1; return NULL; }
     limg *im = &c->imgs[c->nimg++];
     im->ext = (VkExtent2D){ext.width ? ext.width : 1, ext.height ? ext.height : 1}; im->fmt = fmt;
@@ -108,6 +113,7 @@ static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
 }
 
 static VkSampler sampler_new(lsfg_chain *c, VkSamplerAddressMode mode, VkCompareOp op, int white) {
+    if(chain_stopped(c))return VK_NULL_HANDLE;
     VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
         .addressModeU = mode, .addressModeV = mode, .addressModeW = mode, .compareOp = op, .maxLod = VK_LOD_CLAMP_NONE,
         .borderColor = white ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK};
@@ -131,7 +137,7 @@ static VkDeviceSize ubo_get(lsfg_chain *c, float flow_scale, float ts, int fi, i
 // A pass: the compute pipeline of shader id with its set layout, one descriptor per binding in the order of types (the bindings lsfg_dll.c renumbered)
 typedef struct { int n; VkDescriptorType t; } lbind;
 static void pass_new(lsfg_chain *c, lpass *p, const lsfg_modules *mods, uint32_t id, const lbind *b, int nb) {
-    if (c->bad) return;
+    if (chain_stopped(c)) return;
     VkDescriptorSetLayoutBinding bs[32]; uint32_t n = 0;
     for (int i = 0; i < nb; i++) for (int j = 0; j < b[i].n && n < 32; j++, n++) bs[n] = (VkDescriptorSetLayoutBinding){n, b[i].t, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
     VkDescriptorSetLayoutCreateInfo dl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = n, .pBindings = bs};
@@ -149,7 +155,7 @@ static void pass_new(lsfg_chain *c, lpass *p, const lsfg_modules *mods, uint32_t
     if (r) { VRED("lsfg: pipeline of shader %u: %d", id, r); c->bad = 1; }
 }
 static VkDescriptorSet set_new(lsfg_chain *c, const lpass *p) {
-    if (c->bad) return VK_NULL_HANDLE;
+    if (chain_stopped(c)) return VK_NULL_HANDLE;
     VkDescriptorSet s = VK_NULL_HANDLE;
     VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = c->pool, .descriptorSetCount = 1, .pSetLayouts = &p->dsl};
     VkResult r = vk.vkAllocateDescriptorSets(V.dev, &ai, &s);
@@ -178,7 +184,7 @@ static void w_ubo(lwriter *w, VkDeviceSize off) {
     w->w[w->n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = w->set, .dstBinding = w->n, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &w->bi[w->n]};
     w->n++;
 }
-static void w_end(lwriter *w) { if (!w->c->bad && w->n) vk.vkUpdateDescriptorSets(V.dev, w->n, w->w, 0, NULL); }
+static void w_end(lwriter *w) { if (!chain_stopped(w->c) && w->n) vk.vkUpdateDescriptorSets(V.dev, w->n, w->w, 0, NULL); }
 
 static void barrier(VkCommandBuffer cb, VkPipelineStageFlags src, VkAccessFlags sa, VkPipelineStageFlags dst, VkAccessFlags da) {
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = sa, .dstAccessMask = da};
@@ -203,14 +209,15 @@ static void run(VkCommandBuffer cb, const lpass *p, VkDescriptorSet s, uint32_t 
 static VkExtent2D halve(VkExtent2D e) { return (VkExtent2D){(e.width + 1) >> 1, (e.height + 1) >> 1}; }
 
 // ---------- The chain ----------
-lsfg_chain *lsfg_chain_build(const lsfg_modules *mods, VkExtent2D ext, float flow_scale,
-        const VkImageView out_views[LSFG_MAX_GENERATIONS], uint64_t byte_limit) {
+lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext, float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS], uint64_t byte_limit,const atomic_int *cancel) {
+    if(cancel&&atomic_load_explicit(cancel,memory_order_acquire))return NULL;
     if (!mods || !ext.width || !ext.height || !(flow_scale>=0.25f && flow_scale<=1.0f) ||
         !out_views || !byte_limit || !lk_load()) return NULL;
     for (int i=0;i<LSFG_MAX_GENERATIONS;i++) if (!out_views[i]) return NULL;
     lsfg_chain *c = calloc(1, sizeof *c);
     if (!c) return NULL;
-    c->budget.limit=byte_limit;
+    c->budget.limit=byte_limit;c->cancel=cancel;
     lwriter w;
     // Descriptor pool, samplers, uniform buffer
     VkDescriptorPoolSize ps[4] = {{S_UBO, DESCRIPTORS_PER_TYPE}, {S_SMP, DESCRIPTORS_PER_TYPE}, {S_TEX, DESCRIPTORS_PER_TYPE}, {S_STO, DESCRIPTORS_PER_TYPE}};
@@ -221,7 +228,7 @@ lsfg_chain *lsfg_chain_build(const lsfg_modules *mods, VkExtent2D ext, float flo
     c->samp_edge = sampler_new(c, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_COMPARE_OP_ALWAYS, 0);
     VkDeviceSize al = V.ub_align ? V.ub_align : 256; c->ustride = (sizeof(lconst) + al - 1) / al * al;
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = c->ustride * MAX_UBO, .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};
-    VkResult r = c->bad?VK_ERROR_INITIALIZATION_FAILED:vk.vkCreateBuffer(V.dev, &bi, NULL, &c->ubuf);
+    VkResult r = chain_stopped(c)?VK_ERROR_INITIALIZATION_FAILED:vk.vkCreateBuffer(V.dev, &bi, NULL, &c->ubuf);
     if (r) c->ubuf=VK_NULL_HANDLE;
     VkMemoryRequirements mr = {0}; if (!r) vk.vkGetBufferMemoryRequirements(V.dev, c->ubuf, &mr);
     VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
@@ -378,11 +385,17 @@ lsfg_chain *lsfg_chain_build(const lsfg_modules *mods, VkExtent2D ext, float flo
         }
     }
 
-    if (c->bad) { lsfg_chain_free(c); return NULL; }
+    if (chain_stopped(c)) { lsfg_chain_free(c); return NULL; }
+    c->cancel=NULL;
     VLOG("lsfg: graph %ux%u, flow %ux%u (scale %.2f): %d images, %d constant blocks, %llu allocated bytes",
         ext.width,ext.height,c->flow_ext.width,c->flow_ext.height,flow_scale,c->nimg,c->nubo,
         (unsigned long long)c->budget.used);
     return c;
+}
+
+lsfg_chain *lsfg_chain_build(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit) {
+    return lsfg_chain_build_cancelable(mods,ext,flow_scale,out_views,byte_limit,NULL);
 }
 
 uint64_t lsfg_chain_bytes(const lsfg_chain *c) { return c?c->budget.used:0; }

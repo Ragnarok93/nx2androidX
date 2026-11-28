@@ -9,23 +9,24 @@ class FGGraphAllocation(unittest.TestCase):
     def test_budget_and_private_layouts(self):
         source=(ANDROID/'lsfg/lsfg_chain.c').read_text()
         start=source.index('static limg *img_new(')
-        image=source[start:source.index('\n}',start)+2]
+        image=source[source.index('static int chain_stopped('):source.index('\n}',start)+2]
         start=source.index('void lsfg_chain_record_init(')
         init=source[start:source.index('\n}',start)+2]
-        build=source[source.index('lsfg_chain *lsfg_chain_build('):source.index('uint64_t lsfg_chain_bytes(')]
+        build=source[source.index('lsfg_chain *lsfg_chain_build_cancelable('):source.index('uint64_t lsfg_chain_bytes(')]
         # The queue-free constructor must not own any submission path.
         for forbidden in ('vkQueueSubmit','vkQueueWaitIdle','vkWaitForFences'):
             self.assertNotIn(forbidden,build)
         code=r'''
 #include <assert.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <vulkan/vulkan_core.h>
 #include "lsfg/lsfg_graph_budget.h"
 #define VRED(...) ((void)0)
 enum {MAX_IMAGES=192};
 typedef struct {VkImage img;VkDeviceMemory mem;VkImageView view;VkExtent2D ext;VkFormat fmt;} limg;
-typedef struct {int bad,nimg;lsfg_graph_budget budget;limg imgs[MAX_IMAGES];} lsfg_chain;
+typedef struct {int bad,nimg;lsfg_graph_budget budget;const atomic_int *cancel;limg imgs[MAX_IMAGES];} lsfg_chain;
 static struct {VkDevice dev;} V;
 static unsigned fail,allocs,layouts;
 static uint64_t req_bytes=4096;
@@ -69,6 +70,11 @@ int main(void){
         assert(!c.imgs[0].view&&c.budget.used==(fail>=4?4096:0));
         assert(allocs==(fail>=3?1:0));
     }
+    atomic_int cancel=0;fail=0;allocs=0;
+    c=(lsfg_chain){.budget={8192,0},.cancel=&cancel};
+    assert(img_new(&c,e,VK_FORMAT_R8G8B8A8_UNORM)&&allocs==1);
+    atomic_store(&cancel,1);
+    assert(!img_new(&c,e,VK_FORMAT_R8G8B8A8_UNORM)&&allocs==1&&c.bad);
     lsfg_graph_budget b={UINT64_MAX,UINT64_MAX-1};
     assert(!lsfg_graph_charge(&b,2)&&b.used==UINT64_MAX-1);
     assert(lsfg_graph_charge(&b,1)&&b.used==UINT64_MAX);

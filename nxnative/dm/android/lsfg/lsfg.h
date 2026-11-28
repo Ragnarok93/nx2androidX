@@ -10,6 +10,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 // ---------- The DLL (lsfg_dll.c) ----------
 enum { LSFG_OK, LSFG_NOT_INSTALLED, LSFG_UNREADABLE, LSFG_NOT_PE, LSFG_MISSING_SHADERS, LSFG_TRANSLATION_FAILED };
@@ -48,6 +49,10 @@ lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_
 // must outlive all graph consumers. byte_limit covers private VkDeviceMemory.
 lsfg_chain *lsfg_chain_build(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
         const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit);
+// Cooperative worker cancellation between driver calls. The token is borrowed
+// only for construction; a completed graph never retains it.
+lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit,const atomic_int *cancel);
 uint64_t lsfg_chain_bytes(const lsfg_chain *c);
 // Record exactly once per successful initialization submission, before use.
 void lsfg_chain_record_init(const lsfg_chain *c,VkCommandBuffer cb);

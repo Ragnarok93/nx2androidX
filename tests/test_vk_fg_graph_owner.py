@@ -17,6 +17,9 @@ lsfg_chain *lsfg_chain_build(const lsfg_modules *m,VkExtent2D e,float f,const Vk
     assert(m==&mods&&e.width==1920&&e.height==1080&&f>=.25f&&cap==4096&&v[0]==views[0]);
     lsfg_chain *c=malloc(sizeof *c);assert(c);c->id=++created;return c;
 }
+lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *m,VkExtent2D e,float f,const VkImageView v[3],uint64_t cap,const atomic_int *cancel){
+    (void)cancel;return lsfg_chain_build(m,e,f,v,cap); // emulate driver returning a late success
+}
 void lsfg_chain_free(lsfg_chain *c){if(c){assert(!freed[c->id]++);free(c);}}
 static int start(lsfg_graph_owner *o,unsigned pct,uint64_t epoch){
     return lsfg_graph_owner_start(o,&mods,(VkExtent2D){1920,1080},pct,views,4096,epoch);

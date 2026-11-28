@@ -16,16 +16,17 @@ class FGGraphJob(unittest.TestCase):
 struct lsfg_chain {int id;};
 static pthread_mutex_t mu=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv=PTHREAD_COND_INITIALIZER;
-static int entered,release,fail,builds,frees;
+static int entered,release,fail,builds,frees,saw_cancel;
 static lsfg_modules mods;
 static VkImageView views[LSFG_MAX_GENERATIONS]={(VkImageView)(uintptr_t)1,(VkImageView)(uintptr_t)2,(VkImageView)(uintptr_t)3};
-lsfg_chain *lsfg_chain_build(const lsfg_modules *m,VkExtent2D e,float f,const VkImageView v[LSFG_MAX_GENERATIONS],uint64_t cap){
+lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *m,VkExtent2D e,float f,const VkImageView v[LSFG_MAX_GENERATIONS],uint64_t cap,const atomic_int *cancel){
     assert(m==&mods&&e.width==1920&&e.height==1080&&f==.5f&&cap==4096);
     for(unsigned i=0;i<LSFG_MAX_GENERATIONS;i++)assert(v[i]==views[i]);
     pthread_mutex_lock(&mu);
     entered=1;pthread_cond_broadcast(&cv);
     while(!release)pthread_cond_wait(&cv,&mu);
     ++builds;
+    saw_cancel+=atomic_load_explicit(cancel,memory_order_acquire)!=0;
     pthread_mutex_unlock(&mu);
     if(fail)return NULL;
     lsfg_chain *c=malloc(sizeof *c);assert(c);c->id=builds;return c;
@@ -49,7 +50,7 @@ int main(void){
     assert(!lsfg_graph_job_start(&j,&mods,(VkExtent2D){1920,1080},.5f,views,4096,1));
     lsfg_graph_job_cancel(&j);
     assert(!lsfg_graph_job_take(&j,1,&out)&&j.running);
-    unblock();assert(!take(&j,1)&&frees==1&&!j.running);
+    unblock();assert(!take(&j,1)&&frees==1&&!j.running&&saw_cancel==1);
     start(&j,2);unblock();assert(!take(&j,3)&&frees==2);
     start(&j,3);unblock();out=take(&j,3);assert(out&&out->id==3&&frees==2);
     lsfg_chain_free(out);assert(frees==3);

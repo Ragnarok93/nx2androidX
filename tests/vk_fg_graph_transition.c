@@ -171,7 +171,10 @@ static int collect_job(uint64_t epoch){
     assert(r);return r;
 }
 int main(void){
-    setup();active=lsfg_chain_build(&modules,extent,.5f,views,UINT64_MAX);assert(active&&lsfg_chain_bytes(active));
+    setup();
+    atomic_int cancelled=1;
+    assert(!lsfg_chain_build_cancelable(&modules,extent,.5f,views,UINT64_MAX,&cancelled));
+    active=lsfg_chain_build(&modules,extent,.5f,views,UINT64_MAX);assert(active&&lsfg_chain_bytes(active));
     begin(0);lsfg_chain_record_init(active,slots[0].cb);
     for(unsigned i=0;i<3;i++)vka_img_barrier(slots[0].cb,outputs[i],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL);
     for(unsigned i=0;i<3;i++){source(slots[0].cb,active,i,++ticket);lsfg_chain_seed(active,slots[0].cb,i);}
