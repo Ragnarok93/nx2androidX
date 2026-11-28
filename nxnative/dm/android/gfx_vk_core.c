@@ -12,6 +12,7 @@
 #include "nvn_hmap.h"
 #include "nvn_dirty.h"
 #include "gfx_vk_pool_pressure.h"
+#include "gfx_vk_pool_restore.h"
 #include "gfx_vk_fg_pressure.h"
 #include "gfx_vk_quality_recovery.h"
 #include <android/hardware_buffer.h>
@@ -771,9 +772,9 @@ static int zc_place(void *mem, size_t len, zcfill_t *f, int lazy, size_t *done) 
 // Pages that were a hardware buffer's put back on anonymous memory with their contents, before the buffer is dropped (a lazy pool's swap that failed part way, or an import
 // that failed after the copy): left on the dropped buffer, they would stay pinned and, on a Retroid Pocket 5, uncached for the CPU while the game goes on using the memory
 static void copy_back(uint8_t *mem, uint64_t size) {   // no game write under it: a pool being made, or one the game has removed
-    uint8_t *save = malloc(size); if (save) memcpy(save, mem, size);
-    mmap(mem, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-    if (save) { memcpy(mem, save, size); free(save); }
+    if (vk_pool_restore_anon(mem, size))
+        die("[RED] [vk] guest pool restoration failed (%llu bytes, errno %d)",
+            (unsigned long long)size, errno);
 }
 // nvn_dirty_swap's fill: anonymous pages, filled, then moved over [at, at+n) read-only in one call per piece between the pools inside it (ctx: zcin_t, or NULL for none)
 static int zc_anon_fill(void *at, size_t n, size_t off, void *ctx) {
