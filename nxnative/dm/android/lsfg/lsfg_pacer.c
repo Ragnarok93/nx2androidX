@@ -34,6 +34,8 @@
 #define PROBE_DURATION 1.0
 #define DEFICIT_DURATION 1.0
 #define PROBE_STEP_DELAY 0.25
+#define BASE_DEFICIT_DURATION 0.5
+#define BASE_RECOVERY_DURATION 0.5
 
 static double probe_backoff(uint32_t failures) { return failures == 1 ? 5 : failures == 2 ? 15 : failures == 3 ? 30 : 60; }
 static size_t zmin(size_t a, size_t b) { return a < b ? a : b; }
@@ -44,12 +46,14 @@ void lsfg_pacer_reset(lsfg_pacer *p) { memset(p, 0, sizeof *p); }
 static void stabilize(lsfg_pacer *p, double now) {
     p->stable_until = now + STABILIZATION_DURATION; p->probe_until = 0; p->deficit_since = 0;
     p->smoothed_interval = 0; p->output_credit = 0;
+    p->base_deficit_since = p->base_healthy_since = 0;
 }
 static void defer_evaluations(lsfg_pacer *p, double amount) {
     if (p->stable_until) p->stable_until += amount;
     if (p->probe_until) p->probe_until += amount;
     if (p->next_probe) p->next_probe += amount;
     p->deficit_since = 0;
+    p->base_deficit_since = p->base_healthy_since = 0;
 }
 
 static void update_limit(lsfg_pacer *p, double now, float base_rate, float target_rate, size_t ceiling) {
@@ -88,7 +92,8 @@ static void update_limit(lsfg_pacer *p, double now, float base_rate, float targe
         return;
     }
     p->below_since = 0;
-    if (base_rate * (float)(p->limit + 1) >= target_rate * TARGET_SATISFIED_RATIO || p->limit >= ceiling) { p->deficit_since = 0; return; }
+    float requested = p->fixed_base > 0 ? (float)p->fixed_base : base_rate;
+    if (requested * (float)(p->limit + 1) >= target_rate * TARGET_SATISFIED_RATIO || p->limit >= ceiling) { p->deficit_since = 0; return; }
     if (!p->deficit_since) { p->deficit_since = now; return; }
     if (now - p->deficit_since < DEFICIT_DURATION) return;
     if (p->next_probe && now < p->next_probe) return;
@@ -134,6 +139,36 @@ lsfg_plan lsfg_pacer_plan(lsfg_pacer *p, size_t capacity, int multiplier, int ta
         p->mode_target = target_rate;
         p->limit = 0; p->output_credit = 0; p->deficit_since = 0; p->probe_failures = 0; p->next_probe = 0; p->below_since = 0;
     }
+    // An explicit game target is a throughput contract, not the FG output
+    // target. Low base rate is not demand for more optional work. Suppress
+    // optional work after sustained deficit, or immediately if nothing was
+    // generated in the preceding interval. Recover on stable source cadence.
+    if (p->fixed_base > 0 && p->min_base > 0) {
+        float base = 1.0f / p->smoothed_interval;
+        if (base < p->min_base) {
+            p->base_healthy_since = 0;
+            if (!p->base_deficit_since) p->base_deficit_since = now;
+            if (!previous_generations || now - p->base_deficit_since >= BASE_DEFICIT_DURATION) {
+                if (!p->base_blocked) {
+                    p->base_blocked = 1;
+                    p->output_credit = 0;
+                    if (target_rate) {
+                        p->limit = 0;
+                        p->probe_until = p->next_probe = p->deficit_since = 0;
+                    }
+                }
+                return none;
+            }
+        } else {
+            p->base_deficit_since = 0;
+            if (p->base_blocked) {
+                if (!p->base_healthy_since) p->base_healthy_since = now;
+                if (now - p->base_healthy_since < BASE_RECOVERY_DURATION) return none;
+                p->base_blocked = 0;
+                p->base_healthy_since = 0;
+            }
+        }
+    }
     if (!target_rate) {
         // The multiplier mode has no probing, so the generation's own cost is judged here: the game must keep the floor (DM_LSFG_MIN_FPS) — its own
         // rate may not fall under it because of the generation. A decoupled game has the floor alone (its speed follows the rate, so the floor is all
@@ -173,7 +208,7 @@ lsfg_plan lsfg_pacer_plan(lsfg_pacer *p, size_t capacity, int multiplier, int ta
     }
     update_limit(p, now, 1.0f / p->smoothed_interval, target, ceiling);
     size_t allowed = zmin(p->limit, ceiling);
-    float desired_outputs = p->smoothed_interval * target;
+    float desired_outputs = (p->fixed_base > 0 ? 1.0f / p->fixed_base : p->smoothed_interval) * target;
     if (!allowed || desired_outputs <= 1.0f) { p->output_credit = 0; return none; }
     p->output_credit += desired_outputs;
     size_t outputs = (size_t)floorf(p->output_credit + CREDIT_EPSILON); if (outputs < 1) outputs = 1;

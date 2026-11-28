@@ -32,6 +32,9 @@ typedef struct {
     double below_since;   // decoupled: since when the base has been under min_base while generating (0 = not)
     float min_base;       // the floor (DM_LSFG_MIN_FPS, default 30; 0 = none): a decoupled game's own rate must not fall under it because of the generation
     int decoupled;        // the game's speed follows its measured rate (not only held by a limiter): a slower base does not slow the game down
+    int fixed_base;
+    int base_blocked;
+    double base_deficit_since, base_healthy_since;
     int mode_target;      // the target rate the plan was made for (-1 = none yet): a change starts the plan afresh
 } lsfg_pacer;
 typedef struct { size_t generations; int warm; } lsfg_plan;

@@ -683,6 +683,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         F.count = F.warm_streak = 0;
     }
     // Target-aware default floor; the existing explicit override remains.
+    F.pacer.fixed_base = fixed_base;
     F.pacer.min_base = dm_fg_base_floor(fixed_base);
     { const char *e = getenv("DM_LSFG_MIN_FPS"); if (e && atoi(e) > 0) F.pacer.min_base = (float)atoi(e); }
     // Decoupled (the pacer's other measure of the game's own rate): a game whose speed follows its measured rate keeps its speed at any rate, so a
@@ -706,6 +707,13 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     fg_decision.planned=(unsigned)plan.generations;
     fg_decision.warm_streak=F.warm_streak;
     fg_decision.refresh_ns=rns;
+    if (F.pacer.base_blocked) {
+        // No optional copy/seed/submit while the explicit base is below
+        // its recovery floor. Keep graph ownership, not stale history.
+        F.count = F.warm_streak = F.pacer.issued = 0;
+        ng = 0;
+        goto report;
+    }
     if (rns && period > 0) {
         // Explicit base deadlines cannot gain optional refresh slots just
         // because the presentation worker or source has fallen behind.
@@ -826,7 +834,7 @@ report:;
         reason("%s", st2 == 1 ? "generating" : capped ? why : met ? "on, the target rate is met: no frame to add" : "on, waiting for a steady frame rate");
         static int ncap; if (st2 == 2 && capped && ncap++ < 4) VLOG("frame generation: not generating, %s (game frame period %.1f ms)", why + 4, period * 1e3);
     }
-    fg_decision.reason=ng?"generated":seed_only_generation?"adaptive flow warmup":capped?"refresh cap":met?"target met":
+    fg_decision.reason=ng?"generated":seed_only_generation?"adaptive flow warmup":F.pacer.base_blocked?"explicit base cadence protection":capped?"refresh cap":met?"target met":
         !plan.warm?"pacer not warm or floor cooldown":!warm||F.warm_streak<LSFG_GRAPH_HISTORY_COUNT?"history warmup":"pacer issued zero";
     was_capped = st2 == 2 && capped;
     was_met = st2 == 2 && met;
