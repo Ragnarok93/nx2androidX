@@ -77,6 +77,7 @@ static pthread_cond_t g_cpipe_ready = PTHREAD_COND_INITIALIZER;
 static uint64_t g_cpipe_warm_key[4], g_cpipe_demand_key[4];
 static int g_cpipe_warming, g_cpipe_demand;
 static uint64_t g_compute_attempts, g_compute_failed, g_compute_compile_ns, g_compute_wait_ns;
+static void record_demand_pipeline(uint64_t elapsed) { (void)elapsed; }
 static pthread_mutex_t g_cpipe_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t tick(void) { return 0; }
 static unsigned builds;

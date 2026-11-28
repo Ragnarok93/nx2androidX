@@ -59,7 +59,7 @@ int dm_fsr_sharpness(void){return 50;}
 int dm_perf_rate_fps(void){return 30;}
 static int dm_fg_wants_input(void){return fg_on;}
 static spatial_image *spatial_display_resolved(uint64_t ticket){return resolved_ticket==ticket?&resolve:NULL;}
-static int reconstruction_pressure(dm_flow_cadence cadence){assert(cadence.period_us);return 0;}
+static int reconstruction_pressure(dm_flow_cadence cadence,uint64_t ticket){assert(cadence.period_us && ticket);return 0;}
 void vk_guest_flow_feedback(uint64_t ticket,uint32_t cadence,int stressed){assert(ticket&&cadence&&!stressed);}
 static void spatial_collect_sources(void){}
 static VkFormat present_window_format(VkFormat f){return f;}

@@ -2000,6 +2000,22 @@ static int async_pipe(const pkey *k) {   // 1: queued (the draw is left out); un
     return ok;
 }
 uint64_t g_graphics_demand_builds, g_graphics_demand_ns;
+static _Atomic uint64_t g_demand_builds, g_demand_build_ns;
+
+static void record_demand_pipeline(uint64_t elapsed) {
+    atomic_fetch_add_explicit(&g_demand_builds, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_demand_build_ns, elapsed, memory_order_relaxed);
+}
+
+void mtl_create_stats(uint64_t *libs, uint64_t *pipelines) {
+    *libs = 0;
+    *pipelines = atomic_load_explicit(&g_demand_builds, memory_order_relaxed);
+}
+
+void mtl_create_ns(uint64_t *libs, uint64_t *pipelines) {
+    *libs = 0;
+    *pipelines = atomic_load_explicit(&g_demand_build_ns, memory_order_relaxed);
+}
 static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     if (g_last_p && !memcmp(k, &g_last_k, sizeof *k)) return g_last_p == (void *)1 ? VK_NULL_HANDLE : g_last_p;
     pthread_mutex_lock(&g_pipe_mu); VkPipeline p = nvn_hm_get(&g_pipes, k); pthread_mutex_unlock(&g_pipe_mu);
@@ -2012,6 +2028,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     uint64_t elapsed = tick() - start;
     g_graphics_demand_builds++;
     g_graphics_demand_ns += elapsed;
+    record_demand_pipeline(elapsed);
     if (g_prof_on) g_prof_ns[0] += elapsed;
     if (elapsed >= 8000000) {
         static unsigned reported;
@@ -3581,7 +3598,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     g_guest_scene.image = VK_NULL_HANDLE;
     int guest_mode = S.sh[1] && S.sh[1]->guest_filter_certified ? dm_spatial_mode() : SP_NATIVE;
     g_guest_filter_check = guest_mode != SP_NATIVE && spatial_mode_valid(guest_mode) &&
-        nsets == 2 && !vk_rs_cache_has_scaled() && !g_order_check &&
+        nsets == 2 && !vk_rs_cache_has_scaled() &&
         k.ncol == 1 && k.cfmt[0] == VK_FORMAT_R8G8B8A8_UNORM && k.wmask[0] == 15 &&
         !k.dfmt && !k.blend_en && !k.logic_en && !k.raster_discard && !k.a2c &&
         k.samples == 1 && !k.alt && !k.debug_mode && !k.key[2] && !vsh->xfb && !shader_wmem(vsh);
@@ -3593,17 +3610,32 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
         sets[S.sh[st]->set] = stage_set(st, S.sh[st], dofs[S.sh[st]->set], NULL); k.um[st] = g_num_um; k.im[st] = g_num_im; k.r32[st] = g_num_r32;
         g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0;
         if (g_rs_replay && !sets[S.sh[st]->set]) { g_input_collect_descriptors = g_guest_filter_check = 0; g_vkst.skip_rt++; return 0; } }
-    if (g_guest_filter_check && g_guest_source_ok && g_guest_sampler_ok && g_guest_uniform_ok)
-        k.guest_filter = guest_mode == SP_SGSR2 ? SP_SGSR1 : guest_mode;
+    const char *guest_rejection = NULL;
+    const int trace_guest = S.sh[1] && (g_x_logfs == S.sh[1]->key || S.sh[1]->guest_filter_certified);
+    int guest_admitted = g_guest_filter_check && g_guest_source_ok && g_guest_sampler_ok && g_guest_uniform_ok;
+    if (trace_guest && !guest_admitted) {
+        if (!S.sh[1]->guest_filter_certified) guest_rejection = "fragment certificate";
+        else if (guest_mode != SP_NATIVE) {
+            if (!g_guest_filter_check) guest_rejection = "pipeline or attachment state";
+            else if (!g_guest_source_ok) guest_rejection = "current source proof or view";
+            else if (!g_guest_sampler_ok) guest_rejection = "linear clamp sampler";
+            else if (!g_guest_uniform_ok) guest_rejection = "fragment uniform binding";
+        }
+    }
     g_input_collect_descriptors = g_guest_filter_check = 0;
     if (g_order_check) {   // the order-only barrier before this draw (see g_order_keep): kept, or the pass ends here with it
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
         if (g_pass_wmem || shader_wmem(S.sh[0]) || shader_wmem(fs) || shader_wmem(S.sh[2]) || order_feedback(3)) {
+            // Descriptors were proven against the old pass. A harmless
+            // order-only barrier can keep them; a pass split must fall back.
+            if (guest_admitted) guest_rejection = "attachment ordering split the pass";
+            guest_admitted = 0;
             g_order_ended++; vk_end_pass(); vk_img_barrier_all(vk_cmd());
             if (!begin_draw_pass()) { g_vkst.skip_rt++; return 0; }
             cb = vk_cmd();
         } else g_order_kept++;
     }
+    if (guest_admitted) k.guest_filter = guest_mode == SP_SGSR2 ? SP_SGSR1 : guest_mode;
     uint64_t tdesc = tick() - t1d; g_vkst.ns_desc += tdesc; if (g_prof_on) g_prof_ns[5] += tdesc;
     if (g_tracing) {
         VKLOG("  pipeline: topology %u restart %u discard %u cull %u front %u mode %u clamp %u bias %u; depth test %u write %u func %u stencil %u; attributes %u bindings %u; colour %u (format %u) samples %u a2c %u; blend enable %#x logic %u/%u; fragment depth variant %u (depth written by a shader at present %llu, now %llu)",
@@ -3634,9 +3666,20 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     if (!pass_commit()) { g_vkst.skip_rt++; return 0; }
     g_pass_wmem |= shader_wmem(S.sh[0]) | shader_wmem(k.raster_discard ? NULL : S.sh[1]) | shader_wmem(S.sh[2]);
     if (!p && k.guest_filter) {
+        guest_rejection = "replacement pipeline unavailable";
         k.guest_filter = SP_NATIVE;
         p = graphics_pipeline(&k, layout);
     } else if (p) layout = guest_layout;
+    if (guest_rejection) {
+        static uint64_t last_key, last_frame;
+        static const char *last_reason;
+        if (last_key != k.key[1] || last_reason != guest_rejection || g_tex_frame - last_frame >= 600) {
+            VKLOG("[upscale] guest fragment %016llx at frame %llu, %ux%u: kept original draw (%s)",
+                  (unsigned long long)k.key[1], (unsigned long long)g_tex_frame + 1,
+                  P_att[0].w, P_att[0].h, guest_rejection);
+            last_key = k.key[1]; last_reason = guest_rejection; last_frame = g_tex_frame;
+        }
+    }
     uint64_t t1 = tick(); g_vkst.ns_pipe += t1 - t0 - tdesc;
     if (!p) { g_vkst.skip_pipe++; return 0; }
     g_guest_filter_bound = k.guest_filter;
@@ -4320,7 +4363,10 @@ static void compute_warm_start(void) {
     g_compute_alt = alt && atoi(alt);
     if (getenv("DM_VK_NOPREWARM")) return;
     const char *history = getenv("DM_VK_COMPUTE_WARM_HISTORY");
-    g_ch_enabled = history && atoi(history) && !g_compute_alt;
+    const char *seeds = getenv("DM_VK_COMPUTE_WARM_SEEDS");
+    // Profiles with observed variants can prewarm those even when the
+    // whole shader bundle exceeds the generic startup limit.
+    g_ch_enabled = !g_compute_alt && (history ? atoi(history) != 0 : seeds && *seeds);
     pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&t, &a, compute_warm, NULL)) g_ch_enabled = 0;
     pthread_attr_destroy(&a);
@@ -4522,6 +4568,7 @@ static void dispatch(const p_dispatch *d) {
         p = compute_build(cs, ck[1], ck[2], ck[3]);
         uint64_t elapsed = tick() - tb;
         g_compute_compile_ns += elapsed;
+        record_demand_pipeline(elapsed);
         if (g_prof_on) g_prof_ns[7] += elapsed;
         int slow = elapsed >= 8000000;
         if (slow) {

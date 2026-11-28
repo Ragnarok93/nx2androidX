@@ -279,6 +279,11 @@ sample and alpha stores. The guest vertex stage, scissor and output
 attachment continue to define the raster coverage and preserve loaded
 pixels outside the draw. The native pipeline remains the fallback when
 the resource proof or variant creation fails.
+Set `DM_VK_LOG_FS` to a fragment shader key to log its loaded SPIR-V
+digest and replay rejection in the normal runtime log. This requires
+no GPU image or draw-input readbacks. A pending order-only barrier
+keeps the proof if the current pass survives. A split restores the
+original draw because its proof was collected against the earlier pass.
 
 The FSR 1 and GSR 1 variants use the same replay admission. They also check
 the guest uniform's full-source bounds and the interpolated output grid
@@ -354,7 +359,9 @@ The backend budgets images and uniforms against Vulkan allocation requirements
 and a fraction of the local heap. The replay and presentation paths time their own reconstruction work with
 GPU queries and apply a cadence-based budget. Queue backlog, display misses
 and frame work can bring on a cooldown even when reconstruction meets its
-stage budget. The policy uses the larger of CPU replay and GPU work to
+stage budget. The stage check allows five percent timing tolerance and
+queue backlog counts only real frames waiting behind the current one.
+The policy uses the larger of CPU replay and GPU work to
 account for overlap. Replays with unavailable timing use the spatial fallback.
 Results are converted to the presentation format before LSFG. Replay-stage
 results enter the existing guest composition before its presentation handoff.

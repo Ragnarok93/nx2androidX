@@ -816,3 +816,40 @@ bindings. Docked FFR acceptance remains Awaiting device validation.
   Its [signed builder APK](https://github.com/Ragnarok93/nx2androidX/actions/runs/46083105408/artifacts/15237952734)
   was available at verification. Docked FFR admission on the device and
   engine-input GSR 2 semantics remain open.
+
+## 2026-11-27 — Pacing, frame-generation recovery, and docked replay follow-up
+
+- The Samsung system Vulkan log from runtime `54e03821` showed three
+  GSR 2 cooldown transitions with stage samples of 3.347–3.350 ms.
+  At 60 FPS the old allowance was 3.333 ms. The shared controller now
+  allows five percent timing tolerance. The presenter excludes the
+  current real frame from queue backlog. The host fixture covers
+  3.35 ms residency as well as sustained overload and recovery.
+- LSFG skips its source copy and shared work when the refresh cap leaves
+  no generated slot. It retains the display rate vote and warms from fresh
+  real inputs when generation resumes. A slot only waits for a successful
+  submission. Fence retirement clears the reconstruction consumer
+  reference before reuse. Recoverable command failures retry after a
+  short delay. Device loss disables frame generation.
+- Vulkan synchronous pipeline creation is now included in Android's
+  long-frame counters. The original stall had 24 logged first-use
+  pipeline creations totaling 1.02 s despite the old zero counter.
+  A configured compute seed list now enables the existing bounded
+  history worker by default, including on the Samsung system driver.
+  Explicit overrides still apply. The remaining GPU/queue stall time
+  and the reported process exits are unresolved.
+- For docked replay, a harmless order-only barrier can retain an
+  otherwise valid source proof. A barrier that splits the pass continues
+  along the original draw path. Normal runtime logging can report the
+  shader certificate and replay eligibility without image capture.
+  The supplied fragment matches the exact certificate and all four
+  replacement variants passed software Vulkan with the supplied FFR
+  modules. The archive does not identify the installed fragment digest
+  or all live eligibility checks. Docked FFR activation is In progress.
+- The 56-check host reconstruction suite passed, including injected
+  command-end, fence-reset and submit failures. SPIR-V validation and
+  synchronization-validated Lavapipe readbacks passed, including
+  720p through 2160p and the 2160p-to-1080p resolve. NDK r27d linked
+  the FFR executable and both native libraries with LSFG compiled in.
+  Pacing, sustained memory use, live docked admission and accepted
+  generated output on Android remain Awaiting device validation.

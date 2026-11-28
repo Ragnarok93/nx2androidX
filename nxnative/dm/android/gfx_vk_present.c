@@ -1448,13 +1448,20 @@ static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_
 static _Atomic int g_redraw;
 void dm_overlay_redraw(void) { atomic_store(&g_redraw, 1); pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }
 static _Atomic uint32_t g_recon_work_us;
-static int reconstruction_pressure(dm_flow_cadence cadence) {
+
+void vk_fg_fence_retired(VkFence fence) {
+    spatial_forget_fence(fence);
+}
+
+static int reconstruction_pressure(dm_flow_cadence cadence, uint64_t ticket) {
     // Present thread, or synchronous presentation, under g_present_mu.
     static uint64_t seen_slip;
     int missed = g_pace_slip > seen_slip;
     seen_slip = g_pace_slip;
     pthread_mutex_lock(&g_pq_mu);
-    unsigned queued = (unsigned)(g_pq_head - g_pq_tail);
+    unsigned occupied = (unsigned)(g_pq_head - g_pq_tail);
+    unsigned queued = dm_flow_waiting_sources(occupied, occupied &&
+        g_pq[g_pq_tail % PQ_N].n == ticket);
     pthread_mutex_unlock(&g_pq_mu);
     return dm_flow_frame_stressed(cadence.period_us, atomic_load(&g_recon_work_us),
                                   0, queued, missed);
@@ -1516,7 +1523,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         // Quantize the workload key, not the budget, to avoid tiny period jitter.
         g_spatial.flow_cadence_us = ((cadence.period_us + 500u) / 1000u) * 1000u;
         g_spatial.flow_budget_ms = cadence.budget_ms;
-        g_spatial.flow_pressure = reconstruction_pressure(cadence);
+        g_spatial.flow_pressure = reconstruction_pressure(cadence, ticket);
         vk_guest_flow_feedback(ticket, cadence.period_us, g_spatial.flow_pressure);
         needs_fg_resolve = target.width >= picture.width && target.height >= picture.height &&
             (target.width > picture.width || target.height > picture.height);

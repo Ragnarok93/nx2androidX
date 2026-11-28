@@ -327,6 +327,16 @@ static vkshader_t *vk_shader_q(uint64_t key, int stage, int quiet) {
         s->refl_extra_len=0;
     // SPIR-V with the stage's set
     s->guest_filter_certified = guest_filter_certified(stage, w, nw);
+    const char *filter_trace = stage == 1 ? getenv("DM_VK_LOG_FS") : NULL;
+    if (filter_trace && strtoull(filter_trace, NULL, 16) == key) {
+        uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+        char hex[2 * sizeof digest + 1];
+        CC_SHA256(w, nw * sizeof *w, digest);
+        for (unsigned i = 0; i < sizeof digest; ++i)
+            snprintf(hex + 2 * i, 3, "%02x", (unsigned)digest[i]);
+        VKLOG("[upscale] guest fragment %016llx: %u SPIR-V words, SHA-256 %s, certificate %s",
+              (unsigned long long)key, nw, hex, s->guest_filter_certified ? "matched" : "rejected");
+    }
     int f64_used = 0; uint32_t xb = 4;
     for (uint32_t i = 5; i < nw;) { uint32_t n = w[i] >> 16, op = w[i] & 0xffff; if (!n) break; if (op == 71 && n >= 4 && w[i + 2] == 34) w[i + 3] = (uint32_t)s->set;   // OpDecorate DescriptorSet
         if (op == 22 && n == 3 && w[i + 2] == 64) f64_used = 1;   // OpTypeFloat 64

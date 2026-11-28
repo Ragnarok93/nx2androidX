@@ -5,6 +5,9 @@
 /* The host rate limiter may impose a slower cadence than the guest interval.
  * This is an estimate of source period, not a GPU headroom measurement. */
 typedef struct { uint32_t period_us; float budget_ms; } dm_flow_cadence;
+static inline unsigned dm_flow_waiting_sources(unsigned occupied, int processing) {
+    return occupied && processing ? occupied - 1 : occupied;
+}
 static inline dm_flow_cadence dm_flow_cadence_estimate(double guest_period, int cap_fps) {
     if (!(guest_period >= 0.0) || guest_period > 1.0) return (dm_flow_cadence){0};
     double period = guest_period;
@@ -91,7 +94,9 @@ static inline void dm_flow_budget_observe(dm_flow_budget *p, uint64_t generation
         !sample_ticket || sample_ticket <= p->last_sample || sample_ticket >= decision_ticket ||
         !(budget_ms > 0) || !(cost_ms >= 0)) return;
     p->last_sample = sample_ticket;
-    if (cost_ms <= budget_ms) {
+    // A small tolerance keeps timestamp jitter near the cadence allowance
+    // from repeatedly demoting an otherwise viable workload.
+    if (cost_ms <= (double)budget_ms * 1.05) {
         p->slow = 0;
         if (p->affordable < 60 && ++p->affordable == 60) {
             p->backoff = 120;

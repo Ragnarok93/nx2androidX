@@ -32,7 +32,7 @@ static void check_cadence_pressure(void) {
             dm_flow_budget_pressure(&p, frame,
                 dm_flow_frame_stressed(cadence.period_us, work_us, work_us, queued, frame == 55));
             dm_flow_budget_observe(&p, p.generation, frame, frame + 1, cadence.budget_ms,
-                frame % 2 ? 3.3 : 2.6);
+                frame % 2 ? 3.35 : 2.6);
             assert(dm_flow_budget_allow(&p, frame + 1));
         }
         for (uint64_t frame = 201; frame <= 204; ++frame) {
@@ -48,6 +48,10 @@ static void check_cadence_pressure(void) {
         assert(dm_flow_frame_stressed(cadence.period_us, 0, cadence.period_us, 0, 0));
     }
     assert(!dm_flow_frame_stressed(0, 0, 0, 0, 0));
+    assert(dm_flow_waiting_sources(0, 1) == 0);
+    assert(dm_flow_waiting_sources(2, 1) == 1);
+    assert(dm_flow_waiting_sources(3, 1) == 2);
+    assert(dm_flow_waiting_sources(2, 0) == 2);
     assert(dm_flow_cadence_estimate(0.0, 0).budget_ms == 2.0f);
     assert(dm_flow_cadence_estimate(1.0 / 60, 30).period_us == 33333);
 }

@@ -73,13 +73,17 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
 }
 #else
 enum { NFG = 3 };
+typedef struct { VkCommandBuffer cb; VkFence fence; int pending; } fg_slot;
 static struct {
     int state;                         // 0 not tried, 1 ready (modules loaded), -1 unavailable
     lsfg_modules mods;
     lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
     VkExtent2D failed_extent; int failed_flow; double rebuild_retry_at;
     VkImage out[LSFG_MAX_GENERATIONS]; VkImageView out_view[LSFG_MAX_GENERATIONS]; VkDeviceMemory out_mem[LSFG_MAX_GENERATIONS];
-    VkCommandPool pool; struct { VkCommandBuffer cb; VkFence fence; } fr[NFG]; unsigned fi;
+    VkCommandPool pool;
+    fg_slot fr[NFG];
+    double command_retry_at;
+    unsigned fi;
     lsfg_pacer pacer; uint64_t count; uint32_t warm_streak;
     double out_period, longer_since;   // the output period the window's frame rate is set for, and since when a longer one is wanted
 } F;
@@ -171,13 +175,60 @@ static void full_barrier(VkCommandBuffer cb) {   // the game's writes to the win
     vk.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
 
+static VkResult begin_slot(fg_slot *slot) {
+    VkResult result;
+    if (!F.pool) {
+        VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf};
+        result = vk.vkCreateCommandPool(V.dev, &pi, NULL, &F.pool);
+        if (result) { F.pool = VK_NULL_HANDLE; return result; }
+    }
+    if (!slot->cb) {
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = F.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+        result = vk.vkAllocateCommandBuffers(V.dev, &ai, &slot->cb);
+        if (result) { slot->cb = VK_NULL_HANDLE; return result; }
+    }
+    if (!slot->fence) {
+        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        result = vk.vkCreateFence(V.dev, &fi, NULL, &slot->fence);
+        if (result) { slot->fence = VK_NULL_HANDLE; return result; }
+    }
+    if (slot->pending) {
+        result = vk.vkWaitForFences(V.dev, 1, &slot->fence, VK_TRUE, UINT64_MAX);
+        if (result) return result;
+        vk_fg_fence_retired(slot->fence);
+        slot->pending = 0;
+    }
+    result = vk.vkResetCommandBuffer(slot->cb, 0);
+    if (result) return result;
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    return vk.vkBeginCommandBuffer(slot->cb, &bi);
+}
+
+static VkResult submit_slot(fg_slot *slot) {
+    VkCommandBuffer cb = slot->cb;
+    VkResult result = vk.vkEndCommandBuffer(cb);
+    if (result) return result;
+    result = vk.vkResetFences(V.dev, 1, &slot->fence);
+    if (result) return result;
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cb};
+    pthread_mutex_lock(V.qmu);
+    result = vk.vkQueueSubmit(V.q, 1, &si, slot->fence);
+    pthread_mutex_unlock(V.qmu);
+    if (result) return result;
+    slot->pending = 1;
+    return VK_SUCCESS;
+}
+
 int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, unsigned source_reset,
                 double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
     settings_init();
     *hold = 0; *out_period = 0; *consumer = VK_NULL_HANDLE;
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     if (!on) {
-        F.rebuild_retry_at = 0;
+        F.rebuild_retry_at = F.command_retry_at = 0;
         if (F.chain) { teardown(); VLOG("frame generation off"); }
         if (F.state >= 0) { atomic_store(&g_state, 0); reason("%s", "off"); }
         return 0;
@@ -206,6 +257,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // The window's frame rate: a shorter output period at once, a longer one only after it held for 2 s (a game that switches its own present
     // interval would flip the panel's mode back and forth; the generated frames are paced by hold, not by the panel's rate)
     double want = target > 0 ? 1.0 / target : period / (mult < 2 ? 2 : mult > 4 ? 4 : mult), tnow = mono_s();
+    if (tnow < F.command_retry_at) return 0;
     if (F.out_period <= 0 || want < F.out_period - 1e-4) { F.out_period = want; F.longer_since = 0; }
     else if (want > F.out_period + 1e-4) { if (!F.longer_since) F.longer_since = tnow; else if (tnow - F.longer_since >= 2.0) { F.out_period = want; F.longer_since = 0; } }
     else F.longer_since = 0;
@@ -253,26 +305,26 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // Generated frames only as many as the refreshes in the game's own period leave room for (the panel shows one image a refresh; more would hold
     // the FIFO present, and the game with it, to a fraction of its rate — Banana's Honor phone note). DM_VK_FG_REFRESH_CAP=0: no cap
     uint64_t rns = getenv("DM_VK_FG_REFRESH_CAP") && !atoi(getenv("DM_VK_FG_REFRESH_CAP")) ? 0 : vk_refresh_cycle_ns(); int capped = 0;
-    if (ng && rns && period > 0) {
+    if (rns && period > 0) {
         // The game's frame period: the requested one (the limit's, above) or the measured one when longer (a throttled game's frames are further apart)
         double gp = F.pacer.smoothed_interval > period ? F.pacer.smoothed_interval : period;
         double n = gp * 1e9 / (double)rns;   // the refreshes in a game frame
         size_t fit = n < 1.9 ? 0 : (size_t)(n + 0.1) - 1;
+        if (!fit) {
+            // Keep the display vote and pacing observations, but do not copy
+            // a source frame the panel cannot use for generation.
+            F.count = F.warm_streak = F.pacer.issued = 0;
+            ng = 0;
+            capped = 1;
+            goto report;
+        }
         if (ng > fit) { ng = fit; capped = 1; F.pacer.issued = ng; }
     }
 
-    unsigned k = F.fi++ % NFG;
-    if (!F.fr[k].cb) {
-        if (!F.pool) { VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = V.qf}; vk.vkCreateCommandPool(V.dev, &pi, NULL, &F.pool); }
-        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = F.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
-        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
-        vk.vkAllocateCommandBuffers(V.dev, &ai, &F.fr[k].cb); vk.vkCreateFence(V.dev, &fi, NULL, &F.fr[k].fence);
-    }
-    if (vk.vkWaitForFences(V.dev, 1, &F.fr[k].fence, VK_TRUE, UINT64_MAX)) return 0;
-    vk.vkResetFences(V.dev, 1, &F.fr[k].fence);
-    VkCommandBuffer cb = F.fr[k].cb; vk.vkResetCommandBuffer(cb, 0);
-    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    vk.vkBeginCommandBuffer(cb, &bi);
+    fg_slot *slot = &F.fr[F.fi++ % NFG];
+    VkResult result = begin_slot(slot);
+    if (result) goto command_error;
+    VkCommandBuffer cb = slot->cb;
     full_barrier(cb);
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {cw, ch, 1}}};
     if (flip_y) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up, the chain sees it upright
@@ -280,15 +332,9 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     if (warm) lsfg_chain_shared(F.chain, cb, count);
     for (size_t g = 0; g < ng; g++) lsfg_chain_generate(F.chain, cb, count, ng, g);
     full_barrier(cb);   // the outputs for the presents after this
-    vk.vkEndCommandBuffer(cb);
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &cb};
-    pthread_mutex_lock(V.qmu); VkResult r = vk.vkQueueSubmit(V.q, 1, &si, F.fr[k].fence); pthread_mutex_unlock(V.qmu);
-    if (r) {
-        VRED("frame generation submission %d", r);
-        unavailable("%s", "GPU submission failed");
-        return 0;
-    }
-    *consumer = F.fr[k].fence;
+    result = submit_slot(slot);
+    if (result) goto command_error;
+    *consumer = slot->fence;
     for (size_t g = 0; g < ng; g++) gen[g] = F.out[g];
     double interval = F.pacer.smoothed_interval > 0 ? F.pacer.smoothed_interval : period;
     if (interval < period) interval = period;
@@ -297,6 +343,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     // of 17 ms on a 16.7 ms panel let each image's desired time (the previous one's plus the hold) drift across a refresh every few dozen frames, two images in one
     // refresh
     if (ng && rns) { double r = *hold * 1e9 / (double)rns, w = floor(r + 0.5); if (w >= 1 && fabs(r - w) <= 0.15) *hold = w * (double)rns / 1e9; }
+report:;
     int st2 = ng ? 1 : 2;
     // The target rate is met: there is no frame to add (the game already runs at the target, or faster)
     int met = target > 0 && F.pacer.smoothed_interval > 0 && 1.0 / F.pacer.smoothed_interval >= target * 0.95;
@@ -309,5 +356,17 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     was_capped = st2 == 2 && capped;
     was_met = st2 == 2 && met;
     return (int)ng;
+
+command_error:
+    F.count = F.warm_streak = F.pacer.issued = 0;
+    *out_period = 0;
+    VRED("frame generation command failed: %d", result);
+    if (result == VK_ERROR_DEVICE_LOST) unavailable("%s", "GPU device lost");
+    else {
+        F.command_retry_at = tnow + 1.0;
+        atomic_store(&g_state, 2);
+        reason("%s", "GPU command failed; retrying");
+    }
+    return 0;
 }
 #endif

@@ -26,6 +26,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
 int dm_fg_status(char *buf, int n);
 int dm_fg_wants_input(void);
+void vk_fg_fence_retired(VkFence fence);
 
 // The refresh the display timing last saw (ns; 0 without VK_GOOGLE_display_timing): the refresh cap's input
 uint64_t vk_refresh_cycle_ns(void);

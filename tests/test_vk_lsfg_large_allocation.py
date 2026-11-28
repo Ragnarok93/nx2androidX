@@ -3,6 +3,86 @@ import subprocess,tempfile,unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 class LSFGAllocation(unittest.TestCase):
+    def test_submit_failure_and_slot_reuse(self):
+        code = (ROOT / 'nxnative/dm/android/dm_framegen.c').read_text()
+        slot_type = next(line for line in code.splitlines() if line.endswith('} fg_slot;'))
+        start = code.index('static VkResult begin_slot(')
+        end = code.index('\nint dm_fg_frame(', start)
+        commands = code[start:end]
+        source = r'''
+#include <assert.h>
+#include <pthread.h>
+#include <vulkan/vulkan_core.h>
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct { VkDevice dev; VkQueue q; pthread_mutex_t *qmu; uint32_t qf; } V = {.qmu = &mutex};
+static struct { VkCommandPool pool; } F = {.pool = (VkCommandPool)3};
+static int fail, reset, submits, waits, retired;
+static VkResult wait_fence(VkDevice device, uint32_t count, const VkFence *fences,
+                           VkBool32 all, uint64_t timeout) {
+    assert(device == V.dev && count == 1 && *fences && all && timeout == UINT64_MAX);
+    ++waits;
+    return VK_SUCCESS;
+}
+static void vk_fg_fence_retired(VkFence fence) { assert(fence && waits == retired + 1); ++retired; }
+static VkResult reset_cb(VkCommandBuffer cb, VkCommandBufferResetFlags flags) {
+    assert(cb && !flags);
+    return VK_SUCCESS;
+}
+static VkResult begin(VkCommandBuffer cb, const VkCommandBufferBeginInfo *info) {
+    assert(cb && info->flags == VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+    return VK_SUCCESS;
+}
+static VkResult end(VkCommandBuffer cb) {
+    assert(cb);
+    return fail == 1 ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_SUCCESS;
+}
+static VkResult reset_fence(VkDevice device, uint32_t count, const VkFence *fences) {
+    assert(device == V.dev && count == 1 && *fences);
+    ++reset;
+    return fail == 2 ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_SUCCESS;
+}
+static VkResult queue(VkQueue q, uint32_t count, const VkSubmitInfo *info, VkFence fence) {
+    assert(q == V.q && count == 1 && info->commandBufferCount == 1 && fence);
+    ++submits;
+    return fail == 3 ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_SUCCESS;
+}
+static const struct {
+    PFN_vkCreateCommandPool vkCreateCommandPool;
+    PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers;
+    PFN_vkCreateFence vkCreateFence;
+    PFN_vkWaitForFences vkWaitForFences;
+    PFN_vkResetCommandBuffer vkResetCommandBuffer;
+    PFN_vkBeginCommandBuffer vkBeginCommandBuffer;
+    PFN_vkEndCommandBuffer vkEndCommandBuffer;
+    PFN_vkResetFences vkResetFences;
+    PFN_vkQueueSubmit vkQueueSubmit;
+} vk = {.vkWaitForFences = wait_fence, .vkResetCommandBuffer = reset_cb, .vkBeginCommandBuffer = begin,
+    .vkEndCommandBuffer = end, .vkResetFences = reset_fence, .vkQueueSubmit = queue};
+''' + slot_type + '\n' + commands + r'''
+int main(void) {
+    fg_slot slot = {.cb = (VkCommandBuffer)1, .fence = (VkFence)2};
+    for (fail = 1; fail <= 3; ++fail) {
+        assert(!begin_slot(&slot));
+        assert(submit_slot(&slot) == VK_ERROR_OUT_OF_HOST_MEMORY);
+        assert(!slot.pending);
+    }
+    assert(reset == 2 && submits == 1 && !waits);
+    fail = 0;
+    assert(!begin_slot(&slot) && !waits);
+    assert(!submit_slot(&slot) && slot.pending);
+    assert(!begin_slot(&slot) && waits == 1 && retired == 1 && !slot.pending);
+}
+'''
+        headers = ROOT / 'nxnative/dm/third_party/vulkan-headers/include'
+        with tempfile.TemporaryDirectory() as tmp:
+            case = Path(tmp) / 'slot.c'
+            case.write_text(source)
+            exe = case.with_suffix('')
+            subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread',
+                            '-Wno-missing-field-initializers', '-I', str(headers),
+                            str(case), '-o', str(exe)], check=True)
+            subprocess.run([str(exe)], check=True, timeout=10)
+
     def test_partial_allocation_retained_for_teardown(self):
         code=(ROOT/'nxnative/dm/android/dm_framegen.c').read_text()
         start=code.index('static int out_new('); end=code.index('\n}',start)+2
