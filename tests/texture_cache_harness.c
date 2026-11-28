@@ -6,6 +6,7 @@
 #include "gfx_vk_resolution_preflight.h"
 #include "gfx_vk_resolution_ownership.h"
 #include "gfx_vk_resolution_storage_format.h"
+#include "gfx_vk_resolution_view.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

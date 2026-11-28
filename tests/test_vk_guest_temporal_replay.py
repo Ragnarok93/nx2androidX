@@ -45,6 +45,7 @@ static VkRenderingInfo P_ri;
 static VkRenderingAttachmentInfo P_ca[1];
 static struct { VkImage image; VkExtent2D extent; } g_guest_scene;
 static int g_guest_source_ok;
+static VkImageView g_guest_sample_view;
 static uint64_t g_tex_frame, g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
 static uint64_t g_guest_rejected_submit, g_guest_clear_revision = 1;
 static uint64_t submitted = 4;
@@ -203,15 +204,17 @@ static void sampler_contracts(void) {
     assert(spatial_guest_replay_mode(SP_SGSR2,caps,1)==SP_SGSR2);
     assert(spatial_guest_replay_mode(SP_SGSR2,caps,0)==SP_SGSR1);
     // Valid ordinary color samplers with other filtering/addressing:
-    // independent temporal snapshot allowed, spatial guest taps refused.
+    // independent full-grid sampler used; the original sampler remains
+    // bound for the native fragment fallback.
     for(unsigned bit=8;bit<=64;bit*=2) {
         caps=spatial_guest_sampler_caps(bit);
         assert(caps==SP_GUEST_COLOR_SAMPLE);
         assert(spatial_guest_replay_mode(SP_SGSR2,caps,1)==SP_SGSR2);
-        assert(spatial_guest_replay_mode(SP_SGSR2,caps,0)==SP_NATIVE);
-        assert(spatial_guest_replay_mode(SP_FSR1,caps,0)==SP_NATIVE);
-        assert(spatial_guest_replay_mode(SP_SGSR1,caps,0)==SP_NATIVE);
-        assert(spatial_guest_replay_mode(SP_BILINEAR,caps,0)==SP_NATIVE);
+        assert(spatial_guest_replay_mode(SP_SGSR2,caps,0)==SP_SGSR1);
+        assert(spatial_guest_replay_mode(SP_FSR1,caps,0)==SP_FSR1);
+        assert(spatial_guest_replay_mode(SP_SGSR1,caps,0)==SP_SGSR1);
+        assert(spatial_guest_replay_mode(SP_BILINEAR,caps,0)==SP_GUEST_GRID_BILINEAR);
+        assert(spatial_guest_report_mode(SP_GUEST_GRID_BILINEAR)==SP_BILINEAR);
     }
     const unsigned invalid[]={1,2,4,128,256};
     for(unsigned i=0;i<sizeof invalid/sizeof *invalid;i++) {

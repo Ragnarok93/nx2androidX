@@ -22,8 +22,8 @@ static inline const char *spatial_mode_name(int mode) {
 }
 
 // Sampler capabilities for the certified composition draw. Spatial
-// replacements use the guest sampler for their taps, whereas temporal
-// reconstruction reads an independently sampled full-image snapshot.
+// Bilinear's original-program patch needs linear clamp; full-grid
+// replacements use their own sampler or independently sampled snapshot.
 // The original sampler remains bound for guestSmoothstep fallback.
 enum { SP_GUEST_COLOR_SAMPLE=1, SP_GUEST_LINEAR_CLAMP=2 };
 static inline int spatial_guest_sampler_caps(unsigned refusal) {
@@ -32,11 +32,17 @@ static inline int spatial_guest_sampler_caps(unsigned refusal) {
     if (refusal & (1u|2u|4u|128u|256u)) return 0;
     return SP_GUEST_COLOR_SAMPLE | (refusal ? 0 : SP_GUEST_LINEAR_CLAMP);
 }
+// Internal pipeline key only; never persist this value as a user setting.
+enum { SP_GUEST_GRID_BILINEAR=9 };
 static inline int spatial_guest_replay_mode(int requested,int caps,int temporal_ready) {
-    if (requested==SP_SGSR2 && temporal_ready && (caps&SP_GUEST_COLOR_SAMPLE))
-        return SP_SGSR2;
-    if (!(caps&SP_GUEST_LINEAR_CLAMP)) return SP_NATIVE;
-    return requested==SP_SGSR2?SP_SGSR1:requested;
+    if (!(caps&SP_GUEST_COLOR_SAMPLE)) return SP_NATIVE;
+    if (requested==SP_SGSR2) return temporal_ready?SP_SGSR2:SP_SGSR1;
+    if (requested==SP_BILINEAR && !(caps&SP_GUEST_LINEAR_CLAMP))
+        return SP_GUEST_GRID_BILINEAR;
+    return requested;
+}
+static inline int spatial_guest_report_mode(int mode) {
+    return mode==SP_GUEST_GRID_BILINEAR?SP_BILINEAR:mode;
 }
 
 // Conservative indications of replay work submitted on this real frame.

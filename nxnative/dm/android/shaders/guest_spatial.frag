@@ -10,10 +10,13 @@
 
 #include "guest_filter_input.h"
 layout(constant_id = 0) const int filterMode = 2;
+// Same certified image view, but with reconstruction's own linear-clamp
+// sampler. The original guest sampler is reserved for native fallback.
+layout(set = 2, binding = 0) uniform sampler2D gridTex;
 
-AF4 FsrEasuRF(AF2 uv) { return textureGather(tex, uv, 0); }
-AF4 FsrEasuGF(AF2 uv) { return textureGather(tex, uv, 1); }
-AF4 FsrEasuBF(AF2 uv) { return textureGather(tex, uv, 2); }
+AF4 FsrEasuRF(AF2 uv) { return textureGather(gridTex, uv, 0); }
+AF4 FsrEasuGF(AF2 uv) { return textureGather(gridTex, uv, 1); }
+AF4 FsrEasuBF(AF2 uv) { return textureGather(gridTex, uv, 2); }
 
 vec3 easu(vec2 uv, vec2 size) {
     AU4 c0, c1, c2, c3;
@@ -53,6 +56,7 @@ void main() {
         color = vec4(guestSmoothstep(uv), 0.0);
         return;
     }
-    vec3 rgb = filterMode == 2 ? fsr(uv, size) : gsr1Filter(tex, uv, size, draw.sharpness).rgb;
+    vec3 rgb = filterMode == 9 ? textureLod(gridTex, uv, 0.0).rgb :
+        filterMode == 2 ? fsr(uv, size) : gsr1Filter(gridTex, uv, size, draw.sharpness).rgb;
     color = vec4(rgb, 0.0);
 }

@@ -178,15 +178,19 @@ static void check_guest_enlargement(void) {
     VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 2, layouts};
     VkPipelineLayout layout;
     CHECK(vkCreatePipelineLayout(V.dev, &li, NULL, &layout));
+    VkDescriptorSetLayoutBinding grid_binding={0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo gi={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,NULL,0,1,&grid_binding};
+    VkDescriptorSetLayout grid_layout;
+    CHECK(vkCreateDescriptorSetLayout(V.dev,&gi,NULL,&grid_layout));
     VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5},
-                                   {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}};
-    VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 3, 2, sizes};
+                                   {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3}};
+    VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 4, 2, sizes};
     VkDescriptorPool pool;
     CHECK(vkCreateDescriptorPool(V.dev, &pi, NULL, &pool));
-    VkDescriptorSetLayout set_layouts[] = {layouts[0], layouts[1], layouts[1]};
-    VkDescriptorSet sets[3];
+    VkDescriptorSetLayout set_layouts[] = {layouts[0], layouts[1], layouts[1],grid_layout};
+    VkDescriptorSet sets[4];
     VkDescriptorSetAllocateInfo alloc = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                        NULL, pool, 3, set_layouts};
+                                        NULL, pool, 4, set_layouts};
     CHECK(vkAllocateDescriptorSets(V.dev, &alloc, sets));
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
@@ -320,20 +324,37 @@ static void check_guest_enlargement(void) {
     VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 3 * sizeof(float)};
     li.pushConstantRangeCount = 1;
     li.pPushConstantRanges = &pc;
+    VkDescriptorSetLayout spatial_layouts[]={layouts[0],layouts[1],grid_layout};
+    li.setLayoutCount=3;li.pSetLayouts=spatial_layouts;
     VkPipelineLayout spatial_layout;
     CHECK(vkCreatePipelineLayout(V.dev, &li, NULL, &spatial_layout));
+    // The original sampler is deliberately incompatible with the
+    // reconstruction filter; the independent set keeps the real clamp.
+    VkSamplerCreateInfo original_si=si;
+    original_si.magFilter=original_si.minFilter=VK_FILTER_NEAREST;
+    original_si.addressModeU=original_si.addressModeV=VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    VkSampler original;
+    CHECK(vkCreateSampler(V.dev,&original_si,NULL,&original));
+    VkDescriptorImageInfo original_sample={original,input.view,VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet independent_writes[]={
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,NULL,sets[1],1,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,&original_sample},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,NULL,sets[3],0,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,&sampled},
+    };
+    vkUpdateDescriptorSets(V.dev,2,independent_writes,0,NULL);
+    VkDescriptorSet spatial_sets[]={sets[0],sets[1],sets[3]};
     spatial_image guest_target = *target;
     *target = (spatial_image){0};
     int saved_mode = selected_mode, saved_sharpness = sharpness;
     uint64_t ticket = 0;
     const int source_crop[] = {0, 0, SRC, SRC};
-    for (int mode = SP_FSR1; mode <= SP_SGSR1; ++mode) {
+    for (int mode = SP_BILINEAR; mode <= SP_SGSR1; ++mode) {
         VkPipeline pipeline = guest_pipeline(spatial_layout, guest_spatial_frag_spv,
-            sizeof guest_spatial_frag_spv, VK_FALSE, 0xf, (unsigned)mode);
+            sizeof guest_spatial_frag_spv, VK_FALSE, 0xf,
+            mode==SP_BILINEAR?SP_GUEST_GRID_BILINEAR:(unsigned)mode);
         selected_mode = mode;
         uint8_t unsharpened[sizeof baseline];
         uint64_t previous = 0;
-        for (sharpness = 0; sharpness <= 100; sharpness += 25) {
+        for (sharpness = 0; sharpness <= (mode==SP_BILINEAR?0:100); sharpness += 25) {
             spatial_image *reference = spatial_reconstruct(&input.texture, source_crop, 0, OUT, OUT, ++ticket, NULL);
             assert(reference && spatial_active == mode);
             begin();
@@ -345,7 +366,7 @@ static void check_guest_enlargement(void) {
             vkCmdPushConstants(test_cb, spatial_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, constants);
             vkCmdClearColorImage(test_cb, guest_target.texture.img, VK_IMAGE_LAYOUT_GENERAL, &magenta, 1, &full);
             vk_img_barrier_all(test_cb);
-            guest_draw(pipeline, spatial_layout, sets, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+            guest_draw_bound(pipeline, spatial_layout, spatial_sets,3,&guest_target,VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
             guest_readback(&guest_target);
             unsigned max_error = 0;
             for (unsigned y = 0; y < OUT; ++y) {
@@ -381,14 +402,16 @@ static void check_guest_enlargement(void) {
         begin();
         float draw_params[] = {OUT, OUT, 0.5f};
         vkCmdPushConstants(test_cb, spatial_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof draw_params, draw_params);
-        guest_draw(pipeline, spatial_layout, sets, &guest_target, VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
+        guest_draw_bound(pipeline, spatial_layout, spatial_sets,3,&guest_target,VK_ATTACHMENT_LOAD_OP_LOAD, OUT - 1);
         guest_readback(&guest_target);
         assert(memcmp(guest, mapped, sizeof guest) == 0);
-        puts(mode == SP_FSR1 ? "guest FSR 1 reference, sharpness and fallback PASS"
-                            : "guest GSR 1 reference, sharpness and fallback PASS");
+        printf("guest %s independent sampler, reference and fallback PASS\n",spatial_mode_name(mode));
         memcpy(mapped + GUEST_FS_UBO, constants[1], sizeof constants[1]);
         vkDestroyPipeline(V.dev, pipeline, NULL);
     }
+    // Restore original fixture's clamp for the existing temporal test.
+    vkUpdateDescriptorSets(V.dev,1,&writes[4],0,NULL);
+    vkDestroySampler(V.dev,original,NULL);
 #ifdef SGSR2_HOST_PROBE
     if (vk_gsr2_variants() & DM_TEMPORAL_2FS) {
         const VkExtent2D scene_size = {SRC, SRC}, target_size = {OUT, OUT};
@@ -500,6 +523,7 @@ static void check_guest_enlargement(void) {
     vkDestroyPipeline(V.dev, edge, NULL);
     vkDestroyPipelineLayout(V.dev, layout, NULL);
     vkDestroyDescriptorPool(V.dev, pool, NULL);
+    vkDestroyDescriptorSetLayout(V.dev,grid_layout,NULL);
     vkDestroyDescriptorSetLayout(V.dev, layouts[1], NULL);
     vkDestroyDescriptorSetLayout(V.dev, layouts[0], NULL);
     vkDestroySampler(V.dev, sampler, NULL);

@@ -706,6 +706,7 @@ static int g_input_collect_descriptors;
 // Replay-local and scoped to descriptor collection for one draw.
 static int g_guest_filter_check, g_guest_source_ok, g_guest_sampler_caps, g_guest_uniform_ok;
 static int g_guest_filter_bound, g_guest_sharpness_bound;
+static VkImageView g_guest_sample_view;
 static uint64_t g_guest_sharpen_pending, g_guest_sharpen_submitted, g_guest_temporal_submitted;
 static uint64_t g_guest_rejected_submit, g_guest_clear_revision = 1;
 static struct {
@@ -2190,6 +2191,32 @@ static VkDescriptorSetLayout guest_flow_layout(void) {
 
 // Replay owns these layouts and their pipelines for the device
 // lifetime. Keep the optional push constant off ordinary guest layouts.
+// Extra descriptor set uses the same one-image layout as temporal replay.
+// The normal submission descriptor pool owns the set until GPU retirement.
+// Never modify the original guest set: it is needed by shader fallback.
+static VkDescriptorSet guest_grid_set(VkImageView view) {
+    if (!view) return VK_NULL_HANDLE;
+    VkDescriptorSetLayout layout=guest_flow_layout();
+    if (!layout) return VK_NULL_HANDLE;
+    static VkSampler sampler;
+    if (!sampler) {
+        VkSamplerCreateInfo si={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter=VK_FILTER_LINEAR,.minFilter=VK_FILTER_LINEAR,
+            .mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+        if (vkCreateSampler(V.dev,&si,NULL,&sampler)) return VK_NULL_HANDLE;
+    }
+    VkDescriptorSet set=vk_alloc_set(layout);
+    if (!set) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo image={sampler,view,VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet write={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,NULL,set,0,0,1,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,&image};
+    vkUpdateDescriptorSets(V.dev,1,&write,0,NULL);
+    return set;
+}
+
 static VkPipelineLayout guest_spatial_layout(const VkDescriptorSetLayout guest[2], int temporal) {
     VkDescriptorSetLayout sets[3] = {guest[0], guest[1]};
     if (temporal && !(sets[2] = guest_flow_layout())) return VK_NULL_HANDLE;
@@ -2227,7 +2254,8 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
     VkShaderModule guest_fragment = VK_NULL_HANDLE;
     if (k->guest_filter == SP_BILINEAR)
         guest_fragment = vk_shader_guest_bilinear(stg_in[1]);
-    else if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1 || k->guest_filter == SP_SGSR2)
+    else if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1 || k->guest_filter == SP_SGSR2 ||
+             k->guest_filter == SP_GUEST_GRID_BILINEAR)
         guest_fragment = guest_spatial_module(k->guest_filter == SP_SGSR2);
     if (k->guest_filter && !guest_fragment) return (VkPipeline)1;
     // DM_VK_PIPE_LOG: one line per pipeline built, with the state that decides how a material is drawn (shaders, cull/front, depth test/write/func,
@@ -2258,7 +2286,8 @@ static VkPipeline build_pipeline(const pkey *k, VkPipelineLayout layout, vkshade
         for (uint32_t i = 0; i < ns; ++i) {
             if (ss[i].stage != VK_SHADER_STAGE_FRAGMENT_BIT) continue;
             ss[i].module = guest_fragment;
-            if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1) ss[i].pSpecializationInfo = &guest_spec;
+            if (k->guest_filter == SP_FSR1 || k->guest_filter == SP_SGSR1 ||
+                k->guest_filter == SP_GUEST_GRID_BILINEAR) ss[i].pSpecializationInfo = &guest_spec;
         }
     }
     int flat = (int)k->debug_mode;
@@ -2568,6 +2597,7 @@ static void guest_check_source(const vkimg_t *im, VkImageView view) {
         vk_view_range.levelCount == 1 && !vk_view_range.baseArrayLayer && vk_view_range.layerCount == 1 &&
         im->w < P_att[0].w && im->h < P_att[0].h &&
         (uint64_t)im->w * P_att[0].h == (uint64_t)im->h * P_att[0].w;
+    g_guest_sample_view=g_guest_source_ok?view:VK_NULL_HANDLE;
     if (!g_guest_source_ok || im->samples != 1 || !(im->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return;
     const VkComponentMapping swz = vk_view_swizzle;
     if ((swz.r == VK_COMPONENT_SWIZZLE_IDENTITY || swz.r == VK_COMPONENT_SWIZZLE_R) &&
@@ -3650,6 +3680,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     uint64_t t1d = tick();
     g_guest_source_ok = g_guest_sampler_caps = g_guest_uniform_ok = 0;
     g_guest_scene.image = VK_NULL_HANDLE;
+    g_guest_sample_view=VK_NULL_HANDLE;
     int guest_mode = S.sh[1] && S.sh[1]->guest_filter_certified ? dm_spatial_mode() : SP_NATIVE;
     g_guest_filter_check = guest_mode != SP_NATIVE && spatial_mode_valid(guest_mode) &&
         nsets == 2 && !vk_rs_cache_has_scaled() &&
@@ -3671,14 +3702,14 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
         (g_guest_sampler_caps&SP_GUEST_COLOR_SAMPLE) && g_guest_scene.image &&
         defer_pass && S.pass_open==2 && P_ri.layerCount==1 &&
         P_ca[0].storeOp==VK_ATTACHMENT_STORE_OP_STORE;
-    int guest_admitted = guest_proven &&
-        (g_guest_sampler_caps&SP_GUEST_LINEAR_CLAMP);
+    int guest_admitted = guest_proven && g_guest_sample_view &&
+        (g_guest_sampler_caps&SP_GUEST_COLOR_SAMPLE);
     if (trace_guest && !guest_admitted && !guest_temporal) {
         if (!S.sh[1]->guest_filter_certified) guest_rejection = "fragment certificate";
         else if (guest_mode != SP_NATIVE) {
             if (!g_guest_filter_check) guest_rejection = "pipeline or attachment state";
             else if (!g_guest_source_ok) guest_rejection = "current source proof or view";
-            else if (!(g_guest_sampler_caps&SP_GUEST_LINEAR_CLAMP)) guest_rejection = "linear clamp sampler";
+            else if (!(g_guest_sampler_caps&SP_GUEST_COLOR_SAMPLE)) guest_rejection = "ordinary color sampler";
             else if (!g_guest_uniform_ok) guest_rejection = "fragment uniform binding";
         }
     }
@@ -3720,18 +3751,27 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
             p = VK_NULL_HANDLE;
             k.guest_filter = guest_admitted ?
                 spatial_guest_replay_mode(guest_mode,g_guest_sampler_caps,0) : SP_NATIVE;
-            if (!k.guest_filter) guest_rejection = "temporal unavailable; original sampler requires native fallback";
+            if (!k.guest_filter) guest_rejection = "temporal unavailable; native fallback";
         }
     }
     if (!p) {
-        guest_layout = k.guest_filter > SP_BILINEAR ? guest_spatial_layout(dsl, 0) : layout;
-        p = guest_layout ? graphics_pipeline(&k, guest_layout) : VK_NULL_HANDLE;
+        if (k.guest_filter > SP_BILINEAR) {
+            guest_layout=guest_spatial_layout(dsl,1);
+            temporal_set=guest_layout?guest_grid_set(g_guest_sample_view):VK_NULL_HANDLE;
+            if (!temporal_set) {
+                guest_rejection="independent spatial sampler unavailable";
+                k.guest_filter=SP_NATIVE;
+            }
+        }
+        if (k.guest_filter<=SP_BILINEAR) guest_layout=layout;
+        p=guest_layout?graphics_pipeline(&k,guest_layout):VK_NULL_HANDLE;
     }
     if (!pass_commit()) { g_vkst.skip_rt++; return 0; }
     g_pass_wmem |= shader_wmem(S.sh[0]) | shader_wmem(k.raster_discard ? NULL : S.sh[1]) | shader_wmem(S.sh[2]);
     if (!p && k.guest_filter) {
         guest_rejection = "replacement pipeline unavailable";
         k.guest_filter = SP_NATIVE;
+        temporal_set=VK_NULL_HANDLE;
         p = graphics_pipeline(&k, layout);
     } else if (p) layout = guest_layout;
     if (guest_rejection) {
@@ -3746,7 +3786,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     }
     uint64_t t1 = tick(); g_vkst.ns_pipe += t1 - t0 - tdesc;
     if (!p) { g_vkst.skip_pipe++; return 0; }
-    g_guest_filter_bound = k.guest_filter;
+    g_guest_filter_bound = spatial_guest_report_mode(k.guest_filter);
     // A per-pass trace of the *actual* Vulkan raster/depth pipeline state.
     // Read only for an explicitly armed one-shot capture; at most three
     // samples from each depth-using pass and 72 lines per submission. The
@@ -3826,7 +3866,7 @@ static int prepare_draw(int prim, int indexed, int temporal_draw) {
     }
     if (k.guest_filter > SP_BILINEAR) {
         float sharpness = dm_recon_sharpness(dm_fsr_sharpness());
-        g_guest_sharpness_bound = sharpness > 0;
+        g_guest_sharpness_bound = sharpness > 0 && k.guest_filter!=SP_GUEST_GRID_BILINEAR;
         float constants[] = {(float)P_att[0].w, (float)P_att[0].h, sharpness};
         vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, constants);
     }
