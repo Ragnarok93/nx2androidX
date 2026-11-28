@@ -6,7 +6,7 @@ from pathlib import Path
 
 REQUIRED = (
     'test_overlay_recorded_scale', 'test_overlay_settings_scroll', 'test_overlay_scroll_touch', 'test_vk_output_target', 'test_vk_output_present', 'test_vk_output_menu', 'test_overlay_layout', 'test_vk_high_resolution', 'test_vk_lsfg_large_allocation', 'test_vk_flow_budget', 'test_vk_flow_cadence', 'test_vk_reconstruction_limits',
-    'test_overlay_recorded_scale', 'test_overlay_settings_scroll', 'test_overlay_scroll_touch', 'test_vk_output_target', 'test_vk_output_present', 'test_vk_output_menu', 'test_overlay_layout', 'test_vk_high_resolution', 'test_vk_lsfg_large_allocation', 'test_vk_pool_recovery', 'test_vk_flow_cadence', 'test_vk_reconstruction_limits',
+    'test_vk_pool_recovery',
     'test_vk_reconstruction_retry', 'test_vk_reconstruction_allocation', 'test_vk_guest_temporal_replay',
     'test_vk_reconstruction_capture_columns', 'test_vk_temporal_dependencies',
     'test_vk_temporal_policy', 'test_vk_runtime_identity', 'test_vk_source_continuity',
