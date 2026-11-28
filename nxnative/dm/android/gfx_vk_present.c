@@ -1302,12 +1302,15 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     // Count only after the swapchain accepted a present, not when a frame was
     // queued. The framegen images and paused redraws must not inflate source FPS.
     uint32_t k = g_pi++ % 8;
+    uint64_t stall_start = mono_ns();
     if (vkWaitForFences(V.dev, 1, &g_pfence[k], VK_TRUE, UINT64_MAX)) return 0;
+    uint64_t stall_fence = mono_ns();
     spatial_forget_fence(g_pfence[k]);
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return 0; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
     if (r == VK_ERROR_SURFACE_LOST_KHR) { swap_destroy(); return 0; }
     if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return 0; }
+    uint64_t stall_acquire = mono_ns();
     int turned = g_pre != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;   // composed into g_rot.img, then copied turned into the swapchain image
     VkImage tgt = turned ? g_rot.img : g_simg[idx]; VkImageView tview = turned ? g_rot.view : g_sview[idx];
     VkCommandBuffer cb = g_pcb[k];
@@ -1369,7 +1372,9 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     VkPipelineStageFlags ws = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 1, &g_acq[k], &ws, 1, &cb, 1, &g_done_sem[idx]};
     extern pthread_mutex_t g_vk_queue_mu;
+    uint64_t stall_record = mono_ns();
     pthread_mutex_lock(&g_vk_queue_mu);
+    uint64_t stall_lock = mono_ns();
     vkResetFences(V.dev, 1, &g_pfence[k]);
     if (vkQueueSubmit(V.q, 1, &si, g_pfence[k])) {
         pthread_mutex_unlock(&g_vk_queue_mu);
@@ -1377,6 +1382,7 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
         VKRED_ONCE(91, "present submit failed");
         return 0;
     }
+    uint64_t stall_submit = mono_ns();
     if (vivid) g_spatial.image[SP_DISPLAY].last_use = g_pfence[k];
     if (src == g_spatial.image[SP_OUTPUT].texture.img)
         g_spatial.image[SP_OUTPUT].last_use = g_pfence[k];
@@ -1386,9 +1392,20 @@ static int present_one(vkimg_t *im, VkImage src, const int crop[4], VkExtent2D p
     VkPresentTimeGOOGLE ptm = {++g_pace_id, period >= 0 ? pace_desired(period) : 0};
     VkPresentTimesInfoGOOGLE pti = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, NULL, 1, &ptm};
     if (V.has_dtiming) pi.pNext = &pti;
+    uint64_t stall_pace = mono_ns();
     r = vkQueuePresentKHR(V.q, &pi);
+    uint64_t stall_present = mono_ns();
     if (V.has_dtiming && r >= 0) present_time_map(ptm.presentID, ticket);
     pthread_mutex_unlock(&g_vk_queue_mu);
+    // Slow calls are attributed individually; no per-frame log traffic or
+    // GPU wait is added for healthy presentation.
+    if (stall_present - stall_start >= 50000000ull)
+        VKLOG("[perf] PRESENT_STALL ticket=%llu kind=%s total=%.2f fence=%.2f acquire=%.2f record=%.2f lock=%.2f submit=%.2f pace=%.2f present=%.2f result=%d",
+            (unsigned long long)ticket, period < 0 ? "redraw" : with_meta ? "real" : "generated",
+            (stall_present-stall_start)/1e6, (stall_fence-stall_start)/1e6,
+            (stall_acquire-stall_fence)/1e6, (stall_record-stall_acquire)/1e6,
+            (stall_lock-stall_record)/1e6, (stall_submit-stall_lock)/1e6,
+            (stall_pace-stall_submit)/1e6, (stall_present-stall_pace)/1e6, r);
     if (r >= 0) {
         hud_count(with_meta, period, mono_ns());
         // Count actual accepted output images, not only base game presents.
