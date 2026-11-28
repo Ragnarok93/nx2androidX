@@ -44,7 +44,7 @@ static uint64_t mtl_last_fence(void) { return 42; }
 '''
         replay = (ROOT / "nxnative/dm/android/gfx_vk_exec.c").read_text(encoding="utf-8")
         source += replay[replay.index("static void pass_dump_retire_stopped("):
-                         replay.index("static void pass_dump_poll_locked(")]
+                         replay.index("// Only retired readbacks are passed here.") ]
         source += r'''
 static int complete(const char *root, unsigned slot) {
     char path[1024];
@@ -94,6 +94,24 @@ int main(int argc, char **argv) {
     assert(!vk_pass_dump_user_begin(0, 1)); // old GPU slot still in flight
     capture_finish_slot();
     assert(!complete(argv[1], 0));
+
+    // The single asynchronous writer owns its slot until completion.
+    assert(vk_pass_dump_user_begin(0, 1));
+    assert(capture_start_slot() && capture_begin_write());
+    assert(!capture_begin_write() && !capture_start_slot());
+    assert(vk_pass_dump_export_begin()); // unfinished snapshot excluded
+    assert(!complete(argv[1], 0));
+    capture_end_write(1); // stopped session cannot publish
+    assert(!g_capture_writing && !g_capture_rolling_dump && !complete(argv[1], 0));
+    vk_pass_dump_export_end();
+    assert(vk_pass_dump_user_begin(0, 1));
+    assert(capture_start_slot() && capture_begin_write());
+    capture_end_write(1);
+    assert(complete(argv[1], 0) && !g_capture_writing && !g_capture_rolling_dump);
+    assert(capture_start_slot() && capture_begin_write());
+    capture_end_write(0);
+    assert(!complete(argv[1], 1) && !g_capture_writing);
+    vk_pass_dump_user_stop();
 
     assert(vk_pass_dump_user_begin(0, 0));
     assert(vk_pass_dump_user_active() == CAPTURE_SCALING && !g_capture_timeline);

@@ -1149,11 +1149,165 @@ static void pass_dump_retire_stopped(uint64_t done_fence, uint64_t *capture_fenc
     g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;
 }
 
+// Only retired readbacks are passed here. No guest image, replay state or
+// queue ownership is transferred. The batch owns its mapped Vulkan buffers
+// until it has written the raw bytes/previews and destroyed them.
+static int pass_dump_write_images(const char *root,pdump_t *images,int count,int raw,int float_depth) {
+    char manifest[1024], manifest_tmp[1050];
+    snprintf(manifest, sizeof manifest, "%s/pass_dump_manifest.tsv", root ? root : ".");
+    snprintf(manifest_tmp, sizeof manifest_tmp, "%s.tmp", manifest);
+    FILE *mf = count ? fopen(manifest_tmp, "w") : NULL;
+    int ok = !count || mf != NULL;
+    if (mf) fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\tsubmission\tcrop_x\tcrop_y\tcrop_width\tcrop_height\n", mf);
+    for (int i = 0; i < count; i++) {
+        pdump_t *d = &images[i]; char path[1024]; snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
+        char sidecar[1050];
+        unlink(path);
+        snprintf(sidecar, sizeof sidecar, "%s.f32", path);
+        unlink(sidecar); // the same slot may have previously contained depth or velocity
+        snprintf(sidecar, sizeof sidecar, "%s/pass_%02d.raw", root ? root : ".", i);
+        unlink(sidecar);
+        // done_fence covers this buffer's transfer write; HOST_CACHED does not imply HOST_COHERENT.
+        VkMappedMemoryRange inv = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, NULL, d->m, 0, VK_WHOLE_SIZE};
+        if (vkInvalidateMappedMemoryRanges(V.dev, 1, &inv) != VK_SUCCESS) {
+            VKLOG("[diagnostics] readback unavailable for pass %d target %d", d->pass, d->target);
+            ok = 0;
+            goto release_dump;
+        }
+        if (d->pass == -200 && d->w == 8 && d->h == 8 && d->bytes == 256) {
+            const uint32_t expected = 0x9fffffu; // Vulkan D24 image-to-buffer: low24 UNORM
+            unsigned packed = vk_pd_d24_matches((const uint32_t *)d->p, 64,
+                                                   expected, 1);
+            unsigned floats = vk_pd_d24_float_matches((const uint32_t *)d->p, 64, 0.625f);
+            VKLOG("[depthcontrol] RESULT: valid packed D24 %u/64, nonconforming float32 0.625 %u/64, first raw word 0x%08x; %s",
+                  packed, floats, ((const uint32_t *)d->p)[0],
+                  packed == 64 ? "PASS: Vulkan D24 copy representation" :
+                  floats == 64 ? "CONFIRMED DRIVER COPY FORMAT MISMATCH: numeric depth correct, D24 bytes are float32" :
+                  "FAIL: unexpected D24 buffer contents");
+        }
+        if (d->pass == -201 && d->bytes == 256) {
+            unsigned floats = vk_pd_d24_float_matches((const uint32_t *)d->p, 64, 0.625f);
+            VKLOG("[depthcontrol] D32F RESULT: float32 0.625 %u/64, first raw word 0x%08x",
+                  floats, ((const uint32_t *)d->p)[0]);
+        }
+        uint64_t raw_hash = vk_pd_hash(d->p, (size_t)d->bytes);
+        VKLOG("pass dump %02d: present %llu pass %d target %d mip %u layer %u %ux%u storage/view formats %d/%d pool %#llx+%lld bytes %llu raw FNV1a64 %016llx",
+            i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
+            d->f, d->view_fmt, (unsigned long long)d->pool, (long long)d->off,
+            (unsigned long long)d->bytes, (unsigned long long)raw_hash);
+        if (mf) {
+            char preview[24] = "";
+            if (!d->raw_only) snprintf(preview, sizeof preview, "pass_%02d.ppm", i);
+            fprintf(mf, "%d\t%llu\t%d\t%d\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llx\t%lld\t%016llx\t%s\t%llu\t%d\t%d\t%d\t%d\n",
+                i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
+                d->f, d->view_fmt, (unsigned long long)d->bytes, (unsigned long long)d->pool,
+                (long long)d->off, (unsigned long long)raw_hash, preview, (unsigned long long)d->submission,
+                d->crop[0], d->crop[1], d->crop[2], d->crop[3]);
+        }
+        { if (d->raw_only || raw) { char rp[1100]; snprintf(rp, sizeof rp, "%s/pass_%02d.raw", root ? root : ".", i);
+              FILE *rf = fopen(rp, "wb"); if (rf) { if (fwrite(d->p, 1, (size_t)d->bytes, rf) != (size_t)d->bytes) ok = 0; if (fclose(rf)) ok = 0; } else ok = 0; } }
+        if (d->raw_only) { unlink(path); goto release_dump; }
+        VKLOG("pass dump %02d is the submission's pass %d (present %llu)", i, d->pass, (unsigned long long)d->present);
+        FILE *f = fopen(path, "wb"); if (!f) goto release_dump; fprintf(f, "P6\n%u %u\n255\n", d->w, d->h);
+        uint8_t *row = malloc((size_t)d->w * 3);
+        if (!row) { fclose(f); unlink(path); goto release_dump; }
+        uint64_t bad = 0; float mx = 0, mn = 0; double sum = 0;
+        if (d->f == VK_FORMAT_D24_UNORM_S8_UINT || d->f == VK_FORMAT_D32_SFLOAT || d->f == VK_FORMAT_D32_SFLOAT_S8_UINT || d->f == VK_FORMAT_D16_UNORM || d->f == VK_FORMAT_X8_D24_UNORM_PACK32) {
+            size_t np = (size_t)d->w * d->h; float lo = 1e30f, hi = -1e30f; float *v = malloc(np * sizeof *v);
+            if (!v) { free(row); fclose(f); unlink(path); goto release_dump; }
+            for (size_t k = 0; k < np; k++) { float x;
+                if (d->f == VK_FORMAT_D16_UNORM) x = ((const uint16_t *)d->p)[k] / 65535.f;
+                else if (d->f == VK_FORMAT_D32_SFLOAT || d->f == VK_FORMAT_D32_SFLOAT_S8_UINT) memcpy(&x, (const uint8_t *)d->p + 4 * k, 4);
+                else {
+                    if (d->f == VK_FORMAT_D24_UNORM_S8_UINT && float_depth)
+                        memcpy(&x, (const uint8_t *)d->p + 4 * k, 4);
+                    else
+                        x = (((const uint32_t *)d->p)[k] & 0xffffff) / 16777215.f;
+                }
+                v[k] = x; if (x < lo) lo = x; if (x > hi) hi = x; }
+            for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) { float t = hi > lo ? (v[(size_t)y * d->w + x] - lo) / (hi - lo) : 0; row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = (uint8_t)(t * 255); } fwrite(row, 1, (size_t)d->w * 3, f); }
+            { char rp[1100]; snprintf(rp, sizeof rp, "%s.f32", path); FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(v, sizeof *v, np, rf); fclose(rf); } }   // the values themselves
+            free(v); free(row); fclose(f); VKLOG("pass dump %02d: depth %ux%u format %d, values %.6f .. %.9g → %s", i, d->w, d->h, d->f, lo, hi, path);
+            vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL); continue;
+        }
+        if (d->f == VK_FORMAT_R16G16_SFLOAT) {   // signed two-channel fields (velocities): red and green around grey, 1/16 a step; the values themselves in .f32 (r, g a texel)
+            size_t np = (size_t)d->w * d->h; float *v = malloc(np * 2 * sizeof *v), lo = 0, hi = 0; uint64_t nz = 0;
+            if (!v) { free(row); fclose(f); unlink(path); goto release_dump; }
+            for (size_t k = 0; k < np * 2; k++) { v[k] = half2f(((const uint16_t *)d->p)[k]); if (v[k] < lo) lo = v[k]; if (v[k] > hi) hi = v[k]; }
+            for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) { const float *t = v + 2 * ((size_t)y * d->w + x); int on = t[0] != 0 || t[1] != 0; nz += on;
+                for (int c = 0; c < 2; c++) { float q = 128 + t[c] * 16; row[3 * x + c] = (uint8_t)(q < 0 ? 0 : q > 255 ? 255 : q); } row[3 * x + 2] = on ? 255 : 128; }
+                fwrite(row, 1, (size_t)d->w * 3, f); }
+            { char rp[1100]; snprintf(rp, sizeof rp, "%s.f32", path); FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(v, sizeof *v, np * 2, rf); fclose(rf); } }
+            free(v); free(row); fclose(f); VKLOG("pass dump %02d: %ux%u RG16F, values %.3f .. %.3f, nonzero texels %llu → %s", i, d->w, d->h, lo, hi, (unsigned long long)nz, path);
+            vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL); continue;
+        }
+        for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) {
+            if (d->f == VK_FORMAT_R16G16B16A16_SFLOAT || d->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || d->f == VK_FORMAT_R16_SFLOAT) { float v3[3];
+                if (d->f == VK_FORMAT_R16G16B16A16_SFLOAT) { const uint16_t *p = (const uint16_t *)d->p + ((size_t)y * d->w + x) * 4; for (int c = 0; c < 3; c++) v3[c] = half2f(p[c]); }
+                else if (d->f == VK_FORMAT_R16_SFLOAT) v3[0] = v3[1] = v3[2] = half2f(((const uint16_t *)d->p)[(size_t)y * d->w + x]);
+                else { uint32_t w = ((const uint32_t *)d->p)[(size_t)y * d->w + x];   // 11-bit and 10-bit floats: a half's exponent and top mantissa bits
+                    v3[0] = half2f((uint16_t)((w & 0x7ff) << 4)); v3[1] = half2f((uint16_t)((w >> 11 & 0x7ff) << 4)); v3[2] = half2f((uint16_t)((w >> 22 & 0x3ff) << 5)); }
+                for (int c = 0; c < 3; c++) { float v = v3[c]; if (v != v || v > 65000.f || v < -65000.f) { bad++; v = 1; } if (v > mx) mx = v; if (v < mn) mn = v; sum += v; row[3 * x + c] = (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : v * 255 + .5f); } }
+            else if (d->f == VK_FORMAT_R8_UNORM || d->f == VK_FORMAT_S8_UINT) row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = ((const uint8_t *)d->p)[(size_t)y * d->w + x];
+            else if (d->f == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { uint32_t w = ((const uint32_t *)d->p)[(size_t)y * d->w + x]; for (int c = 0; c < 3; c++) row[3 * x + c] = (uint8_t)((w >> (10 * c) & 0x3ff) >> 2); }
+            else { const uint8_t *p = (const uint8_t *)d->p + ((size_t)y * d->w + x) * 4; int bgr = d->f == VK_FORMAT_B8G8R8A8_UNORM || d->f == VK_FORMAT_B8G8R8A8_SRGB; row[3 * x] = p[bgr ? 2 : 0]; row[3 * x + 1] = p[1]; row[3 * x + 2] = p[bgr ? 0 : 2]; } }
+            fwrite(row, 1, (size_t)d->w * 3, f); }
+        free(row); fclose(f);
+        VKLOG("pass dump %02d: %ux%u format %d → %s%s", i, d->w, d->h, d->f, path, d->f == VK_FORMAT_R16G16B16A16_SFLOAT ? "" : "");
+        if (d->f == VK_FORMAT_R16G16B16A16_SFLOAT || d->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || d->f == VK_FORMAT_R16_SFLOAT) VKLOG("   NaN/inf channels %llu, finite values %.3f .. %.3f, mean %.5f", (unsigned long long)bad, mn, mx, sum / (3.0 * d->w * d->h));
+        if (d->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && d->w * d->h <= 4) { char t[200]; int k = 0;   // a tiny target (an exposure value): every texel
+            for (uint32_t q = 0; q < d->w * d->h; q++) { uint32_t w = ((const uint32_t *)d->p)[q];
+                k += snprintf(t + k, sizeof t - k, " (%g %g %g)", half2f((uint16_t)((w & 0x7ff) << 4)), half2f((uint16_t)((w >> 11 & 0x7ff) << 4)), half2f((uint16_t)((w >> 22 & 0x3ff) << 5))); }
+            VKLOG("   texels:%s", t); }
+release_dump:
+        vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL);
+    }
+    if (mf) {
+        if (ferror(mf)) ok = 0;
+        if (fclose(mf) != 0) ok = 0;
+        if (!ok || rename(manifest_tmp, manifest) != 0) { unlink(manifest_tmp); ok = 0; }
+    }
+    return ok;
+}
+typedef struct {
+    char root[896];
+    int count,raw,float_depth;
+    pdump_t images[PD_MAX];
+} pass_dump_write_batch;
+static void *pass_dump_write_main(void *arg) {
+    pass_dump_write_batch *b=arg;
+    int ok=pass_dump_write_images(b->root,b->images,b->count,b->raw,b->float_depth);
+    free(b);
+    pthread_mutex_lock(&g_capture_lock);
+    capture_end_write(ok);
+    pthread_mutex_unlock(&g_capture_lock);
+    if (!ok) VKLOG("[diagnostics] snapshot image write failed; slot not published");
+    return NULL;
+}
+static int pass_dump_queue_images(int raw,int float_depth) {
+    pass_dump_write_batch *b=calloc(1,sizeof *b);
+    if (!b) return 0;
+    if (!capture_begin_write()) { free(b); return 0; }
+    snprintf(b->root,sizeof b->root,"%s",g_capture_slot);
+    b->count=g_npd;b->raw=raw;b->float_depth=float_depth;
+    memcpy(b->images,g_pd,(size_t)g_npd*sizeof *g_pd);
+    pthread_t worker;
+    if (pthread_create(&worker,NULL,pass_dump_write_main,b)) {
+        g_capture_writing=0;
+        free(b);
+        return 0;
+    }
+    pthread_detach(worker);
+    return 1;
+}
+
 static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const int crop[4], uint64_t ticket) {   // gfx_vk_present.c, every present: start on the switch, write once the GPU finished
     static uint64_t capture_fence;
     int had_scene = g_pd_frame_has_scene;
     g_pd_frame_has_scene = 0;
     int recording = atomic_load(&g_pd_user_pending) == CAPTURE_SNAPSHOTS;
+    // The worker owns this slot and its readbacks. Do not retire or reuse it.
+    if (g_capture_writing) return;
     if (g_capture_rolling_dump && !recording) {
         pass_dump_retire_stopped(done_fence, &capture_fence);
         return;
@@ -1243,121 +1397,18 @@ static void pass_dump_poll_locked(uint64_t done_fence, vkimg_t *present, const i
     if (g_pd_state != 2 || done_fence < capture_fence) return;
     input_capture_write();
 
-    const char *root = vk_pass_dump_root();
-    char manifest[1024], manifest_tmp[1050];
-    snprintf(manifest, sizeof manifest, "%s/pass_dump_manifest.tsv", root ? root : ".");
-    snprintf(manifest_tmp, sizeof manifest_tmp, "%s.tmp", manifest);
-    FILE *mf = g_npd ? fopen(manifest_tmp, "w") : NULL;
-    if (mf) fputs("dump\tpresent\tpass\ttarget\tlevel\tlayer\twidth\theight\tstorage_format\tview_format\tbytes\tpool\toffset\traw_hash\tpreview\tsubmission\tcrop_x\tcrop_y\tcrop_width\tcrop_height\n", mf);
-    for (int i = 0; i < g_npd; i++) {
-        pdump_t *d = &g_pd[i]; char path[1024]; snprintf(path, sizeof path, "%s/pass_%02d.ppm", root ? root : ".", i);
-        char sidecar[1050];
-        unlink(path);
-        snprintf(sidecar, sizeof sidecar, "%s.f32", path);
-        unlink(sidecar); // the same slot may have previously contained depth or velocity
-        snprintf(sidecar, sizeof sidecar, "%s/pass_%02d.raw", root ? root : ".", i);
-        unlink(sidecar);
-        // done_fence covers this buffer's transfer write; HOST_CACHED does not imply HOST_COHERENT.
-        VkMappedMemoryRange inv = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, NULL, d->m, 0, VK_WHOLE_SIZE};
-        if (vkInvalidateMappedMemoryRanges(V.dev, 1, &inv) != VK_SUCCESS) {
-            VKLOG("[diagnostics] readback unavailable for pass %d target %d", d->pass, d->target);
-            goto release_dump;
+    // Small input/tile reports still belong to replay. The expensive full
+    // image conversion and disk writes move to a worker after GPU retirement.
+    const char *raw_env=getenv("DM_VK_PASSDUMP_RAW"), *depth_env=getenv("DM_VK_D24_FLOAT_COPY");
+    int raw=raw_env&&atoi(raw_env), float_depth=depth_env&&atoi(depth_env);
+    if (g_pd_full) surface_capture_write();
+    int queued=g_capture_rolling_dump && pass_dump_queue_images(raw,float_depth);
+    if (!queued) {
+        int ok=pass_dump_write_images(vk_pass_dump_root(),g_pd,g_npd,raw,float_depth);
+        if (g_capture_rolling_dump) {
+            if (ok) capture_finish_slot();
+            else g_capture_rolling_dump=0;
         }
-        if (d->pass == -200 && d->w == 8 && d->h == 8 && d->bytes == 256) {
-            const uint32_t expected = 0x9fffffu; // Vulkan D24 image-to-buffer: low24 UNORM
-            unsigned packed = vk_pd_d24_matches((const uint32_t *)d->p, 64,
-                                                   expected, 1);
-            unsigned floats = vk_pd_d24_float_matches((const uint32_t *)d->p, 64, 0.625f);
-            VKLOG("[depthcontrol] RESULT: valid packed D24 %u/64, nonconforming float32 0.625 %u/64, first raw word 0x%08x; %s",
-                  packed, floats, ((const uint32_t *)d->p)[0],
-                  packed == 64 ? "PASS: Vulkan D24 copy representation" :
-                  floats == 64 ? "CONFIRMED DRIVER COPY FORMAT MISMATCH: numeric depth correct, D24 bytes are float32" :
-                  "FAIL: unexpected D24 buffer contents");
-        }
-        if (d->pass == -201 && d->bytes == 256) {
-            unsigned floats = vk_pd_d24_float_matches((const uint32_t *)d->p, 64, 0.625f);
-            VKLOG("[depthcontrol] D32F RESULT: float32 0.625 %u/64, first raw word 0x%08x",
-                  floats, ((const uint32_t *)d->p)[0]);
-        }
-        uint64_t raw_hash = vk_pd_hash(d->p, (size_t)d->bytes);
-        VKLOG("pass dump %02d: present %llu pass %d target %d mip %u layer %u %ux%u storage/view formats %d/%d pool %#llx+%lld bytes %llu raw FNV1a64 %016llx",
-            i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
-            d->f, d->view_fmt, (unsigned long long)d->pool, (long long)d->off,
-            (unsigned long long)d->bytes, (unsigned long long)raw_hash);
-        if (mf) {
-            char preview[24] = "";
-            if (!d->raw_only) snprintf(preview, sizeof preview, "pass_%02d.ppm", i);
-            fprintf(mf, "%d\t%llu\t%d\t%d\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llx\t%lld\t%016llx\t%s\t%llu\t%d\t%d\t%d\t%d\n",
-                i, (unsigned long long)d->present, d->pass, d->target, d->level, d->layer, d->w, d->h,
-                d->f, d->view_fmt, (unsigned long long)d->bytes, (unsigned long long)d->pool,
-                (long long)d->off, (unsigned long long)raw_hash, preview, (unsigned long long)d->submission,
-                d->crop[0], d->crop[1], d->crop[2], d->crop[3]);
-        }
-        { const char *raw = getenv("DM_VK_PASSDUMP_RAW");
-          if (d->raw_only || (raw && atoi(raw))) { char rp[1100]; snprintf(rp, sizeof rp, "%s/pass_%02d.raw", root ? root : ".", i);
-              FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(d->p, 1, (size_t)d->bytes, rf); fclose(rf); } } }
-        if (d->raw_only) { unlink(path); goto release_dump; }
-        VKLOG("pass dump %02d is the submission's pass %d (present %llu)", i, d->pass, (unsigned long long)d->present);
-        FILE *f = fopen(path, "wb"); if (!f) goto release_dump; fprintf(f, "P6\n%u %u\n255\n", d->w, d->h);
-        uint8_t *row = malloc((size_t)d->w * 3);
-        if (!row) { fclose(f); unlink(path); goto release_dump; }
-        uint64_t bad = 0; float mx = 0, mn = 0; double sum = 0;
-        if (d->f == VK_FORMAT_D24_UNORM_S8_UINT || d->f == VK_FORMAT_D32_SFLOAT || d->f == VK_FORMAT_D32_SFLOAT_S8_UINT || d->f == VK_FORMAT_D16_UNORM || d->f == VK_FORMAT_X8_D24_UNORM_PACK32) {
-            size_t np = (size_t)d->w * d->h; float lo = 1e30f, hi = -1e30f; float *v = malloc(np * sizeof *v);
-            if (!v) { free(row); fclose(f); unlink(path); goto release_dump; }
-            for (size_t k = 0; k < np; k++) { float x;
-                if (d->f == VK_FORMAT_D16_UNORM) x = ((const uint16_t *)d->p)[k] / 65535.f;
-                else if (d->f == VK_FORMAT_D32_SFLOAT || d->f == VK_FORMAT_D32_SFLOAT_S8_UINT) memcpy(&x, (const uint8_t *)d->p + 4 * k, 4);
-                else {
-                    const char *e = getenv("DM_VK_D24_FLOAT_COPY");
-                    if (d->f == VK_FORMAT_D24_UNORM_S8_UINT && e && atoi(e))
-                        memcpy(&x, (const uint8_t *)d->p + 4 * k, 4);
-                    else
-                        x = (((const uint32_t *)d->p)[k] & 0xffffff) / 16777215.f;
-                }
-                v[k] = x; if (x < lo) lo = x; if (x > hi) hi = x; }
-            for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) { float t = hi > lo ? (v[(size_t)y * d->w + x] - lo) / (hi - lo) : 0; row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = (uint8_t)(t * 255); } fwrite(row, 1, (size_t)d->w * 3, f); }
-            { char rp[1100]; snprintf(rp, sizeof rp, "%s.f32", path); FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(v, sizeof *v, np, rf); fclose(rf); } }   // the values themselves
-            free(v); free(row); fclose(f); VKLOG("pass dump %02d: depth %ux%u format %d, values %.6f .. %.9g → %s", i, d->w, d->h, d->f, lo, hi, path);
-            vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL); continue;
-        }
-        if (d->f == VK_FORMAT_R16G16_SFLOAT) {   // signed two-channel fields (velocities): red and green around grey, 1/16 a step; the values themselves in .f32 (r, g a texel)
-            size_t np = (size_t)d->w * d->h; float *v = malloc(np * 2 * sizeof *v), lo = 0, hi = 0; uint64_t nz = 0;
-            if (!v) { free(row); fclose(f); unlink(path); goto release_dump; }
-            for (size_t k = 0; k < np * 2; k++) { v[k] = half2f(((const uint16_t *)d->p)[k]); if (v[k] < lo) lo = v[k]; if (v[k] > hi) hi = v[k]; }
-            for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) { const float *t = v + 2 * ((size_t)y * d->w + x); int on = t[0] != 0 || t[1] != 0; nz += on;
-                for (int c = 0; c < 2; c++) { float q = 128 + t[c] * 16; row[3 * x + c] = (uint8_t)(q < 0 ? 0 : q > 255 ? 255 : q); } row[3 * x + 2] = on ? 255 : 128; }
-                fwrite(row, 1, (size_t)d->w * 3, f); }
-            { char rp[1100]; snprintf(rp, sizeof rp, "%s.f32", path); FILE *rf = fopen(rp, "wb"); if (rf) { fwrite(v, sizeof *v, np * 2, rf); fclose(rf); } }
-            free(v); free(row); fclose(f); VKLOG("pass dump %02d: %ux%u RG16F, values %.3f .. %.3f, nonzero texels %llu → %s", i, d->w, d->h, lo, hi, (unsigned long long)nz, path);
-            vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL); continue;
-        }
-        for (uint32_t y = 0; y < d->h; y++) { for (uint32_t x = 0; x < d->w; x++) {
-            if (d->f == VK_FORMAT_R16G16B16A16_SFLOAT || d->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || d->f == VK_FORMAT_R16_SFLOAT) { float v3[3];
-                if (d->f == VK_FORMAT_R16G16B16A16_SFLOAT) { const uint16_t *p = (const uint16_t *)d->p + ((size_t)y * d->w + x) * 4; for (int c = 0; c < 3; c++) v3[c] = half2f(p[c]); }
-                else if (d->f == VK_FORMAT_R16_SFLOAT) v3[0] = v3[1] = v3[2] = half2f(((const uint16_t *)d->p)[(size_t)y * d->w + x]);
-                else { uint32_t w = ((const uint32_t *)d->p)[(size_t)y * d->w + x];   // 11-bit and 10-bit floats: a half's exponent and top mantissa bits
-                    v3[0] = half2f((uint16_t)((w & 0x7ff) << 4)); v3[1] = half2f((uint16_t)((w >> 11 & 0x7ff) << 4)); v3[2] = half2f((uint16_t)((w >> 22 & 0x3ff) << 5)); }
-                for (int c = 0; c < 3; c++) { float v = v3[c]; if (v != v || v > 65000.f || v < -65000.f) { bad++; v = 1; } if (v > mx) mx = v; if (v < mn) mn = v; sum += v; row[3 * x + c] = (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : v * 255 + .5f); } }
-            else if (d->f == VK_FORMAT_R8_UNORM || d->f == VK_FORMAT_S8_UINT) row[3 * x] = row[3 * x + 1] = row[3 * x + 2] = ((const uint8_t *)d->p)[(size_t)y * d->w + x];
-            else if (d->f == VK_FORMAT_A2B10G10R10_UNORM_PACK32) { uint32_t w = ((const uint32_t *)d->p)[(size_t)y * d->w + x]; for (int c = 0; c < 3; c++) row[3 * x + c] = (uint8_t)((w >> (10 * c) & 0x3ff) >> 2); }
-            else { const uint8_t *p = (const uint8_t *)d->p + ((size_t)y * d->w + x) * 4; int bgr = d->f == VK_FORMAT_B8G8R8A8_UNORM || d->f == VK_FORMAT_B8G8R8A8_SRGB; row[3 * x] = p[bgr ? 2 : 0]; row[3 * x + 1] = p[1]; row[3 * x + 2] = p[bgr ? 0 : 2]; } }
-            fwrite(row, 1, (size_t)d->w * 3, f); }
-        free(row); fclose(f);
-        VKLOG("pass dump %02d: %ux%u format %d → %s%s", i, d->w, d->h, d->f, path, d->f == VK_FORMAT_R16G16B16A16_SFLOAT ? "" : "");
-        if (d->f == VK_FORMAT_R16G16B16A16_SFLOAT || d->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || d->f == VK_FORMAT_R16_SFLOAT) VKLOG("   NaN/inf channels %llu, finite values %.3f .. %.3f, mean %.5f", (unsigned long long)bad, mn, mx, sum / (3.0 * d->w * d->h));
-        if (d->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && d->w * d->h <= 4) { char t[200]; int k = 0;   // a tiny target (an exposure value): every texel
-            for (uint32_t q = 0; q < d->w * d->h; q++) { uint32_t w = ((const uint32_t *)d->p)[q];
-                k += snprintf(t + k, sizeof t - k, " (%g %g %g)", half2f((uint16_t)((w & 0x7ff) << 4)), half2f((uint16_t)((w >> 11 & 0x7ff) << 4)), half2f((uint16_t)((w >> 22 & 0x3ff) << 5))); }
-            VKLOG("   texels:%s", t); }
-release_dump:
-        vkDestroyBuffer(V.dev, d->b, NULL); vkFreeMemory(V.dev, d->m, NULL);
-    }
-    if (mf && (fclose(mf) != 0 || rename(manifest_tmp, manifest) != 0))
-        unlink(manifest_tmp);
-    if (g_pd_full) {
-        surface_capture_write();
-        if (g_capture_rolling_dump) capture_finish_slot();
     }
     g_pd_full = 0;
     g_npd = 0; g_pd_bytes = 0; g_pd_state = 0;

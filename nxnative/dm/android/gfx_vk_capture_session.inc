@@ -16,6 +16,8 @@
 enum { CAPTURE_SLOTS = 3, CAPTURE_INTERVAL = 30 };
 static pthread_mutex_t g_capture_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_capture_exporting;
+// Protected by g_capture_lock. At most one batch owns completed GPU readbacks.
+static int g_capture_writing;
 static int g_capture_delay;
 static unsigned g_capture_next_slot;
 static uint64_t g_capture_next_present;
@@ -228,6 +230,7 @@ void vk_pass_dump_export_end(void) {
 int vk_pass_dump_user_active(void) { return atomic_load(&g_pd_user_pending); }
 
 static int capture_start_slot(void) {
+    if (g_capture_writing || g_capture_rolling_dump || g_capture_exporting) return 0;
     int n = snprintf(g_capture_slot, sizeof g_capture_slot,
                      "%s/diagnostic-capture-%u", vk_pass_dump_root(), g_capture_next_slot);
     if (n < 0 || (size_t)n >= sizeof g_capture_slot) return 0;
@@ -256,4 +259,20 @@ static void capture_finish_slot(void) {
         if (file) fclose(file);
     }
     g_capture_rolling_dump = 0;
+}
+
+// Called with g_capture_lock held after all GPU copies have completed.
+// Export can stop the session while the worker writes, but must never
+// publish a completion marker for that unfinished slot.
+static int capture_begin_write(void) {
+    if (!g_capture_rolling_dump || g_capture_writing || g_capture_exporting ||
+        atomic_load(&g_pd_user_pending) != CAPTURE_SNAPSHOTS) return 0;
+    g_capture_writing = 1;
+    return 1;
+}
+static void capture_end_write(int ok) {
+    if (!g_capture_writing) return;
+    g_capture_writing = 0;
+    if (ok) capture_finish_slot();
+    else g_capture_rolling_dump = 0; // incomplete slot stays invisible to export
 }
