@@ -3337,11 +3337,24 @@ static int resolution_raw_span(uint64_t addr,uint64_t bytes,int tail) {
     if (!bytes || bytes>p->hi-addr) return 0;
     return vk_rs_preflight_buffer(addr,bytes);
 }
+// Match the vertex input locations used by prepare_draw and vertex
+// padding. Retain full backing-tail checks for potentially read streams.
+static unsigned resolution_vertex_streams(unsigned inputs,const uint32_t attrs[16]) {
+    unsigned streams=0;
+    for (unsigned i=0;i<16;i++) if (inputs&(1u<<i)) {
+        va_st a;memcpy(&a,&attrs[i],sizeof a);
+        if (!a.fmt) continue;
+        if (a.stream>=16) return 0xffffu;
+        streams|=1u<<a.stream;
+    }
+    return streams;
+}
 static int resolution_draw_inputs(uint64_t index,int index_type,int count,int indexed,
                                   uint64_t indirect,uint64_t mdi_count,int mdi_i,int mdi_max,int mdi_stride) {
     if (g_tf_on) return 0;
+    unsigned streams=S.sh[0]?resolution_vertex_streams(S.sh[0]->local[0],S.vattr):0xffffu;
     for (unsigned i=0;i<16;i++) {
-        if (S.vbuf[i].address && !resolution_raw_span(S.vbuf[i].address,0,1)) return 0;
+        if ((streams&(1u<<i)) && S.vbuf[i].address && !resolution_raw_span(S.vbuf[i].address,0,1)) return 0;
     }
     if (indexed) {
         if (index_type<0 || index_type>2 || count<0) return 0;

@@ -11,9 +11,12 @@ PREFIX = r"""
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "gfx_vk_resolution_preflight.h"
+typedef struct {uint32_t fmt:8,offset:19,stream:5;} va_st;
+static struct {unsigned local[3];} vs;
 #define NVN_MEMORY_POOL_FLAGS_VIRTUAL 0x200
-static struct { struct { uint64_t address,size; } vbuf[16]; } S;
+static struct { struct { uint64_t address,size; } vbuf[16]; uint32_t vattr[16]; __typeof__(&vs) sh[6]; } S;
 static int g_tf_on;
 typedef struct { uint64_t lo,hi; int buf,flags; } vkpool_t;
 static vkpool_t p={0x1000,0x2000,1,0};
@@ -26,6 +29,17 @@ int main(void) {
     assert(resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
     S.vbuf[0].address=0x1000; S.vbuf[0].size=4;
     assert(!resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
+    S.sh[0]=&vs;vs.local[0]=1;
+    va_st attr={.fmt=1,.stream=1};memcpy(S.vattr,&attr,4);
+    S.vbuf[1].address=0x1900;
+    assert(resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
+    attr.stream=0;memcpy(S.vattr,&attr,4);
+    assert(!resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
+    attr.fmt=0;memcpy(S.vattr,&attr,4);
+    assert(resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
+    attr.fmt=1;attr.stream=17;memcpy(S.vattr,&attr,4);
+    assert(!resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
+    S.sh[0]=NULL;S.vbuf[1].address=0;
     S.vbuf[0].address=0x1900;
     assert(resolution_draw_inputs(0,0,3,0,0,0,0,0,0));
     S.vbuf[0].address=0;

@@ -82,7 +82,9 @@ static int rs_scope_native_check(const tex_t *t,const view_t *v,int texel,void *
 static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *look,int scaled,unsigned *samples) {
     *samples=0;
     if (!look->sh[0] || look->rast_discard || look->sh[2] || look->sh[3] || look->sh[4]) return 0;
-    for (unsigned i=0;i<16;i++) if (look->vbuf[i].address && !rs_scope_raw(g,look->vbuf[i].address,0,1)) return 0;
+    unsigned streams=resolution_vertex_streams(look->sh[0]->local[0],look->vattr);
+    for (unsigned i=0;i<16;i++) if ((streams&(1u<<i)) && look->vbuf[i].address &&
+        !rs_scope_raw(g,look->vbuf[i].address,0,1)) return 0;
     for (int st=0;st<2;st++) {
         vkshader_t *s=look->sh[st]; if (!s) continue;
         if (s->xfb || s->nbind<0 || s->nbind>96 || (s->nbind && !s->b) ||
@@ -563,6 +565,14 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             RS_NEED(p_clear_buf);const p_clear_buf *c=(const p_clear_buf *)a;
             if (c->size && !rs_scope_raw(g,c->addr,c->size,0)) return NULL;
             break; }
+        case OP_BIND_VATTR: {
+            if (n<offsetof(p_bind_vattr,st)) return NULL;
+            const p_bind_vattr *v=(const p_bind_vattr *)a;
+            if (v->first<0 || v->first>16 || v->n<0 || v->n>16-v->first ||
+                n<offsetof(p_bind_vattr,st)+(size_t)v->n*sizeof v->st[0]) return NULL;
+            memset(look.vattr,0,sizeof look.vattr);
+            memcpy(look.vattr+v->first,v->st,(size_t)v->n*sizeof v->st[0]);
+            break; }
         case OP_BIND_VBUF: {
             if (n<offsetof(p_bind_vbuf,r)) return NULL;
             const p_bind_vbuf *b=(const p_bind_vbuf *)a;
@@ -624,7 +634,7 @@ static const uint8_t *rs_scope_scan_once(const uint8_t *p, rs_scope_group *g, un
             break; }
         // State-only records, no guest data reads or resource accesses.
         case OP_BEGIN: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_BIND_STATE:
-        case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_STENCIL: case OP_POLY_OFFSET:
+        case OP_BIND_VSTREAM: case OP_STENCIL: case OP_POLY_OFFSET:
         case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_BLEND_COLOR:
         case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_DEPTH_BOUNDS: break;
         default: return NULL;

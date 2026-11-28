@@ -154,7 +154,7 @@ static unsigned g_rs_scope_rest_n,g_rs_scope_crossed,g_rs_scope_program_count;
 static int g_rs_scope_overwrite;
 static struct {
     p_scissor sc; int sc_set,rast_discard;
-    p_bind_buf ubo[6][16],ssbo[6][16]; NVNbufferRange vbuf[16];
+    p_bind_buf ubo[6][16],ssbo[6][16]; NVNbufferRange vbuf[16]; uint32_t vattr[16];
     uint64_t tex[6][256],img[6][32];
 } S;
 typedef struct { const tex_t *target[NX_RS_SCOPE_OWNER_MAX]; uint64_t addr[NX_RS_SCOPE_OWNER_MAX]; unsigned mask; uint32_t w,h,pw,ph,ax,ay; } rs_scope_group;
@@ -174,7 +174,10 @@ static int rs_scope_program_proof(__typeof__(S) *s,const uint8_t *p,const p_bind
  * proof dependencies. This stub makes the native consumer sample only
  * when its test texture binding is set. */
 static int rs_scope_draw_proof(const rs_scope_group *g,const __typeof__(S) *s,int scaled,unsigned *sampled) {
-    (void)g;(void)scaled;
+    (void)scaled;
+    va_st attr;memcpy(&attr,s->vattr,sizeof attr);
+    if (attr.fmt && (attr.stream>=16 || (s->vbuf[attr.stream].address &&
+        !rs_scope_raw(g,s->vbuf[attr.stream].address,0,1)))) return 0;
     *sampled=s->tex[1][0]==7?1:s->tex[1][0]==9?2:0;
     return !s->rast_discard;
 }
@@ -258,6 +261,18 @@ static void consumer_two(void) {rt(&t[2]);bind(7,0);draw();}
 int main(void) {
     reset();clear(15);rt(&t[0]);draw();consumer();rt(&t[2]);draw();rt(&t[0]);uint8_t *end=discard();assert(scan()==end);
     reset();producer();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    // Attribute state must follow immutable binds, not stale live state.
+    reset();S.vbuf[0].address=(uintptr_t)storage;S.vbuf[1].address=(uintptr_t)storage+8192;
+    va_st attr={.fmt=1,.stream=0};memcpy(S.vattr,&attr,4);
+    p_bind_vattr attrs={.first=0,.n=1};attr.stream=1;memcpy(attrs.st,&attr,4);
+    clear(15);append(OP_BIND_VATTR,&attrs,offsetof(p_bind_vattr,st)+4);
+    draw();consumer();rt(&t[0]);end=discard();assert(scan()==end);
+    reset();S.vbuf[0].address=(uintptr_t)storage;S.vbuf[1].address=(uintptr_t)storage+8192;
+    attr.stream=1;memcpy(S.vattr,&attr,4);attr.stream=0;memcpy(attrs.st,&attr,4);
+    clear(15);append(OP_BIND_VATTR,&attrs,offsetof(p_bind_vattr,st)+4);
+    draw();consumer();rt(&t[0]);discard();assert(!scan());
+    reset();clear(15);attrs.first=16;append(OP_BIND_VATTR,&attrs,offsetof(p_bind_vattr,st)+4);
+    draw();consumer();rt(&t[0]);discard();assert(!scan());
     reset();
     rs_scope_group owner_group={.target={&t[0]},.addr={(uintptr_t)t[0].mem},.mask=1,.w=64,.h=64};
     tex_t wrapper=t[0];wrapper.d.flags|=NVN_TEXTURE_FLAGS_COMPRESSIBLE;
