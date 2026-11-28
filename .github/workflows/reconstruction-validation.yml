@@ -6,6 +6,9 @@ on:
     paths:
       - '.github/workflows/reconstruction-validation.yml'
       - 'nxnative/dm/android/gfx_vk*'
+      - 'nxnative/dm/host/hle_os.c'
+      - 'nxnative/dm/gfx/nvn/hle_nvn.c'
+      - 'tests/test_vk_pause_accounting.py'
       - 'nxnative/dm/android/shaders/**'
       - 'devtools/trace_reconstruction.py'
       - 'tests/*reconstruction*'

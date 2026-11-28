@@ -92,6 +92,18 @@ void guest_clock_freeze_for(int reason, int on) {
     pthread_mutex_unlock(&g_gfz_mu);
 }
 void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }
+#ifdef __ANDROID__
+// Sample wall and active time at the same instant, independent of the
+// deterministic guest clock. The reason lock prevents a half-applied freeze.
+uint64_t dm_guest_active_time(uint64_t *wall) {
+    pthread_mutex_lock(&g_gfz_mu);
+    uint64_t now=now_ns();
+    uint64_t active=atomic_load(&g_gfz)?atomic_load(&g_gfrozen):now-atomic_load(&g_glag);
+    pthread_mutex_unlock(&g_gfz_mu);
+    *wall=now;
+    return active;
+}
+#endif
 // Entropy source: true random by default (arc4random); with DM_DETCLOCK on it becomes a fixed-seed splitmix64 stream (so that replay pictures are byte-for-byte comparable, the camp blue fire particles differed between two passes).
 // The two outlets (libc getentropy, svc GetInfo RandomEntropy) share one stream; the call count is reported in the log (first call and every 1000 calls)
 static _Atomic uint64_t g_detrng = 0x5357444554524e47ull; static _Atomic uint64_t g_detrng_n;

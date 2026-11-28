@@ -264,13 +264,13 @@ static void capture_finish_slot(void) {
 // Called with g_capture_lock held after all GPU copies have completed.
 // Export can stop the session while the worker writes, but must never
 // publish a completion marker for that unfinished slot.
-static int capture_begin_write(void) {
+static inline int capture_begin_write(void) {
     if (!g_capture_rolling_dump || g_capture_writing || g_capture_exporting ||
         atomic_load(&g_pd_user_pending) != CAPTURE_SNAPSHOTS) return 0;
     g_capture_writing = 1;
     return 1;
 }
-static void capture_end_write(int ok) {
+static inline void capture_end_write(int ok) {
     if (!g_capture_writing) return;
     g_capture_writing = 0;
     if (ok) capture_finish_slot();

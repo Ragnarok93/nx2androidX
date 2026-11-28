@@ -33,3 +33,7 @@ The prior APK workflow 46096506618 failed in the full test suite because the leg
 ## Checkpoint 5 — asynchronous full-image diagnostics
 
 Transfer only retired full-image readbacks to a single background writer. No full-frame RAM copy, no extra in-flight batch, and no completion marker before successful raw/manifest publication. A stopped/exporting session omits its unfinished slot; replay can continue without waiting for the writer. Small input and surface reports remain synchronous, as does the legacy manual dump path or thread-allocation failure fallback. GPU readback recording itself can still perturb frame pacing. Added capture lifecycle regression for completion, export during write, and write failure. CI and on-device timing remain required.
+
+## Checkpoint 6 — pause accounting
+
+Sample Android host wall and pause-adjusted active clocks together under the existing guest freeze-reason lock. Long-frame and adaptive-scale CPU work use the active interval; trace retains wall duration and excluded pause time. The deterministic guest clock, presentation pacing, and other platform paths are unchanged. Regression exercises overlapping freeze reasons and an unpaused 100 ms stall. Mark asynchronous capture helpers inline for extracted test translation units.

@@ -1786,6 +1786,9 @@ __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mo
 #define LFN 16
 typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, rs_cpu_us; } lf_rec;
 static lf_rec g_lf[LFN];
+#ifdef __ANDROID__
+__attribute__((weak)) uint64_t dm_guest_active_time(uint64_t *wall) { return *wall=now_ns(); }
+#endif
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
 static const char *const g_tname[6] = {"frame time", "frame work", "NVN submit+present", "GPU", "translation layer recording", "translation layer submit"};
@@ -2260,6 +2263,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (fstep_on()) fstep_tick(o);
     else g_fs_start = g_fs_wait = g_fs_pq = 0;   // the next acquire starts the next frame (dm_perf_frame_start: the CPU hint's and the adaptive frame rate's work time)
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
+#ifdef __ANDROID__
+    static uint64_t prev_active_in, prev_active_out;
+#endif
     present_cfg(o);
     {
         // Test switch DM_TEST_PRESENT_LAG=every N presents,milliseconds[,presents in a row][;…]: sleep that long before the Nth, 2Nth… present (and the ones after it in the run), imitating an occasional slow frame on a phone (Mario 1.2.1 then sets present interval 2; checks that the display link holds frames by interval),
@@ -2279,7 +2285,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         if (lag) usleep((useconds_t)lag * 1000);
     }
     gfx_enter();
+#ifdef __ANDROID__
+    uint64_t t0, active_in=dm_guest_active_time(&t0);
+#else
     uint64_t t0 = now_ns();
+#endif
     if (idx >= 0 && idx < o->ntex && idx < 4) {
         o->done[idx] = nvn_fence_now();
         if (nvn_async()) { nvn_job j = {JOB_PRESENT, 0, NULL, q, CTX(o->tex[idx]), present_period(o) / 1e9, {0}, &o->ticket[idx]}; memcpy(j.crop, o->crop, sizeof j.crop);
@@ -2306,6 +2316,15 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     if (prev_in) {
         double fr = (t0 - prev_in) / 1e6, wk = (t0 - prev_out) / 1e6, nv = atomic_exchange(&g_nvn_ns, 0) / 1e6;
+#ifdef __ANDROID__
+        // Do not classify a frozen guest clock as a slow frame. Preserve
+        // unadjusted intervals separately for capture and lifecycle analysis.
+        double wall_fr=fr;
+        fr=active_in>=prev_active_in?(active_in-prev_active_in)/1e6:0;
+        wk=active_in>=prev_active_out?(active_in-prev_active_out)/1e6:0;
+        trow(f,"@frame_wall_ms",wall_fr);
+        trow(f,"@paused_ms",wall_fr>fr?wall_fr-fr:0);
+#endif
         tpush(0, fr); tpush(1, wk); tpush(2, nv);
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
@@ -2380,6 +2399,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
+#ifdef __ANDROID__
+    prev_active_in=active_in;
+#endif
     dump_frame();
     if (g_frame % TWIN == 0) tsummary(g_frame);
     mtl_set_frame(g_frame);
@@ -2400,7 +2422,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         dm_perf_present(a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0));   // on-screen present intervals are also kept in a separate ring; tsummary reports dropped frames every 300 frames (M1 criterion)
         if (a_ > 0) trow(f - 8, "@pres_at_ms", a_ * 1e3 - g_t0_ns / 1e6); }   // on-screen present time (ms since process start; presentedTime shares a time base with mach_absolute_time)
     if (f >= 8 && slow_on()) slow_emit(f - 8);
+#ifdef __ANDROID__
+    prev_active_out=dm_guest_active_time(&prev_out);
+#else
     prev_out = now_ns();
+#endif
 }
 
 // ---------- State-only interfaces used by newer-SDK games (SMBW): buffer objects, pool / sampler / texture queries, views, color state, device and window ----------
