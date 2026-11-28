@@ -8,5 +8,9 @@ CUTS = {
   # are read only by the allocator's own code (main+0xae024 to main+0xb4568)
   '84e182f72ee1da4f477804bd05b54c15': [
     (0x137f0, 'e06b0294', '1f2003d5', 'nninitStartup: bl 0xae770 (FMallocBinned3 constructor, 38 GB of address space) → nop; the host allocator is in the object already (hle_uemalloc.c)'),
+    # A failed lazy shader factory call used to return NULL immediately, even when a competing creator had already published the same shader.
+    # Re-read the exact cache slot (resource +0x38, signed shader index w22) with acquire ordering, matching the callers' fast path.
+    # A genuine miss remains NULL: never invent a shader, select an adjacent stage, or skip a rendering command. Reuse the unchanged ABI epilogue at 0x15686e8.
+    (0x15686fc, 'f5031faae00315aaf44f43a9f65742a9', 'e81e40f908cd368b00fddfc8f8ffff17', 'lazy shader factory failure: acquire-load the competing publication before returning'),
   ],
 }
