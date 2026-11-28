@@ -18,6 +18,8 @@ static float dm_overlay_scale(void){return 1;}
 '''+layout[a:b]+r'''
 int dm_menu_audio_available(void){return 0;}
 int dm_menu_rs_live(void){return 1;}
+static int flow=0;
+int dm_menu_fg_flow(void){return flow;}
 enum{AMOTION_EVENT_ACTION_DOWN=0,AMOTION_EVENT_ACTION_UP=1,AMOTION_EVENT_ACTION_MOVE=2,AMOTION_EVENT_ACTION_CANCEL=3,AMOTION_EVENT_ACTION_POINTER_DOWN=5,AMOTION_EVENT_ACTION_POINTER_UP=6,AMOTION_EVENT_ACTION_MASK=255,AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT=8,OV_MENU=1};
 typedef struct{int action,pointers;struct{int id;float x,y;}ptr[4];}dm_java_event;
 static struct{int kind;}OV_CTLS[1];
@@ -43,6 +45,8 @@ static void menu_fsr_sharp(int x){sharpness=x;slider_calls++;}
 static void menu_opacity(int x){(void)x;slider_calls++;}
 static void menu_drs_min(int x){(void)x;slider_calls++;}
 static void menu_rs_max(int x){(void)x;slider_calls++;}
+static void fg_fixed_set(int x){flow=x;slider_calls++;}
+static void fg_flow_select_mode(int mode){flow=mode==0?75:mode==1?-1:0;}
 '''
         if 'menu_output_step(' in touch:
             code+='static void menu_output_step(int d,int custom){(void)d;(void)custom;actions++;last=OVM_OUTPUT_CUSTOM;}\n'
@@ -86,6 +90,16 @@ int main(void){
     // Switch to a short tab; no scroll or old selection survives.
     ov_settings_row(p,2,0,scroll,r);send(0,v[0]+v[2]*.1f,r[1]+rh/2);send(1,v[0]+v[2]*.1f,r[1]+rh/2);
     assert(page==0&&scroll==0&&actions==4);
+    page=3;flow=0;scroll=0;ov_settings_row(p,3,4,0,r);
+    float left,right;ov_settings_flow_track(r,&left,&right);
+    send(0,left+(right-left)/6,r[1]+rh/2);send(1,left+(right-left)/6,r[1]+rh/2);
+    assert(flow==75&&ov_menu_item(3,5)==OVM_FG_FIXED);
+    ov_settings_row(p,3,5,0,r);send(0,v[0]+v[2]*OV_SETTINGS_TRACK_START,r[1]+rh/2);
+    send(1,v[0]+v[2]*OV_SETTINGS_TRACK_START,r[1]+rh/2);assert(flow==25);
+    ov_settings_row(p,3,4,0,r);send(0,left+(right-left)/2,r[1]+rh/2);
+    send(1,left+(right-left)/2,r[1]+rh/2);assert(flow==-1&&ov_menu_item(3,6)==OVM_FG_PRESET);
+    send(0,left+(right-left)*5/6,r[1]+rh/2);send(1,left+(right-left)*5/6,r[1]+rh/2);
+    assert(flow==0&&ov_menu_item(3,5)==-1&&ov_menu_item(3,6)==-1);
     return 0;
 }
 '''

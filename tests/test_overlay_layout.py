@@ -109,8 +109,8 @@ int main(void) {
     assert(ov_menu_item(3, 2) == OVM_FG);
     assert(ov_menu_item(3, 3) == OVM_FG_MULT);
     assert(ov_menu_item(3, 4) == OVM_FG_FLOW);
-    assert(ov_menu_item(3, 5) == OVM_DIAG_OPEN);
-    assert(ov_menu_item(3, 6) == -1);
+    assert(ov_menu_item(3, 5) == -1 && ov_menu_item(3, 6)==-1);
+    assert(ov_menu_item(3, 7) == OVM_DIAG_OPEN);
     assert(ov_menu_item(1, OVM_ROWS - 1) == OVM_RESUME);
     audio_available = 1;
     assert(ov_menu_item(1, 5) == OVM_AUDIO);

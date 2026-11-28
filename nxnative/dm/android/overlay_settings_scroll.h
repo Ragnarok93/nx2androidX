@@ -64,7 +64,16 @@ static inline int ov_settings_hit(const float p[4],int page,int scroll,float x,f
     return -1;
 }
 static inline int ov_settings_slider(int item) {
-    return item==OVM_OPACITY||item==OVM_FSR_SHARP||item==OVM_DRS_MIN||item==OVM_RS_MAX;
+    return item==OVM_OPACITY||item==OVM_FSR_SHARP||item==OVM_DRS_MIN||item==OVM_RS_MAX||item==OVM_FG_FIXED;
+}
+static inline void ov_settings_flow_track(const float r[4],float *left,float *right) {
+    *left=r[0]+r[2]*.47f;*right=r[0]+r[2]-r[3]*.15f;
+}
+static inline int ov_settings_flow_hit(const float p[4],float x) {
+    float v[4],left,right;ov_settings_view(p,v);v[3]/=OV_SETTINGS_VIEW_ROWS;
+    ov_settings_flow_track(v,&left,&right);
+    if(x<left||x>=right||right<=left)return -1;
+    int i=(int)((x-left)*3/(right-left));return i<3?i:2;
 }
 static inline int ov_settings_gesture(int slider,int current,float dx,float dy,float rh) {
     if(current!=OV_SETTINGS_PENDING)return current;

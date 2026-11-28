@@ -25,6 +25,7 @@ void crash_thread_init(void);   // the signal alternate stack is per thread (dm.
 #include "gfx_vk_capture_scale.h"
 #include "gfx_vk_source_continuity.h"
 #include "gfx_vk_menu_recon.h"
+#include "gfx_vk_fg_flow.h"
 static dm_recon_menu_status g_menu_recon;
 static dm_fg_menu_status g_menu_fg;
 static dm_recon_continuity g_recon_source;
@@ -520,7 +521,7 @@ static const char *const OVM_LABELS[OVM_N] = {
     [OVM_RUMBLE]="Rumble", [OVM_FPS]="Show FPS", [OVM_MODE]="Mode",
     [OVM_EXPORT]="Export save", [OVM_IMPORT]="Import save", [OVM_PAD]="Face buttons",
     [OVM_AUDIO]="Audio output", [OVM_FG]="Lossless FG", [OVM_FG_MULT]="FG multiplier",
-    [OVM_FG_FLOW]="FG flow scale", [OVM_DRIVER]="Vulkan driver",
+    [OVM_FG_FLOW]="FG flow scale", [OVM_FG_FIXED]="Fixed scale", [OVM_FG_PRESET]="Flow preset", [OVM_DRIVER]="Vulkan driver",
     [OVM_OUTPUT_HEIGHT]="Output Resolution", [OVM_OUTPUT_CUSTOM]="Custom resolution",
     [OVM_OUTPUT_AUTO]="Auto (display)", [OVM_OUTPUT_720]="720p", [OVM_OUTPUT_1080]="1080p",
     [OVM_OUTPUT_1440]="1440p", [OVM_OUTPUT_1800]="1800p", [OVM_OUTPUT_2160]="2160p (4K)",
@@ -633,10 +634,24 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
         if (it == OVM_DRS_NOW && dm_menu_rs_live()) label = "Recorded scale";
         /* Maximum Scale remains the same label in Fixed and Adaptive modes. */
         const float label_right=r[0]+rw*0.43f, control_left=r[0]+rw*0.47f;
-        m3_bounded_text(cv,x0,cy,label,is,label_right-x0,0,M3_ON_SURFACE);
-        if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN || it==OVM_RS_MAX) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
-            int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : it==OVM_RS_MAX?dm_menu_rs_max():dm_fsr_sharpness();
-            float t[3]; ov_settings_track(r,t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : (it == OVM_DRS_MIN || it==OVM_RS_MAX) ? (float)(value - 50) / (dm_menu_rs_live()?50.0f:45.0f) : (float)value / 100.0f, th = fmaxf(1, rh * 0.09f), kr = fminf(rh * 0.13f,rw*0.035f);
+        if(it==OVM_FG_FIXED || it==OVM_FG_PRESET)x0+=rh*.13f;
+        if(it==OVM_FG_FLOW && dm_menu_fg_flow()<=0){
+            char last[80];dm_fg_menu_label(&g_menu_fg,last,sizeof last);
+            m3_bounded_text(cv,x0,cy-rh*.17f,label,is,label_right-x0,0,M3_ON_SURFACE);
+            m3_bounded_text(cv,x0,cy+rh*.19f,last,small_scale*.78f,label_right-x0,0,M3_VARIANT);
+        }else m3_bounded_text(cv,x0,cy,label,is,label_right-x0,0,M3_ON_SURFACE);
+        if (it == OVM_FG_FLOW) {
+            const char *const seg[]={"Fixed","Adaptive","Auto"};
+            int cur=dm_fg_flow_mode(dm_menu_fg_flow());float left,right;
+            ov_settings_flow_track(r,&left,&right);
+            float hh=rh*.60f,w=(right-left)/3,ss=small_scale;
+            for(int k=0;k<3;k++)ss=fminf(ss,m3_fit_scale(seg[k],small_scale,w*.84f));
+            cv_rrect(cv,left,cy-hh/2,right,cy+hh/2,hh/2,C_OFF);
+            cv_rrect(cv,left+cur*w,cy-hh/2,left+(cur+1)*w,cy+hh/2,hh/2,M3_SECONDARY);
+            for(int k=0;k<3;k++)m3_text(cv,left+k*w+(w-m3_text_w(seg[k],ss))/2,cy,seg[k],ss,k==cur?M3_ON_SECONDARY:C_DIM);
+        } else if (it == OVM_OPACITY || it == OVM_FSR_SHARP || it == OVM_DRS_MIN || it==OVM_RS_MAX || it==OVM_FG_FIXED) {   // touch/controller slider: opacity, FSR sharpness, or minimum true render scale
+            int value = it == OVM_OPACITY ? op : it == OVM_DRS_MIN ? dm_menu_drs_min() : it==OVM_RS_MAX?dm_menu_rs_max():it==OVM_FG_FIXED?dm_menu_fg_flow():dm_fsr_sharpness();
+            float t[3]; ov_settings_track(r,t); float f = it == OVM_OPACITY ? (float)(value - OV_OPACITY_MIN) / (OV_OPACITY_MAX - OV_OPACITY_MIN) : (it == OVM_DRS_MIN || it==OVM_RS_MAX) ? (float)(value - 50) / (dm_menu_rs_live()?50.0f:45.0f) : it==OVM_FG_FIXED?(float)(value-25)/75.0f:(float)value / 100.0f, th = fmaxf(1, rh * 0.09f), kr = fminf(rh * 0.13f,rw*0.035f);
             f = f < 0 ? 0 : f > 1 ? 1 : f;
             cv_rrect(cv, t[0], t[1] - th / 2, t[0] + t[2], t[1] + th / 2, th / 2, M3_SECONDARY);
             if (f * t[2] >= th) cv_rrect(cv, t[0], t[1] - th / 2, t[0] + f * t[2], t[1] + th / 2, th / 2, M3_PRIMARY);
@@ -652,7 +667,7 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             m3_text(cv,x1-m3_text_w(status,is),cy,status,is,M3_PRIMARY);
         } else if (it==OVM_OUTPUT_BACK) {
             m3_text(cv,x1-m3_text_w(">",is),cy,">",is,M3_PRIMARY);
-        } else if ((it==OVM_DRS && dm_menu_rs_live()) || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY || ov_flag_item(it)) {
+        } else if ((it==OVM_DRS && dm_menu_rs_live()) || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_PRESET || it == OVM_DRIVER || it == OVM_RATE || it == OVM_DRS_NOW || it == OVM_DRS_HOOK || it == OVM_DIAG_STATUS || it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY || ov_flag_item(it)) {
             char value[128];
             if (it==OVM_DRS) {
                 int mode=dm_menu_rs_mode();
@@ -667,11 +682,9 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             } else if (it == OVM_FSR) {
                 snprintf(value, sizeof value, "%s", spatial_mode_name(dm_spatial_mode()));
             } else if (it == OVM_FG_MULT) snprintf(value, sizeof value, "%dx", dm_menu_fg_mult());
-            else if (it == OVM_FG_FLOW) {
-                int scale = dm_menu_fg_flow();
-                if (scale<0) snprintf(value,sizeof value,"Adaptive Auto");
-                else if (!scale) snprintf(value, sizeof value, "Auto");
-                else snprintf(value, sizeof value, "%d%%", scale);
+            else if (it == OVM_FG_PRESET) {
+                dm_fg_flow_range range=dm_fg_flow_bounds(dm_menu_fg_flow());
+                snprintf(value,sizeof value,"%s (%u-%u%%)",range.name,range.min,range.max);
             } else if (it == OVM_RATE) {
                 if (!dm_menu_rate_supported()) snprintf(value, sizeof value, "Unavailable");
                 else if (dm_menu_rate() == -1) snprintf(value, sizeof value, "Unlocked");
@@ -690,12 +703,11 @@ static void ov_menu_panel(const ov_canvas *root, int st, int scroll) {
             else if(it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY)dm_menu_diag_option(it==OVM_DIAG_DELAY,value,sizeof value);
             else if (ov_flag_item(it)) dm_menu_radv_note(it - OVM_FLAG_DLC, value, sizeof value);
             else snprintf(value, sizeof value, "%s", dm_vk_driver_status());
-            const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_FLOW || it == OVM_RATE || it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY || ov_flag_item(it);
+            const int action = it==OVM_DRS || it == OVM_DRIVER || it == OVM_OUTPUT_HEIGHT || it == OVM_OUTPUT_CUSTOM || it == OVM_FSR || it == OVM_FG_MULT || it == OVM_FG_PRESET || it == OVM_RATE || it==OVM_DIAG_SNAPSHOT || it==OVM_DIAG_DELAY || ov_flag_item(it);
             float trailing=action?m3_text_w(">",small_scale)+rh*0.16f:0;
-            if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT || (it==OVM_FG_FLOW && dm_menu_fg_flow()<=0)) {
+            if (it==OVM_FSR || it==OVM_OUTPUT_HEIGHT) {
                 char last[80];
-                if(it==OVM_FG_FLOW)dm_fg_menu_label(&g_menu_fg,last,sizeof last);
-                else dm_recon_menu_label(&g_menu_recon,it==OVM_OUTPUT_HEIGHT,last,sizeof last);
+                dm_recon_menu_label(&g_menu_recon,it==OVM_OUTPUT_HEIGHT,last,sizeof last);
                 m3_bounded_text(cv,x1-trailing,cy-rh*0.17f,value,small_scale,x1-control_left-trailing,1,M3_PRIMARY);
                 m3_bounded_text(cv,x1-trailing,cy+rh*0.19f,last,small_scale*0.78f,x1-control_left-trailing,1,M3_VARIANT);
             } else m3_bounded_text(cv,x1-trailing,cy,value,small_scale,x1-control_left-trailing,1,action?M3_PRIMARY:M3_VARIANT);

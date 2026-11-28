@@ -20,6 +20,7 @@
 // follow their position (the Switch's layout) or their label (an Xbox controller's A is the game's A),
 // per controller — the label belongs to the controller, not to the game.
 #include "dm.h"
+#include "gfx_vk_fg_flow.h"
 #include "front.h"
 #include "front_profile.h"
 #include "radv_test_flags.h"
@@ -414,7 +415,7 @@ int dm_menu_fg_mult(void) {
 int dm_menu_fg_flow(void) {
     const char *e = getenv("DM_LSFG_FLOW");
     int flow = e ? atoi(e) : 75;
-    return flow <= 0 ? 0 : flow < 25 ? 25 : flow > 100 ? 100 : flow;
+    return dm_fg_flow_normalize(flow);
 }
 int dm_menu_fg_has_dll(void) {
     const char *dll = getenv("DM_LSFG_DLL");

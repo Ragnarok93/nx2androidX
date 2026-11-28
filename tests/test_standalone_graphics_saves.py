@@ -58,7 +58,7 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
                                    "OVM_OUTPUT_1800", "OVM_OUTPUT_2160", "OVM_OUTPUT_2880", "OVM_OUTPUT_4320",
                                    "OVM_OUTPUT_CUSTOM", "OVM_OUTPUT_BACK"])
         self.assertFalse(any("OVM_DRS_HOOK" in row for row in rows))
-        self.assertEqual(rows[3], ["OVM_RATE", "OVM_FG", "OVM_FG_MULT", "OVM_FG_FLOW", "OVM_DIAG_OPEN"])
+        self.assertEqual(rows[3], ["OVM_RATE", "OVM_FG", "OVM_FG_MULT", "OVM_FG_FLOW", "OVM_FG_FIXED", "OVM_FG_PRESET", "OVM_DIAG_OPEN"])
         self.assertIn('[OVM_VIVID]="HDR"', self.gfx)
         self.assertIn("vivid=%d", self.front)
         self.assertEqual(sum(row.count("OVM_FPS") for row in rows), 1)

@@ -17,6 +17,8 @@ static float dm_overlay_scale(void){return 1;}
 static int live=1;
 int dm_menu_audio_available(void){return 0;}
 int dm_menu_rs_live(void){return live;}
+static int flow;
+int dm_menu_fg_flow(void){return flow;}
 int main(void){
      assert(OVM_TAB_NAMES[2][0]=='G'); float p[4],r[4]; ov_menu_rect(1536,720,p);
 #ifdef OV_SETTINGS_VIEW_ROWS
@@ -61,6 +63,16 @@ int main(void){
         assert(ov_settings_clamp(2,-100)==0&&ov_settings_clamp(2,100000)==max);
         ov_settings_row(p,0,1,0,r);assert(fabsf(r[3]-a[3])<0.01f);
         assert(ov_settings_hit(p,0,0,p[0]+p[2]/2,v[1]+v[3]*0.95f)==-1);
+    }
+    flow=0;assert(ov_settings_count(3)==5 && ov_menu_item(3,5)==-1 && ov_menu_item(3,6)==-1);
+    flow=75;assert(ov_settings_count(3)==6 && ov_menu_item(3,5)==OVM_FG_FIXED && ov_menu_item(3,6)==-1);
+    flow=-3;assert(ov_settings_count(3)==6 && ov_menu_item(3,5)==-1 && ov_menu_item(3,6)==OVM_FG_PRESET);
+    assert(ov_menu_item(3,7)==OVM_DIAG_OPEN && ov_settings_slider(OVM_FG_FIXED));
+    for(unsigned k=0;k<sizeof screens/sizeof screens[0];k++){
+        ov_menu_rect(screens[k][0],screens[k][1],p);
+        assert(ov_settings_row(p,3,4,0,r));float a,b;ov_settings_flow_track(r,&a,&b);
+        for(int i=0;i<3;i++)assert(ov_settings_flow_hit(p,a+(i+.5f)*(b-a)/3)==i);
+        assert(ov_settings_flow_hit(p,a-1)==-1 && ov_settings_flow_hit(p,b)==-1);
     }
     live=0;assert(ov_settings_count(2)==6);
     ov_menu_rect(1536,720,p);assert(!ov_settings_row(p,2,7,0,r));

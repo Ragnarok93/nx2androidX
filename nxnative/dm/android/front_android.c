@@ -75,7 +75,8 @@ void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freez
 static char g_root[512], g_settings_file[700];
 const char *dm_front_root(void) { return g_root; }   // overlay_theme.c: the player's path has no APK assets, the theme comes from the pack's overlay/
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // gamepad, rumble, frame rate
-static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;  // standalone FG preferences
+static _Atomic int g_set_fg, g_set_fg_mult = 2, g_set_fg_flow = 75;
+static _Atomic int g_set_fg_fixed=75,g_set_fg_preset=DM_FG_FLOW_ADAPTIVE;  // standalone FG preferences
 static _Atomic unsigned g_set_rs_live=NX_RS_OFF|(50u<<2)|(100u<<9);
 unsigned dm_rs_live_config(void) {return atomic_load(&g_set_rs_live);}
 int vk_rs_live_available(void); unsigned vk_rs_live_recorded(void);
@@ -109,6 +110,11 @@ int dm_menu_drs_min(void) { return dm_menu_rs_live()? (int)nx_rs_live_unpack(dm_
 int dm_graphics_target_fps(void) { return dm_fps_lock_supported() ? atomic_load(&g_set_rate) : 0; }
 int dm_menu_rate(void) { return atomic_load(&g_set_rate); }
 int dm_menu_rate_supported(void) { return dm_fps_lock_supported(); }
+static void fg_remember_selected(void) {
+    int n=atomic_load(&g_set_fg_flow);
+    if(n>0)atomic_store(&g_set_fg_fixed,n);
+    else if(n<0)atomic_store(&g_set_fg_preset,n);
+}
 static void settings_load(void) {
     const char *fpstarget = getenv("DM_FPS_TARGET");
     int initial = fpstarget ? atoi(fpstarget) : DM_GAME_FPS_TARGET;
@@ -121,6 +127,7 @@ static void settings_load(void) {
     if ((fg_env = getenv("DM_LSFG_FLOW"))) {
         int n = atoi(fg_env); atomic_store(&g_set_fg_flow,dm_fg_flow_normalize(n));
     }
+    fg_remember_selected();
     if ((fg_env = getenv("DM_VIVID"))) atomic_store(&g_set_vivid, atoi(fg_env) != 0);
     if ((fg_env = getenv("DM_FSR"))) atomic_store(&g_set_upscaler, atoi(fg_env) ? SP_FSR1 : SP_NATIVE);
     if ((fg_env = getenv("DM_UPSCALER"))) {
@@ -150,6 +157,8 @@ static void settings_load(void) {
         else if (sscanf(line, "fg=%d", &v) == 1) atomic_store(&g_set_fg, v != 0);
         else if (sscanf(line, "fg_mult=%d", &v) == 1) atomic_store(&g_set_fg_mult, v < 2 ? 2 : v > 4 ? 4 : v);
         else if (sscanf(line, "fg_flow=%d", &v) == 1) atomic_store(&g_set_fg_flow,dm_fg_flow_normalize(v));
+        else if (sscanf(line,"fg_fixed=%d",&v)==1 && v>=25 && v<=100)atomic_store(&g_set_fg_fixed,v);
+        else if (sscanf(line,"fg_preset=%d",&v)==1 && dm_fg_flow_mode(v)==DM_FG_MODE_ADAPTIVE)atomic_store(&g_set_fg_preset,v);
         else if (sscanf(line, "vivid=%d", &v) == 1) atomic_store(&g_set_vivid, v != 0);
         else if (sscanf(line, "fsr=%d", &v) == 1) atomic_store(&g_set_upscaler, v ? SP_FSR1 : SP_NATIVE);
         else if (sscanf(line, "upscaler=%d", &v) == 1) {
@@ -176,6 +185,7 @@ static void settings_load(void) {
         } else if (sscanf(line, "menu_x=%d", &v) == 1 && v >= 0 && v <= 10000) { int m = ctl_named("menu"); for (int l = 0; l < 2 && m >= 0; l++) atomic_store(&g_cust[0][l][m][0], v + 1); }   // before
         else if (sscanf(line, "menu_y=%d", &v) == 1 && v >= 0 && v <= 10000) { int m = ctl_named("menu"); for (int l = 0; l < 2 && m >= 0; l++) atomic_store(&g_cust[0][l][m][1], v + 1); }   // the editor
     }
+    fg_remember_selected();
     if (saved_upscaler >= 0) atomic_store(&g_set_upscaler, saved_upscaler);
     fclose(f);
 }
@@ -191,6 +201,7 @@ static void settings_save(void) {
             atomic_load(&g_set_opacity), atomic_load(&g_set_grid), atomic_load(&g_set_fg), atomic_load(&g_set_fg_mult), atomic_load(&g_set_fg_flow),
             upscaler == SP_FSR1, upscaler, atomic_load(&g_set_fsr_sharp), atomic_load(&g_set_rate),
             atomic_load(&g_set_dyn), atomic_load(&g_set_dyn_min));
+    fprintf(f,"fg_fixed=%d\nfg_preset=%d\n",atomic_load(&g_set_fg_fixed),atomic_load(&g_set_fg_preset));
     fprintf(f, "vivid=%d\nrs_live=%u\n", atomic_load(&g_set_vivid),dm_rs_live_config());
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
         _Atomic int *c = g_cust[0][l][i]; int x = atomic_load(&c[0]), y = atomic_load(&c[1]), z = atomic_load(&c[2]);
@@ -908,12 +919,30 @@ static void fg_mult_step(int direction) {
     atomic_fetch_add(&g_menu_cfg_ver, 1);
     fg_apply();
 }
-static void fg_flow_step(int direction) {
-    int n = atomic_load(&g_set_fg_flow);
-    n=dm_fg_flow_step(n,direction);
-    atomic_store(&g_set_fg_flow, n);
-    atomic_fetch_add(&g_menu_cfg_ver, 1);
+static void fg_flow_select_mode(int mode) {
+    int n=dm_fg_flow_select(mode,atomic_load(&g_set_fg_fixed),atomic_load(&g_set_fg_preset));
+    if(atomic_exchange(&g_set_fg_flow,n)==n)return;
+    atomic_fetch_add(&g_menu_cfg_ver,1);
     fg_apply();
+    menu_scroll_set(3,ov_settings_clamp(3,dm_menu_scroll_units()));
+}
+static void fg_flow_step(int direction) {
+    int mode=dm_fg_flow_mode(dm_menu_fg_flow());
+    fg_flow_select_mode((mode+(direction<0?2:1))%3);
+}
+static void fg_preset_step(int direction) {
+    if(dm_fg_flow_mode(dm_menu_fg_flow())!=DM_FG_MODE_ADAPTIVE)return;
+    int n=dm_fg_flow_preset_step(dm_menu_fg_flow(),direction);
+    atomic_store(&g_set_fg_preset,n);atomic_store(&g_set_fg_flow,n);
+    atomic_fetch_add(&g_menu_cfg_ver,1);fg_apply();
+}
+static void fg_fixed_set(int value) {
+    if(dm_fg_flow_mode(dm_menu_fg_flow())!=DM_FG_MODE_FIXED)return;
+    int n=dm_fg_flow_select(DM_FG_MODE_FIXED,value,0);
+    if(atomic_exchange(&g_set_fg_flow,n)==n)return;
+    atomic_store(&g_set_fg_fixed,n);
+    atomic_fetch_add(&g_menu_cfg_ver,1);
+    dm_fg_set(atomic_load(&g_set_fg),atomic_load(&g_set_fg_mult),0,n);
 }
 int vk_pass_dump_user_begin(int delay, int full);
 void vk_pass_dump_user_stop(void);
@@ -1052,6 +1081,8 @@ static void menu_do(int item) {
     }
     else if (item == OVM_FG_MULT) fg_mult_step(1);
     else if (item == OVM_FG_FLOW) fg_flow_step(1);
+    else if (item==OVM_FG_PRESET) fg_preset_step(1);
+    else if (item==OVM_FG_FIXED) return;
     else if (item == OVM_DRIVER) { jni_save_document_picker("chooseVulkanDriver"); return; } // persisted for next process only
     else if (item == OVM_DIAG_OPEN) { atomic_store(&g_diag_flags_page, 1); atomic_store(&g_menu_hi, -1); }
     else if (item == OVM_DIAG_BACK) { atomic_store(&g_diag_flags_page, 0); atomic_store(&g_menu_hi, -1); }
@@ -1096,6 +1127,7 @@ static void menu_slider_set(int item,float x,const float p[4]) {
     else if(item==OVM_FSR_SHARP) menu_fsr_sharp(5*(int)lroundf(f*20));
     else if(item==OVM_DRS_MIN) menu_drs_min(50+5*(int)lroundf(f*(dm_menu_rs_live()?10:9)));
     else if(item==OVM_RS_MAX) menu_rs_max(50+5*(int)lroundf(f*10));
+    else if(item==OVM_FG_FIXED)fg_fixed_set(25+5*(int)lroundf(f*15));
 }
 static void menu_touch(const dm_java_event *e,float W,float H) {
     int act=e->action&AMOTION_EVENT_ACTION_MASK, ai=e->action>>AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
@@ -1144,6 +1176,7 @@ static void menu_touch(const dm_java_event *e,float W,float H) {
                 // Large horizontal motions are not taps; vertical drags may end on the same row.
                 if(fmaxf(fabsf(x-g_menu_down_x),fabsf(y-g_menu_down_y))<v[3]/OV_SETTINGS_VIEW_ROWS*0.14f){
                     if(ov_settings_slider(item)){if(x>=v[0]+v[2]*OV_SETTINGS_SLIDER_HIT){menu_slider_set(item,x,p);settings_save();}}
+                    else if(item==OVM_FG_FLOW){int mode=ov_settings_flow_hit(p,x);if(mode>=0){fg_flow_select_mode(mode);dm_haptics_android_tap();}else menu_do(item);}
                     else if(item==OVM_OUTPUT_CUSTOM){menu_output_step(x<p[0]+p[2]*0.5f?-1:1,1);dm_haptics_android_tap();}
                     else if(item>=0&&item!=OVM_TAB)menu_do(item);
                     else if(row==-2||row==-3){dm_haptics_android_tap();menu_close();}
@@ -1176,6 +1209,8 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_RATE) { menu_rate_step(bit == DM_BTN_LEFT ? -1 : 1); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_MULT) { fg_mult_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && (item==OVM_DIAG_SNAPSHOT || item==OVM_DIAG_DELAY)) { diag_option_step(item==OVM_DIAG_DELAY,bit==DM_BTN_LEFT?-1:1); }
+    else if ((bit==DM_BTN_LEFT || bit==DM_BTN_RIGHT) && item==OVM_FG_FIXED){fg_fixed_set(dm_menu_fg_flow()+(bit==DM_BTN_LEFT?-5:5));settings_save();dm_overlay_redraw();}
+    else if ((bit==DM_BTN_LEFT || bit==DM_BTN_RIGHT) && item==OVM_FG_PRESET){fg_preset_step(bit==DM_BTN_LEFT?-1:1);dm_overlay_redraw();}
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_FG_FLOW) { fg_flow_step(bit == DM_BTN_LEFT ? -1 : 1); dm_overlay_redraw(); }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(atomic_load(&g_menu_tab) + (bit == DM_BTN_LEFT ? -1 : 1));
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {

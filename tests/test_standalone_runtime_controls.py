@@ -37,7 +37,7 @@ class StandaloneRuntimeControlsTest(unittest.TestCase):
         self.assertIn('dm_fg_set(atomic_load(&g_set_fg)', front)
         self.assertIn("fg_mult_step(1)", front)
         self.assertIn("fg_flow_step(1)", front)
-        for x in ("fg=%d", "fg_mult=%d", "fg_flow=%d"):
+        for x in ("fg=%d", "fg_mult=%d", "fg_flow=%d", "fg_fixed=%d", "fg_preset=%d"):
             self.assertIn(x, front)
         self.assertIn('"%s/Lossless.dll"', front)
         self.assertIn('"Need DLL"', draw)
