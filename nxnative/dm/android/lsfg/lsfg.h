@@ -45,6 +45,7 @@ void lsfg_pacer_resume(lsfg_pacer *p, double now);
 
 // ---------- The chain (lsfg_chain.c), Vulkan; needs the replay's device (vka.h) ----------
 #ifdef VK_VERSION_1_0
+#include "lsfg_graph_budget.h"
 enum { LSFG_MAX_GENERATIONS = 3, LSFG_GENERATION_SLOTS = LSFG_MAX_GENERATIONS * (LSFG_MAX_GENERATIONS + 1) / 2 };
 typedef struct lsfg_chain lsfg_chain;
 // The chain for frames of extent ext (RGBA8 UNORM inputs); flow_scale 0.25..1 is the optical flow's resolution. outs[g] are the images generation g writes (storage, RGBA8)
@@ -57,6 +58,8 @@ lsfg_chain *lsfg_chain_build(const lsfg_modules *mods,VkExtent2D ext,float flow_
 // only for construction; a completed graph never retains it.
 lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
         const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit,const atomic_int *cancel);
+// Query actual image/buffer requirements without allocating device memory.
+int lsfg_chain_measure(VkExtent2D ext,float flow_scale,lsfg_graph_budget *requirements,const atomic_int *cancel);
 uint64_t lsfg_chain_bytes(const lsfg_chain *c);
 uint64_t lsfg_chain_heap_bytes(const lsfg_chain *c,unsigned heap);
 // Record exactly once per successful initialization submission, before use.

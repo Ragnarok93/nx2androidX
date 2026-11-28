@@ -95,10 +95,12 @@ static int graph_memory_allocate(lsfg_chain *c, const VkMemoryAllocateInfo *ai,
              (unsigned long long)ai->allocationSize);
         return 0;
     }
-    if (!lsfg_graph_fits(&c->budget,ai->allocationSize)) {
-        VLOG("LSFG_ALLOC_REJECT origin=policy_budget kind=%s type=%u heap=%u bytes=%llu used=%llu limit=%llu",
+    if (!lsfg_graph_fits_heap(&c->budget,heap,ai->allocationSize)) {
+        VLOG("LSFG_ALLOC_REJECT origin=policy_budget kind=%s type=%u heap=%u bytes=%llu used=%llu limit=%llu heap_used=%llu heap_limit=%llu",
              kind,type,heap,(unsigned long long)ai->allocationSize,
-             (unsigned long long)c->budget.used,(unsigned long long)c->budget.limit);
+             (unsigned long long)c->budget.used,(unsigned long long)c->budget.limit,
+             (unsigned long long)c->budget.heap_used[heap],
+             (unsigned long long)(c->budget.heap_limited?c->budget.heap_limit[heap]:UINT64_MAX));
         return 0;
     }
     VkResult r=vk.vkAllocateMemory(V.dev,ai,NULL,out);
@@ -111,14 +113,18 @@ static int graph_memory_allocate(lsfg_chain *c, const VkMemoryAllocateInfo *ai,
     lsfg_graph_charge_heap(&c->budget,heap,ai->allocationSize);
     return 1;
 }
+static VkImageCreateInfo graph_image_info(VkExtent2D ext,VkFormat fmt) {
+    return (VkImageCreateInfo){VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .format = fmt, .extent = {ext.width, ext.height, 1}, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+}
 static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
     if (chain_stopped(c)) return NULL;
     if (c->nimg >= MAX_IMAGES) { VRED("lsfg: more than %d images", MAX_IMAGES); c->bad = 1; return NULL; }
     limg *im = &c->imgs[c->nimg++];
     im->ext = (VkExtent2D){ext.width ? ext.width : 1, ext.height ? ext.height : 1}; im->fmt = fmt;
-    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = {im->ext.width, im->ext.height, 1}, .mipLevels = 1, .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+    VkImageCreateInfo ci = graph_image_info(im->ext,fmt);
     VkResult r = vk.vkCreateImage(V.dev, &ci, NULL, &im->img);
     if (r) im->img=VK_NULL_HANDLE;
     VkMemoryRequirements mr = {0}; if (!r) vk.vkGetImageMemoryRequirements(V.dev, im->img, &mr);
@@ -133,6 +139,25 @@ static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
         if (r) im->view=VK_NULL_HANDLE;
     }
     if (r) { VRED("lsfg: image %ux%u format %d: %d", im->ext.width, im->ext.height, fmt, r); c->bad = 1; return NULL; }
+    return im;
+}
+
+// Temporary unbound image: no VkDeviceMemory, view, pipeline or submission.
+static limg *img_measure(lsfg_chain *c,VkExtent2D ext,VkFormat fmt) {
+    if(chain_stopped(c))return NULL;
+    if(c->nimg>=MAX_IMAGES){c->bad=1;return NULL;}
+    limg *im=&c->imgs[c->nimg++];
+    im->ext=(VkExtent2D){ext.width?ext.width:1,ext.height?ext.height:1};im->fmt=fmt;
+    VkImageCreateInfo ci=graph_image_info(im->ext,fmt);
+    VkImage image=VK_NULL_HANDLE;
+    VkResult r=vk.vkCreateImage(V.dev,&ci,NULL,&image);
+    if(r){c->bad=1;return NULL;}
+    VkMemoryRequirements mr={0};
+    vk.vkGetImageMemoryRequirements(V.dev,image,&mr);
+    vk.vkDestroyImage(V.dev,image,NULL);
+    uint32_t type=vka_mem_type(mr.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,0);
+    uint32_t heap=type<V.mem.memoryTypeCount?V.mem.memoryTypes[type].heapIndex:UINT32_MAX;
+    if(!mr.size || !lsfg_graph_charge_heap(&c->budget,heap,mr.size)){c->bad=1;return NULL;}
     return im;
 }
 
@@ -232,6 +257,79 @@ static void run(VkCommandBuffer cb, const lpass *p, VkDescriptorSet s, uint32_t 
 
 static VkExtent2D halve(VkExtent2D e) { return (VkExtent2D){(e.width + 1) >> 1, (e.height + 1) >> 1}; }
 
+// The same geometry and formats drive measurement and actual allocation.
+static int graph_images_new(lsfg_chain *c,VkExtent2D ext,float flow_scale,
+                            limg *(*make)(lsfg_chain *,VkExtent2D,VkFormat)) {
+    for(int i=0;i<2;i++)c->frames[i]=make(c,ext,LSFG_FORMAT);
+    c->flow_ext=(VkExtent2D){(uint32_t)(ext.width*flow_scale),(uint32_t)(ext.height*flow_scale)};
+    if(!c->flow_ext.width)c->flow_ext.width=1;
+    if(!c->flow_ext.height)c->flow_ext.height=1;
+    for(int i=0;i<MIPS;i++)c->mip[i]=make(c,(VkExtent2D){c->flow_ext.width>>i,c->flow_ext.height>>i},LSFG_FLOW_FORMAT);
+    for(int l=0;l<MIPS&&!chain_stopped(c);l++) {
+        __typeof__(c->alpha[0]) *a=&c->alpha[l];
+        a->input=c->mip[l];
+        VkExtent2D half=halve(a->input->ext),quarter=halve(half);
+        a->t1=make(c,half,LSFG_FORMAT);a->t2=make(c,half,LSFG_FORMAT);
+        for(int i=0;i<2;i++) {
+            a->t3[i]=make(c,quarter,LSFG_FORMAT);
+            for(int j=0;j<HIST;j++)a->out[j][i]=make(c,quarter,LSFG_FORMAT);
+        }
+    }
+    if(chain_stopped(c))return 0;
+    VkExtent2D beta=c->alpha[0].out[0][0]->ext;
+    for(int i=0;i<2;i++) {
+        c->beta_t1[i]=make(c,beta,LSFG_FORMAT);c->beta_t2[i]=make(c,beta,LSFG_FORMAT);
+    }
+    for(int i=0;i<BETA_OUTPUTS;i++)c->beta_out[i]=make(c,(VkExtent2D){beta.width>>i,beta.height>>i},LSFG_FLOW_FORMAT);
+    for(int i=0;i<MIPS&&!chain_stopped(c);i++) {
+        VkExtent2D e=c->alpha[MIPS-1-i].out[0][0]->ext;
+        __typeof__(c->gamma[0]) *g=&c->gamma[i];
+        for(int k=0;k<3;k++)g->t1[k]=make(c,e,LSFG_FORMAT);
+        for(int k=0;k<2;k++)g->t2[k]=make(c,e,LSFG_FORMAT);
+        g->out=make(c,e,LSFG_MOTION_FORMAT);
+        if(i<FIRST_DELTA_LEVEL||chain_stopped(c))continue;
+        __typeof__(c->delta[0]) *d=&c->delta[i-FIRST_DELTA_LEVEL];
+        for(int k=0;k<3;k++)d->t1[k]=make(c,e,LSFG_FORMAT);
+        for(int k=0;k<2;k++)d->t2[k]=make(c,e,LSFG_FORMAT);
+        d->out1=make(c,e,LSFG_MOTION_FORMAT);d->out2=make(c,e,LSFG_MOTION_FORMAT);
+    }
+    return !chain_stopped(c);
+}
+
+static VkBufferCreateInfo graph_uniform_info(VkDeviceSize *stride) {
+    VkDeviceSize al=V.ub_align?V.ub_align:256;
+    *stride=(sizeof(lconst)+al-1)/al*al;
+    return (VkBufferCreateInfo){VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size=*stride*MAX_UBO,.usage=VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};
+}
+
+int lsfg_chain_measure(VkExtent2D ext,float flow_scale,lsfg_graph_budget *requirements,const atomic_int *cancel) {
+    if(!requirements)return 0;
+    *requirements=(lsfg_graph_budget){0};
+    if(!ext.width||!ext.height||!(flow_scale>=.25f&&flow_scale<=1.f)||
+        (cancel&&atomic_load_explicit(cancel,memory_order_acquire)))return 0;
+    lsfg_chain *c=calloc(1,sizeof *c);
+    if(!c)return 0;
+    c->budget.limit=UINT64_MAX;c->cancel=cancel;
+    VkBufferCreateInfo bi=graph_uniform_info(&c->ustride);
+    VkBuffer buf=VK_NULL_HANDLE;
+    VkResult r=vk.vkCreateBuffer(V.dev,&bi,NULL,&buf);
+    if(r)c->bad=1;
+    else {
+        VkMemoryRequirements mr={0};
+        vk.vkGetBufferMemoryRequirements(V.dev,buf,&mr);
+        vk.vkDestroyBuffer(V.dev,buf,NULL);
+        uint32_t type=vka_mem_type(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,0);
+        uint32_t heap=type<V.mem.memoryTypeCount?V.mem.memoryTypes[type].heapIndex:UINT32_MAX;
+        if(!mr.size || !lsfg_graph_charge_heap(&c->budget,heap,mr.size))c->bad=1;
+    }
+    int ok=!chain_stopped(c)&&graph_images_new(c,ext,flow_scale,img_measure);
+    if(ok)*requirements=c->budget;
+    free(c); // only transient, already-destroyed unbound Vulkan objects
+    return ok;
+}
+
 // ---------- The chain ----------
 lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext, float flow_scale,
         const VkImageView out_views[LSFG_MAX_GENERATIONS], uint64_t byte_limit,const atomic_int *cancel) {
@@ -239,9 +337,22 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     if (!mods || !ext.width || !ext.height || !(flow_scale>=0.25f && flow_scale<=1.0f) ||
         !out_views || !byte_limit || !lk_load()) return NULL;
     for (int i=0;i<LSFG_MAX_GENERATIONS;i++) if (!out_views[i]) return NULL;
+    lsfg_graph_budget measured={0};
+    if(byte_limit!=UINT64_MAX) {
+        if(!lsfg_chain_measure(ext,flow_scale,&measured,cancel))return NULL;
+        if(measured.used>byte_limit) {
+            VLOG("LSFG_ALLOC_REJECT origin=preflight_budget bytes=%llu limit=%llu",
+                (unsigned long long)measured.used,(unsigned long long)byte_limit);
+            return NULL;
+        }
+    }
     lsfg_chain *c = calloc(1, sizeof *c);
     if (!c) return NULL;
     c->budget.limit=byte_limit;c->cancel=cancel;
+    if(byte_limit!=UINT64_MAX) {
+        c->budget.heap_limited=1;
+        memcpy(c->budget.heap_limit,measured.heap_used,sizeof c->budget.heap_limit);
+    }
     lwriter w;
     // Descriptor pool, samplers, uniform buffer
     VkDescriptorPoolSize ps[4] = {{S_UBO, DESCRIPTORS_PER_TYPE}, {S_SMP, DESCRIPTORS_PER_TYPE}, {S_TEX, DESCRIPTORS_PER_TYPE}, {S_STO, DESCRIPTORS_PER_TYPE}};
@@ -250,8 +361,7 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     c->samp = sampler_new(c, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_COMPARE_OP_NEVER, 0);
     c->samp_border = sampler_new(c, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_COMPARE_OP_NEVER, 1);
     c->samp_edge = sampler_new(c, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_COMPARE_OP_ALWAYS, 0);
-    VkDeviceSize al = V.ub_align ? V.ub_align : 256; c->ustride = (sizeof(lconst) + al - 1) / al * al;
-    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = c->ustride * MAX_UBO, .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};
+    VkBufferCreateInfo bi = graph_uniform_info(&c->ustride);
     VkResult r = chain_stopped(c)?VK_ERROR_INITIALIZATION_FAILED:vk.vkCreateBuffer(V.dev, &bi, NULL, &c->ubuf);
     if (r) c->ubuf=VK_NULL_HANDLE;
     VkMemoryRequirements mr = {0}; if (!r) vk.vkGetBufferMemoryRequirements(V.dev, c->ubuf, &mr);
@@ -264,15 +374,12 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     else if (!allocated) c->bad=1;
     else c->umap = map;
 
-    // Inputs
-    for (int i = 0; i < 2; i++) c->frames[i] = img_new(c, ext, LSFG_FORMAT);
+    if(chain_stopped(c)||!graph_images_new(c,ext,flow_scale,img_new)) {
+        lsfg_chain_free(c);return NULL;
+    }
 
     // Mipmaps (LsfgMipmaps)
     PASS(&c->mip_pass, LSFG_SH_MIPMAPS, {1, S_UBO}, {1, S_SMP}, {1, S_TEX}, {MIPS, S_STO});
-    c->flow_ext = (VkExtent2D){(uint32_t)(ext.width * flow_scale), (uint32_t)(ext.height * flow_scale)};
-    if (!c->flow_ext.width) c->flow_ext.width = 1;
-    if (!c->flow_ext.height) c->flow_ext.height = 1;
-    for (int i = 0; i < MIPS; i++) c->mip[i] = img_new(c, (VkExtent2D){c->flow_ext.width >> i, c->flow_ext.height >> i}, LSFG_FLOW_FORMAT);
     for (int i = 0; i < 2; i++) {
         c->mip_sets[i] = set_new(c, &c->mip_pass);
         w_begin(&w, c, c->mip_sets[i]); w_ubo(&w, ubo_get(c, flow_scale, 0, 0, 0)); w_samp(&w, c->samp); w_tex(&w, c->frames[i]); w_stores(&w, c->mip, MIPS); w_end(&w);
@@ -285,10 +392,6 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     PASS(&c->alpha_pass[3], 293, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
     for (int l = 0; l < MIPS && !c->bad; l++) {
         __typeof__(c->alpha[0]) *a = &c->alpha[l];
-        a->input = c->mip[l];
-        VkExtent2D half = halve(a->input->ext), quarter = halve(half);
-        a->t1 = img_new(c, half, LSFG_FORMAT); a->t2 = img_new(c, half, LSFG_FORMAT);
-        for (int i = 0; i < 2; i++) { a->t3[i] = img_new(c, quarter, LSFG_FORMAT); for (int j = 0; j < HIST; j++) a->out[j][i] = img_new(c, quarter, LSFG_FORMAT); }
         for (int s = 0; s < ALPHA_STAGES - 1; s++) a->sets[s] = set_new(c, &c->alpha_pass[s]);
         for (int h = 0; h < HIST; h++) a->last[h] = set_new(c, &c->alpha_pass[3]);
         if (c->bad) break;
@@ -304,9 +407,6 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     PASS(&c->beta_pass[4], 302, {1, S_UBO}, {1, S_SMP}, {2, S_TEX}, {6, S_STO});
     if (!c->bad) {
         limg *(*in)[2] = c->alpha[0].out;
-        VkExtent2D e = in[0][0]->ext;
-        for (int i = 0; i < 2; i++) { c->beta_t1[i] = img_new(c, e, LSFG_FORMAT); c->beta_t2[i] = img_new(c, e, LSFG_FORMAT); }
-        for (int i = 0; i < BETA_OUTPUTS; i++) c->beta_out[i] = img_new(c, (VkExtent2D){e.width >> i, e.height >> i}, LSFG_FLOW_FORMAT);
         for (int h = 0; h < HIST; h++) c->beta_first[h] = set_new(c, &c->beta_pass[0]);
         for (int s = 0; s < BETA_STAGES - 1; s++) c->beta_sets[s] = set_new(c, &c->beta_pass[s + 1]);
         for (int h = 0; h < HIST && !c->bad; h++) {
@@ -341,10 +441,6 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
         limg *flow = c->beta_out[level < BETA_OUTPUTS - 1 ? level : BETA_OUTPUTS - 1];
         limg *prev = i == 0 ? NULL : c->gamma[i - 1].out;
         __typeof__(c->gamma[0]) *g = &c->gamma[i];
-        VkExtent2D e = in[0][0]->ext;
-        for (int k = 0; k < 3; k++) g->t1[k] = img_new(c, e, LSFG_FORMAT);
-        for (int k = 0; k < 2; k++) g->t2[k] = img_new(c, e, LSFG_FORMAT);
-        g->out = img_new(c, e, LSFG_MOTION_FORMAT);
         for (int s = 0; s < LSFG_GENERATION_SLOTS && !c->bad; s++) {
             VkDeviceSize ub = ubo_get(c, flow_scale, slot_timestamp((size_t)s), prev == NULL, 0);
             for (int h = 0; h < HIST; h++) g->g[s].first[h] = set_new(c, &c->gamma_pass[0]);
@@ -365,9 +461,6 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
         limg *pg = i == FIRST_DELTA_LEVEL ? NULL : c->gamma[i - 1].out;
         limg *p1 = i == FIRST_DELTA_LEVEL ? NULL : c->delta[di - 1].out1, *p2 = i == FIRST_DELTA_LEVEL ? NULL : c->delta[di - 1].out2;
         limg *dflow = c->beta_out[level];
-        for (int k = 0; k < 3; k++) d->t1[k] = img_new(c, e, LSFG_FORMAT);
-        for (int k = 0; k < 2; k++) d->t2[k] = img_new(c, e, LSFG_FORMAT);
-        d->out1 = img_new(c, e, LSFG_MOTION_FORMAT); d->out2 = img_new(c, e, LSFG_MOTION_FORMAT);
         for (int s = 0; s < LSFG_GENERATION_SLOTS && !c->bad; s++) {
             VkDeviceSize ub = ubo_get(c, flow_scale, slot_timestamp((size_t)s), 0, pg == NULL);
             for (int h = 0; h < HIST; h++) { d->g[s].first[h] = set_new(c, &c->delta_pass[0]); d->g[s].sixth[h] = set_new(c, &c->delta_pass[5]); }

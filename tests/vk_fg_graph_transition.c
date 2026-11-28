@@ -178,6 +178,15 @@ int main(void){
     uint64_t private_sum=0;
     for(unsigned heap=0;heap<memory_props.memoryHeapCount;heap++)private_sum+=lsfg_chain_heap_bytes(active,heap);
     assert(private_sum==lsfg_chain_bytes(active));
+    lsfg_graph_budget measured;
+    assert(lsfg_chain_measure(extent,.5f,&measured,NULL));
+    assert(measured.used==private_sum);
+    for(unsigned heap=0;heap<memory_props.memoryHeapCount;heap++)
+        assert(measured.heap_used[heap]==lsfg_chain_heap_bytes(active,heap));
+    assert(!lsfg_chain_build(&modules,extent,.5f,views,measured.used-1));
+    lsfg_chain *exact=lsfg_chain_build(&modules,extent,.5f,views,measured.used);
+    assert(exact&&lsfg_chain_bytes(exact)==measured.used);
+    lsfg_chain_free(exact);
     begin(0);lsfg_chain_record_init(active,slots[0].cb);
     for(unsigned i=0;i<3;i++)vka_img_barrier(slots[0].cb,outputs[i],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL);
     for(unsigned i=0;i<3;i++){source(slots[0].cb,active,i,++ticket);lsfg_chain_seed(active,slots[0].cb,i);}
