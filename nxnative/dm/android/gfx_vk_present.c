@@ -1633,6 +1633,20 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         accepted_generated += present_one(NULL, gen[g], generated_rect, picture, 0, hold, 0, 0);
     int accepted_real = present_one(source, source->img, rect, picture, flip_y,
                                     ng ? hold : period, ticket, 1);
+    // Shadow decisions use only completed timing and actual accepted batches.
+    // Require a recent matching reconstruction measurement when it ran.
+    extern double vk_gpu_ms_recent(void);
+    double fg_recon_ms=0;
+    if (reconstructed) {
+        fg_recon_ms=g_spatial.measured_ticket && ticket>=g_spatial.measured_ticket &&
+            ticket-g_spatial.measured_ticket<=8 && g_spatial.measured_mode==spatial_active &&
+            g_spatial.measured_output.width==target.width && g_spatial.measured_output.height==target.height ?
+            g_spatial.gpu_ms : -1;
+    }
+    uint64_t fg_workload=((uint64_t)target.width<<32)|target.height;
+    fg_workload=fg_workload*131u+(unsigned)spatial_active;
+    fg_workload=fg_workload*131u+(unsigned)docked;
+    dm_fg_shadow_present(accepted_real,accepted_generated,vk_gpu_ms_recent(),fg_recon_ms,fg_workload);
     if (dm_recon_menu_publish(&g_menu_recon,accepted_real,spatial_active,
             reconstructed!=NULL,replay_flags,
             reconstructed?reconstructed->texture.w:(unsigned)raw[2],

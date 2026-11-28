@@ -7,6 +7,7 @@
 #include "dm_framegen.h"
 #include "gfx_vk_fg_flow.h"
 #include "gfx_vk_fg_timing.h"
+#include "gfx_vk_fg_governor.h"
 #include "vka.h"
 #include <math.h>
 #include <stdio.h>
@@ -68,6 +69,9 @@ int dm_fg_status(char *buf, int n) {
 }
 
 #ifndef NX_LSFG
+void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
+    (void)real;(void)generated;(void)replay_ms;(void)recon_ms;(void)workload;
+}
 int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, unsigned source_reset,
                 double period, VkImage gen[3], double *hold, double *out_period, VkFence *consumer) {
     (void)im; (void)crop; (void)period; (void)gen; (void)flip_y; (void)encoding; (void)source_reset;
@@ -94,6 +98,9 @@ static struct {
     int timing_mult,timing_target;
     uint64_t timing_epoch,timing_serial;
     dm_fg_timing timing_pending[NFG],timing_latest;
+    dm_fg_governor shadow;
+    uint64_t shadow_workload;
+    struct {uint64_t serial,workload; double budget,elapsed;int accepted;} shadow_rows[8];
     double command_retry_at;
     unsigned fi;
     lsfg_pacer pacer; uint64_t count; uint32_t warm_streak;
@@ -182,6 +189,48 @@ static void fg_timing_read(unsigned slot) {
 }
 static void fg_timing_stamp(VkCommandBuffer cb,uint32_t index) {
     if (F.timing_queries) vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,F.timing_queries,index);
+}
+
+// Shadow only: this cannot call rebuild or modify F.flow, pacing or history.
+// The available budget is an estimate from recent completed replay and
+// reconstruction measurements, not a measured free GPU interval.
+void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_ms,uint64_t workload) {
+    const char *enabled=getenv("DM_LSFG_FLOW_SHADOW");
+    if (!enabled || !atoi(enabled)) return;
+    dm_fg_decision d=fg_decision;
+    if (d.requested_flow || !d.active_flow || !d.submission_serial) {
+        dm_fg_governor_gap(&F.shadow);return;
+    }
+    if (F.shadow.epoch!=F.timing_epoch || F.shadow.applied!=(unsigned)d.active_flow ||
+        F.shadow_workload!=workload) {
+        dm_fg_governor_reset(&F.shadow,(unsigned)d.active_flow,F.timing_epoch);
+        F.shadow_workload=workload;
+        memset(F.shadow_rows,0,sizeof F.shadow_rows);
+    }
+    // A submission serial is unique and at most NFG slots old when read.
+    // Match the actual acceptance of that batch, not the current present.
+    unsigned i=d.submission_serial%8;
+    F.shadow_rows[i].serial=d.submission_serial;
+    F.shadow_rows[i].workload=workload;
+    F.shadow_rows[i].budget=replay_ms>0 && recon_ms>=0 ?
+        d.period_ms-replay_ms-recon_ms-1.0 : 0;
+    F.shadow_rows[i].elapsed=d.measured_ms/1000.0;
+    F.shadow_rows[i].accepted=real && generated>0;
+    dm_fg_timing s=d.timing;
+    if (!s.valid) {dm_fg_governor_gap(&F.shadow);return;}
+    unsigned j=s.serial%8;
+    int matched=F.shadow_rows[j].serial==s.serial && F.shadow_rows[j].workload==workload;
+    if (!matched) {dm_fg_governor_gap(&F.shadow);return;}
+    // Recovery is deliberately vetoed until fresh memory/thermal evidence
+    // is available; pure controller tests cover the recovery path.
+    dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
+        F.shadow_rows[j].elapsed,F.shadow_rows[j].accepted && real && generated>0,0);
+    if (req.reason!=FG_FLOW_HOLD) {
+        VLOG("LSFG_FLOW_SHADOW serial=%llu epoch=%llu active=%d suggested=%u reason=%u gpu_ms=%.3f estimated_budget_ms=%.3f",
+            (unsigned long long)s.serial,(unsigned long long)s.epoch,d.active_flow,req.pct,req.reason,
+            s.total_ms,F.shadow_rows[j].budget);
+        dm_fg_governor_ack(&F.shadow,0,F.timing_epoch); // no actual transition; bound repeat reports
+    }
 }
 
 static void teardown(void) {

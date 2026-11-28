@@ -35,6 +35,8 @@ typedef struct {
     dm_fg_timing timing;
 } dm_fg_decision;
 dm_fg_decision dm_fg_last_decision(void);
+// Observational only. Called after real/generated presentation attempts.
+void dm_fg_shadow_present(int accepted_real,int accepted_generated,double replay_ms,double recon_ms,uint64_t workload);
 
 // The drawer's live switch and status line (the reason string follows the state int, Banana's "<state> <reason>")
 void dm_fg_set(int on, int multiplier, int target_rate, int flow_pct);
