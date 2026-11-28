@@ -8,7 +8,7 @@ enum { FG_FLOW_HOLD, FG_FLOW_DOWN, FG_FLOW_UP, FG_FLOW_ROLLBACK };
 typedef struct { unsigned pct,reason; } dm_fg_flow_request;
 typedef struct {
     uint64_t epoch,last;
-    unsigned applied,pending,prior,pending_reason,probe_count,min,max,step;
+    unsigned applied,pending,prior,pending_reason,probe_count,min,max,step,failed_requests;
     double down,up,backoff,baseline,base_budget,probe_time,probe_sum;
     int probe;
 } dm_fg_governor;
@@ -34,9 +34,16 @@ static inline void dm_fg_governor_ack(dm_fg_governor *g,int success,uint64_t epo
         g->prior=g->applied;g->applied=g->pending;
         g->probe=g->pending_reason==FG_FLOW_DOWN;
         g->epoch=epoch;g->last=0;
-    } else g->probe=0;
+        g->failed_requests=0;
+        g->backoff=2.0;
+    } else {
+        g->probe=0;
+        // Failed graph admission/builds can repeat at unchanged memory or
+        // thermal pressure. Back off without weakening either safety limit.
+        g->backoff=(double)(2u<<g->failed_requests);
+        if(g->failed_requests<4)++g->failed_requests;
+    }
     g->pending=g->pending_reason=0;
-    g->backoff=2.0;
     dm_fg_governor_gap(g);
 }
 static inline double dm_fg_predicted_ms(const dm_fg_timing *s,unsigned pct) {
