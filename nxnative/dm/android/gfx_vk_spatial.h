@@ -347,6 +347,23 @@ static void spatial_draw(VkCommandBuffer cb, int pass, VkDescriptorSet set, VkIm
     vkCmdEndRendering(cb);
 }
 
+// Only linear 8-bit UNORM has the same interpretation before and after
+// the old float-to-output blit. Keep the staged path for sRGB, packed
+// higher precision, and unavailable per-slot descriptors.
+static int spatial_flow_rcas_ready(unsigned slot) {
+    if (g_sfmt != VK_FORMAT_R8G8B8A8_UNORM &&
+        g_sfmt != VK_FORMAT_B8G8R8A8_UNORM) return 0;
+    const char *staged=getenv("DM_GSR2_STAGED_RCAS");
+    if (staged && atoi(staged)) return 0;
+    VkDescriptorSet *set=&g_spatial.direct_set[slot];
+    if (!*set) {
+        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL,
+            g_spatial.pool, 1, &g_spatial.dsl};
+        if (vkAllocateDescriptorSets(V.dev, &ai, set)) return 0;
+    }
+    return 1;
+}
+
 static void spatial_blit(VkCommandBuffer cb, VkImage src, VkImage dst, const int rect[4],
                          uint32_t w, uint32_t h, int flip_y, VkFilter filter) {
     VkImageBlit blit = {
@@ -549,7 +566,7 @@ unavailable:
 
 static int spatial_flow_record(VkCommandBuffer cb, unsigned slot, VkImage image,
                                const int crop[4], int flip_y, uint64_t ticket,
-                               spatial_image *output) {
+                               spatial_image *output, int direct_post, float sharpness) {
     spatial_image *current = &g_spatial.image[SP_FLOW0 + g_flow.next];
     const int cut = !g_flow.ticket || ticket - g_flow.ticket != 1;
     const unsigned first_query = SP_QUERY_STRIDE * slot;
@@ -579,6 +596,23 @@ static int spatial_flow_record(VkCommandBuffer cb, unsigned slot, VkImage image,
             g_spatial.queries ? &timing : NULL, &result)) return 0;
     if (g_spatial.queries)
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_spatial.queries, first_query + 8);
+    if (direct_post) {
+        // The slot fence has retired. This descriptor is private to this
+        // submission; never rewrite the shared intermediate-image set.
+        VkDescriptorSet set=g_spatial.direct_set[slot];
+        VkDescriptorImageInfo info={g_spatial.sampler,result.view,result.layout};
+        VkWriteDescriptorSet write={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,NULL,set,
+            0,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,&info};
+        vkUpdateDescriptorSets(V.dev,1,&write,0,NULL);
+        // vk_gsr2_record ends with an all-image barrier, covering the
+        // history attachment write -> fragment read on this same queue.
+        uint32_t w=result.extent.width,h=result.extent.height;
+        spatial_constants params={{(float)w,(float)h,(float)w,(float)h},{0,0},sharpness,1.0f};
+        barrier(cb,output->texture.img,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        spatial_draw(cb,SP_RCAS,set,output->view,0,0,w,h,params);
+        barrier(cb,output->texture.img,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+        return 1;
+    }
     int full[4] = {0, 0, (int)result.extent.width, (int)result.extent.height};
     barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     spatial_blit(cb, result.image, output->texture.img, full, result.extent.width, result.extent.height,
@@ -843,6 +877,7 @@ select_backend:;
         (raster_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) &&
         spatial_pipeline_ready(SP_RCAS);
     if (wants_post && !post && !reason) reason = "output sharpening unavailable";
+    int direct_post = post && flow && spatial_flow_rcas_ready(slot);
     int raster_output = raster || post;
     VkImageUsageFlags out_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
         (raster_output ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_TRANSFER_DST_BIT);
@@ -906,7 +941,7 @@ select_backend:;
     }
     // Base images have priority. A failed optional post pass must not
     // discard the selected reconstruction algorithm or temporal history.
-    if (post && !spatial_image_ready(SP_INTERMEDIATE, w, h,
+    if (post && !direct_post && !spatial_image_ready(SP_INTERMEDIATE, w, h,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, sample_fmt)) {
         disable_post = 1;
         g_spatial.rcas_retry_after = ticket + 120;
@@ -951,7 +986,8 @@ select_backend:;
     }
 #if SP_TEMPORAL
     if (flow) {
-        if (!spatial_flow_record(cb, slot, image, crop, flip_y, ticket, post ? intermediate : output)) {
+        if (!spatial_flow_record(cb, slot, image, crop, flip_y, ticket,
+                post && !direct_post ? intermediate : output, direct_post, sharpness)) {
             // Nothing has been submitted; abandon the command buffer and the
             // pending temporal transaction before trying the same real frame.
             vk_gsr2_commit(g_flow.ctx, 0);
@@ -985,7 +1021,7 @@ select_backend:;
                      isolated ? full : crop, w, h, isolated ? 0 : flip_y, VK_FILTER_LINEAR);
         barrier(cb, first->texture.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     }
-    if (post) {
+    if (post && !direct_post) {
         spatial_constants params = {{(float)w, (float)h, (float)w, (float)h}, {0, 0}, sharpness, 0};
         barrier(cb, intermediate->texture.img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         barrier(cb, output->texture.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -1040,7 +1076,7 @@ select_backend:;
                   w, h, stage_needed ? " (physical-size staging)" : "");
     } else src->layout = VK_IMAGE_LAYOUT_GENERAL;
     if (stage_needed) stage->last_use = fence;
-    if (rcas || post) intermediate->last_use = fence;
+    if (rcas || (post && !direct_post)) intermediate->last_use = fence;
     output->last_use = fence;
     g_spatial.resolve_ticket = resolve ? ticket : 0;
     if (resolve) resolve->last_use = fence;

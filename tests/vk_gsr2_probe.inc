@@ -463,6 +463,27 @@ static void check_image_temporal(void) {
         assert(g_spatial.encoding == SP_SGSR2 * 128u + (unsigned)sharpness);
     }
     assert(quarter > 0 && previous > quarter);
+    // Compare the new direct FP16->RCAS output with the original
+    // FP16->UNORM blit->RCAS output on identical reset frames.
+    uint8_t direct_pixels[OUT * OUT * 4];
+    memcpy(direct_pixels,mapped,sizeof direct_pixels);
+    assert(g_spatial.image[SP_INTERMEDIATE].last_use != g_flow.fence);
+    CHECK(vkQueueWaitIdle(V.q));
+    sharpness=100;
+    assert(!setenv("DM_GSR2_STAGED_RCAS","1",1));
+    ticket+=10;
+    assert(spatial_reconstruct(&src.texture,crop,0,OUT,OUT,ticket,NULL)==output);
+    assert(spatial_active==SP_SGSR2&&g_flow.ctx->pending_plan.reset);
+    assert(g_spatial.image[SP_INTERMEDIATE].last_use);
+    begin();
+    vkCmdCopyImageToBuffer(test_cb,output->texture.img,VK_IMAGE_LAYOUT_GENERAL,pixels,1,&copy);
+    complete();
+    for(unsigned i=0;i<sizeof direct_pixels;i++)
+        assert(abs((int)direct_pixels[i]-(int)mapped[i])<=(i%4==3?1:3));
+    assert(!unsetenv("DM_GSR2_STAGED_RCAS"));
+    // Non-UNORM paths must not use the direct quantization contract.
+    VkFormat saved_format=g_sfmt;g_sfmt=VK_FORMAT_R8G8B8A8_SRGB;
+    assert(!spatial_flow_rcas_ready(0));g_sfmt=saved_format;
     sharpness = 0;
     assert(spatial_reconstruct(&src.texture, crop, 0, OUT, OUT, ++ticket, NULL) == output);
     assert(spatial_active == SP_SGSR2 && !g_flow.ctx->pending_plan.reset);

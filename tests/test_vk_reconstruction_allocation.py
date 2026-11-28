@@ -35,12 +35,13 @@ typedef struct { struct { int img; unsigned w,h,fmt; } texture;
 static VkFormat g_sfmt=37;
 static struct { spatial_image image[SP_IMAGE_COUNT]; dm_recon_shared_retry shared_output_retry; VkExtent2D report_allocated;
     uint64_t report_alloc_wait_ns, rcas_retry_after, retry_after; unsigned report_alloc_waits; } g_spatial;
-static unsigned cap, failure_shared, shared_attempts, evictions, deferred, last_mode, sharpened;
+static unsigned cap, failure_shared, shared_attempts, evictions, deferred, last_mode, sharpened, direct_available;
 static unsigned first_mandatory, first_optional, attempts;
 '''+match+r'''
 static void spatial_image_drop(spatial_image *s) { if(s==&g_spatial.image[SP_INTERMEDIATE] && s->texture.img) ++evictions; *s=(spatial_image){0}; }
 static int spatial_wait(uint64_t fence,uint64_t *elapsed) { assert(fence); ++*elapsed; return 0; }
 static int spatial_pipeline_ready(int pass) { (void)pass; return 1; }
+static int spatial_flow_rcas_ready(unsigned slot) { assert(!slot);return direct_available; }
 static int spatial_drop_retired_resolve(void) { return 0; }
 static void spatial_flow_defer(uint64_t ticket) { assert(ticket); ++deferred; }
 static void spatial_report(int requested,int active,const char *reason,uint64_t ticket) { (void)requested;(void)reason;(void)ticket;last_mode=active; }
@@ -60,7 +61,7 @@ static int spatial_image_ready(int index,unsigned w,unsigned h,VkImageUsageFlags
 }
 static spatial_image *run(int requested,int flow,float sharpness,unsigned w,uint64_t ticket) {
     int mode=flow?SP_SGSR2:requested;
-    unsigned h=1080,iw=1280,ih=720;
+    unsigned h=1080,iw=1280,ih=720,slot=0;
     unsigned raster_features=16|32,sampling=32;
     VkFormat sample_fmt=g_sfmt;
     spatial_image *output=&g_spatial.image[SP_OUTPUT],*intermediate=&g_spatial.image[SP_INTERMEDIATE];
@@ -95,6 +96,10 @@ int main(void) {
     reset(60);
     assert(run(SP_SGSR2,1,1,1920,100));
     assert(last_mode==SP_SGSR2&&!sharpened&&!deferred);
+    reset(60);direct_available=1;
+    assert(run(SP_SGSR2,1,1,1920,100));
+    assert(last_mode==SP_SGSR2&&sharpened&&!deferred&&!first_optional);
+    direct_available=0;
     reset(85);
     assert(run(SP_FSR1,0,1,1920,100));
     assert(last_mode==SP_FSR1&&!sharpened);

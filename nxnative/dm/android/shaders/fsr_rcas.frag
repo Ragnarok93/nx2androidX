@@ -15,7 +15,13 @@ layout(push_constant) uniform FsrParams {
 } params;
 layout(location = 0) out vec4 color;
 AF4 FsrRcasLoadF(ASU2 pos) {
-    return texelFetch(tex, clamp(pos, ivec2(0), textureSize(tex, 0) - ivec2(1)), 0);
+    vec4 sampleColor = texelFetch(tex, clamp(pos, ivec2(0), textureSize(tex, 0) - ivec2(1)), 0);
+    // GSR2 history is FP16. Reproduce the removed 8-bit UNORM intermediate
+    // conversion before RCAS, not after the nonlinear sharpening filter.
+    // Ordinary FSR1 and bilinear RCAS already read the quantized image.
+    if (params.padding > 0.5)
+        sampleColor = unpackUnorm4x8(packUnorm4x8(sampleColor));
+    return sampleColor;
 }
 void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 void main() {
@@ -28,5 +34,5 @@ void main() {
     FsrRcasCon(c, -log2(max(strength, 1e-6)));
     AF1 r, g, b;
     FsrRcasF(r, g, b, AU2(px), c);
-    color = vec4(clamp(vec3(r, g, b), vec3(0.0), vec3(1.0)), texelFetch(tex, px, 0).a);
+    color = vec4(clamp(vec3(r, g, b), vec3(0.0), vec3(1.0)), FsrRcasLoadF(px).a);
 }
