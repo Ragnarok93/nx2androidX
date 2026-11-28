@@ -4469,7 +4469,7 @@ static int resolution_compute_fill_target(const vkshader_t *cs,const p_dispatch 
         !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
         !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || nx_rs_storage_spv_format(t->d.format)!=b->fmt ||
         t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
-        t->set_swz || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
+        !nx_rs_texture_identity_swizzle(t) || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
     *out=t;*view=v;
     return 1;
 }
@@ -4500,7 +4500,7 @@ static int resolution_compute_transform_targets(const vkshader_t *cs,const p_dis
             (i && !(t->d.flags&NVN_TEXTURE_FLAGS_IMAGE)) || !nx_rs_storage_spv_format(t->d.format) ||
             (i && nx_rs_storage_spv_format(t->d.format)!=bind[1]->fmt) ||
             t->d.target!=NVN_TEXTURE_TARGET_2D || t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
-            t->set_swz || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
+            !nx_rs_texture_identity_swizzle(t) || t->has_layout || t->has_pkg_data || !nx_rs_view_equivalent(t,v)) return 0;
         out[i]=*t;views[i]=v?*v:(view_t){0};
     }
     return out[0].mem!=out[1].mem && out[0].d.width==out[1].d.width && out[0].d.height==out[1].d.height;

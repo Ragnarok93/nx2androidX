@@ -24,6 +24,14 @@ int main(void) {
     assert(!nx_rs_sampled_owner_description_equal(&sampled,&producer));
     sampled.has_pkg_data=0;sampled.set_swz=1;
     assert(!nx_rs_sampled_owner_description_equal(&sampled,&producer));
+    sampled.swz=NVN_TEXTURE_SWIZZLE_R | (NVN_TEXTURE_SWIZZLE_G<<3) |
+        (NVN_TEXTURE_SWIZZLE_B<<6) | (NVN_TEXTURE_SWIZZLE_A<<9);
+    assert(nx_rs_sampled_owner_description_equal(&sampled,&producer));
+    producer.set_swz=1;producer.swz=sampled.swz;
+    assert(nx_rs_sampled_owner_description_equal(&sampled,&producer));
+    producer.swz^=1;
+    assert(!nx_rs_sampled_owner_description_equal(&sampled,&producer));
+    producer.set_swz=0;
     sampled.set_swz=0;sampled.has_layout=1;
     assert(!nx_rs_sampled_owner_description_equal(&sampled,&producer));
     producer.d.format=sampled.d.format=0x27;sampled.has_layout=0;

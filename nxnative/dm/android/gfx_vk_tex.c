@@ -1164,7 +1164,7 @@ vkimg_t *vk_tex_for_present(const tex_t *t) {
 // independent native texture or an integer reinterpretation.
 static vkimg_t *rs_sampled_peer(const akey *k,const tex_t *t) {
     if ((k->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || !nx_rs_storage_spv_format(t->d.format) ||
-        t->has_layout || t->has_pkg_data || t->set_swz || !t->pool ||
+        t->has_layout || t->has_pkg_data || !nx_rs_texture_identity_swizzle(t) || !t->pool ||
         !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) return NULL;
     akey producer=*k;producer.d.flags|=NVN_TEXTURE_FLAGS_IMAGE;
     vkimg_t *peer=rs_exact_owner(&producer);
@@ -1334,7 +1334,7 @@ int vk_rs_allocate_fresh_group(const tex_t *const *targets,unsigned count,uint32
         const tex_t *t=targets[i]; if (!t) continue;
         if (!t->serial || t->magic!=MAGIC('T','E','X',0) || !t->pool ||
             !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
-            t->has_layout || t->has_pkg_data || t->d.target!=NVN_TEXTURE_TARGET_2D ||
+            t->has_layout || t->has_pkg_data || !nx_rs_texture_identity_swizzle(t) || t->d.target!=NVN_TEXTURE_TARGET_2D ||
             t->d.levels!=1 || t->d.depth!=1 || t->d.samples>1 ||
             (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) ||
             t->L.size>INT64_MAX || !(addr[i]=rs_guest_address(t)) ||

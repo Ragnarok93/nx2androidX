@@ -32,7 +32,7 @@ static int rs_scope_match_access(const rs_scope_group *g,const tex_t *t,const vi
     for (unsigned i=0;i<NX_RS_SCOPE_OWNER_MAX;i++) if (g->target[i] &&
         nx_rs_range_overlap(a,t->L.size,g->addr[i],g->target[i]->L.size)) {
         const tex_t *o=g->target[i];
-        if (hit || !nx_rs_view_equivalent(t,v) || t->has_layout || t->has_pkg_data || t->set_swz ||
+        if (hit || !nx_rs_view_equivalent(t,v) || t->has_layout || t->has_pkg_data || !nx_rs_texture_identity_swizzle(t) ||
             a!=g->addr[i] || t->pool!=o->pool || t->off!=o->off ||
             !(sampled?nx_rs_sampled_owner_description_equal(t,o):nx_rs_owner_description_equal(t,o))) return -1;
         hit=(int)i+1;
@@ -330,7 +330,7 @@ static int rs_scope_rt(rs_scope_group *g, const p_set_rt *r, unsigned slots[9], 
         const view_t *v=i==8?(r->has_dview?&r->dview:NULL):(r->has_cview[i]?&r->cview[i]:NULL);
         if (!nx_rs_view_equivalent(t,v) || t->d.width!=g->w || t->d.height!=g->h ||
             !rs_scope_addr(t) || !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
-            t->has_layout || t->has_pkg_data || t->set_swz || rs_scope_match(&expanded,t,NULL)!=0)
+            t->has_layout || t->has_pkg_data || !nx_rs_texture_identity_swizzle(t) || rs_scope_match(&expanded,t,NULL)!=0)
             return -1;
         unsigned available=NX_RS_SCOPE_OWNER_MASK & ~expanded.mask;
         if (!available) return -1;
@@ -702,7 +702,7 @@ static void rs_scope_try_begin(const uint8_t *next) {
         const char *storage_reason=!t->pool?"attachment storage provenance: no pool":
             !group.addr[i]?"attachment storage provenance: no guest address":
             !(t->pool->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)?"attachment storage provenance: CPU-accessible pool":
-            t->set_swz?"attachment storage provenance: explicit swizzle":
+            !nx_rs_texture_identity_swizzle(t)?"attachment storage provenance: nonidentity swizzle":
             t->has_layout?"attachment storage provenance: explicit layout":
             t->has_pkg_data?"attachment storage provenance: packaged data":NULL;
         if (storage_reason) {

@@ -2,6 +2,15 @@
 #define NX_RS_VIEW_H
 #include "nvn_obj.h"
 #include "gfx_vk_resolution_storage_format.h"
+// The native sample_swizzle composes selectors with the underlying
+// format mapping. Explicit R,G,B,A selects the same mapping as no swizzle.
+// Treat only this exact packed identity as equivalent; do not normalize
+// the guest descriptor or accept constants, permutations or unknown values.
+static inline int nx_rs_texture_identity_swizzle(const tex_t *t) {
+    const unsigned identity=NVN_TEXTURE_SWIZZLE_R | (NVN_TEXTURE_SWIZZLE_G<<3) |
+        (NVN_TEXTURE_SWIZZLE_B<<6) | (NVN_TEXTURE_SWIZZLE_A<<9);
+    return t && (!t->set_swz || t->swz==identity);
+}
 // A view is eligible only when it leaves the single physical subresource
 // and its sampling semantics unchanged. Never normalize guest objects in place.
 static inline int nx_rs_view_equivalent(const tex_t *t,const view_t *v) {
@@ -14,7 +23,7 @@ static inline int nx_rs_view_equivalent(const tex_t *t,const view_t *v) {
     if (v->set_layers && (v->min_layer || v->nlayers>1)) return 0;
     if (v->set_format && v->format!=t->d.format) return 0;
     if (v->set_target && v->target!=t->d.target) return 0;
-    if (v->set_swizzle && (t->set_swz || v->swz[0]!=NVN_TEXTURE_SWIZZLE_R || v->swz[1]!=NVN_TEXTURE_SWIZZLE_G ||
+    if (v->set_swizzle && (!nx_rs_texture_identity_swizzle(t) || v->swz[0]!=NVN_TEXTURE_SWIZZLE_R || v->swz[1]!=NVN_TEXTURE_SWIZZLE_G ||
         v->swz[2]!=NVN_TEXTURE_SWIZZLE_B || v->swz[3]!=NVN_TEXTURE_SWIZZLE_A)) return 0;
     if (v->set_dsmode && v->dsmode!=(t->stencil?NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL:NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH)) return 0;
     return 1;
@@ -49,7 +58,8 @@ static inline int nx_rs_sampled_owner_description_equal(const tex_t *sample,cons
     if (nx_rs_owner_description_equal(sample,owner)) return 1;
     if ((sample->d.flags&NVN_TEXTURE_FLAGS_IMAGE) || !(owner->d.flags&NVN_TEXTURE_FLAGS_IMAGE) ||
         !nx_rs_storage_spv_format(sample->d.format) || sample->has_layout || sample->has_pkg_data ||
-        sample->set_swz || owner->has_layout || owner->has_pkg_data || owner->set_swz) return 0;
+        !nx_rs_texture_identity_swizzle(sample) || owner->has_layout || owner->has_pkg_data ||
+        !nx_rs_texture_identity_swizzle(owner)) return 0;
     tex_t normalized=*sample;
     normalized.d.flags|=NVN_TEXTURE_FLAGS_IMAGE;
     return nx_rs_owner_description_equal(&normalized,owner);
