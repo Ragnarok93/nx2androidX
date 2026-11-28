@@ -95,7 +95,7 @@ static int capture_scale_write(const char *root) {
                  "replay_cpu_us\tsource_monotonic_us\trecent_replay_gpu_ms\t"
                  "presentation_seen\trequested_upscaler\tactive_upscaler\tphysical_candidate\t"
                  "source_w\tsource_h\toutput_w\toutput_h\tgenerated_frames\t"
-                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\ttiming_backend\ttiming_iw\ttiming_ih\ttiming_ow\ttiming_oh\ttiming_budget_ms\ttiming_cadence_us\ttiming_generation\ttiming_history_epoch\ttiming_history_reset\tsharpness_requested\tsharpness_applied\tstage_input_ms\tstage_motion_ms\tstage_accumulate_ms\tstage_output_ms\tsource_enqueue_ns\tsource_reset_flags\tdocked_at_enqueue\treconstruction_alloc_attempts\treconstruction_allocations\treconstruction_alloc_waits\treconstruction_alloc_wait_ns\treconstruction_slot_wait_ns\tdisplay_w\tdisplay_h\tactual_reconstruction_w\tactual_reconstruction_h\tconfigured_output_short_edge\tsupersampling\tguest_w\tguest_h\tguest_crop_x\tguest_crop_y\tguest_crop_w\tguest_crop_h\tfinal_source_w\tfinal_source_h\tdrawable_w\tdrawable_h\tswapchain_w\tswapchain_h\treconstruction_submitted\tpresent_accepted\tgenerated_accepted\tscene_image\tguest_image\tscene_crop_x\tscene_crop_y\tscene_crop_w\tscene_crop_h\treconstruction_allocated_w\treconstruction_allocated_h\treconstruction_recorded\treconstruction_completed_ticket\tfg_reason\tfg_period_ms\tfg_measured_ms\tfg_refresh_ns\tfg_planned\tfg_warm_streak\n",
+                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\ttiming_backend\ttiming_iw\ttiming_ih\ttiming_ow\ttiming_oh\ttiming_budget_ms\ttiming_cadence_us\ttiming_generation\ttiming_history_epoch\ttiming_history_reset\tsharpness_requested\tsharpness_applied\tstage_input_ms\tstage_motion_ms\tstage_accumulate_ms\tstage_output_ms\tsource_enqueue_ns\tsource_reset_flags\tdocked_at_enqueue\treconstruction_alloc_attempts\treconstruction_allocations\treconstruction_alloc_waits\treconstruction_alloc_wait_ns\treconstruction_slot_wait_ns\tdisplay_w\tdisplay_h\tactual_reconstruction_w\tactual_reconstruction_h\tconfigured_output_short_edge\tsupersampling\tguest_w\tguest_h\tguest_crop_x\tguest_crop_y\tguest_crop_w\tguest_crop_h\tfinal_source_w\tfinal_source_h\tdrawable_w\tdrawable_h\tswapchain_w\tswapchain_h\treconstruction_submitted\tpresent_accepted\tgenerated_accepted\tscene_image\tguest_image\tscene_crop_x\tscene_crop_y\tscene_crop_w\tscene_crop_h\treconstruction_allocated_w\treconstruction_allocated_h\treconstruction_recorded\treconstruction_completed_ticket\tfg_reason\tfg_period_ms\tfg_measured_ms\tfg_refresh_ns\tfg_planned\tfg_warm_streak\tfg_requested_flow\tfg_active_flow\tfg_submission_serial\tfg_timing_serial\tfg_timing_epoch\tfg_timing_scale\tfg_timing_w\tfg_timing_h\tfg_timing_generated\tfg_copy_ms\tfg_mip_ms\tfg_shared_ms\tfg_refine_ms\tfg_output_ms\tfg_total_ms\n",
             (unsigned long long)g_scale_capture_overwritten, runtime_id);
     uint64_t end = g_scale_capture_ticket;
     uint64_t first = end >= SCALE_CAPTURE_FRAMES ? end - SCALE_CAPTURE_FRAMES + 1 : 1;
@@ -106,7 +106,7 @@ static int capture_scale_write(const char *root) {
         const vk_capture_scale_replay_sample *r = &row->replay;
         const vk_capture_scale_present_sample *p = &row->present;
         fprintf(out, "%llu\t%s\t%u\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llu\t%.3f\t%d\t"
-                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\t%s\t%u\t%u\t%u\t%u\t%.3f\t%u\t%llu\t%llu\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%llu\t%u\t%d\t%u\t%u\t%u\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%d\t%d\t%d\t%llx\t%llx\t%d\t%d\t%d\t%d\t%u\t%u\t%d\t%llu\t%s\t%.3f\t%.3f\t%llu\t%u\t%u\n",
+                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\t%s\t%u\t%u\t%u\t%u\t%.3f\t%u\t%llu\t%llu\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%llu\t%u\t%d\t%u\t%u\t%u\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%d\t%d\t%d\t%llx\t%llx\t%d\t%d\t%d\t%d\t%u\t%u\t%d\t%llu\t%s\t%.3f\t%.3f\t%llu\t%u\t%u\t%d\t%d\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n",
                 (unsigned long long)ticket, r->mode < 3 ? modes[r->mode] : "-", r->min, r->max,
                 r->target, r->passes, (unsigned long long)r->passes_total, r->logical_w, r->logical_h,
                 r->physical_w, r->physical_h, r->renderer_available, r->gpu_snapshot,
@@ -138,7 +138,12 @@ static int capture_scale_write(const char *root) {
                 p->allocated_w, p->allocated_h, p->reconstruction_recorded,
                 (unsigned long long)p->completed_ticket,
                 p->fg_reason?p->fg_reason:"-",p->fg_period_ms,p->fg_measured_ms,
-                (unsigned long long)p->fg_refresh_ns,p->fg_planned,p->fg_warm_streak);
+                (unsigned long long)p->fg_refresh_ns,p->fg_planned,p->fg_warm_streak,
+                p->fg_requested_flow,p->fg_active_flow,(unsigned long long)p->fg_submission_serial,
+                (unsigned long long)p->fg_timing.serial,(unsigned long long)p->fg_timing.epoch,
+                p->fg_timing.scale,p->fg_timing.width,p->fg_timing.height,p->fg_timing.generated,
+                p->fg_timing.copy_ms,p->fg_timing.mip_ms,p->fg_timing.shared_ms,
+                p->fg_timing.refine_ms,p->fg_timing.output_ms,p->fg_timing.total_ms);
     }
     int ok = !ferror(out);
     if (fclose(out) || !ok || rename(tmp, path)) {

@@ -56,6 +56,9 @@ int main(int argc, char **argv) {
         .alloc_waits=1,.alloc_wait_ns=42,.slot_wait_ns=17,
         .fg_reason="refresh cap",.fg_period_ms=16.667,.fg_measured_ms=18.5,
         .fg_refresh_ns=8333333,.fg_planned=1,.fg_warm_streak=2,
+        .fg_requested_flow=0,.fg_active_flow=50,.fg_submission_serial=13,
+        .fg_timing={.valid=1,.serial=10,.epoch=2,.scale=50,.width=1920,.height=1080,.generated=1,
+            .copy_ms=.25,.mip_ms=.5,.shared_ms=1,.refine_ms=2,.output_ms=.75,.total_ms=4.5},
         .reason="image-driven motion"});
     assert(vk_pass_dump_export_begin());
     vk_pass_dump_export_end();
@@ -120,6 +123,22 @@ int main(int argc, char **argv) {
             self.assertEqual(a['fg_refresh_ns'],'8333333')
             self.assertEqual(a['fg_planned'],'1')
             self.assertEqual(a['fg_warm_streak'],'2')
+            self.assertEqual(a['fg_requested_flow'],'0')
+            self.assertEqual(a['fg_active_flow'],'50')
+            self.assertEqual(a['fg_submission_serial'],'13')
+            self.assertEqual(a['fg_timing_serial'],'10')
+            self.assertEqual(a['fg_timing_epoch'],'2')
+            self.assertEqual(a['fg_timing_scale'],'50')
+            self.assertEqual(a['fg_timing_w'],'1920')
+            self.assertEqual(a['fg_timing_h'],'1080')
+            self.assertEqual(a['fg_timing_generated'],'1')
+            self.assertEqual(a['fg_copy_ms'],'0.250')
+            self.assertEqual(a['fg_mip_ms'],'0.500')
+            self.assertEqual(a['fg_shared_ms'],'1.000')
+            self.assertEqual(a['fg_refine_ms'],'2.000')
+            self.assertEqual(a['fg_output_ms'],'0.750')
+            self.assertEqual(a['fg_total_ms'],'4.500')
+            self.assertEqual(b['fg_timing_serial'],'0')
             self.assertEqual(b['fg_reason'],'-')
             self.assertEqual(b['presentation_seen'],'0')
             self.assertEqual(b['timing_backend'],'-')

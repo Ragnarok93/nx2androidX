@@ -1583,6 +1583,8 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
         sample = (vk_capture_scale_present_sample){
             .fg_reason=fd.reason,.fg_period_ms=fd.period_ms,.fg_measured_ms=fd.measured_ms,
             .fg_refresh_ns=fd.refresh_ns,.fg_planned=fd.planned,.fg_warm_streak=fd.warm_streak,
+            .fg_requested_flow=fd.requested_flow,.fg_active_flow=fd.active_flow,
+            .fg_submission_serial=fd.submission_serial,.fg_timing=fd.timing,
             .requested = spatial_requested, .active = spatial_active,
             .physical = g_spatial.report_physical, .generated = ng,
             .source_w = g_spatial.report_input.width, .source_h = g_spatial.report_input.height,

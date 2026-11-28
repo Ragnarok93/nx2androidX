@@ -73,7 +73,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     (void)im; (void)crop; (void)period; (void)gen; (void)flip_y; (void)encoding; (void)source_reset;
     *consumer = VK_NULL_HANDLE;
     settings_init(); *hold = 0; *out_period = 0;
-    fg_decision=(dm_fg_decision){0};
+    fg_decision=(dm_fg_decision){.requested_flow=atomic_load(&g_flow)};
     if (atomic_load(&g_on) > 0) { atomic_store(&g_state, -1); reason("%s", "not in this build (built without NX_LSFG)"); }
     return fg_skip(atomic_load(&g_on)>0?"not compiled":"disabled");
 }
@@ -140,7 +140,8 @@ static void fg_timing_invalidate(void) {
 }
 
 static void fg_timing_init(void) {
-    if (F.timing_tried++) { F.timing_tried=1; return; }
+    if (F.timing_tried) return;
+    F.timing_tried=1;
     if (!vkCreateQueryPool || !vkCmdResetQueryPool || !vkCmdWriteTimestamp ||
         !vkGetQueryPoolResults || !vkGetPhysicalDeviceQueueFamilyProperties ||
         !vkGetPhysicalDeviceProperties) return;
@@ -292,6 +293,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     *hold = 0; *out_period = 0; *consumer = VK_NULL_HANDLE;
     fg_decision=(dm_fg_decision){.period_ms=period*1000.0};
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
+    fg_decision.requested_flow=flow;
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;
         if (F.chain) { teardown(); VLOG("frame generation off"); }
@@ -353,6 +355,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         }
         F.rebuild_retry_at = 0;
     }
+    fg_decision.active_flow=F.flow;
     if (source_reset || encoding != F.encoding) {
         fg_timing_invalidate();
         F.encoding = encoding;
@@ -405,6 +408,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     if (result) goto command_error;
     VkCommandBuffer cb = slot->cb;
     fg_timing_read(slot_index); // existing begin_slot fence already retired
+    if (F.timing_latest.valid) fg_decision.timing=F.timing_latest;
     uint32_t qb=slot_index*FG_QUERY_STRIDE;
     if (F.timing_queries) vkCmdResetQueryPool(cb,F.timing_queries,qb,FG_QUERY_STRIDE);
     full_barrier(cb);
@@ -426,6 +430,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     if (F.timing_queries) F.timing_pending[slot_index]=(dm_fg_timing){
         .serial=++F.timing_serial,.epoch=F.timing_epoch,.scale=(unsigned)flow,
         .width=e.width,.height=e.height,.generated=(unsigned)ng};
+    if (F.timing_queries) fg_decision.submission_serial=F.timing_serial;
     *consumer = slot->fence;
     for (size_t g = 0; g < ng; g++) gen[g] = F.out[g];
     double interval = F.pacer.smoothed_interval > 0 ? F.pacer.smoothed_interval : period;

@@ -13,6 +13,7 @@
 #define DM_FRAMEGEN_H
 
 #include "gfx_vk.h"
+#include "gfx_vk_fg_timing.h"
 
 enum { DM_FG_OFF = 0, DM_FG_GENERATING = 1, DM_FG_ON_NOT_GENERATING = 2, DM_FG_UNAVAILABLE = -1, DM_FG_NOT_IN_BUILD = -2 };
 
@@ -29,6 +30,9 @@ typedef struct {
     double period_ms, measured_ms;
     uint64_t refresh_ns;
     unsigned planned, warm_streak;
+    int requested_flow,active_flow;
+    uint64_t submission_serial;
+    dm_fg_timing timing;
 } dm_fg_decision;
 dm_fg_decision dm_fg_last_decision(void);
 

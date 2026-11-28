@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "gfx_vk_fg_timing.h"
 
 enum { CAPTURE_OFF, CAPTURE_SCALING, CAPTURE_SNAPSHOTS };
 
@@ -40,6 +41,9 @@ typedef struct {
     double fg_period_ms, fg_measured_ms;
     uint64_t fg_refresh_ns;
     unsigned fg_planned, fg_warm_streak;
+    int fg_requested_flow,fg_active_flow;
+    uint64_t fg_submission_serial;
+    dm_fg_timing fg_timing;
     const char *reason; // immutable reconstruction status string
 } vk_capture_scale_present_sample;
 
