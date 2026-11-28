@@ -9,6 +9,7 @@
 #include "gfx_vk_gsr2.h"
 #include "gfx_vk_reconstruction_limits.h"
 #include "gfx_vk_flow_budget.h"
+#include "gfx_vk_graphics_history.h"
 #include "gfx_vk_passdump_plan.h"
 #include "gfx_vk_resolution_plan.h"
 #include "gfx_vk_resolution_raster.h"
@@ -2100,7 +2101,7 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
     pthread_mutex_unlock(&g_pipe_mu);
     return p == (void *)1 ? VK_NULL_HANDLE : p;
 }
-// ---- pipeline prewarm: every pipeline the game needed is recorded (DM_ROOT/vk_pipelines.bin) and made again at the next boot on background
+// ---- pipeline prewarm: observed pipelines are recorded in the private Vulkan cache and made again at the next boot on background
 // threads, before the game reaches it, so a scene seen once never stalls a frame on a pipeline compile again (the driver's compile, not the
 // pipeline cache's lookup, is the cost: tens of milliseconds per pipeline on Adreno). DM_VK_NOPREWARM=1 turns it off.
 #define PIPE_MAGIC 0x32455050u   // "PPE2"; the header also holds sizeof(pkey), so a changed key layout starts a new file
@@ -2108,22 +2109,33 @@ static VkPipeline graphics_pipeline(const pkey *k, VkPipelineLayout layout) {
 static FILE *g_prec;
 // The records are written by a thread of their own: a flush to the app's files folder (FUSE) took tens of milliseconds, and made under g_pipe_mu it held up the replay's
 // pipeline lookups (a 66 ms frame with no pipeline built in it)
-enum { PREC_Q = 64 };
+enum { PREC_Q = 512 };
+static unsigned g_prec_dropped;
 static pkey g_precq[PREC_Q]; static int g_precq_n, g_precw_on; static pthread_mutex_t g_precq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_precq_cv = PTHREAD_COND_INITIALIZER;
 static void *pipe_record_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk pipe record"); static pkey b[PREC_Q];
     for (;;) {
         pthread_mutex_lock(&g_precq_mu); while (!g_precq_n) pthread_cond_wait(&g_precq_cv, &g_precq_mu);
-        int n = g_precq_n; memcpy(b, g_precq, sizeof *b * (size_t)n); g_precq_n = 0; pthread_mutex_unlock(&g_precq_mu);
-        fwrite(b, sizeof *b, (size_t)n, g_prec); fflush(g_prec);
+        int n = g_precq_n; memcpy(b, g_precq, sizeof *b * (size_t)n); g_precq_n = 0; FILE *f = g_prec; pthread_mutex_unlock(&g_precq_mu);
+        if (fwrite(b, sizeof *b, (size_t)n, f) != (size_t)n || fflush(f)) {
+            pthread_mutex_lock(&g_precq_mu); g_prec = NULL; g_precq_n = 0; pthread_mutex_unlock(&g_precq_mu);
+            fclose(f); VKLOG("[RED] graphics pipeline history write failed; recording disabled for this run"); return NULL;
+        }
     }
     return NULL;
 }
 static void pipe_record(const pkey *k) {   // (under g_pipe_mu: only queued here)
-    if (!g_prec || k->alt || k->guest_filter > SP_BILINEAR) return;   // DM_VK_SPV_ALT's pipelines are a debugging run's own
+    if (k->alt || k->guest_filter > SP_BILINEAR) return;   // debug and guest reconstruction layouts are not prewarmable
     pthread_mutex_lock(&g_precq_mu);
-    if (!g_precw_on) { g_precw_on = 1; pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED); pthread_create(&t, &a, pipe_record_thread, NULL); pthread_attr_destroy(&a); }
-    if (g_precq_n < PREC_Q) g_precq[g_precq_n++] = *k;   // (a full queue drops the record: that pipeline is only not prewarmed next time)
+    if (!g_prec) { pthread_mutex_unlock(&g_precq_mu); return; }
+    if (!g_precw_on) {
+        pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        int error = pthread_create(&t, &a, pipe_record_thread, NULL); pthread_attr_destroy(&a);
+        if (error) { pthread_mutex_unlock(&g_precq_mu); VKLOG("[RED] graphics pipeline history worker could not start (%d)", error); return; }
+        g_precw_on = 1;
+    }
+    if (g_precq_n < PREC_Q) g_precq[g_precq_n++] = *k;
+    else { unsigned n = ++g_prec_dropped; if (!(n & (n-1))) VKLOG("[RED] graphics pipeline history queue full (%u records dropped)", n); }
     pthread_cond_signal(&g_precq_cv); pthread_mutex_unlock(&g_precq_mu);
 }
 static pkey *g_pw; static size_t g_pw_n; static volatile size_t g_pw_next, g_pw_done;
@@ -2134,7 +2146,7 @@ static void *prewarm_thread(void *arg) {
         size_t i = __atomic_fetch_add(&g_pw_next, 1, __ATOMIC_RELAXED); if (i >= g_pw_n) break;
         const pkey *k = &g_pw[i];
         pthread_mutex_lock(&g_pipe_mu); int have = nvn_hm_get(&g_pipes, k) != NULL; pthread_mutex_unlock(&g_pipe_mu);
-        if (have) continue;
+        if (have || k->nattr > 16 || k->nbind > 17 || k->ncol > 8 || k->alt || k->guest_filter > SP_BILINEAR) continue;
         vkshader_t *stg[3] = {0}; int ok = 1;
         for (int s = 0; s < 3; s++) if (k->key[s] && !(s == 1 && k->raster_discard)) { stg[s] = vk_shader(k->key[s], s); if (!stg[s]) ok = 0; }
         if (!ok || !stg[0]) continue;
@@ -2142,7 +2154,11 @@ static void *prewarm_thread(void *arg) {
         for (int s = 0; s < 3; s++) if (stg[s]) { dsl[stg[s]->set] = stg[s]->dsl; if (stg[s]->set + 1 > nsets) nsets = stg[s]->set + 1; }
         VkPipeline p = build_pipeline(k, vk_pipeline_layout(dsl, nsets), stg);
         pthread_mutex_lock(&g_pipe_mu);
-        if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, p); else if (p != (void *)1) vkDestroyPipeline(V.dev, p, NULL);
+        // A failed speculative compile must not poison the demand lookup.
+        if (p != (void *)1 && p) {
+            if (!nvn_hm_get(&g_pipes, k)) nvn_hm_put(&g_pipes, k, p);
+            else vkDestroyPipeline(V.dev, p, NULL);
+        }
         pthread_mutex_unlock(&g_pipe_mu);
         size_t d = __atomic_add_fetch(&g_pw_done, 1, __ATOMIC_RELAXED);
         if (d == g_pw_n || d % 500 == 0) VKLOG("prewarm: %zu of %zu pipelines", d, g_pw_n);
@@ -2150,17 +2166,20 @@ static void *prewarm_thread(void *arg) {
     return NULL;
 }
 static void prewarm_start(void) {
-    const char *root = getenv("DM_ROOT"); if (!root) return;
-    char path[1024]; snprintf(path, sizeof path, "%s/vk_pipelines.bin", root);
-    uint32_t hdr[2] = {PIPE_MAGIC, (uint32_t)sizeof(pkey)}, fh[2] = {0};
-    FILE *f = fopen(path, "rb");
-    if (f && fread(fh, sizeof fh, 1, f) == 1 && fh[0] == hdr[0] && fh[1] == hdr[1]) {
-        fseek(f, 0, SEEK_END); long n = (ftell(f) - (long)sizeof fh) / (long)sizeof(pkey); fseek(f, sizeof fh, SEEK_SET);
-        if (n > 0) { g_pw = malloc((size_t)n * sizeof(pkey)); g_pw_n = fread(g_pw, sizeof(pkey), (size_t)n, f); }
+    const char *root = getenv("DM_ROOT"), *dir = getenv("DM_VK_PCACHE_DIR");
+    if (!dir || !*dir) dir = root;
+    if (!dir || !*dir) return;
+    char path[1024], legacy[1024] = {0};
+    int len = snprintf(path, sizeof path, "%s/vk_pipelines.bin", dir);
+    if (len < 0 || (size_t)len >= sizeof path) return;
+    if (root && *root) {
+        len = snprintf(legacy, sizeof legacy, "%s/vk_pipelines.bin", root);
+        if (len < 0 || (size_t)len >= sizeof legacy) legacy[0] = 0;
     }
-    if (f) fclose(f);
-    // rewrite the file with the records read (dropping a torn last record), then append to it
-    g_prec = fopen(path, "wb"); if (g_prec) { fwrite(hdr, sizeof hdr, 1, g_prec); if (g_pw_n) fwrite(g_pw, sizeof(pkey), g_pw_n, g_prec); fflush(g_prec); }
+    void *records = NULL;
+    g_prec = vk_graphics_history_open(path, legacy, PIPE_MAGIC, (uint32_t)sizeof(pkey), &records, &g_pw_n);
+    g_pw = records;
+    if (!g_prec) VKLOG("[RED] graphics pipeline history unavailable: %s", path);
     if (!g_pw_n || getenv("DM_VK_NOPREWARM")) { VKLOG("prewarm: %zu pipelines recorded%s", g_pw_n, g_pw_n ? ", off (DM_VK_NOPREWARM)" : ""); return; }
     long nc = sysconf(_SC_NPROCESSORS_ONLN); int nt = nc >= 8 ? 3 : nc >= 4 ? 2 : 1;
     VKLOG("prewarm: %zu recorded pipelines on %d threads", g_pw_n, nt);
