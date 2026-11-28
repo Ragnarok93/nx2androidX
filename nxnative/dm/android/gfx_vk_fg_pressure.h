@@ -53,6 +53,26 @@ static inline dm_fg_heap_admission dm_fg_heap_admit(const dm_fg_heap_snapshot *s
     p.reason=p.total&&p.growth<=cap?DM_FG_HEAP_OK:DM_FG_HEAP_CAP;
     return p;
 }
+static inline int dm_fg_heap_gate(const dm_fg_heap_snapshot *s,uint64_t now,int upward) {
+    return s->sampled_ns&&now>=s->sampled_ns&&now-s->sampled_ns<=UINT64_C(5000000000)&&
+        s->count&&s->count<=DM_FG_MAX_HEAPS&&s->eligible&&
+        s->os_available>(upward?1024:768)*FG_MIB&&s->thermal<4&&
+        (!upward||(s->thermal>=0&&s->thermal<2));
+}
+// Net growth was checked before transfer. Recheck the full reservation
+// against current headroom after reclaim, rather than charging reclaim twice.
+static inline int dm_fg_heap_reserved_fits(const dm_fg_heap_snapshot *s,uint64_t now,
+        const uint64_t *required,int upward) {
+    if(!required||!dm_fg_heap_gate(s,now,upward))return 0;
+    uint64_t left=s->os_available-(upward?1024:768)*FG_MIB,total=0;
+    for(unsigned i=0;i<DM_FG_MAX_HEAPS;i++) {
+        uint64_t bytes=required[i];
+        if(!bytes)continue;
+        if(bytes>dm_fg_heap_headroom(s,i)||bytes>left)return 0;
+        left-=bytes;total+=bytes;
+    }
+    return total!=0;
+}
 typedef struct {
     uint64_t sampled_ns,os_available,heap_available;
     int thermal; // Android thermal status, -1 unknown

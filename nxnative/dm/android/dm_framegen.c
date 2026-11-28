@@ -23,6 +23,7 @@
 #ifdef NX_LSFG
 #include "lsfg/lsfg.h"
 #include "lsfg/lsfg_graph_owner.h"
+#include "lsfg/lsfg_graph_measure_job.h"
 #endif
 
 static _Atomic int g_on = -1, g_mult = 2, g_target, g_flow = 75, g_state, g_reprobe;   // g_state: 0 off, 1 generating, 2 on and not generating, -1 unavailable
@@ -114,7 +115,16 @@ static struct {
     lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
     lsfg_graph_owner graph;
     lsfg_graph_job cold_job;
-    struct { unsigned phase, scale, failures, prior_scale, restoring; uint64_t limit, epoch, prior_limit; double retry_at; } cold;
+    lsfg_graph_measure_job upward_measure;
+    int upward_seed;
+    double upward_deadline;
+    uint64_t active_published_ns;
+    struct {
+        unsigned phase,scale,failures,prior_scale,restoring,upward;
+        uint64_t limit,epoch,prior_limit;
+        double retry_at;
+        lsfg_graph_budget reservation,prior_reservation;
+    } cold;
     int cold_init;
     uint64_t graph_ticket;
     int auto_applied,requested_flow;
@@ -199,6 +209,7 @@ static void fg_collect_retired(void) {
     }
 }
 static void fg_cancel_request(void) {
+    lsfg_graph_measure_cancel(&F.upward_measure);
     lsfg_graph_owner_cancel(&F.graph);
     if(F.shadow.pending) dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);
     F.seed_policy=FG_SEED_DEFER;
@@ -219,6 +230,8 @@ void dm_fg_prepare_workload(uint64_t key,uint64_t ns,int blocked) {
     if(dm_fg_coordination_update(&F.coordination,key,ns,blocked))fg_timing_invalidate();
     // An upward graph must not commit when competing work is recovering
     // or the source is already stressed. Downward relief remains eligible.
+    if(F.upward_measure.running && !dm_fg_coordination_recover(&F.coordination,ns))
+        fg_cancel_request();
     if(F.graph.phase==LSFG_GRAPH_BUILDING || F.graph.phase==LSFG_GRAPH_WARMING)
         if(F.graph.scale>(unsigned)F.flow &&
             !dm_fg_coordination_recover(&F.coordination,ns))fg_cancel_request();
@@ -269,6 +282,69 @@ static void fg_timing_stamp(VkCommandBuffer cb,uint32_t index) {
     if (F.timing_queries) vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,F.timing_queries,index);
 }
 
+static lsfg_graph_budget fg_chain_reservation(const lsfg_chain *chain) {
+    lsfg_graph_budget r={.limit=UINT64_MAX};
+    for(unsigned i=0;i<LSFG_GRAPH_MAX_HEAPS;i++)
+        if(!lsfg_graph_charge_heap(&r,i,lsfg_chain_heap_bytes(chain,i)))return (lsfg_graph_budget){0};
+    return r.used==lsfg_chain_bytes(chain)?r:(lsfg_graph_budget){0};
+}
+static int fg_heap_recovery_gate(double now) {
+    dm_fg_heap_snapshot s=vk_fg_heap_snapshot();
+    return dm_fg_heap_gate(&s,(uint64_t)(now*1e9),1);
+}
+static lsfg_chain *fg_build_reserved_direction(const lsfg_modules *mods,VkExtent2D ext,float scale,
+        const VkImageView *outputs,const lsfg_graph_budget *req,const atomic_int *cancel,int upward) {
+    dm_fg_heap_snapshot heaps=vk_fg_heap_refresh();
+    if(!dm_fg_heap_reserved_fits(&heaps,(uint64_t)(mono_s()*1e9),req->heap_used,upward)) {
+        VLOG("LSFG_ALLOC_REJECT origin=reservation_pressure bytes=%llu upward=%d",(unsigned long long)req->used,upward);
+        return NULL;
+    }
+    return lsfg_chain_build_reserved(mods,ext,scale,outputs,req,cancel);
+}
+static lsfg_chain *fg_build_upward(const lsfg_modules *mods,VkExtent2D ext,float scale,
+        const VkImageView *outputs,const lsfg_graph_budget *req,const atomic_int *cancel) {
+    return fg_build_reserved_direction(mods,ext,scale,outputs,req,cancel,1);
+}
+static lsfg_chain *fg_build_restore(const lsfg_modules *mods,VkExtent2D ext,float scale,
+        const VkImageView *outputs,const lsfg_graph_budget *req,const atomic_int *cancel) {
+    return fg_build_reserved_direction(mods,ext,scale,outputs,req,cancel,0);
+}
+// A completed preflight is only a candidate. Keep the active graph until
+// exact warm or cold admission, with a fresh pressure observation.
+static void fg_upward_poll(double now) {
+    if(!F.upward_measure.running)return;
+    unsigned scale=F.upward_measure.scale;
+    int eligible=F.chain&&fg_live_enabled()&&!F.cold.phase&&F.graph.phase==LSFG_GRAPH_EMPTY&&
+        F.shadow.pending==scale&&scale>(unsigned)F.flow&&
+        dm_fg_coordination_recover(&F.coordination,F.coordination_ns)&&now<=F.upward_deadline;
+    if(!eligible)lsfg_graph_measure_cancel(&F.upward_measure);
+    lsfg_graph_budget req;
+    if(!lsfg_graph_measure_take(&F.upward_measure,F.timing_epoch,&req))return;
+    if(!eligible||!req.used) {fg_cancel_request();return;}
+    dm_fg_heap_snapshot heaps=vk_fg_heap_snapshot();
+    uint64_t ns=(uint64_t)(now*1e9);
+    dm_fg_heap_admission warm=dm_fg_heap_admit(&heaps,ns,req.heap_used,NULL,0,1);
+    if(F.upward_seed&&warm.reason==DM_FG_HEAP_OK&&
+        lsfg_graph_owner_start_reserved(&F.graph,&F.mods,F.ext,scale,F.out_view,F.timing_epoch,&req,fg_build_upward)) {
+        F.seed_policy=F.upward_seed;F.graph_deadline=now+10.0;
+        vk_quality_recovery_hold(12000);
+        VLOG("LSFG_FLOW_GRAPH upward warm admitted %u%% bytes=%llu",scale,(unsigned long long)req.used);
+        return;
+    }
+    lsfg_graph_budget old=fg_chain_reservation(F.chain);
+    dm_fg_heap_admission cold=dm_fg_heap_admit(&heaps,ns,req.heap_used,old.heap_used,F.active_published_ns,1);
+    if(old.used&&cold.reason==DM_FG_HEAP_OK) {
+        F.cold.phase=FG_COLD_DRAIN;F.cold.scale=scale;F.cold.upward=1;
+        F.cold.limit=req.used;F.cold.epoch=F.timing_epoch;F.cold.reservation=req;
+        vk_quality_recovery_hold(12000);
+        VLOG("LSFG_FLOW_GRAPH upward cold admitted %u%% required=%llu growth=%llu",
+            scale,(unsigned long long)req.used,(unsigned long long)cold.growth);
+        return;
+    }
+    VLOG("LSFG_FLOW_GRAPH upward refused warm=%u cold=%u required=%llu",warm.reason,cold.reason,(unsigned long long)req.used);
+    fg_cancel_request();
+}
+
 // Shadow or explicit experimental Auto. Decisions never rebuild the active chain.
 // The available budget is an estimate from recent completed replay and
 // reconstruction measurements, not a measured free GPU interval.
@@ -281,6 +357,10 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     // transitions. No second debug switch or verbose log mode is needed.
     if (!live && (!enabled || !atoi(enabled)) && !vk_pass_dump_user_active()) return;
     report->pressure=vk_fg_pressure_snapshot();
+    if(F.upward_measure.running) {
+        report->status="upward graph preflight";report->requested_pct=F.upward_measure.scale;
+        return;
+    }
     if (F.cold.phase) {
         report->status=F.cold.phase==FG_COLD_DRAIN?"cold graph drain":F.cold.phase==FG_COLD_BUILD?"cold graph build":"cold graph retry";
         report->requested_pct=F.cold.scale;
@@ -322,12 +402,13 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
     // Pending and retiring graphs cannot launch a third graph. Do not let
     // transition-only workload contaminate profitability or dwell evidence.
     if(live && F.graph.phase!=LSFG_GRAPH_EMPTY){report->status="graph transition in flight";return;}
-    uint64_t recovery_cap=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)?report->pressure.up_cap:0;
-    report->recovery_allowed=recovery_cap!=0;
+    int recover=live && dm_fg_coordination_recover(&F.coordination,F.coordination_ns)&&fg_heap_recovery_gate(mono_s());
+    uint64_t recovery_cap=recover?report->pressure.up_cap:0;
+    report->recovery_allowed=recover;
     int accepted=F.shadow_rows[j].accepted==(int)s.generated && s.generated;
     report->status=!accepted?"generated batch not accepted":!isfinite(matched_budget)?"budget unavailable":matched_budget<=0?"GPU budget exhausted":"hold";
     dm_fg_flow_request req=dm_fg_governor_observe(&F.shadow,&s,F.shadow_rows[j].budget,
-        F.shadow_rows[j].elapsed,accepted,recovery_cap!=0);
+        F.shadow_rows[j].elapsed,accepted,recover);
     report->requested_pct=req.pct;report->reason=req.reason;
     if (req.reason!=FG_FLOW_HOLD) {
         report->status=live?"request evaluated":"shadow recommendation";
@@ -351,6 +432,19 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
                 VLOG("LSFG_HEAP_PRESSURE sampled_ns=%llu heap=%u budget=%llu usage=%llu active_private=%llu",
                     (unsigned long long)heaps.sampled_ns,i,(unsigned long long)heaps.budget[i],
                     (unsigned long long)heaps.usage[i],(unsigned long long)lsfg_chain_heap_bytes(F.chain,i));
+            }
+            if(up) {
+                // Measure off the render thread, even when the scalar
+                // overlapping-graph cap is too small to hold a full graph.
+                if(recover&&old_bytes&&vk_quality_recovery_try(12000)&&
+                    lsfg_graph_measure_start(&F.upward_measure,F.ext,req.pct,F.timing_epoch,lsfg_chain_measure)) {
+                    F.upward_seed=seed;F.upward_deadline=mono_s()+10.0;
+                    report->status="upward graph preflight requested";
+                    return;
+                }
+                report->status="upward preflight veto";
+                dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);
+                return;
             }
             if (!up && req.reason==FG_FLOW_DOWN && cap && old_bytes &&
                 F.graph.phase==LSFG_GRAPH_EMPTY && (!seed || cap<old_bytes)) {
@@ -380,7 +474,9 @@ void dm_fg_shadow_present(int real,int generated,double replay_ms,double recon_m
 
 static void teardown(void) {
     fg_timing_invalidate();
+    lsfg_graph_measure_drain(&F.upward_measure);
     lsfg_graph_job_drain(&F.cold_job);
+    F.active_published_ns=0;
     memset(&F.cold,0,sizeof F.cold);
     F.cold_init=0;
     if (!F.chain && !F.out[0]) return;
@@ -429,22 +525,56 @@ static int rebuild(VkExtent2D e, int flow) {
     double t0 = mono_s();
     F.chain = lsfg_chain_new(&F.mods, e, flow / 100.0f, imgs, F.out_view);
     if (!F.chain) { teardown(); return 0; }
-    F.ext = e; F.flow = flow;
+    F.ext = e; F.flow = flow; F.active_published_ns=(uint64_t)(mono_s()*1e9);
     VLOG("frame generation: chain for %ux%u (effective flow %d%%) made in %.1f ms", e.width, e.height, flow, (mono_s() - t0) * 1e3);
     return 1;
 }
 
-// Same-extent downward replacement: the present thread stops submitting
+// Revalidate before transferring old ownership, then recheck current
+// physical capacity in the worker after the old private allocations vanish.
+static int fg_cold_pressure_ok(double now) {
+    if(!F.cold.upward)return vk_fg_transition_cap(0)!=0;
+    dm_fg_heap_snapshot heaps=vk_fg_heap_snapshot();
+    uint64_t ns=(uint64_t)(now*1e9);
+    if(F.cold.restoring)return dm_fg_heap_gate(&heaps,ns,0);
+    if(!dm_fg_heap_gate(&heaps,ns,1)||
+        !dm_fg_coordination_recover(&F.coordination,F.coordination_ns))return 0;
+    if(F.cold.phase==FG_COLD_DRAIN) {
+        lsfg_graph_budget old=fg_chain_reservation(F.chain);
+        return old.used&&dm_fg_heap_admit(&heaps,ns,F.cold.reservation.heap_used,
+            old.heap_used,F.active_published_ns,1).reason==DM_FG_HEAP_OK;
+    }
+    return 1;
+}
+static int fg_cold_start_replace(void) {
+    if(F.cold.upward) {
+        F.cold.prior_reservation=fg_chain_reservation(F.chain);
+        if(!F.cold.prior_reservation.used)return 0;
+        return lsfg_graph_job_start_reserved_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
+            F.out_view,F.cold.epoch,F.chain,&F.cold.reservation,fg_build_upward);
+    }
+    return lsfg_graph_job_start_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
+        F.out_view,F.cold.limit,F.cold.epoch,F.chain);
+}
+static int fg_cold_retry_start(void) {
+    if(F.cold.upward&&F.cold.restoring)
+        return lsfg_graph_job_start_reserved_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
+            F.out_view,F.cold.epoch,NULL,&F.cold.prior_reservation,fg_build_restore);
+    return lsfg_graph_job_start(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
+        F.out_view,F.cold.limit,F.cold.epoch);
+}
+
+// Same-extent cold replacement: the present thread stops submitting
 // LSFG work, polls only private graph users, then hands old ownership to a
 // worker. Shared generated output images remain alive for presentation.
 // No queue-wide idle, overlapping private graphs, or unbounded allocation.
 static int fg_cold_advance(double now) {
     if (!F.cold.phase) return 1;
-    uint64_t extra_cap=vk_fg_transition_cap(0);
+    int pressure_ok=fg_cold_pressure_ok(now);
     if (F.cold.phase==FG_COLD_DRAIN) {
         // A discontinuity or newly unsafe pressure before ownership transfer
         // leaves the original graph available; no resources were discarded.
-        if (F.cold.epoch!=F.timing_epoch || !extra_cap) {
+        if (F.cold.epoch!=F.timing_epoch || !pressure_ok) {
             memset(&F.cold,0,sizeof F.cold);
             fg_cancel_request();
             F.count=F.warm_streak=0;
@@ -463,8 +593,7 @@ static int fg_cold_advance(double now) {
         if (F.graph.active_slots) return 0;
         F.cold.prior_scale=(unsigned)F.flow;
         F.cold.prior_limit=lsfg_chain_bytes(F.chain);
-        if (!lsfg_graph_job_start_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
-                F.out_view,F.cold.limit,F.cold.epoch,F.chain)) {
+        if (!fg_cold_start_replace()) {
             memset(&F.cold,0,sizeof F.cold);
             fg_cancel_request();
             F.count=F.warm_streak=0;
@@ -476,17 +605,16 @@ static int fg_cold_advance(double now) {
         return 0;
     }
     if (F.cold.phase==FG_COLD_RETRY) {
-        if (!extra_cap || now<F.cold.retry_at) return 0;
+        if (!pressure_ok || now<F.cold.retry_at) return 0;
         F.cold.epoch=F.timing_epoch;
-        if (!lsfg_graph_job_start(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,
-                F.out_view,F.cold.limit,F.cold.epoch)) {
+        if (!fg_cold_retry_start()) {
             F.cold.retry_at=now+2.0;
             return 0;
         }
         F.cold.phase=FG_COLD_BUILD;
         return 0;
     }
-    if (!extra_cap || F.cold.epoch!=F.timing_epoch) lsfg_graph_job_cancel(&F.cold_job);
+    if (!pressure_ok || F.cold.epoch!=F.timing_epoch) lsfg_graph_job_cancel(&F.cold_job);
     lsfg_chain *replacement=NULL;
     if (!lsfg_graph_job_take(&F.cold_job,F.cold.epoch,&replacement)) return 0;
     if (!replacement) {
@@ -506,6 +634,7 @@ static int fg_cold_advance(double now) {
         return 0;
     }
     F.chain=replacement;
+    F.active_published_ns=(uint64_t)(now*1e9);
     F.flow=(int)F.cold.scale;
     F.auto_applied=1;
     F.cold_init=1;
@@ -661,6 +790,11 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         teardown();
         *out_period=want;
     }
+    if(F.cold.phase&&(source_reset||encoding!=F.encoding||F.timing_period!=period||
+            F.timing_mult!=mult||F.timing_target!=target)) {
+        fg_timing_invalidate();
+        F.encoding=encoding;F.timing_period=period;F.timing_mult=mult;F.timing_target=target;
+    }
     if (F.cold.phase && !fg_cold_advance(tnow)) {
         F.count=F.warm_streak=F.pacer.issued=0;
         fg_decision.active_flow=F.chain?F.flow:0;
@@ -701,6 +835,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         if (preserve) {
             ++F.timing_epoch;
             F.timing_latest.valid=0;
+            lsfg_graph_measure_cancel(&F.upward_measure);
             lsfg_graph_owner_cancel(&F.graph);
             F.seed_policy=FG_SEED_DEFER;
             F.shadow.pending=F.shadow.pending_reason=0;
@@ -720,9 +855,10 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         F.timing_period=period; F.timing_mult=mult; F.timing_target=target;
     }
     fg_timing_init();
+    fg_upward_poll(tnow);
     if (F.graph.phase==LSFG_GRAPH_BUILDING || F.graph.phase==LSFG_GRAPH_WARMING) {
         if (!fg_live_enabled() || tnow>F.graph_deadline ||
-            !vk_fg_transition_cap(F.graph.scale>(unsigned)F.flow))fg_cancel_request();
+            !(F.graph.scale>(unsigned)F.flow?fg_heap_recovery_gate(tnow):vk_fg_transition_cap(0)!=0))fg_cancel_request();
     }
     int graph_poll=lsfg_graph_owner_poll(&F.graph,F.timing_epoch);
     if (graph_poll<0) {
@@ -863,6 +999,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         int published=lsfg_graph_owner_publish(&F.graph,&F.chain,slot_index,F.timing_epoch,graph_ticket,1);
         if (!published) abort(); // internal ownership invariant
         F.flow=(int)new_flow;flow=F.flow;F.auto_applied=1;
+        F.active_published_ns=(uint64_t)(mono_s()*1e9);
         F.count=record_count+1;
         ++F.timing_epoch;
         F.timing_latest.valid=0;

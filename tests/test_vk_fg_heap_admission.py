@@ -44,6 +44,14 @@ int main(void){
     s.budget[0]=1024*FG_MIB;
     req[0]=76*FG_MIB;assert(dm_fg_heap_admit(&s,now,req,old,now-1,1).reason==DM_FG_HEAP_OK);
     req[0]=83*FG_MIB;assert(dm_fg_heap_admit(&s,now,req,old,now-1,1).reason==DM_FG_HEAP_CAP);
+    req[0]=80*FG_MIB;
+    assert(!dm_fg_heap_reserved_fits(&s,now,req,1));
+    s.usage[0]-=76*FG_MIB;
+    assert(dm_fg_heap_reserved_fits(&s,now,req,1));
+    s.usage[0]+=60*FG_MIB;
+    assert(!dm_fg_heap_reserved_fits(&s,now,req,1));
+    s.usage[0]-=60*FG_MIB;s.os_available=1090*FG_MIB;
+    assert(!dm_fg_heap_reserved_fits(&s,now,req,1));
 #endif
 }
 '''

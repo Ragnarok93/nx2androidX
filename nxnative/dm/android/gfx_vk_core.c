@@ -620,6 +620,27 @@ static uint64_t fg_heap_available(dm_fg_heap_snapshot *s) {
     }
     return found?free_bytes:0;
 }
+// Worker-only refresh before reserved construction, after any retired
+// graph was freed. Thermal freshness remains tied to the monitor sample.
+dm_fg_heap_snapshot vk_fg_heap_refresh(void) {
+    dm_fg_heap_snapshot s=vk_fg_heap_snapshot();
+    if(!s.sampled_ns)return s;
+    s.os_available=0;
+    FILE *f=fopen("/proc/meminfo","r");
+    if(f) {
+        char line[192];
+        unsigned long long kb=0;
+        while(fgets(line,sizeof line,f))if(sscanf(line,"MemAvailable: %llu kB",&kb)==1) {
+            if(kb<=UINT64_MAX/1024)s.os_available=(uint64_t)kb*1024;
+            break;
+        }
+        fclose(f);
+    }
+    s.count=s.eligible=0;
+    memset(s.budget,0,sizeof s.budget);memset(s.usage,0,sizeof s.usage);
+    (void)fg_heap_available(&s);
+    return s;
+}
 static int fg_thermal_status(void) {
     // Dynamic lookup keeps older Android API levels supported. The pressure
     // monitor owns this process-lifetime manager, no JNI or sysfs guessing.

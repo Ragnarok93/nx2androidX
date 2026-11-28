@@ -35,7 +35,7 @@ static struct {
     int cold_init,flow,auto_applied,requested_flow;
     lsfg_chain *chain;lsfg_modules mods;VkExtent2D ext;VkImageView out_view[3];
     owner graph;fg_slot fr[NFG];
-    uint64_t timing_epoch,count;unsigned warm_streak;
+    uint64_t timing_epoch,count,active_published_ns;unsigned warm_streak;
     struct {size_t issued;} pacer;
     dm_fg_timing timing_latest;dm_fg_governor shadow;unsigned shadow_rows[8];
 } F;
@@ -71,6 +71,13 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods,VkExtent2D e,fl
 }
 static void wait_entered(void){while(!atomic_load(&entered))sched_yield();}
 static void finish_build(void){atomic_store(&release_build,1);while(!atomic_load(&F.cold_job.done))sched_yield();}
+static int fg_cold_pressure_ok(double now){(void)now;return vk_fg_transition_cap(0)!=0;}
+static int fg_cold_start_replace(void){
+    return lsfg_graph_job_start_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,F.out_view,F.cold.limit,F.cold.epoch,F.chain);
+}
+static int fg_cold_retry_start(void){
+    return lsfg_graph_job_start(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,F.out_view,F.cold.limit,F.cold.epoch);
+}
 ''' + advance + r'''
 static void reset_request(void){
     F.chain=make_chain(100);F.flow=50;F.requested_flow=-1;F.timing_epoch=7;

@@ -187,6 +187,12 @@ int main(void){
     lsfg_chain *exact=lsfg_chain_build(&modules,extent,.5f,views,measured.used);
     assert(exact&&lsfg_chain_bytes(exact)==measured.used);
     lsfg_chain_free(exact);
+    lsfg_graph_budget wrong=measured;
+    for(unsigned heap=0;heap<LSFG_GRAPH_MAX_HEAPS;heap++)if(wrong.heap_used[heap]){--wrong.heap_used[heap];break;}
+    assert(!lsfg_chain_build_reserved(&modules,extent,.5f,views,&wrong,NULL));
+    exact=lsfg_chain_build_reserved(&modules,extent,.5f,views,&measured,NULL);
+    assert(exact&&lsfg_chain_bytes(exact)==measured.used);
+    lsfg_chain_free(exact);
     begin(0);lsfg_chain_record_init(active,slots[0].cb);
     for(unsigned i=0;i<3;i++)vka_img_barrier(slots[0].cb,outputs[i],VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL);
     for(unsigned i=0;i<3;i++){source(slots[0].cb,active,i,++ticket);lsfg_chain_seed(active,slots[0].cb,i);}

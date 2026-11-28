@@ -33,7 +33,7 @@ static struct {
     struct {unsigned phase,scale,failures,prior_scale,restoring;uint64_t limit,epoch,prior_limit;double retry_at;} cold;
     job cold_job;int mods,ext,out_view[3],flow,auto_applied,cold_init,requested_flow;
     lsfg_chain *chain;graph graph;fg_slot fr[NFG];
-    uint64_t timing_epoch,count;unsigned warm_streak;
+    uint64_t timing_epoch,count,active_published_ns;unsigned warm_streak;
     struct {unsigned issued;} pacer;
     struct {int valid;} timing_latest;
     governor shadow;unsigned shadow_rows[8];
@@ -64,6 +64,13 @@ static int lsfg_graph_job_take(job *j,uint64_t epoch,lsfg_chain **out){
 }
 static void dm_fg_governor_reset(governor *g,unsigned scale,uint64_t epoch){(void)epoch;*g=(governor){.applied=scale};}
 static void dm_fg_governor_preset(governor *g,int f){(void)g;(void)f;}
+static int fg_cold_pressure_ok(double now){(void)now;return vk_fg_transition_cap(0)!=0;}
+static int fg_cold_start_replace(void){
+    return lsfg_graph_job_start_replace(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,F.out_view,F.cold.limit,F.cold.epoch,F.chain);
+}
+static int fg_cold_retry_start(void){
+    return lsfg_graph_job_start(&F.cold_job,&F.mods,F.ext,F.cold.scale/100.0f,F.out_view,F.cold.limit,F.cold.epoch);
+}
 ''' + body + r'''
 int main(void){
     F.chain=&old;F.flow=50;F.timing_epoch=7;F.cold.phase=FG_COLD_DRAIN;
