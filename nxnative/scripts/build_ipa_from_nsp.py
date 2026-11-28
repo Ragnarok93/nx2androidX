@@ -908,7 +908,7 @@ def extracted(log):   # (files, bytes) from the summary lines nx_extract wrote t
     return (sum(int(n) for n, _ in rows), int(sum(float(mb) for _, mb in rows) * 2**20)) if rows else None
 
 
-def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, allow_damaged_media=False):   # the build IDs are checked by the caller (build_mismatch)
+def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, allow_damaged_media=False, romfs_output=None):   # the build IDs are checked by the caller (build_mismatch)
     dst, marker, log = ex / name, g.get('romfs_marker'), logs / f'extract_{name}.log'
     if (dst / 'ExeFS' / 'main').exists() and (dst / 'RomFS' / marker).exists() and (allow_damaged_media or not (dst / 'romfs_integrity_warnings.txt').exists()):
         PROG.stage(f'extract {name}')
@@ -916,9 +916,22 @@ def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, allow_damaged_media
         PROG.end('reused')
         return dst
     tmp = ex / (name + '.partial'); rmtree(tmp)
+    if romfs_output is not None:
+        # The caller owns an unpublished, empty destination on Android public
+        # storage. Keep ExeFS and other tools private; nx_extract writes RomFS
+        # through this directory link directly, with its usual integrity checks.
+        romfs_output = Path(romfs_output)
+        if romfs_output.is_symlink() or not romfs_output.is_dir() or any(romfs_output.iterdir()):
+            raise BuildError(f'expected an empty direct RomFS staging directory: {romfs_output}')
+        tmp.mkdir(parents=True)
+        (tmp / 'RomFS').symlink_to(romfs_output.absolute(), target_is_directory=True)
     last = extracted(log)   # the last extraction of this version (its log is about to be overwritten) has the exact size; without one, the NSPs' size is the estimate
     def poll():
-        n, b = tree_size(tmp); return {'done': b, 'note': f'{n:,} files'}
+        n, b = tree_size(tmp)
+        if romfs_output is not None:
+            rn, rb = tree_size(romfs_output)
+            n += rn; b += rb
+        return {'done': b, 'note': f'{n:,} files'}
     PROG.stage(f'extract {name}', poll=poll, unit='B', total=last[1] if last else base.stat().st_size + (upd.stat().st_size if upd else 0), est=not last)
     run([nx, keys, base, upd or '-', tmp] + ([cmp_dir] if cmp_dir else []) + (['--allow-damaged'] if ALLOW_DAMAGED else []) + (['--allow-damaged-media'] if allow_damaged_media else []), log)
     swap_in(tmp, dst)
