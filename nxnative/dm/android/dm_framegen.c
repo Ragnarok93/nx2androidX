@@ -16,6 +16,7 @@
 #include <time.h>
 #ifdef NX_LSFG
 #include "lsfg/lsfg.h"
+#include "lsfg/lsfg_graph_owner.h"
 #endif
 
 static _Atomic int g_on = -1, g_mult = 2, g_target, g_flow = 75, g_state, g_reprobe;   // g_state: 0 off, 1 generating, 2 on and not generating, -1 unavailable
@@ -88,6 +89,9 @@ static struct {
     int state;                         // 0 not tried, 1 ready (modules loaded), -1 unavailable
     lsfg_modules mods;
     lsfg_chain *chain; VkExtent2D ext; int flow; unsigned encoding;
+    lsfg_graph_owner graph;
+    uint64_t graph_ticket;
+    int auto_applied;
     VkExtent2D failed_extent; int failed_flow; double rebuild_retry_at;
     VkImage out[LSFG_MAX_GENERATIONS]; VkImageView out_view[LSFG_MAX_GENERATIONS]; VkDeviceMemory out_mem[LSFG_MAX_GENERATIONS];
     VkCommandPool pool;
@@ -144,6 +148,7 @@ static int load(void) {
 static void fg_timing_invalidate(void) {
     ++F.timing_epoch;
     F.timing_latest.valid=0;
+    lsfg_graph_owner_cancel(&F.graph);
 }
 
 static void fg_timing_init(void) {
@@ -237,7 +242,9 @@ static void teardown(void) {
     fg_timing_invalidate();
     if (!F.chain && !F.out[0]) return;
     pthread_mutex_lock(V.qmu); vk.vkQueueWaitIdle(V.q); pthread_mutex_unlock(V.qmu);
+    lsfg_graph_owner_clear_idle(&F.graph); // private GPU users and shared outputs retired
     lsfg_chain_free(F.chain); F.chain = NULL;
+    F.auto_applied=0;
     for (int i = 0; i < LSFG_MAX_GENERATIONS; i++) {
         if (F.out_view[i]) vk.vkDestroyImageView(V.dev, F.out_view[i], NULL);
         F.out_view[i] = VK_NULL_HANDLE;
@@ -343,6 +350,8 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     fg_decision=(dm_fg_decision){.period_ms=period*1000.0};
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     fg_decision.requested_flow=flow;
+    uint64_t graph_ticket=++F.graph_ticket;
+    if (flow) { F.auto_applied=0; lsfg_graph_owner_cancel(&F.graph); }
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;
         if (F.chain) { teardown(); VLOG("frame generation off"); }
@@ -385,10 +394,13 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     VkFormatProperties fp = {0}; vk.vkGetPhysicalDeviceFormatProperties(V.pd, im->fmt, &fp);
     if (!im->img || !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || cw <= 0 || ch <= 0) {
         VKRED_ONCE(96, "frame generation: the window texture (format %d) cannot be copied into the chain: not generating", im->fmt);
+        lsfg_graph_owner_cancel(&F.graph);
         F.warm_streak = 0; atomic_store(&g_state, 2); return fg_skip("source format or crop unsupported");
     }
     VkExtent2D e = {(uint32_t)cw, (uint32_t)ch};
     flow=dm_fg_effective_flow(flow,e.width,e.height);
+    if (!fg_decision.requested_flow && F.auto_applied && F.chain &&
+        F.ext.width==e.width && F.ext.height==e.height) flow=F.flow;
     if (!F.chain || F.ext.width != e.width || F.ext.height != e.height || F.flow != flow) {
         // A larger source can exhaust allocations without making the loaded
         // LSFG shaders unavailable. Retry a different geometry immediately;
@@ -416,6 +428,8 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         F.timing_period=period; F.timing_mult=mult; F.timing_target=target;
     }
     fg_timing_init();
+    int graph_poll=lsfg_graph_owner_poll(&F.graph,F.timing_epoch);
+    if (graph_poll<0) VLOG("LSFG_FLOW_GRAPH build cancelled or failed");
     // The floor for the game's own rate (DM_LSFG_MIN_FPS, default 30): the generation's work must not push the game under it
     F.pacer.min_base = 30.0f;
     { const char *e = getenv("DM_LSFG_MIN_FPS"); if (e && atoi(e) > 0) F.pacer.min_base = (float)atoi(e); }
@@ -443,6 +457,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
         if (!fit) {
             // Keep the display vote and pacing observations, but do not copy
             // a source frame the panel cannot use for generation.
+            lsfg_graph_owner_cancel(&F.graph);
             F.count = F.warm_streak = F.pacer.issued = 0;
             ng = 0;
             capped = 1;
@@ -456,6 +471,15 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     VkResult result = begin_slot(slot);
     if (result) goto command_error;
     VkCommandBuffer cb = slot->cb;
+    lsfg_graph_owner_retire_slot(&F.graph,slot_index);
+    // Only switch on a real generation opportunity with contiguous history.
+    int switching=ng && !fg_decision.requested_flow &&
+        lsfg_graph_owner_ready(&F.graph,F.timing_epoch,graph_ticket);
+    int seeded=!switching && warm && !fg_decision.requested_flow &&
+        F.graph.phase==LSFG_GRAPH_WARMING &&
+        lsfg_graph_history_can_seed(&F.graph.history,F.timing_epoch,graph_ticket);
+    lsfg_chain *record_chain=switching?F.graph.extra:F.chain;
+    uint64_t record_count=switching?F.graph.history.next_index:count;
     fg_timing_read(slot_index); // existing begin_slot fence already retired
     if (F.timing_latest.valid) fg_decision.timing=F.timing_latest;
     uint32_t qb=slot_index*FG_QUERY_STRIDE;
@@ -464,22 +488,50 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     fg_timing_stamp(cb,qb);
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {cw, ch, 1}}};
     if (flip_y) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up, the chain sees it upright
-    vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(F.chain, count), VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
+    vk.vkCmdBlitImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, lsfg_chain_input(record_chain, record_count), VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
     fg_timing_stamp(cb,qb+1);
-    if (warm) lsfg_chain_shared_timed(F.chain,cb,count,F.timing_queries,qb+2);
+    if (warm) lsfg_chain_shared_timed(record_chain,cb,record_count,F.timing_queries,qb+2);
     else fg_timing_stamp(cb,qb+2);
     fg_timing_stamp(cb,qb+3);
     for (size_t g = 0; g < ng; g++) {
-        lsfg_chain_generate_timed(F.chain,cb,count,ng,g,F.timing_queries,qb+4+2*g);
+        lsfg_chain_generate_timed(record_chain,cb,record_count,ng,g,F.timing_queries,qb+4+2*g);
         fg_timing_stamp(cb,qb+5+2*g);
+    }
+    if (seeded) {
+        // The same submission owns both reads of the real source; the
+        // existing consumer fence therefore also covers the pending copy.
+        uint64_t index=lsfg_graph_history_index(&F.graph.history,graph_ticket);
+        if (!F.graph.history.initialized) lsfg_chain_record_init(F.graph.extra,cb);
+        full_barrier(cb);
+        vk.vkCmdBlitImage(cb,im->img,VK_IMAGE_LAYOUT_GENERAL,
+            lsfg_chain_input(F.graph.extra,index),VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_NEAREST);
+        lsfg_chain_seed(F.graph.extra,cb,index);
     }
     full_barrier(cb);   // the outputs for the presents after this
     result = submit_slot(slot);
     if (result) goto command_error;
-    if (F.timing_queries) F.timing_pending[slot_index]=(dm_fg_timing){
-        .serial=++F.timing_serial,.epoch=F.timing_epoch,.scale=(unsigned)flow,
-        .width=e.width,.height=e.height,.generated=(unsigned)ng};
-    if (F.timing_queries) fg_decision.submission_serial=F.timing_serial;
+    if (switching) {
+        unsigned new_flow=F.graph.scale;
+        // All conditions were checked before recording; only this thread
+        // mutates ownership. Shared outputs are NOT retired with old graph.
+        int published=lsfg_graph_owner_publish(&F.graph,&F.chain,slot_index,F.timing_epoch,graph_ticket,1);
+        if (!published) abort(); // internal ownership invariant
+        F.flow=(int)new_flow;flow=F.flow;F.auto_applied=1;
+        F.count=record_count+1;
+        fg_timing_invalidate();
+        fg_decision.timing.valid=0;
+        fg_decision.active_flow=F.flow;
+        VLOG("LSFG_FLOW_GRAPH activated %d%%, private bytes %llu",F.flow,(unsigned long long)lsfg_chain_bytes(F.chain));
+    } else lsfg_graph_owner_submit(&F.graph,slot_index,1,1,seeded,F.timing_epoch,graph_ticket);
+    if (F.timing_queries) {
+        uint64_t serial=++F.timing_serial;
+        // Warmup contributes extra GPU work after the measured interval.
+        // Do not allow its otherwise valid active timings into the governor.
+        F.timing_pending[slot_index]=seeded?(dm_fg_timing){0}:(dm_fg_timing){
+            .serial=serial,.epoch=F.timing_epoch,.scale=(unsigned)flow,
+            .width=e.width,.height=e.height,.generated=(unsigned)ng};
+        fg_decision.submission_serial=serial;
+    }
     *consumer = slot->fence;
     for (size_t g = 0; g < ng; g++) gen[g] = F.out[g];
     double interval = F.pacer.smoothed_interval > 0 ? F.pacer.smoothed_interval : period;
