@@ -46,7 +46,10 @@ int main(void) {
                         trim.index("zcf_free_now(&old[i])"))
         self.assertIn("zcf_pressure_start();", text)
         self.assertIn("DM_VK_POOL_PRESSURE_TRIM", text)
-        self.assertIn("vk_pool_reuse_budget_bytes(available, total)", text)
+        monitor = text[text.index("static void *zcf_pressure_main("):]
+        self.assertIn("vk_pool_reuse_budget_update(&recovery,", monitor)
+        self.assertIn("available,total);", monitor)
+        self.assertIn("if (budget < ZCF_BYTES) zcf_trim_to(budget);", monitor)
         self.assertIn("reuse cache: %.0f MB retained", text)
 
 if __name__ == "__main__":
