@@ -60,6 +60,8 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods,VkExtent2D ext,
         const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit,const atomic_int *cancel);
 // Query actual image/buffer requirements without allocating device memory.
 int lsfg_chain_measure(VkExtent2D ext,float flow_scale,lsfg_graph_budget *requirements,const atomic_int *cancel);
+lsfg_chain *lsfg_chain_build_reserved(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS],const lsfg_graph_budget *reservation,const atomic_int *cancel);
 uint64_t lsfg_chain_bytes(const lsfg_chain *c);
 uint64_t lsfg_chain_heap_bytes(const lsfg_chain *c,unsigned heap);
 // Record exactly once per successful initialization submission, before use.

@@ -331,8 +331,9 @@ int lsfg_chain_measure(VkExtent2D ext,float flow_scale,lsfg_graph_budget *requir
 }
 
 // ---------- The chain ----------
-lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext, float flow_scale,
-        const VkImageView out_views[LSFG_MAX_GENERATIONS], uint64_t byte_limit,const atomic_int *cancel) {
+static lsfg_chain *lsfg_chain_build_internal(const lsfg_modules *mods, VkExtent2D ext, float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS], uint64_t byte_limit,
+        const lsfg_graph_budget *reservation,const atomic_int *cancel) {
     if(cancel&&atomic_load_explicit(cancel,memory_order_acquire))return NULL;
     if (!mods || !ext.width || !ext.height || !(flow_scale>=0.25f && flow_scale<=1.0f) ||
         !out_views || !byte_limit || !lk_load()) return NULL;
@@ -340,6 +341,11 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     lsfg_graph_budget measured={0};
     if(byte_limit!=UINT64_MAX) {
         if(!lsfg_chain_measure(ext,flow_scale,&measured,cancel))return NULL;
+        if(reservation&&!lsfg_graph_reservation_fits(reservation,&measured)) {
+            VLOG("LSFG_ALLOC_REJECT origin=reservation_changed bytes=%llu reserved=%llu",
+                (unsigned long long)measured.used,(unsigned long long)reservation->used);
+            return NULL;
+        }
         if(measured.used>byte_limit) {
             VLOG("LSFG_ALLOC_REJECT origin=preflight_budget bytes=%llu limit=%llu",
                 (unsigned long long)measured.used,(unsigned long long)byte_limit);
@@ -506,6 +512,15 @@ lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods, VkExtent2D ext
     return c;
 }
 
+lsfg_chain *lsfg_chain_build_cancelable(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit,const atomic_int *cancel) {
+    return lsfg_chain_build_internal(mods,ext,flow_scale,out_views,byte_limit,NULL,cancel);
+}
+lsfg_chain *lsfg_chain_build_reserved(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
+        const VkImageView out_views[LSFG_MAX_GENERATIONS],const lsfg_graph_budget *reservation,const atomic_int *cancel) {
+    if(!reservation||!reservation->used||reservation->used==UINT64_MAX)return NULL;
+    return lsfg_chain_build_internal(mods,ext,flow_scale,out_views,reservation->used,reservation,cancel);
+}
 lsfg_chain *lsfg_chain_build(const lsfg_modules *mods,VkExtent2D ext,float flow_scale,
         const VkImageView out_views[LSFG_MAX_GENERATIONS],uint64_t byte_limit) {
     return lsfg_chain_build_cancelable(mods,ext,flow_scale,out_views,byte_limit,NULL);

@@ -26,3 +26,11 @@ static inline int lsfg_graph_charge_heap(lsfg_graph_budget *b,unsigned heap,uint
     b->used+=bytes;
     return 1;
 }
+
+// A reserved candidate may shrink but must not silently grow or migrate
+// allocations to an unreserved heap between measurement and construction.
+static inline int lsfg_graph_reservation_fits(const lsfg_graph_budget *r,const lsfg_graph_budget *m) {
+    if(!r||!m||!r->used||!m->used||m->used>r->used)return 0;
+    for(unsigned i=0;i<LSFG_GRAPH_MAX_HEAPS;i++)if(m->heap_used[i]>r->heap_used[i])return 0;
+    return 1;
+}

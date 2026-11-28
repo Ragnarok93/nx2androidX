@@ -8,6 +8,8 @@
 // cancels and drains it. Modules and external output views are borrowed:
 // the owner MUST drain before releasing either, even after cancellation.
 // The worker never submits Vulkan commands or modifies the live graph.
+typedef lsfg_chain *(*lsfg_graph_reserved_builder)(const lsfg_modules *,VkExtent2D,float,
+        const VkImageView *,const lsfg_graph_budget *,const atomic_int *);
 typedef struct {
     pthread_t thread;
     int running;
@@ -16,6 +18,8 @@ typedef struct {
     VkExtent2D extent;
     float scale;
     uint64_t byte_limit,epoch;
+    lsfg_graph_reserved_builder reserved_build;
+    lsfg_graph_budget reservation;
     VkImageView outputs[LSFG_MAX_GENERATIONS];
     lsfg_chain *result;
     lsfg_chain *retire; // optional fully retired graph, ownership transferred on successful start
@@ -25,22 +29,35 @@ static inline void *lsfg_graph_job_main(void *arg) {
     // A cold replacement releases the old private allocations before any
     // allocation for the new graph. Outputs and modules remain borrowed.
     lsfg_chain_free(j->retire);j->retire=NULL;
-    j->result=lsfg_chain_build_cancelable(j->mods,j->extent,j->scale,j->outputs,j->byte_limit,&j->cancelled);
+    j->result=j->reserved_build?
+        j->reserved_build(j->mods,j->extent,j->scale,j->outputs,&j->reservation,&j->cancelled):
+        lsfg_chain_build_cancelable(j->mods,j->extent,j->scale,j->outputs,j->byte_limit,&j->cancelled);
     atomic_store_explicit(&j->done,1,memory_order_release);
     return NULL;
 }
-static inline int lsfg_graph_job_start_replace(lsfg_graph_job *j,const lsfg_modules *mods,
+static inline int lsfg_graph_job_start_impl(lsfg_graph_job *j,const lsfg_modules *mods,
         VkExtent2D extent,float scale,const VkImageView *outputs,uint64_t cap,uint64_t epoch,
-        lsfg_chain *retire) {
+        lsfg_chain *retire,const lsfg_graph_budget *reservation,lsfg_graph_reserved_builder builder) {
     if(j->running || !mods || !outputs || !cap || !extent.width || !extent.height ||
         !(scale>=.25f && scale<=1.0f)) return 0;
     for(unsigned i=0;i<LSFG_MAX_GENERATIONS;i++) if(!outputs[i]) return 0;
     j->mods=mods;j->extent=extent;j->scale=scale;j->byte_limit=cap;j->epoch=epoch;
+    j->reserved_build=builder;j->reservation=reservation?*reservation:(lsfg_graph_budget){0};
     for(unsigned i=0;i<LSFG_MAX_GENERATIONS;i++)j->outputs[i]=outputs[i];
     j->result=NULL;j->retire=retire;atomic_store_explicit(&j->cancelled,0,memory_order_relaxed);
     atomic_store_explicit(&j->done,0,memory_order_relaxed);
     if(pthread_create(&j->thread,NULL,lsfg_graph_job_main,j)) { j->retire=NULL;return 0; }
     j->running=1;return 1;
+}
+static inline int lsfg_graph_job_start_replace(lsfg_graph_job *j,const lsfg_modules *mods,
+        VkExtent2D extent,float scale,const VkImageView *outputs,uint64_t cap,uint64_t epoch,lsfg_chain *retire) {
+    return lsfg_graph_job_start_impl(j,mods,extent,scale,outputs,cap,epoch,retire,NULL,NULL);
+}
+static inline int lsfg_graph_job_start_reserved_replace(lsfg_graph_job *j,const lsfg_modules *mods,
+        VkExtent2D extent,float scale,const VkImageView *outputs,uint64_t epoch,lsfg_chain *retire,
+        const lsfg_graph_budget *reservation,lsfg_graph_reserved_builder builder) {
+    if(!reservation||!builder||!reservation->used||reservation->used==UINT64_MAX)return 0;
+    return lsfg_graph_job_start_impl(j,mods,extent,scale,outputs,reservation->used,epoch,retire,reservation,builder);
 }
 static inline int lsfg_graph_job_start(lsfg_graph_job *j,const lsfg_modules *mods,
         VkExtent2D extent,float scale,const VkImageView *outputs,uint64_t cap,uint64_t epoch) {

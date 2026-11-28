@@ -12,7 +12,7 @@ class FGGraphAllocation(unittest.TestCase):
         image=source[source.index('static int chain_stopped('):source.index('\n}',start)+2]
         start=source.index('void lsfg_chain_record_init(')
         init=source[start:source.index('\n}',start)+2]
-        build=source[source.index('lsfg_chain *lsfg_chain_build_cancelable('):source.index('uint64_t lsfg_chain_bytes(')]
+        build=source[source.index('static lsfg_chain *lsfg_chain_build_internal('):source.index('uint64_t lsfg_chain_bytes(')]
         # The queue-free constructor must not own any submission path.
         for forbidden in ('vkQueueSubmit','vkQueueWaitIdle','vkWaitForFences'):
             self.assertNotIn(forbidden,build)

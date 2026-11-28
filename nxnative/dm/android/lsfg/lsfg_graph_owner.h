@@ -25,6 +25,13 @@ static inline int lsfg_graph_owner_start(lsfg_graph_owner *o,const lsfg_modules 
     o->scale=scale;o->phase=LSFG_GRAPH_BUILDING;
     return 1;
 }
+static inline int lsfg_graph_owner_start_reserved(lsfg_graph_owner *o,const lsfg_modules *mods,
+        VkExtent2D extent,unsigned scale,const VkImageView *outputs,uint64_t epoch,
+        const lsfg_graph_budget *reservation,lsfg_graph_reserved_builder builder) {
+    if(o->phase!=LSFG_GRAPH_EMPTY||o->job.running||o->extra||scale<25||scale>100)return 0;
+    if(!lsfg_graph_job_start_reserved_replace(&o->job,mods,extent,scale/100.0f,outputs,epoch,NULL,reservation,builder))return 0;
+    o->scale=scale;o->phase=LSFG_GRAPH_BUILDING;return 1;
+}
 // 0 pending/no job, 1 warmup ready to begin, -1 failed/cancelled.
 static inline int lsfg_graph_owner_poll(lsfg_graph_owner *o,uint64_t epoch) {
     if(o->phase!=LSFG_GRAPH_BUILDING)return 0;
