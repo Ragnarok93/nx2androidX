@@ -445,7 +445,7 @@ static void m3_bounded_text(const ov_canvas *cv,float x,float cy,const char *lab
     float fitted=m3_fit_scale(shown,scale,room);
     if(fitted<scale*0.78f)fitted=scale*0.78f;
     if(m3_text_w(shown,fitted)>room){
-        while(shown[0]&&m3_text_w(shown,fitted)+m3_text_w("...",fitted)>room)pf_chop(shown,strlen(shown));
+        while(shown[0]&&(strlen(shown)>sizeof shown-4||m3_text_w(shown,fitted)+m3_text_w("...",fitted)>room))pf_chop(shown,strlen(shown));
         if(m3_text_w("...",fitted)>room)return;
         strcat(shown,"...");
     }
