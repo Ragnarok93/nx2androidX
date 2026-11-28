@@ -36,18 +36,23 @@ int main(){
         for(int i=0;i<5;i++){ref[i]=next();candidate[i]=next();}
         float cost=next()*.1f;
         reads=0;float a=referenceError(candidate,{0,0},{1,1},ref);fullReads+=reads;
-        reads=0;float b=errorAt(candidate,{0,0},{1,1},ref,cost);boundedReads+=reads;
+        reads=0;float b=errorAt(candidate,{0,0},{1,1},ref,cost,.001f);boundedReads+=reads;
         assert((a+.001f<cost)==(b+.001f<cost));
+        b=errorAt(candidate,{0,0},{1,1},ref,cost,.005f);
         assert((a+.005f<cost)==(b+.005f<cost));
         float limit=cost+.006f;
-        b=errorAt(candidate,{0,0},{1,1},ref,limit);
+        b=errorAt(candidate,{0,0},{1,1},ref,limit,0);
         assert((a<=limit)==(b<=limit));
-        if(a<=cost)assert(a==errorAt(candidate,{0,0},{1,1},ref,cost));
+        if(a<=cost)assert(a==errorAt(candidate,{0,0},{1,1},ref,cost,0));
     }
     float ref[5]={},candidate[5]={1,1,1,1,1};
-    reads=0;assert(errorAt(candidate,{0,0},{1,1},ref,.03f)>.03f);assert(reads==1);
+    reads=0;assert(errorAt(candidate,{0,0},{1,1},ref,.03f,0)>.03f);assert(reads==1);
     float tie[5]={1,0,0,0,0};
-    reads=0;assert(errorAt(tie,{0,0},{1,1},ref,.2f)==.2f);assert(reads==5);
+    reads=0;assert(errorAt(tie,{0,0},{1,1},ref,.2f,0)==.2f);assert(reads==5);
+    float nearTie[5]={.996f,0,0,0,0};
+    reads=0;assert(!(errorAt(nearTie,{0,0},{1,1},ref,.2f,.001f)+.001f<.2f));assert(reads==1);
+    nearTie[0]=.98f;
+    reads=0;assert(!(errorAt(nearTie,{0,0},{1,1},ref,.2f,.005f)+.005f<.2f));assert(reads==1);
     assert(boundedReads<fullReads);
     printf("motion candidates: %u taps -> %u taps\n",fullReads,boundedReads);
 }
