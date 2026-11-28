@@ -93,12 +93,20 @@ class StandaloneGraphicsAndSaveTests(unittest.TestCase):
 
     def test_fps_counts_generated_only_on_accepted_presents(self):
         src = self.gfx[self.gfx.index("static int present_one("):self.gfx.index("// headless frame shots")]
-        self.assertLess(src.index("r = vkQueuePresentKHR"), src.index("if (period >= 0)"))
-        self.assertIn("if (r >= 0)", src)
-        self.assertIn("hud_count(with_meta, period", src)
+        # Earlier period checks may poll WSI timing, but must not count FPS.
+        # Locate the actual accepted-present block, not the first period test.
+        submit = src.index("r = vkQueuePresentKHR")
+        accepted_start = src.index("if (r >= 0) {", submit)
+        accepted_end = src.index("\n    }", accepted_start)
+        accepted = src[accepted_start:accepted_end]
+        self.assertNotIn("hud_count(", src[:accepted_start])
+        self.assertNotIn("atomic_fetch_add_explicit(&g_fps_frames", src[:accepted_start])
+        self.assertIn("hud_count(with_meta, period", accepted)
+        self.assertRegex(accepted, r"if \(period >= 0\)\s+atomic_fetch_add_explicit\(&g_fps_frames, 1, memory_order_relaxed\)")
+        self.assertEqual(src.count("atomic_fetch_add_explicit(&g_fps_frames"), 1)
+        self.assertEqual(src.count("hud_count("), 1)
         hud = self.gfx.split("static void hud_count(", 1)[1].split("uint64_t vk_refresh_cycle_ns", 1)[0]
         self.assertLess(hud.index("if (period < 0) return"), hud.index("atomic_fetch_add_explicit(&g_hud_gen"))
-        self.assertIn("atomic_fetch_add_explicit(&g_fps_frames, 1, memory_order_relaxed)", src)
         self.assertNotIn("if (with_meta && period >= 0)", src)
 
 
