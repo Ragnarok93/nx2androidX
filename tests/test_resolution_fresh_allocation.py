@@ -135,6 +135,7 @@ int main(void) {
 #include "gfx_vk_resolution_restore.h"
 #include "gfx_vk_resolution_preflight.h"
 #include "gfx_vk_resolution_storage_format.h"
+#include "gfx_vk_resolution_view.h"
 #define VK_IMAGE_LAYOUT_GENERAL 1
 #define VK_IMAGE_LAYOUT_UNDEFINED 0
 #define NX_RS_RESTORE_BUDGET_BYTES (64ull * 1024 * 1024)
@@ -211,6 +212,13 @@ int main(void) {
     assert(!vk_rs_allocate_fresh_group(targets,NX_RS_SCOPE_OWNER_MAX,32,32));
     assert(created==1 && !published && !freed);
     b.d.format=NVN_FORMAT_RGBA8; // Keep IMAGE for rollback and success.
+    // Nonidentity sampling must never become a physical owner, even if the
+    // caller accidentally authorizes it. Exact identity is admitted.
+    b.set_swz=1;b.swz=0;
+    assert(!vk_rs_allocate_fresh_group(targets,NX_RS_SCOPE_OWNER_MAX,32,32));
+    assert(created==1 && !published && !freed);
+    b.swz=NVN_TEXTURE_SWIZZLE_R | (NVN_TEXTURE_SWIZZLE_G<<3) |
+        (NVN_TEXTURE_SWIZZLE_B<<6) | (NVN_TEXTURE_SWIZZLE_A<<9);
     fail_at=3;
     assert(!vk_rs_allocate_fresh_group(targets,NX_RS_SCOPE_OWNER_MAX,32,32));
     assert(freed==1 && !published && !g_rs_live && !retired && g_by_key.n==1);

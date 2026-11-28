@@ -69,3 +69,7 @@ For linear RGBA8/BGRA8 UNORM only, sample the unsharpened FP16 history directly 
 ## Checkpoint 14 — explicit identity swizzle admission
 
 The native Vulkan sampler view resolver composes NVN R/G/B/A with the format's component mapping; an explicit identity therefore has the same semantics as no selector. The scaling scope previously rejected any explicit texture swizzle, even this equivalent form. Admit the exact packed identity in replay lifetime checks, sampled-wrapper matching and compute eligibility, and enforce the same rule in backing allocation. Nonidentity selectors, explicit layout, packaged content, CPU-accessible pools, alias, full-overwrite and bounded lifetime checks remain unchanged. Add positive/negative view and sampled-wrapper controls. Existing FFR captures do not show which provenance predicate actually failed, so this is a proven source-level false rejection, not a confirmed FFR fix.
+
+## Checkpoint 15 — fresh allocation harness integration
+
+Reconstruction CI at 79c4533 passed; Android workflow 46103476777 passed real Vulkan raster but failed its extracted fresh-owner transaction harness on the missing identity-swizzle declaration. Include the production view header and exercise the real allocator's rejection of nonidentity swizzle and acceptance of explicit identity while preserving the complete rollback assertions. Earlier cache fast-path APK at a176a39 passed.
