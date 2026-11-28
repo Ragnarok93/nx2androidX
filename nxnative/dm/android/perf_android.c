@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include "dm.h"
+#include "gfx_vk_source_continuity.h"
 
 // Headless and legacy player fronts retain gap-based continuity.
 __attribute__((weak)) uint64_t dm_front_lifecycle_epoch(void) { return 0; }
@@ -197,7 +198,6 @@ void dm_perf_replay_thread(void) {
     state = 1;
 }
 
-static int64_t g_work_start;
 // ---- adaptive frame rate: when the frames do not fit the period the game asks for, presentation steps to a longer one the display divides evenly
 // (60 → 40 → 30 fps; 40 asks the display for 120 Hz), and back when they fit the shorter one with room; a steady rate instead of alternating
 // one-vsync and two-vsync frames. DM_ADAPTIVE_FPS=0 keeps the game's own period.
@@ -382,10 +382,27 @@ static void adapt_frame(int64_t work, int64_t now) {
 // left out, Super Mario Odyssey's hint saw light frames and the clocks stayed at 1-2 GHz). At 60 fps it is not a pace but the display or the swapchain
 // holding the frames back, and it stays in the work, or the rate could not step down for it. With the frame generation on it is longer by design (the present
 // thread presents more images per game frame): it is a pace there too, or the rate steps down while the frame generation is running
-static int64_t g_prev_present, g_pace, g_pq;
-void dm_perf_frame_start(uint64_t pace_ns, uint64_t pq_ns) { g_work_start = perf_now(); g_pace = (int64_t)pace_ns; g_pq = (int64_t)pq_ns; }
+static int64_t g_prev_present;
+static uint64_t g_prev_epoch;
+static pthread_mutex_t g_frame_work_mu = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { int64_t start, pace, pq; uint64_t epoch; } dm_perf_work_sample;
+static dm_perf_work_sample g_frame_work;
+void dm_perf_frame_start(uint64_t pace_ns, uint64_t pq_ns) {
+    uint64_t epoch = dm_front_lifecycle_epoch();
+    dm_perf_work_sample work = {perf_now(), (int64_t)pace_ns, (int64_t)pq_ns, epoch};
+    pthread_mutex_lock(&g_frame_work_mu);
+    g_frame_work = work;
+    pthread_mutex_unlock(&g_frame_work_mu);
+}
 // Called on the presenting thread right before a present; period in seconds (1/60, 1/30, ...).
 void dm_perf_frame(double period) {
+    uint64_t epoch = dm_front_lifecycle_epoch();
+    pthread_mutex_lock(&g_frame_work_mu);
+    dm_perf_work_sample work = g_frame_work;
+    g_frame_work = (dm_perf_work_sample){0};
+    pthread_mutex_unlock(&g_frame_work_mu);
+    if (epoch & 1u) { g_prev_present = 0; g_prev_epoch = epoch; return; }
+    if (g_prev_epoch != epoch) g_prev_present = 0;
     game_mode_sync();   // reset the step before deciding which part of the previous wait was adaptive pacing
     int64_t p = period > 0 && period < 1 ? (int64_t)(period * 1e9) : 16666667, t = perf_now();
     // the CPU hint's target is the game's own period, not the adaptive one: with the longer target the CPU clocks drop until the work fills it,
@@ -393,13 +410,18 @@ void dm_perf_frame(double period) {
     if (g_game_period && (int64_t)g_game_period < p) p = (int64_t)g_game_period;
     hint_init(p);
     { static unsigned n; if (++n % 60 == 0) gpu_turbo(); }
-    if (g_work_start) {   // (a longer span: the game was held, by the pause menu or the background)
-        int64_t w = g_prev_present ? t - g_prev_present - g_pace : t - g_work_start;
-        int64_t pq = g_prev_present ? g_pq : 0, pace = dm_perf_pq_pace(pq);   // (t - g_work_start starts after the wait already)
-        if (w > 0 && w < 250000000) { adapt_frame(w - pace > 0 ? w - pace : 0, t); if (g_hint) hint_report(w, pq, pace, t, g_hint_target); }
-        g_work_start = 0;
+    if (work.start && dm_lifecycle_source_current(work.epoch, epoch)) {
+        int64_t w = g_prev_present ? t - g_prev_present - work.pace : t - work.start;
+        int64_t pq = g_prev_present ? work.pq : 0, pace = dm_perf_pq_pace(pq);
+        // With a known active epoch a long frame is real work/stall, not a
+        // pause heuristic. Legacy frontends keep the old ambiguity guard.
+        if (w > 0 && (epoch || w < 250000000)) {
+            adapt_frame(w - pace > 0 ? w - pace : 0, t);
+            if (g_hint) hint_report(w, pq, pace, t, g_hint_target);
+        }
     }
     g_prev_present = t;
+    g_prev_epoch = epoch;
     static unsigned frames; if (frames++ % 300 == 0) hint_threads_scan((int32_t)gettid());
     if (!g_hint) return;
     if (p != g_hint_target && H.update) { H.update(g_hint, p); g_hint_target = p; }
