@@ -169,10 +169,32 @@ static int load(void) {
 // Timing state is present-thread owned, with process-lifetime query pool like
 // the existing FG command pool. Old epoch queries are retired but ignored.
 static int fg_live_enabled(void) { return dm_fg_adaptive_auto_selected(); }
+// A refresh-capped or invalid source may never reuse a command slot.
+// Collect only signalled private graph users, without waiting or resetting
+// any fence. The normal slot path still owns query retirement/reset.
+static void fg_collect_retired(void) {
+    if(F.graph.phase==LSFG_GRAPH_BUILDING &&
+        atomic_load_explicit(&F.graph.job.cancelled,memory_order_acquire))
+        (void)lsfg_graph_owner_poll(&F.graph,F.timing_epoch);
+    if(F.graph.phase!=LSFG_GRAPH_RETIRING)return;
+    PFN_vkGetFenceStatus status=(PFN_vkGetFenceStatus)vk.vkGetDeviceProcAddr(V.dev,"vkGetFenceStatus");
+    if(!status)return;
+    for(unsigned i=0;i<NFG;i++){
+        if(!(F.graph.extra_slots&(1u<<i)))continue;
+        fg_slot *slot=&F.fr[i];
+        if(slot->pending){
+            if(status(V.dev,slot->fence)!=VK_SUCCESS)continue;
+            vk_fg_fence_retired(slot->fence);
+            slot->pending=0;
+        }
+        lsfg_graph_owner_retire_slot(&F.graph,i);
+    }
+}
 static void fg_cancel_request(void) {
     lsfg_graph_owner_cancel(&F.graph);
     if(F.shadow.pending) dm_fg_governor_ack(&F.shadow,0,F.timing_epoch);
     F.seed_policy=FG_SEED_DEFER;
+    fg_collect_retired();
 }
 static void fg_timing_invalidate(void) {
     ++F.timing_epoch;
@@ -424,6 +446,7 @@ int dm_fg_frame(vkimg_t *im, const int *crop, int flip_y, unsigned encoding, uns
     int on = atomic_load(&g_on) > 0, mult = atomic_load(&g_mult), target = atomic_load(&g_target), flow = atomic_load(&g_flow);
     fg_decision.requested_flow=flow;
     uint64_t graph_ticket=++F.graph_ticket;
+    fg_collect_retired();
     if (flow>0 || !fg_live_enabled()) { F.auto_applied=0; fg_cancel_request(); }
     if (!on) {
         F.rebuild_retry_at = F.command_retry_at = 0;

@@ -64,3 +64,56 @@ int main(void){
                 '-I',str(ROOT/'nxnative/dm/third_party/vulkan-headers/include'),
                 '-I',str(ROOT/'nxnative/dm/android'),str(p),'-o',str(exe)],check=True)
             subprocess.run([str(exe)],check=True,timeout=10)
+
+    def test_nonblocking_retirement_without_slot_reuse(self):
+        source=(ROOT/'nxnative/dm/android/dm_framegen.c').read_text()
+        start=source.index('static void fg_collect_retired(')
+        end=source.index('static void fg_cancel_request(',start)
+        code=r'''
+#include <assert.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <string.h>
+#include <vulkan/vulkan_core.h>
+enum {NFG=3,LSFG_GRAPH_EMPTY,LSFG_GRAPH_BUILDING,LSFG_GRAPH_RETIRING};
+typedef struct {VkFence fence;int pending;} fg_slot;
+typedef struct {unsigned phase,extra_slots;struct {atomic_int cancelled;} job;} owner;
+static struct {owner graph;uint64_t timing_epoch;fg_slot fr[NFG];} F;
+static struct {VkDevice dev;} V;
+static unsigned signalled,forgotten,retired,polled;
+static VKAPI_ATTR VkResult VKAPI_CALL status(VkDevice dev,VkFence f){
+    assert(dev==V.dev);return signalled&(1u<<((uintptr_t)f-1))?VK_SUCCESS:VK_NOT_READY;
+}
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL get_proc(VkDevice dev,const char *name){
+    assert(dev==V.dev&&!strcmp(name,"vkGetFenceStatus"));
+    return (PFN_vkVoidFunction)status;
+}
+static struct {PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;} vk={get_proc};
+static void vk_fg_fence_retired(VkFence f){forgotten|=1u<<((uintptr_t)f-1);}
+static void lsfg_graph_owner_retire_slot(owner *o,unsigned i){
+    assert(o==&F.graph);retired|=1u<<i;o->extra_slots&=~(1u<<i);
+    if(!o->extra_slots)o->phase=LSFG_GRAPH_EMPTY;
+}
+static int lsfg_graph_owner_poll(owner *o,uint64_t epoch){
+    assert(o==&F.graph&&epoch==F.timing_epoch&&atomic_load(&o->job.cancelled));
+    ++polled;o->phase=LSFG_GRAPH_EMPTY;return -1;
+}
+'''+source[start:end]+r'''
+int main(void){
+    F.graph.phase=LSFG_GRAPH_BUILDING;fg_collect_retired();assert(!polled);
+    atomic_store(&F.graph.job.cancelled,1);fg_collect_retired();assert(polled==1);
+    F.graph.phase=LSFG_GRAPH_RETIRING;F.graph.extra_slots=7;
+    for(unsigned i=0;i<3;i++)F.fr[i]=(fg_slot){(VkFence)(uintptr_t)(i+1),1};
+    signalled=1;fg_collect_retired();
+    assert(F.graph.phase==LSFG_GRAPH_RETIRING&&F.graph.extra_slots==6&&forgotten==1&&retired==1);
+    assert(!F.fr[0].pending&&F.fr[1].pending&&F.fr[2].pending);
+    fg_collect_retired();assert(retired==1);
+    signalled=7;fg_collect_retired();
+    assert(F.graph.phase==LSFG_GRAPH_EMPTY&&forgotten==7&&retired==7);
+    return 0;
+}'''
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'case.c';p.write_text(code);exe=p.with_suffix('')
+            subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',
+                str(ROOT/'nxnative/dm/third_party/vulkan-headers/include'),str(p),'-o',str(exe)],check=True)
+            subprocess.run([str(exe)],check=True,timeout=10)
