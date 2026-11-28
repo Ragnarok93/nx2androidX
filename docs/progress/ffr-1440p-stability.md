@@ -17,3 +17,7 @@ Resolve attachment ownership using the specific rejection and lifetime proof; va
 ## Checkpoint 2
 
 Preserve GSR 2 measured overload cooldown across pause/gap discontinuities while retiring timing samples and resetting temporal image history. Geometry, encoding, operation mode and surface changes can still invalidate the workload. This removes pause-induced recovery bursts without raising the GPU budget or guaranteeing 1440p GSR 2 performance.
+
+## Checkpoint 3
+
+Initial CI failed in native link (missing GPU pending declaration) and two extracted-code harnesses (missing decision/skip test boundaries). Update declaration and harnesses without changing production behavior; register pool recovery regression in focused runner. Re-run CI before claiming validation.

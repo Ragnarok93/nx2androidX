@@ -285,6 +285,7 @@ void vk_exec_reset(void);
 void vk_exec_resume(void);   // new internal segment, retaining conditional state
 extern int g_vk_cpu_ready;   // live diagnostic switch; default on
 void vk_cpu_ready(uint64_t addr, uint64_t size);
+int vk_gpu_pending(uint64_t addr, uint64_t size);
 int vk_ubd_overlaps(uint64_t addr, uint64_t size);
 void vk_sub_resume(void);   // per submission
 void vk_end_pass(void);     // close an open render pass

@@ -58,6 +58,8 @@ int dm_spatial_mode(void){return mode;}
 int dm_fsr_sharpness(void){return 50;}
 int dm_perf_rate_fps(void){return 30;}
 static int dm_fg_wants_input(void){return fg_on;}
+typedef struct {const char *reason;double period_ms,measured_ms;uint64_t refresh_ns;unsigned planned,warm_streak;} dm_fg_decision;
+static dm_fg_decision dm_fg_last_decision(void){return (dm_fg_decision){.reason=fg_on?"test fg":"disabled",.period_ms=33.333,.planned=fg_on?1:0};}
 static spatial_image *spatial_display_resolved(uint64_t ticket){return resolved_ticket==ticket?&resolve:NULL;}
 static int reconstruction_pressure(dm_flow_cadence cadence,uint64_t ticket){assert(cadence.period_us && ticket);return 0;}
 void vk_guest_flow_feedback(uint64_t ticket,uint32_t cadence,int stressed){assert(ticket&&cadence&&!stressed);}
@@ -107,6 +109,7 @@ int main(void){
     assert(cap.reconstruction_submitted&&cap.actual_w==3840&&cap.actual_h==2160);
     assert(cap.final_source_w==1920&&cap.final_source_h==1080);
     assert(cap.present_accepted==1&&cap.generated_accepted==1);
+    assert(cap.fg_reason && !strcmp(cap.fg_reason,"test fg") && cap.fg_planned==1);
     // A paused setting change must not generate or reconstruct the old ticket.
     configured=1440;present_calls=0;
     present_window(&src,NULL,-1,1,1,33333333,1,1,0,NULL);

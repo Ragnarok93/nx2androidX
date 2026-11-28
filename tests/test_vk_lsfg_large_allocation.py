@@ -152,6 +152,7 @@ typedef struct {unsigned width,height;} VkExtent2D;
 static struct {int chain,flow,state,failed_flow;VkExtent2D ext,failed_extent;double rebuild_retry_at;} F;
 static atomic_int g_state;
 static int attempts;
+static int fg_skip(const char *why){assert(why&&*why);return 0;}
 static void reason(const char *fmt,const char *s){(void)fmt;(void)s;}
 static void unavailable(const char *fmt,const char *s){reason(fmt,s);F.state=-1;}
 static int rebuild(VkExtent2D e,int flow){
