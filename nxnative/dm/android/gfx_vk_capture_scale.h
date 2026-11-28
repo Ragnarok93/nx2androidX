@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include "gfx_vk_fg_timing.h"
+#include "gfx_vk_present_queue_trace.h"
 
 // Preserve existing mode values for internal/legacy callers.
 enum { CAPTURE_OFF, CAPTURE_SCALING, CAPTURE_SNAPSHOTS, CAPTURE_DETAILED };
@@ -54,7 +55,7 @@ typedef struct {
     unsigned source_reset, alloc_attempts, allocations, alloc_waits;
     int docked;
     const char *fg_reason; // immutable frame-generation decision
-    double fg_period_ms, fg_measured_ms;
+    double fg_period_ms, fg_measured_ms, fg_hold_ms;
     uint64_t fg_refresh_ns;
     unsigned fg_planned, fg_warm_streak;
     int fg_requested_flow,fg_active_flow;
@@ -69,3 +70,4 @@ typedef struct {
 int vk_pass_dump_user_active(void);
 void vk_rs_capture_replay(uint64_t ticket, uint64_t cpu_replay_ns, double recent_gpu_ms);
 void vk_capture_scale_present(uint64_t ticket, vk_capture_scale_present_sample sample);
+void vk_capture_scale_queue(uint64_t ticket, dm_present_queue_trace sample);

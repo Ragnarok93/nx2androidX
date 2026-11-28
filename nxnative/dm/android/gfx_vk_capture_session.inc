@@ -32,6 +32,7 @@ typedef struct {
     uint64_t ticket;
     vk_capture_scale_replay_sample replay;
     vk_capture_scale_present_sample present;
+    dm_present_queue_trace queue;
     int seen_present;
 } scale_capture_row;
 static scale_capture_row *g_scale_capture;
@@ -56,6 +57,16 @@ void vk_capture_scale_present(uint64_t ticket, vk_capture_scale_present_sample s
             row->present = sample;
             row->seen_present = 1;
         }
+    }
+    pthread_mutex_unlock(&g_capture_lock);
+}
+
+void vk_capture_scale_queue(uint64_t ticket, dm_present_queue_trace sample) {
+    if (!ticket || !sample.source_ns) return;
+    pthread_mutex_lock(&g_capture_lock);
+    if (atomic_load(&g_pd_user_pending) && g_scale_capture) {
+        scale_capture_row *row = &g_scale_capture[ticket % SCALE_CAPTURE_FRAMES];
+        if (row->ticket == ticket) row->queue = sample;
     }
     pthread_mutex_unlock(&g_capture_lock);
 }
@@ -95,7 +106,7 @@ static int capture_scale_write(const char *root) {
                  "replay_cpu_us\tsource_monotonic_us\trecent_replay_gpu_ms\t"
                  "presentation_seen\trequested_upscaler\tactive_upscaler\tphysical_candidate\t"
                  "source_w\tsource_h\toutput_w\toutput_h\tgenerated_frames\t"
-                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\ttiming_backend\ttiming_iw\ttiming_ih\ttiming_ow\ttiming_oh\ttiming_budget_ms\ttiming_cadence_us\ttiming_generation\ttiming_history_epoch\ttiming_history_reset\tsharpness_requested\tsharpness_applied\tstage_input_ms\tstage_motion_ms\tstage_accumulate_ms\tstage_output_ms\tsource_enqueue_ns\tsource_reset_flags\tdocked_at_enqueue\treconstruction_alloc_attempts\treconstruction_allocations\treconstruction_alloc_waits\treconstruction_alloc_wait_ns\treconstruction_slot_wait_ns\tdisplay_w\tdisplay_h\tactual_reconstruction_w\tactual_reconstruction_h\tconfigured_output_short_edge\tsupersampling\tguest_w\tguest_h\tguest_crop_x\tguest_crop_y\tguest_crop_w\tguest_crop_h\tfinal_source_w\tfinal_source_h\tdrawable_w\tdrawable_h\tswapchain_w\tswapchain_h\treconstruction_submitted\tpresent_accepted\tgenerated_accepted\tscene_image\tguest_image\tscene_crop_x\tscene_crop_y\tscene_crop_w\tscene_crop_h\treconstruction_allocated_w\treconstruction_allocated_h\treconstruction_recorded\treconstruction_completed_ticket\tfg_reason\tfg_period_ms\tfg_measured_ms\tfg_refresh_ns\tfg_planned\tfg_warm_streak\tfg_requested_flow\tfg_active_flow\tfg_submission_serial\tfg_timing_serial\tfg_timing_epoch\tfg_timing_scale\tfg_timing_w\tfg_timing_h\tfg_timing_generated\tfg_copy_ms\tfg_mip_ms\tfg_shared_ms\tfg_refine_ms\tfg_output_ms\tfg_total_ms\tfg_graph_phase\tfg_pending_flow\tfg_seed_policy\tfg_seed_count\tfg_active_bytes\tfg_extra_bytes\tfg_build_limit\tfg_governor_status\tfg_governor_workload\tfg_governor_matched_serial\tfg_governor_cap\tfg_governor_budget_ms\tfg_governor_requested_pct\tfg_governor_reason\tfg_governor_live\tfg_governor_recovery_allowed\tfg_governor_matched\tfg_pressure_sample_ns\tfg_pressure_age_ns\tfg_pressure_fresh\tfg_os_available_bytes\tfg_heap_available_bytes\tfg_thermal_status\tfg_down_cap_bytes\tfg_up_cap_bytes\n",
+                 "reconstruction_timing_ticket\treconstruction_gpu_ms\treason\tfirst_scope_rejection\trejected_w\trejected_h\tbacking_bytes\tpeak_published_backing_bytes\ttiming_backend\ttiming_iw\ttiming_ih\ttiming_ow\ttiming_oh\ttiming_budget_ms\ttiming_cadence_us\ttiming_generation\ttiming_history_epoch\ttiming_history_reset\tsharpness_requested\tsharpness_applied\tstage_input_ms\tstage_motion_ms\tstage_accumulate_ms\tstage_output_ms\tsource_enqueue_ns\tsource_reset_flags\tdocked_at_enqueue\treconstruction_alloc_attempts\treconstruction_allocations\treconstruction_alloc_waits\treconstruction_alloc_wait_ns\treconstruction_slot_wait_ns\tdisplay_w\tdisplay_h\tactual_reconstruction_w\tactual_reconstruction_h\tconfigured_output_short_edge\tsupersampling\tguest_w\tguest_h\tguest_crop_x\tguest_crop_y\tguest_crop_w\tguest_crop_h\tfinal_source_w\tfinal_source_h\tdrawable_w\tdrawable_h\tswapchain_w\tswapchain_h\treconstruction_submitted\tpresent_accepted\tgenerated_accepted\tscene_image\tguest_image\tscene_crop_x\tscene_crop_y\tscene_crop_w\tscene_crop_h\treconstruction_allocated_w\treconstruction_allocated_h\treconstruction_recorded\treconstruction_completed_ticket\tfg_reason\tfg_period_ms\tfg_measured_ms\tfg_refresh_ns\tfg_planned\tfg_warm_streak\tfg_requested_flow\tfg_active_flow\tfg_submission_serial\tfg_timing_serial\tfg_timing_epoch\tfg_timing_scale\tfg_timing_w\tfg_timing_h\tfg_timing_generated\tfg_copy_ms\tfg_mip_ms\tfg_shared_ms\tfg_refine_ms\tfg_output_ms\tfg_total_ms\tfg_graph_phase\tfg_pending_flow\tfg_seed_policy\tfg_seed_count\tfg_active_bytes\tfg_extra_bytes\tfg_build_limit\tfg_governor_status\tfg_governor_workload\tfg_governor_matched_serial\tfg_governor_cap\tfg_governor_budget_ms\tfg_governor_requested_pct\tfg_governor_reason\tfg_governor_live\tfg_governor_recovery_allowed\tfg_governor_matched\tfg_pressure_sample_ns\tfg_pressure_age_ns\tfg_pressure_fresh\tfg_os_available_bytes\tfg_heap_available_bytes\tfg_thermal_status\tfg_down_cap_bytes\tfg_up_cap_bytes\tfg_hold_ms" DM_PRESENT_QUEUE_COLUMNS "\n",
             (unsigned long long)g_scale_capture_overwritten, runtime_id);
     uint64_t end = g_scale_capture_ticket;
     uint64_t first = end >= SCALE_CAPTURE_FRAMES ? end - SCALE_CAPTURE_FRAMES + 1 : 1;
@@ -106,7 +117,7 @@ static int capture_scale_write(const char *root) {
         const vk_capture_scale_replay_sample *r = &row->replay;
         const vk_capture_scale_present_sample *p = &row->present;
         fprintf(out, "%llu\t%s\t%u\t%u\t%u\t%u\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%llu\t%llu\t%.3f\t%d\t"
-                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\t%s\t%u\t%u\t%u\t%u\t%.3f\t%u\t%llu\t%llu\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%llu\t%u\t%d\t%u\t%u\t%u\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%d\t%d\t%d\t%llx\t%llx\t%d\t%d\t%d\t%d\t%u\t%u\t%d\t%llu\t%s\t%.3f\t%.3f\t%llu\t%u\t%u\t%d\t%d\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%s\t%llu\t%llu\t%llu\t%.3f\t%u\t%u\t%d\t%d\t%d\t%llu\t%llu\t%d\t%llu\t%llu\t%d\t%llu\t%llu\n",
+                "%s\t%s\t%d\t%u\t%u\t%u\t%u\t%d\t%llu\t%.3f\t%s\t%s\t%u\t%u\t%llu\t%llu\t%s\t%u\t%u\t%u\t%u\t%.3f\t%u\t%llu\t%llu\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%llu\t%u\t%d\t%u\t%u\t%u\t%llu\t%llu\t%u\t%u\t%u\t%u\t%d\t%d\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%d\t%d\t%d\t%llx\t%llx\t%d\t%d\t%d\t%d\t%u\t%u\t%d\t%llu\t%s\t%.3f\t%.3f\t%llu\t%u\t%u\t%d\t%d\t%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%s\t%llu\t%llu\t%llu\t%.3f\t%u\t%u\t%d\t%d\t%d\t%llu\t%llu\t%d\t%llu\t%llu\t%d\t%llu\t%llu",
                 (unsigned long long)ticket, r->mode < 3 ? modes[r->mode] : "-", r->min, r->max,
                 r->target, r->passes, (unsigned long long)r->passes_total, r->logical_w, r->logical_h,
                 r->physical_w, r->physical_h, r->renderer_available, r->gpu_snapshot,
@@ -159,6 +170,9 @@ static int capture_scale_write(const char *root) {
                 p->fg_governor.pressure.sampled_ns?p->fg_governor.pressure.thermal:-1,
                 (unsigned long long)p->fg_governor.pressure.down_cap,
                 (unsigned long long)p->fg_governor.pressure.up_cap);
+        fprintf(out, "\t%.3f", p->fg_hold_ms);
+        dm_present_queue_write(out, &row->queue);
+        fputc('\n', out);
     }
     int ok = !ferror(out);
     if (fclose(out) || !ok || rename(tmp, path)) {

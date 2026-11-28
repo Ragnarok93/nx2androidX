@@ -1539,6 +1539,7 @@ static struct {
     unsigned replay_flags;
     uint64_t n, source_ns;
     double period;
+    dm_present_queue_trace trace;
     vk_reconstruction_input physical;
 } g_pq[PQ_N];
 static uint64_t g_pq_head, g_pq_tail, g_pq_done;   // queued [tail, head), presents up to ticket g_pq_done are blitted
@@ -1683,7 +1684,7 @@ static void present_window(vkimg_t *im, const int *crop, double period, uint64_t
     if (capture) {
         dm_fg_decision fd=dm_fg_last_decision();
         sample = (vk_capture_scale_present_sample){
-            .fg_reason=fd.reason,.fg_period_ms=fd.period_ms,.fg_measured_ms=fd.measured_ms,
+            .fg_reason=fd.reason,.fg_period_ms=fd.period_ms,.fg_measured_ms=fd.measured_ms,.fg_hold_ms=hold*1000.0,
             .fg_refresh_ns=fd.refresh_ns,.fg_planned=fd.planned,.fg_warm_streak=fd.warm_streak,
             .fg_requested_flow=fd.requested_flow,.fg_active_flow=fd.active_flow,
              .fg_submission_serial=fd.submission_serial,.fg_timing=fd.timing,
@@ -1781,17 +1782,30 @@ static void *present_thread(void *arg) {
             continue;
         }
         typeof(g_pq[0]) e = g_pq[g_pq_tail % PQ_N];
+        if (e.trace.source_ns) {
+            e.trace.dequeue_ns = mono_ns();
+            e.trace.dequeue_occupied = (unsigned)(g_pq_head - g_pq_tail);
+            e.trace.oldest_dequeue_age_ns = dm_present_queue_age(e.trace.dequeue_ns, e.source_ns, e.trace.dequeue_occupied);
+        }
         pthread_mutex_unlock(&g_pq_mu);
         if (e.im) {
             last = e;
             last.physical.backing = NULL;
             pthread_mutex_lock(&g_present_mu);
+            if (e.trace.source_ns) e.trace.work_begin_ns = mono_ns();
             present_window(e.im, e.has_crop ? e.crop : NULL, e.period, e.n, 0,
                            e.source_ns, e.docked, e.flip_y, e.replay_flags, e.physical.backing ? &e.physical : NULL);
+            if (e.trace.source_ns) e.trace.work_end_ns = mono_ns();
             pthread_mutex_unlock(&g_present_mu);
         }
         vk_rs_variant_destroy(e.physical.backing);
-        pthread_mutex_lock(&g_pq_mu); g_pq_tail++; g_pq_done = e.n; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
+        pthread_mutex_lock(&g_pq_mu);
+        g_pq_tail++; g_pq_done = e.n;
+        if (e.trace.source_ns) e.trace.retire_ns = mono_ns();
+        pthread_cond_broadcast(&g_pq_cv);
+        pthread_mutex_unlock(&g_pq_mu);
+        // Capture mutex never nests inside the presentation queue mutex.
+        if (e.trace.source_ns) vk_capture_scale_queue(e.n, e.trace);
     }
     return NULL;
 }
@@ -1809,6 +1823,11 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     // Operation mode is a notification snapshot, not shader/scene certification.
     extern int dm_opmode(void);
     uint64_t source_ns = mono_ns();
+    dm_present_queue_trace trace = {0};
+    if (vk_pass_dump_user_active()) {
+        trace.source_ns = source_ns;
+        trace.has_image = im != NULL;
+    }
     int docked = dm_opmode() != 0, flip_y = vk_window_bottom_up();
     static int sync = -1; static pthread_once_t once = PTHREAD_ONCE_INIT;
     if (sync < 0) sync = getenv("DM_VK_SYNC_PRESENT") != NULL;
@@ -1816,9 +1835,22 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     if (!sync && front) pthread_once(&once,present_thread_start);
     if (sync || !front || !g_present_thread_started) {
         // A failed worker startup must not enqueue into an undrained FIFO.
-        if ((sync || front) && im) { pthread_mutex_lock(&g_present_mu); present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_flags, physical); pthread_mutex_unlock(&g_present_mu); }
+        if (trace.source_ns) trace.synchronous = 1;
+        if ((sync || front) && im) {
+            pthread_mutex_lock(&g_present_mu);
+            if (trace.source_ns) trace.work_begin_ns = mono_ns();
+            present_window(im, crop, period, n, 0, source_ns, docked, flip_y, replay_flags, physical);
+            if (trace.source_ns) trace.work_end_ns = mono_ns();
+            pthread_mutex_unlock(&g_present_mu);
+        }
         if (physical) vk_rs_variant_destroy(physical->backing);
-        pthread_mutex_lock(&g_pq_mu); if (g_pq_tail == g_pq_head) g_pq_done = n; pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
+        pthread_mutex_lock(&g_pq_mu);
+        if (g_pq_tail == g_pq_head) {
+            g_pq_done = n;
+            if (trace.source_ns) trace.retire_ns = mono_ns();
+        }
+        pthread_mutex_unlock(&g_pq_mu);   // done at once (after any queued ones)
+        if (trace.source_ns) vk_capture_scale_queue(n, trace);
         return n;
     }
     pthread_mutex_lock(&g_pq_mu);
@@ -1826,6 +1858,14 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     typeof(g_pq[0]) *e = &g_pq[g_pq_head % PQ_N]; e->im = im; e->n = n; e->period = period; e->has_crop = crop != NULL; if (crop) memcpy(e->crop, crop, sizeof e->crop);
     e->source_ns = source_ns; e->docked = docked; e->flip_y = flip_y;
     e->replay_flags = replay_flags;
+    if (trace.source_ns) {
+        unsigned occupied = (unsigned)(g_pq_head - g_pq_tail);
+        trace.entry_ns = mono_ns();
+        trace.entry_occupied = occupied + 1;
+        trace.oldest_entry_age_ns = dm_present_queue_age(trace.entry_ns,
+            occupied ? g_pq[g_pq_tail % PQ_N].source_ns : source_ns, occupied + 1);
+    }
+    e->trace = trace;
     if (physical) e->physical = *physical;
     else e->physical.backing = NULL;
     g_pq_head++; pthread_cond_broadcast(&g_pq_cv);

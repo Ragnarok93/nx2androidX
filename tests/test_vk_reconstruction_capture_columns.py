@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
         .stage_ms={0.125,0.5,1.0,0.625},.source_ns=123456789,
         .source_reset=8,.docked=1,.alloc_attempts=3,.allocations=2,
         .alloc_waits=1,.alloc_wait_ns=42,.slot_wait_ns=17,
-        .fg_reason="refresh cap",.fg_period_ms=16.667,.fg_measured_ms=18.5,
+        .fg_reason="refresh cap",.fg_period_ms=16.667,.fg_measured_ms=18.5,.fg_hold_ms=8.333,
         .fg_refresh_ns=8333333,.fg_planned=1,.fg_warm_streak=2,
         .fg_requested_flow=0,.fg_active_flow=50,.fg_submission_serial=13,
         .fg_graph_phase=2,.fg_pending_flow=40,.fg_seed_policy=2,.fg_seed_count=1,
@@ -65,6 +65,11 @@ int main(int argc, char **argv) {
         .fg_timing={.valid=1,.serial=10,.epoch=2,.scale=50,.width=1920,.height=1080,.generated=1,
             .copy_ms=.25,.mip_ms=.5,.shared_ms=1,.refine_ms=2,.output_ms=.75,.total_ms=4.5},
         .reason="image-driven motion"});
+    vk_capture_scale_queue(10,(dm_present_queue_trace){
+        .source_ns=123456789,.entry_ns=123456800,.dequeue_ns=123456900,
+        .work_begin_ns=123457000,.work_end_ns=123458000,.retire_ns=123458001,
+        .oldest_entry_age_ns=33,.oldest_dequeue_age_ns=111,.entry_occupied=2,.dequeue_occupied=3,.has_image=1});
+    vk_capture_scale_queue(9,(dm_present_queue_trace){.source_ns=1}); // no matching row
     assert(vk_pass_dump_export_begin());
     vk_pass_dump_export_end();
     return 0;
@@ -168,6 +173,19 @@ int main(int argc, char **argv) {
             self.assertEqual(a['fg_thermal_status'],'2')
             self.assertEqual(a['fg_down_cap_bytes'],'50000000')
             self.assertEqual(a['fg_up_cap_bytes'],'0')
+            self.assertEqual(a['fg_hold_ms'],'8.333')
+            self.assertEqual(a['queue_source_ns'],'123456789')
+            self.assertEqual(a['queue_entry_ns'],'123456800')
+            self.assertEqual(a['queue_dequeue_ns'],'123456900')
+            self.assertEqual(a['queue_work_begin_ns'],'123457000')
+            self.assertEqual(a['queue_work_end_ns'],'123458000')
+            self.assertEqual(a['queue_cpu_retire_ns'],'123458001')
+            self.assertEqual(a['queue_oldest_entry_age_ns'],'33')
+            self.assertEqual(a['queue_oldest_dequeue_age_ns'],'111')
+            self.assertEqual(a['queue_entry_occupied'],'2')
+            self.assertEqual(a['queue_dequeue_occupied'],'3')
+            self.assertEqual(a['queue_has_image'],'1')
+            self.assertEqual(b['queue_source_ns'],'0')
             self.assertEqual(b['fg_pressure_fresh'],'0')
             self.assertEqual(b['fg_thermal_status'],'-1')
             self.assertEqual(b['fg_governor_status'],'-')
