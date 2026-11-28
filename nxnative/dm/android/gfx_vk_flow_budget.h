@@ -58,11 +58,11 @@ static inline void dm_flow_budget_set_workload(dm_flow_budget *p, const dm_flow_
 }
 
 static inline int dm_flow_budget_recovery_due(const dm_flow_budget *p,uint64_t ticket) {
-    return p->valid && p->retry_after && p->retry_after!=UINT64_MAX &&
+    return p->valid && p->retry_after &&
         ticket>=p->retry_after && p->last_pressure==ticket && p->recovery_quiet>=30;
 }
 static inline int dm_flow_budget_allow(dm_flow_budget *p, uint64_t ticket) {
-    if (!p->valid || p->retry_after == UINT64_MAX || ticket < p->retry_after) return 0;
+    if (!p->valid || ticket < p->retry_after) return 0;
     if (p->retry_after) {
         if (!dm_flow_budget_recovery_due(p,ticket)) return 0;
         p->recovery_quiet = 0;
@@ -74,8 +74,9 @@ static inline int dm_flow_budget_allow(dm_flow_budget *p, uint64_t ticket) {
 }
 
 static inline void dm_flow_budget_overload(dm_flow_budget *p, uint64_t decision_ticket) {
-    // After three failed recovery probes, wait for a workload change.
-    p->retry_after = ++p->overload_events >= 4 ? UINT64_MAX : decision_ticket + p->backoff;
+    // Bound recurring probes without requiring a workload change.
+    if (p->overload_events != ~0u) ++p->overload_events;
+    p->retry_after = decision_ticket > UINT64_MAX - p->backoff ? UINT64_MAX : decision_ticket + p->backoff;
     p->backoff = p->backoff < 1920 ? p->backoff * 2 : 1920;
     p->slow = p->pressure = p->affordable = p->recovery_quiet = 0;
     p->generation++;

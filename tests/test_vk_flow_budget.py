@@ -105,7 +105,7 @@ int main(void) {
         dm_flow_budget_observe(&p, probe, t, t+1, 2.5f, 3.8);
     assert(!dm_flow_budget_allow(&p, 730));
     assert(p.retry_after == 970);
-    // Two more failed probes end the recurring bursts under an unchanged workload.
+    // Repeated failed probes retain bounded recovery opportunities.
     for (uint64_t t=941;t<=970;t++) dm_flow_budget_pressure(&p,t,0);
     assert(dm_flow_budget_allow(&p, 970));
     uint64_t probe2 = p.generation;
@@ -117,9 +117,11 @@ int main(void) {
     uint64_t probe3 = p.generation;
     for (uint64_t t=1455; t<1460; ++t)
         dm_flow_budget_observe(&p, probe3, t, t+1, 2.5f, 3.8);
-    assert(p.retry_after == UINT64_MAX && !dm_flow_budget_allow(&p, 5000));
+    assert(p.retry_after == 2420 && !dm_flow_budget_allow(&p, 2420));
     dm_flow_budget_source_reset(&p,DM_RECON_SOURCE_PAUSE);
-    assert(p.retry_after==UINT64_MAX && !dm_flow_budget_allow(&p,5000));
+    assert(p.retry_after==2420 && !dm_flow_budget_allow(&p,2420));
+    for (uint64_t t=2391;t<=2420;t++) dm_flow_budget_pressure(&p,t,0);
+    assert(dm_flow_budget_allow(&p,2420));
     // A genuine geometry change can trigger a new probe immediately.
     dm_flow_budget_source_reset(&p,DM_RECON_SOURCE_GEOMETRY);
     assert(!p.valid);

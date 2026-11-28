@@ -819,8 +819,7 @@ static spatial_image *spatial_reconstruct(vkimg_t *src, const int crop[4], int f
         reason = "image-driven motion";
     } else if (wants_flow) {
         if (!recovery_allows) reason="temporal recovery deferred by competing quality probe";
-        else if (!budget_allows) reason = g_flow.policy.retry_after == UINT64_MAX ?
-            "temporal sustained overload; waiting for workload change" : "temporal sustained overload cooldown";
+        else if (!budget_allows) reason = "temporal sustained overload cooldown";
         else if (!g_spatial.queries && g_spatial.flow_budget_ms > 0.0f)
             reason = "temporal timing capability unavailable";
         else reason = "temporal resources or geometry unavailable";
