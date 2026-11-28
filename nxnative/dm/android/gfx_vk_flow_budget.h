@@ -36,7 +36,7 @@ typedef struct {
 typedef struct {
     dm_flow_workload key;
     uint64_t generation, retry_after, last_sample, last_pressure;
-    unsigned slow, affordable, backoff, overload_events, pressure;
+    unsigned slow, affordable, backoff, overload_events, pressure, recovery_quiet;
     int valid;
 } dm_flow_budget;
 
@@ -58,11 +58,14 @@ static inline void dm_flow_budget_set_workload(dm_flow_budget *p, const dm_flow_
 }
 
 static inline int dm_flow_budget_recovery_due(const dm_flow_budget *p,uint64_t ticket) {
-    return p->valid && p->retry_after && p->retry_after!=UINT64_MAX && ticket>=p->retry_after;
+    return p->valid && p->retry_after && p->retry_after!=UINT64_MAX &&
+        ticket>=p->retry_after && p->last_pressure==ticket && p->recovery_quiet>=30;
 }
 static inline int dm_flow_budget_allow(dm_flow_budget *p, uint64_t ticket) {
     if (!p->valid || p->retry_after == UINT64_MAX || ticket < p->retry_after) return 0;
     if (p->retry_after) {
+        if (!dm_flow_budget_recovery_due(p,ticket)) return 0;
+        p->recovery_quiet = 0;
         p->retry_after = 0;
         p->generation++;
         p->last_sample = 0;
@@ -74,7 +77,7 @@ static inline void dm_flow_budget_overload(dm_flow_budget *p, uint64_t decision_
     // After three failed recovery probes, wait for a workload change.
     p->retry_after = ++p->overload_events >= 4 ? UINT64_MAX : decision_ticket + p->backoff;
     p->backoff = p->backoff < 1920 ? p->backoff * 2 : 1920;
-    p->slow = p->pressure = p->affordable = 0;
+    p->slow = p->pressure = p->affordable = p->recovery_quiet = 0;
     p->generation++;
     p->last_sample = 0;
 }
@@ -82,8 +85,16 @@ static inline void dm_flow_budget_overload(dm_flow_budget *p, uint64_t decision_
 // One pressure sample per source frame, irrespective of LSFG outputs.
 // Stage cost and aggregate pressure share one cooldown without adding times.
 static inline void dm_flow_budget_pressure(dm_flow_budget *p, uint64_t ticket, int stressed) {
-    if (!p->valid || p->retry_after || !ticket || ticket <= p->last_pressure) return;
+    if (!p->valid || !ticket || ticket <= p->last_pressure) return;
+    int contiguous = p->last_pressure && ticket-p->last_pressure==1;
     p->last_pressure = ticket;
+    if (p->retry_after) {
+        // A deadline is a minimum delay, not evidence that pressure cleared.
+        // Count only consecutive real source observations during cooldown.
+        if (stressed || !contiguous) p->recovery_quiet=0;
+        if (!stressed && p->recovery_quiet<30) ++p->recovery_quiet;
+        return;
+    }
     if (!stressed) {
         if (p->pressure) --p->pressure;
         return;
@@ -131,7 +142,7 @@ static inline void dm_flow_budget_source_reset(dm_flow_budget *p,unsigned flags)
     if(flags&changed)dm_flow_budget_invalidate(p);
     else if(flags&&p->valid) {
         dm_flow_budget_retire_samples(p);
-        p->pressure=0;
+        p->pressure=p->recovery_quiet=0;
     }
 }
 #endif
